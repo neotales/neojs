@@ -21,14 +21,16 @@
 //!
 //! `crypto` adds AES-256-GCM authenticated encryption with a fresh per-message
 //! nonce, an authenticated envelope, and documented size bounds; bounded
-//! stateful AES-256-CBC and AES-256-GCM ciphers; and SHA-2 hashing, HMAC,
-//! PBKDF2, and bcrypt. It exposes `generateEnvelopeKey`, `randomBytes`,
-//! `encrypt`, `decrypt`, `createEncryptor`, `createDecryptor`, incremental
-//! `createHash` and `createHmac` (with explicit `close()`/`dispose()` and a
-//! per-runtime open-object cap), one-shot `hashAsync` and `hmacAsync`,
-//! synchronous `pbkdf2`, `bcryptHash`, and `bcryptVerify`, and the asynchronous
-//! `pbkdf2Async`, `bcryptHashAsync`, and `bcryptVerifyAsync`. The envelope and
-//! cipher functions are synchronous and return `Uint8Array` values; cipher
+//! stateful AES-256-CBC and AES-256-GCM ciphers; SHA-2 hashing, HMAC, PBKDF2,
+//! and bcrypt; and GF(256) Shamir secret sharing. It exposes
+//! `generateEnvelopeKey`, `randomBytes`, `encrypt`, `decrypt`,
+//! `createEncryptor`, `createDecryptor`, incremental `createHash` and
+//! `createHmac` (with explicit `close()`/`dispose()` and a per-runtime
+//! open-object cap), one-shot `hashAsync` and `hmacAsync`, synchronous
+//! `pbkdf2`, `bcryptHash`, and `bcryptVerify`, the asynchronous `pbkdf2Async`,
+//! `bcryptHashAsync`, and `bcryptVerifyAsync`, and `shamirSplit`,
+//! `shamirCombine`, `shamirSplitAsync`, and `shamirCombineAsync`. The envelope
+//! and cipher functions are synchronous and return `Uint8Array` values; cipher
 //! `update` also accepts a UTF-8 string.
 //! `createEncryptor`/`createDecryptor` accept `aes-256-cbc` or `aes-256-gcm`,
 //! buffer bounded input across `update`, and produce output at `final`; GCM
@@ -39,8 +41,9 @@
 //! no Promise form. `createHash`/`createHmac` are synchronous incremental
 //! objects over `sha256`, `sha384`, and `sha512`; `pbkdf2` accepts the same
 //! three names. `hashAsync`/`hmacAsync`/`pbkdf2Async`/`bcryptHashAsync`/
-//! `bcryptVerifyAsync` return a `Promise` resolved by the runtime's bounded
-//! blocking pool, not a `Promise.resolve` wrapper around blocking work.
+//! `bcryptVerifyAsync` and `shamirSplitAsync`/`shamirCombineAsync` return a
+//! `Promise` resolved by the runtime's bounded blocking pool, not a
+//! `Promise.resolve` wrapper around blocking work.
 //! Bcrypt emits `$2b$`, verifies `$2a$`, `$2b$`, and `$2y$`, rejects passwords
 //! over 72 bytes, defaults to cost 10, and never verifies a hash whose encoded
 //! cost is above 16. Random values come from the operating system CSPRNG. The
@@ -52,7 +55,15 @@
 //! are documented in `neojs-core/src/crypto_cipher.rs`; the hash algorithms,
 //! encodings, lifecycle, asynchronous executor condition, and bounds are
 //! documented in `neojs-core/src/crypto_hash.rs`; PBKDF2 and bcrypt are
-//! documented in `neojs-core/src/crypto_hash/password.rs`.
+//! documented in `neojs-core/src/crypto_hash/password.rs`; Shamir's GF(256)
+//! encoding, one-based indexes, threshold and authenticity limitations,
+//! bounds, memory policy, and interoperability are documented in
+//! `neojs-core/src/crypto_shamir.rs`. Shamir shares are bytewise compatible
+//! with the Neotales PLAB and rust-libraries encodings, are not authenticated,
+//! and cannot detect a wrong reconstruction. `SharedArrayBuffer`-backed inputs
+//! are rejected because a copy is not one coherent snapshot. Returned share and
+//! secret bytes use V8 backing stores that are cleared when V8 releases them;
+//! JavaScript-made copies remain outside that guarantee.
 //!
 //! `stdio` is a synchronous byte-stream foundation over bounded memory:
 //! `Readable` reads from an owned snapshot of a `Uint8Array`, `Writable`
@@ -176,6 +187,7 @@ mod builtins;
 mod crypto;
 mod crypto_cipher;
 mod crypto_hash;
+mod crypto_shamir;
 mod error;
 mod loader;
 mod path;
@@ -221,5 +233,32 @@ pub mod test_support {
     /// production hook.
     pub fn fail_next_bcrypt_random() {
         crate::crypto_hash::fail_next_bcrypt_random();
+    }
+
+    /// Make the next Shamir split's noise draw fail with `NEO_CRYPTO_RANDOM`.
+    ///
+    /// The injection is consumed exactly once and is compiled only with the
+    /// off-by-default `test-support` feature. It exists so the synchronous and
+    /// asynchronous error paths can be tested deterministically without a
+    /// production hook.
+    pub fn fail_next_shamir_random() {
+        crate::crypto_shamir::fail_next_shamir_random();
+    }
+
+    /// Count Shamir V8 backing stores cleared by the zeroizing deleter.
+    ///
+    /// Used to prove that dropped share arrays and secrets are cleared when
+    /// V8 releases them. Compiled only with `test-support`.
+    pub fn zeroized_shamir_buffers() -> usize {
+        crate::crypto_shamir::zeroized_v8_buffers()
+    }
+
+    /// Count sensitive Shamir worker buffers cleared at the wipe boundary.
+    ///
+    /// The counter increments only after the full-capacity zeroization, so it
+    /// proves an abandoned worker result reached the actual clearing code when
+    /// the runtime was torn down.
+    pub fn zeroized_shamir_worker_results() -> usize {
+        crate::crypto_shamir::zeroized_worker_results()
     }
 }

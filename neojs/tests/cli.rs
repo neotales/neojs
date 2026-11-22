@@ -522,6 +522,56 @@ try {
 }
 
 #[test]
+fn crypto_shamir_work_from_the_cli() {
+    let project = Project::new();
+    let file = project.write(
+        "shamir.js",
+        r#"
+import {
+    shamirCombine,
+    shamirCombineAsync,
+    shamirSplit,
+    shamirSplitAsync,
+} from "crypto";
+
+function hex(bytes) {
+    let text = "";
+    for (const byte of bytes) text += byte.toString(16).padStart(2, "0");
+    return text;
+}
+
+const secret = Uint8Array.from([0x00, 0x01, 0x80, 0xff, 0x42]);
+const shares = shamirSplit(secret, 3, 5);
+console.log(shares.length, shares[4].index, hex(shamirCombine([shares[0], shares[2], shares[4]])));
+
+const asyncShares = await shamirSplitAsync(secret, 2, 3);
+const recovered = await shamirCombineAsync([asyncShares[0], asyncShares[1]], 2);
+console.log(recovered.length, hex(recovered));
+
+try {
+    shamirCombine([shares[0], shares[0]]);
+} catch (error) {
+    console.log(error.constructor.name, error.code);
+}
+try {
+    shamirSplit(secret, 1, 3);
+} catch (error) {
+    console.log(error.constructor.name);
+}
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stdout(&output),
+        "5 5 000180ff42\n5 000180ff42\nError NEO_CRYPTO_SHAMIR_DUPLICATE\nRangeError\n"
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
 fn crypto_stateful_cbc_and_gcm_work_from_the_cli() {
     let project = Project::new();
     let file = project.write(

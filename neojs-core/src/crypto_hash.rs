@@ -613,7 +613,7 @@ struct BudgetState {
 /// and it is safe to release from a blocking worker thread, a dropped op
 /// future, or a panic unwind.
 #[derive(Default)]
-struct Budget {
+pub(crate) struct Budget {
     state: Mutex<BudgetState>,
 }
 
@@ -651,6 +651,15 @@ impl Budget {
         })
     }
 
+    /// Reserve one pending job for a module that shares this budget but not
+    /// this module's private error type.
+    pub(crate) fn reserve_pending_busy(
+        self: &Arc<Self>,
+        bytes: usize,
+    ) -> Option<PendingReservation> {
+        self.reserve_pending(bytes).ok()
+    }
+
     /// Reserve one open incremental hash object.
     fn reserve_open(self: &Arc<Self>) -> Result<OpenReservation, HashError> {
         let mut state = self.lock();
@@ -667,7 +676,7 @@ impl Budget {
 /// A reservation released when the worker finishes, panics, or is aborted
 /// before it starts. The guard is not `Clone`, so release happens exactly once.
 /// A running job cannot be aborted and keeps this charge until it returns.
-struct PendingReservation {
+pub(crate) struct PendingReservation {
     budget: Arc<Budget>,
     bytes: usize,
 }
@@ -696,8 +705,9 @@ impl Drop for OpenReservation {
 ///
 /// The runtime is created inside a Tokio driver, so the extension's state
 /// initializer sees that driver's handle. An embedding that installs this
-/// extension without a Tokio context gets synchronous hashing only.
-struct CryptoExecutor {
+/// extension without a Tokio context gets synchronous hashing and synchronous
+/// Shamir secret sharing only.
+pub(crate) struct CryptoExecutor {
     handle: Option<Handle>,
     budget: Arc<Budget>,
     /// Whether the worker closure ran on the isolate thread (1) or another
@@ -719,6 +729,10 @@ struct CryptoExecutor {
     /// asynchronous job.
     #[cfg(feature = "test-support")]
     bcrypt_placement: Arc<AtomicU32>,
+    /// Where Shamir splitting or combination actually ran for the last
+    /// asynchronous job.
+    #[cfg(feature = "test-support")]
+    shamir_placement: Arc<AtomicU32>,
     #[cfg(feature = "test-support")]
     isolate_thread: ThreadId,
     /// Test-only gate captured when the runtime is created.
@@ -742,14 +756,29 @@ impl CryptoExecutor {
             #[cfg(feature = "test-support")]
             bcrypt_placement: Arc::new(AtomicU32::new(0)),
             #[cfg(feature = "test-support")]
+            shamir_placement: Arc::new(AtomicU32::new(0)),
+            #[cfg(feature = "test-support")]
             isolate_thread: std::thread::current().id(),
             #[cfg(feature = "test-support")]
             cancellation_gate: CANCELLATION_GATE.with(|slot| slot.borrow().clone()),
         }
     }
 
-    fn budget(&self) -> Arc<Budget> {
+    pub(crate) fn budget(&self) -> Arc<Budget> {
         Arc::clone(&self.budget)
+    }
+
+    /// Whether this runtime captured a blocking-pool handle.
+    pub(crate) fn has_handle(&self) -> bool {
+        self.handle.is_some()
+    }
+
+    /// Tell the test-only cancellation gate that a join op started.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn note_join_started(&self) {
+        if let Some(gate) = &self.cancellation_gate {
+            gate.join_started();
+        }
     }
 
     /// Build a placement probe for one asynchronous job.
@@ -765,6 +794,7 @@ impl CryptoExecutor {
             hmac_key_placement: Arc::clone(&self.hmac_key_placement),
             pbkdf2_placement: Arc::clone(&self.pbkdf2_placement),
             bcrypt_placement: Arc::clone(&self.bcrypt_placement),
+            shamir_placement: Arc::clone(&self.shamir_placement),
         })
     }
 
@@ -776,9 +806,10 @@ impl CryptoExecutor {
     /// probe, and enters the cancellation gate before running `work`. The
     /// closure returns its raw bytes; an empty vector is the internal-failure
     /// sentinel used by the join ops.
-    fn spawn_blocking<F>(&self, work: F) -> JoinHandle<Vec<u8>>
+    pub(crate) fn spawn_blocking<F, R>(&self, work: F) -> JoinHandle<R>
     where
-        F: FnOnce() -> Vec<u8> + Send + 'static,
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
     {
         let handle = self
             .handle
@@ -813,9 +844,10 @@ impl CryptoExecutor {
 /// Per-job placement probe installed on the isolate thread and on the worker
 /// thread while an asynchronous operation runs.
 ///
-/// The instrumentation lives in [`DigestState::update`] and [`HmacState::new`],
-/// not just in the worker closure, so a change that moves the actual hashing
-/// back onto the isolate thread is observable.
+/// The instrumentation lives in [`DigestState::update`], [`HmacState::new`],
+/// and the Shamir split/combine core, not just in the worker closure, so a
+/// change that moves the actual work back onto the isolate thread is
+/// observable.
 #[cfg(feature = "test-support")]
 struct AsyncProbe {
     isolate_thread: ThreadId,
@@ -823,6 +855,7 @@ struct AsyncProbe {
     hmac_key_placement: Arc<AtomicU32>,
     pbkdf2_placement: Arc<AtomicU32>,
     bcrypt_placement: Arc<AtomicU32>,
+    shamir_placement: Arc<AtomicU32>,
 }
 
 #[cfg(feature = "test-support")]
@@ -878,6 +911,19 @@ fn record_bcrypt_placement() {
             let on_isolate = std::thread::current().id() == probe.isolate_thread;
             probe
                 .bcrypt_placement
+                .store(if on_isolate { 1 } else { 2 }, Ordering::Release);
+        }
+    });
+}
+
+/// Record where the last Shamir split or combine ran.
+#[cfg(feature = "test-support")]
+pub(crate) fn record_shamir_placement() {
+    ASYNC_PROBE.with(|slot| {
+        if let Some(probe) = slot.borrow().as_ref() {
+            let on_isolate = std::thread::current().id() == probe.isolate_thread;
+            probe
+                .shamir_placement
                 .store(if on_isolate { 1 } else { 2 }, Ordering::Release);
         }
     });
@@ -1678,6 +1724,18 @@ fn op_neo_crypto_test_worker_placement(state: &mut OpState) -> String {
 #[cfg(feature = "test-support")]
 #[op2]
 #[string]
+fn op_neo_crypto_test_shamir_placement(state: &mut OpState) -> String {
+    let executor = state.borrow::<CryptoExecutor>();
+    format!(
+        "{},{}",
+        executor.worker_placement.load(Ordering::Acquire),
+        executor.shamir_placement.load(Ordering::Acquire),
+    )
+}
+
+#[cfg(feature = "test-support")]
+#[op2]
+#[string]
 fn op_neo_crypto_test_password_placement(state: &mut OpState) -> String {
     let executor = state.borrow::<CryptoExecutor>();
     format!(
@@ -1693,7 +1751,8 @@ deno_core::extension!(
     neojs_crypto_hash_test,
     ops = [
         op_neo_crypto_test_worker_placement,
-        op_neo_crypto_test_password_placement
+        op_neo_crypto_test_password_placement,
+        op_neo_crypto_test_shamir_placement
     ],
     docs = "Test-only worker-placement probes for `neo:crypto`."
 );

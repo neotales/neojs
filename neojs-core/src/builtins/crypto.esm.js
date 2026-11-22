@@ -2,8 +2,9 @@
 // `import ... from "neo:crypto"`.
 //
 // The implementations live in `neo.js`, which the runtime evaluates once per
-// realm, and call private host ops registered by `neojs-core/src/crypto.rs` and
-// `neojs-core/src/crypto_hash.rs`. This file only re-exports them, so every
+// realm, and call private host ops registered by `neojs-core/src/crypto.rs`,
+// `neojs-core/src/crypto_cipher.rs`, `neojs-core/src/crypto_hash.rs`, and
+// `neojs-core/src/crypto_shamir.rs`. This file only re-exports them, so every
 // named export is the same function
 // object as the matching property of `Neo.getBuiltInModule("crypto")`. Nothing
 // here reaches the private module registry: it reads the public module object
@@ -15,7 +16,10 @@
 // that each export is identity-equal to the registry property.
 //
 // This is the synchronous envelope-and-randomness slice, bounded stateful
-// AES-256-CBC/AES-256-GCM ciphers, SHA-2 hashing, HMAC, PBKDF2, and bcrypt.
+// AES-256-CBC/AES-256-GCM ciphers, SHA-2 hashing, HMAC, PBKDF2, bcrypt, and
+// GF(256) Shamir secret sharing. `shamirSplit`/`shamirCombine` are synchronous;
+// `shamirSplitAsync`/`shamirCombineAsync` return a Promise resolved by the
+// bounded worker pool. Shares are not authenticated.
 // `createEncryptor`/`createDecryptor` are stateful and synchronous: `update`
 // buffers and `final` performs the operation. They are Node-inspired, not Node
 // compatible, and have no Promise form. Incremental `createHash`/`createHmac`,
@@ -47,4 +51,8 @@ export const hmacAsync = crypto.hmacAsync;
 export const pbkdf2 = crypto.pbkdf2;
 export const pbkdf2Async = crypto.pbkdf2Async;
 export const randomBytes = crypto.randomBytes;
+export const shamirCombine = crypto.shamirCombine;
+export const shamirCombineAsync = crypto.shamirCombineAsync;
+export const shamirSplit = crypto.shamirSplit;
+export const shamirSplitAsync = crypto.shamirSplitAsync;
 
