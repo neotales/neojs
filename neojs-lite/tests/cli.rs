@@ -103,6 +103,66 @@ fn an_unhandled_rejection_exits_one_with_its_cause() {
 }
 
 #[test]
+fn entry_error_diagnostics_do_not_run_getters() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(
+        &dir,
+        "main.js",
+        r#"
+const error = new Error("original");
+Object.defineProperty(error, "message", {
+    get() {
+        console.log("GETTER RAN");
+        throw new Error("getter threw");
+    },
+});
+throw error;
+"#,
+    );
+    let file = dir.path().join("main.js");
+
+    let output = run(&[file.as_os_str()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    let error = stderr(&output);
+    assert!(
+        error.contains("<rejected Error with no readable message>"),
+        "{error}"
+    );
+    assert!(!error.contains("GETTER RAN"), "{error}");
+}
+
+#[test]
+fn unhandled_proxy_rejection_exits_one_without_traps() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(
+        &dir,
+        "main.js",
+        r#"
+const reason = new Proxy({}, {
+    get() {
+        console.log("TRAP RAN");
+        throw new Error("get trap");
+    },
+    getOwnPropertyDescriptor() {
+        console.log("TRAP RAN");
+        throw new Error("descriptor trap");
+    },
+});
+Promise.reject(reason);
+"#,
+    );
+    let file = dir.path().join("main.js");
+
+    let output = run(&[file.as_os_str()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    let error = stderr(&output);
+    assert!(error.contains("<rejected Proxy>"), "{error}");
+    assert!(!error.contains("TRAP RAN"), "{error}");
+}
+
+#[test]
 fn a_rejection_handled_later_exits_zero() {
     let dir = tempfile::tempdir().expect("temp dir");
     write(

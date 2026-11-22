@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use neojs_module_policy::{ModuleFormat, module_format};
-use rquickjs::{CatchResultExt, Context, Ctx, Function, Module, Persistent, Value, qjs};
+use rquickjs::{
+    CatchResultExt, CaughtError, Context, Ctx, Function, Module, Persistent, Value, qjs,
+};
 
 use crate::loader::{FileLoader, FileResolver};
 
@@ -411,7 +413,8 @@ impl Runtime {
     /// values directly and an Error's own `message`/`stack` data properties when
     /// present; it never invokes getters, proxy traps, `toString`, or `String`.
     /// A rejection that gains a handler before the drain finishes is not
-    /// reported.
+    /// reported. An entry or queued job that throws uses the same formatter;
+    /// native loader and engine errors keep their own messages.
     ///
     /// A failure before evaluation (unsupported format, unreadable file) leaves
     /// the runtime unused. Once evaluation starts the runtime is consumed even
@@ -693,11 +696,20 @@ fn drive_entry(ctx: &Ctx<'_>, module: &str, promise: &rquickjs::Promise<'_>) -> 
 }
 
 /// Formats a QuickJS error, retrieving and clearing any pending exception.
-fn caught_message(ctx: &rquickjs::Ctx<'_>, error: rquickjs::Error) -> String {
-    match Err::<(), _>(error).catch(ctx) {
+///
+/// Native binding, loader, and engine errors keep their own message. A caught
+/// JavaScript exception goes through the same non-executing formatter as an
+/// unhandled rejection: no getters, proxy traps, `toString`, or `String`
+/// conversion run while an entry error is being reported.
+fn caught_message(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
+    let message = match Err::<(), _>(error).catch(ctx) {
         Ok(()) => "unknown QuickJS error".to_string(),
-        Err(caught) => caught.to_string(),
-    }
+        Err(CaughtError::Error(error)) => error.to_string(),
+        Err(CaughtError::Exception(exception)) => rejection_message(ctx, &exception.into_value()),
+        Err(CaughtError::Value(value)) => rejection_message(ctx, &value),
+    };
+    clear_pending_exception(ctx);
+    message
 }
 
 #[cfg(test)]
@@ -876,6 +888,92 @@ Promise.resolve().then(() => {{ globalThis.__extra = 1; }});
             .with(|ctx| ctx.eval::<bool, _>("globalThis.__extra !== undefined"))
             .expect("inspect marker");
         assert!(!extra_ran, "the over-budget job ran before failing");
+    }
+
+    #[test]
+    fn entry_error_never_invokes_error_accessors() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let error = runtime
+            .run_source(
+                "memory.js",
+                r#"
+globalThis.__calls = 0;
+const error = new Error("original");
+Object.defineProperty(error, "message", {
+    get() {
+        __calls++;
+        Promise.resolve().then(() => { __calls++; });
+        Promise.reject(new Error("getter rejection"));
+        throw new Error("getter threw");
+    },
+});
+Object.defineProperty(error, "stack", {
+    get() {
+        __calls++;
+        for (let i = 0; i < 10000; i++) {}
+        return "getter stack";
+    },
+});
+throw error;
+"#,
+            )
+            .expect_err("entry error");
+        let Error::Module { message, .. } = error else {
+            panic!("expected a module error, got {error:?}");
+        };
+        assert!(
+            message.contains("<rejected Error with no readable message>"),
+            "{message}"
+        );
+        assert!(!message.contains("getter threw"), "{message}");
+        let calls = runtime
+            .context
+            .with(|ctx| ctx.eval::<i32, _>("__calls"))
+            .expect("inspect getter counter");
+        assert_eq!(calls, 0, "entry diagnostics invoked a getter");
+        assert!(!runtime.context.with(|ctx| ctx.has_exception()));
+    }
+
+    #[test]
+    fn unhandled_proxy_rejection_does_not_run_traps() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let error = runtime
+            .run_source(
+                "memory.js",
+                r#"
+globalThis.__traps = 0;
+const reason = new Proxy({}, {
+    get() {
+        __traps++;
+        throw new Error("get trap");
+    },
+    getOwnPropertyDescriptor() {
+        __traps++;
+        throw new Error("descriptor trap");
+    },
+    has() {
+        __traps++;
+        return false;
+    },
+    ownKeys() {
+        __traps++;
+        return [];
+    },
+});
+Promise.reject(reason);
+"#,
+            )
+            .expect_err("unhandled rejection");
+        let Error::UnhandledRejection { details, .. } = error else {
+            panic!("expected an unhandled rejection, got {error:?}");
+        };
+        assert!(details.contains("<rejected Proxy>"), "{details}");
+        let traps = runtime
+            .context
+            .with(|ctx| ctx.eval::<i32, _>("__traps"))
+            .expect("inspect proxy trap counter");
+        assert_eq!(traps, 0, "diagnostics invoked a proxy trap");
+        assert!(!runtime.context.with(|ctx| ctx.has_exception()));
     }
 
     fn assert_roots_cleared(runtime: &Runtime) {
