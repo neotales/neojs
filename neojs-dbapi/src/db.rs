@@ -41,12 +41,15 @@ use neotales_dbapi_sqlite::{SqliteConfig as ProviderSqliteConfig, SqlitePoolProv
 /// leaves the session usable.
 ///
 /// A returned error is different from a dropped future. The SQLite provider
-/// maps a standalone write, or an `INSERT ... RETURNING` fetch, whose dispatch
-/// outcome is unknown to `WriteOutcomeUnknown`. A dispatched `COMMIT` error is
-/// reported as `CommitOutcomeUnknown`: success is unknown, not a rollback.
-/// Neither category is returned when the future is dropped, because there is no
-/// result to return. Do not retry automatically; only a caller that can verify
-/// the data or tolerate a repeat may retry. Use [`Error::database_kind`].
+/// maps a standalone write whose dispatch outcome is unknown to
+/// `WriteOutcomeUnknown`, and a dispatched `COMMIT` error to
+/// `CommitOutcomeUnknown`. Those mappings are narrower than "any error after a
+/// write": a fetch can run `INSERT ... RETURNING`, and an `Overflow`, `Decode`,
+/// `Constraint`, or other returned category after dispatch does not prove the
+/// write had no effect. Do not retry any post-dispatch error automatically;
+/// verify on a new connection. Neither category is returned when the future is
+/// dropped, because there is no result to return. Use
+/// [`Error::database_kind`].
 pub struct Db {
     driver: Driver,
     dialect: Dialect,
@@ -148,8 +151,13 @@ impl Db {
 
     /// Fetches one bounded batch using the default [`RowLimit`].
     ///
-    /// Fetching does not imply read-only SQL: `INSERT ... RETURNING` can write,
-    /// and an interrupted fetch can have an unknown write outcome.
+    /// Fetching does not imply read-only SQL: `INSERT ... RETURNING` can write.
+    /// The SQLite provider maps a standalone fetch row-stream `Connection`,
+    /// `Timeout`, or `Cancelled` error to `WriteOutcomeUnknown`, but `Overflow`
+    /// from a row or byte limit, `Decode`, and other categories are returned as
+    /// themselves. Any error after the statement was dispatched can still leave
+    /// the write's effects uncertain, even when the category is not
+    /// `WriteOutcomeUnknown`. Do not retry automatically; verify the data.
     ///
     /// # Errors
     /// Returns a SQL, parameter, limit, or provider error.
@@ -159,6 +167,10 @@ impl Db {
     }
 
     /// Fetches one bounded batch with an explicit limit.
+    ///
+    /// A limit is enforced after the statement is dispatched, so an `Overflow`
+    /// after `INSERT ... RETURNING` does not mean the write did not happen. See
+    /// [`Db::query`] for the post-dispatch error rules.
     ///
     /// # Errors
     /// Returns a SQL, parameter, limit, or provider error.
@@ -174,7 +186,10 @@ impl Db {
 
     /// Fetches a statement whose result set must contain at most one row.
     ///
-    /// The whole bounded batch is drained before the cardinality is decided.
+    /// The whole bounded batch is drained before the cardinality is decided. A
+    /// statement such as `INSERT ... RETURNING` can write, and any post-dispatch
+    /// error, including `Overflow` or `Decode`, can leave its effects uncertain;
+    /// see [`Db::query`].
     ///
     /// # Errors
     /// Returns [`crate::ErrorKind::Cardinality`] for more than one row, plus
@@ -275,8 +290,11 @@ impl Connection {
 
     /// Fetches one bounded batch on this connection.
     ///
-    /// Fetching does not imply read-only SQL, and an interrupted fetch can have
-    /// an unknown write outcome.
+    /// Fetching does not imply read-only SQL. For a standalone fetch, the SQLite
+    /// provider maps row-stream `Connection`, `Timeout`, and `Cancelled` errors
+    /// to `WriteOutcomeUnknown`, but `Overflow`, `Decode`, and other returned
+    /// categories are not that mapping. Any error after dispatch can still leave
+    /// an `INSERT ... RETURNING` write uncertain; do not retry automatically.
     ///
     /// # Errors
     /// Returns a SQL, parameter, limit, or provider error.
@@ -286,6 +304,9 @@ impl Connection {
     }
 
     /// Fetches one bounded batch with an explicit limit.
+    ///
+    /// A limit overflow can follow a dispatched `INSERT ... RETURNING` write.
+    /// See [`Connection::query`] for the post-dispatch error rules.
     ///
     /// # Errors
     /// Returns a SQL, parameter, limit, or provider error.
@@ -306,6 +327,9 @@ impl Connection {
     }
 
     /// Fetches at most one row and drains the bounded batch.
+    ///
+    /// A writing fetch can fail after dispatch with `Overflow`, `Decode`, or
+    /// another category; see [`Connection::query`]. Automatic retry is not safe.
     ///
     /// # Errors
     /// Returns [`crate::ErrorKind::Cardinality`] for more than one row, plus
@@ -360,11 +384,11 @@ impl fmt::Debug for Connection {
 /// cancellation signal, and the SQLite progress handler has the limits
 /// described on [`Connection`].
 ///
-/// A statement inside the transaction can write. A returned `Connection`,
-/// `Timeout`, or `Cancelled` error after dispatch is not proof that the
-/// statement had no effect, even though the SQLite provider maps transaction
-/// statements with `map_error` rather than the standalone `WriteOutcomeUnknown`
-/// mapping.
+/// A statement inside the transaction can write. Transaction statements are
+/// mapped with `map_error`, not the standalone write mapper, so none of the
+/// returned categories is `WriteOutcomeUnknown`. Any post-dispatch error, and in
+/// particular any error from a fetch that can write, may still leave the write's
+/// effects uncertain; it is not proof of no effect.
 pub struct Transaction<'a> {
     inner: Box<dyn DbTransaction<'a> + 'a>,
     dialect: Dialect,
@@ -392,8 +416,11 @@ impl Transaction<'_> {
 
     /// Fetches one bounded batch inside this transaction.
     ///
-    /// Fetching does not imply read-only SQL; an interrupted fetch can have an
-    /// unknown write outcome.
+    /// Fetching does not imply read-only SQL. Transaction fetches use the
+    /// provider's general `map_error`, so `Connection`, `Timeout`, `Cancelled`,
+    /// `Overflow`, and `Decode` are returned as themselves and never as
+    /// `WriteOutcomeUnknown`. Any error after dispatch can still leave an
+    /// `INSERT ... RETURNING` write uncertain. Do not retry automatically.
     ///
     /// # Errors
     /// Returns a SQL, parameter, limit, or provider error.
@@ -403,6 +430,9 @@ impl Transaction<'_> {
     }
 
     /// Fetches one bounded batch with an explicit limit.
+    ///
+    /// A limit overflow can follow a dispatched `INSERT ... RETURNING` write.
+    /// See [`Connection::query`] for the post-dispatch error rules.
     ///
     /// # Errors
     /// Returns a SQL, parameter, limit, or provider error.
@@ -423,6 +453,9 @@ impl Transaction<'_> {
     }
 
     /// Fetches at most one row and drains the bounded batch.
+    ///
+    /// A writing fetch can fail after dispatch; see [`Transaction::query`].
+    /// Automatic retry is not safe.
     ///
     /// # Errors
     /// Returns [`crate::ErrorKind::Cardinality`] for more than one row, plus

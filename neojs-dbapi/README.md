@@ -175,14 +175,14 @@ bounds lock waits but is not a prompt-cancellation guarantee. Effects of a dropp
 unobservable to that call and must be treated as possibly applied, not as proof that nothing
 happened. Validation failures detected before dispatch leave the session usable.
 
-A returned error is different. A standalone write, or an `INSERT ... RETURNING` fetch, whose
-dispatch outcome is unknown is reported as `WriteOutcomeUnknown`. A dispatched `COMMIT` error is
-reported as `CommitOutcomeUnknown`, which means success is unknown, not that the transaction rolled
-back. A transaction statement error is mapped by the provider's general mapper, so it may be
-`Connection`, `Timeout`, or `Cancelled` rather than `WriteOutcomeUnknown`; that category is still
-not proof the statement had no effect, and the connection is discarded. Do not retry any of these
-automatically: acquire a new connection and verify the data. Use `Error::database_kind()` to
-distinguish the categories.
+A returned error is different. The SQLite provider maps a standalone write with an unknown
+dispatch outcome to `WriteOutcomeUnknown`, and a dispatched `COMMIT` error to
+`CommitOutcomeUnknown`. That write mapping is narrower than "any error after a write": a fetch can
+run `INSERT ... RETURNING`, and `Overflow` (including a row or byte limit), `Decode`, `Constraint`,
+or another returned category after dispatch does not prove the write had no effect. Transaction
+statements use the provider's general `map_error` and never produce `WriteOutcomeUnknown`, but the
+same uncertainty can apply. Do not retry any post-dispatch error automatically: acquire a new
+connection and verify the data. Use `Error::database_kind()` to distinguish the categories.
 
 ## License
 

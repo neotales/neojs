@@ -104,17 +104,19 @@ than guaranteeing prompt cancellation. A validation failure detected before disp
 invalidate the session. Effects of a dropped future are unobservable to that call and must be
 treated as possibly applied.
 
-A returned error is different. The SQLite provider maps a standalone write, or an `INSERT ...
-RETURNING` fetch, with an unknown dispatch outcome to `WriteOutcomeUnknown`. A dispatched `COMMIT`
-error is mapped to `CommitOutcomeUnknown` and discards the connection: the commit may have
-succeeded, so it is not a rollback. A transaction statement is mapped with the provider's general
-`map_error`, so a returned `Connection`, `Timeout`, or `Cancelled` error is not reported as
-`WriteOutcomeUnknown`; it is still not proof the write had no effect, and the connection is
-discarded. Do not retry any category automatically; acquire a new connection and verify.
-`Error::database_kind()` exposes the provider category. This description matches
-`neotales-dbapi-sqlite` 0.0.0-alpha.0, whose transaction statements use `map_error`, whose
-standalone writes use `map_write_error`, and whose `COMMIT` failure maps to
-`CommitOutcomeUnknown`.
+A returned error is different. The SQLite provider maps a standalone write with an unknown
+dispatch outcome to `WriteOutcomeUnknown`, and a dispatched `COMMIT` error to
+`CommitOutcomeUnknown`; the latter discards the connection because the commit may have succeeded
+and is not a rollback. The write mapping is narrower than "any error after a write". A fetch can
+run `INSERT ... RETURNING`; the provider maps a row-stream `Connection`, `Timeout`, or `Cancelled`
+error to `WriteOutcomeUnknown`, but an `Overflow` from a row or byte limit, a `Decode` error, a
+`Constraint`, or another category is returned as itself. Any post-dispatch fetch error can still
+leave the write's effects uncertain. Transaction statements are mapped with the provider's general
+`map_error` and never produce `WriteOutcomeUnknown`, but the same warning applies. Do not retry any
+post-dispatch error automatically; acquire a new connection and verify. `Error::database_kind()`
+exposes the provider category. This description matches `neotales-dbapi-sqlite` 0.0.0-alpha.0,
+whose transaction statements use `map_error`, whose standalone writes and row-stream fetch errors
+use `map_write_error`, and whose `COMMIT` failure maps to `CommitOutcomeUnknown`.
 
 ## Verification
 

@@ -87,11 +87,13 @@ impl Error {
 
     /// Returns the provider's stable category when the failure came from it.
     ///
-    /// `WriteOutcomeUnknown` means a dispatched write may or may not have
-    /// happened; `CommitOutcomeUnknown` means a dispatched `COMMIT` may have
-    /// succeeded. Both are returned errors that require caller-owned
-    /// verification, not a blind retry. A dropped future returns no error at
-    /// all, so its effects are unobservable rather than categorized.
+    /// `WriteOutcomeUnknown` means the provider mapped an unknown standalone
+    /// write outcome; `CommitOutcomeUnknown` means a dispatched `COMMIT` may have
+    /// succeeded. Other categories are not proof that no write happened: a
+    /// fetch can run `INSERT ... RETURNING` and then return `Overflow`, `Decode`,
+    /// or another error after dispatch. A dropped future returns no error at
+    /// all. Every uncertain case requires caller-owned verification, not a blind
+    /// retry.
     #[must_use]
     pub const fn database_kind(self) -> Option<ProviderErrorKind> {
         self.database_kind
