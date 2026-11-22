@@ -2336,6 +2336,34 @@ const unreadableProperties = new Proxy({ a: 1 }, {
     },
 });
 fails("unreadable own property", () => equals({ a: 1 }, unreadableProperties));
+
+// `expected`'s prototype trap revokes `actual` after actual's prototype was
+// already read. Kind detection then meets a revoked proxy; it must report an
+// AssertionError rather than let Array.isArray throw a TypeError.
+const crossRevocable = Proxy.revocable({}, {});
+const crossActual = crossRevocable.proxy;
+const crossExpected = new Proxy({}, {
+    getPrototypeOf() {
+        crossRevocable.revoke();
+        return Object.prototype;
+    },
+});
+const crossError = fails("kind detection after cross-revocation", () =>
+    equals(crossActual, crossExpected));
+if (!crossError.message.includes("could not be inspected")) {
+    throw new Error(`unexpected cross-revocation message: ${crossError.message}`);
+}
+
+// The same guard covers a proxy that revokes itself in its prototype trap.
+const selfRevocable = Proxy.revocable({}, {});
+const selfExpected = new Proxy({}, {
+    getPrototypeOf() {
+        selfRevocable.revoke();
+        return Object.prototype;
+    },
+});
+fails("kind detection after self-revocation", () =>
+    equals(selfRevocable.proxy, selfExpected));
 "#,
     );
 }
@@ -2610,6 +2638,38 @@ if (!(error instanceof TypeError)) throw new Error("throws async was not a TypeE
 if (!error.message.includes("assert.rejects")) throw new Error("throws async did not point at rejects");
 error = fails("throws promise", () => throws(() => Promise.reject(new Error("x"))));
 if (!(error instanceof TypeError)) throw new Error("throws promise was not a TypeError");
+error = fails("throws real promise", () => throws(() => Promise.resolve(1)));
+if (!(error instanceof TypeError)) throw new Error("throws real promise was not a TypeError");
+
+// An object that merely inherits from Promise.prototype has no Promise
+// internal slot, so the synchronous guard must treat it as an ordinary return.
+const spoofedPromise = Object.create(Promise.prototype);
+error = fails("throws spoofed promise", () => throws(() => spoofedPromise));
+if (!(error instanceof AssertionError)) {
+    throw new Error("throws spoofed promise was not an AssertionError");
+}
+if (doesNotThrow(() => spoofedPromise) !== spoofedPromise) {
+    throw new Error("doesNotThrow rejected a spoofed Promise");
+}
+
+// A Proxy around a Promise is not the Promise itself.
+const proxiedPromise = new Proxy(Promise.resolve(1), {});
+error = fails("throws proxied promise", () => throws(() => proxiedPromise));
+if (!(error instanceof AssertionError)) {
+    throw new Error("throws proxied promise was not an AssertionError");
+}
+
+// A revoked Proxy has no Promise slot and must not make the guard throw.
+const revoked = Proxy.revocable({}, {});
+revoked.revoke();
+error = fails("throws revoked proxy", () => throws(() => revoked.proxy));
+if (!(error instanceof AssertionError)) {
+    throw new Error("throws revoked proxy was not an AssertionError");
+}
+if (doesNotThrow(() => revoked.proxy) !== revoked.proxy) {
+    throw new Error("doesNotThrow rejected a revoked proxy");
+}
+
 error = fails("throws string expected", () => throws(() => {}, "message"));
 if (!(error instanceof TypeError)) throw new Error("throws string expected was not a TypeError");
 
@@ -2639,6 +2699,62 @@ await rejects(() => ({
         reject(new TypeError("thenable"));
     },
 }), TypeError);
+await rejects(() => new Proxy(Promise.resolve(1), {}), TypeError);
+const realReason = await rejects(() => Promise.reject(new RangeError("real")), RangeError);
+if (!(realReason instanceof RangeError)) throw new Error("rejects lost a native rejection");
+
+// A stateful then getter must be read exactly once, then called once. Reading
+// it again to test for thenability would consume the second value or throw.
+let thenReads = 0;
+const statefulThenable = {
+    get then() {
+        thenReads += 1;
+        return function (resolve, reject) {
+            reject(new RangeError("stateful"));
+        };
+    },
+};
+const statefulReason = await rejects(() => statefulThenable, RangeError);
+if (thenReads !== 1) throw new Error(`then was read ${thenReads} times`);
+if (!(statefulReason instanceof RangeError)) {
+    throw new Error("rejects lost a stateful thenable rejection");
+}
+
+let flakyReads = 0;
+const flakyThenable = {
+    get then() {
+        flakyReads += 1;
+        if (flakyReads > 1) throw new SyntaxError("second read");
+        return function (resolve, reject) {
+            reject(new TypeError("first read"));
+        };
+    },
+};
+const flakyReason = await rejects(() => flakyThenable, TypeError);
+if (flakyReads !== 1) throw new Error(`flaky then was read ${flakyReads} times`);
+if (!(flakyReason instanceof TypeError)) {
+    throw new Error("rejects lost a flaky thenable rejection");
+}
+
+await rejects(() => ({
+    get then() {
+        throw new RangeError("getter");
+    },
+}), RangeError);
+await rejects(() => ({
+    then() {
+        throw new SyntaxError("call");
+    },
+}), SyntaxError);
+error = await failsAsync("rejects non-thenable then", () => rejects(() => ({ then: 1 })));
+if (!(error instanceof AssertionError)) {
+    throw new Error("rejects accepted a non-thenable then property");
+}
+error = await failsAsync("rejects null", () => rejects(() => null));
+if (!(error instanceof AssertionError)) {
+    throw new Error("rejects accepted null as a Promise");
+}
+
 error = await failsAsync("rejects arity", () => rejects());
 if (!(error instanceof TypeError)) throw new Error("rejects arity was not a TypeError");
 error = await failsAsync("doesNotReject arity", () => doesNotReject());
@@ -2661,6 +2777,42 @@ if (!(error instanceof AssertionError)) throw new Error("rejects accepted the wr
 
 if (await doesNotReject(async () => "fulfilled") !== "fulfilled") {
     throw new Error("doesNotReject did not return the fulfilment value");
+}
+if (await doesNotReject(() => Promise.resolve("real")) !== "real") {
+    throw new Error("doesNotReject lost a native fulfilment");
+}
+let doesNotThenReads = 0;
+const fulfillingThenable = {
+    get then() {
+        doesNotThenReads += 1;
+        return function (resolve) {
+            resolve(42);
+        };
+    },
+};
+if (await doesNotReject(() => fulfillingThenable) !== 42) {
+    throw new Error("doesNotReject lost a thenable fulfilment");
+}
+if (doesNotThenReads !== 1) {
+    throw new Error(`doesNotReject read then ${doesNotThenReads} times`);
+}
+const firstWins = {
+    then(resolve, reject) {
+        resolve("first");
+        reject(new Error("second"));
+    },
+};
+if (await doesNotReject(() => firstWins) !== "first") {
+    throw new Error("doesNotReject did not use the first resolution");
+}
+error = await failsAsync("doesNotReject throwing then getter", () =>
+    doesNotReject(() => ({
+        get then() {
+            throw new RangeError("getter");
+        },
+    })));
+if (!(error instanceof AssertionError)) {
+    throw new Error("doesNotReject accepted a throwing then getter");
 }
 error = await failsAsync("doesNotReject rejection", () =>
     doesNotReject(async () => {

@@ -23,11 +23,13 @@
 //! string and symbol properties plus built-in state for Dates, RegExps, Maps,
 //! Sets, ArrayBuffers, DataViews, typed arrays, boxed primitives, and Errors;
 //! cycles are handled, Maps and Sets are order-insensitive, `NaN` equals `NaN`,
-//! and `-0` differs from `0`. Functions, Promises, WeakMaps, WeakSets, and
-//! WeakRefs compare by identity. There is no `assertEquals`, `deepEqual`, or
-//! `strictEqual`, and this is not a Node or Deno compatibility layer.
-//! `throws`/`doesNotThrow` take synchronous callbacks; a Promise return is a
-//! `TypeError` that points at `rejects`/`doesNotReject`, which return Promises.
+//! and `-0` differs from `0`. Functions and genuine native Promises, WeakMaps,
+//! WeakSets, and WeakRefs compare by identity. There is no `assertEquals`,
+//! `deepEqual`, or `strictEqual`, and this is not a Node or Deno compatibility
+//! layer. `throws`/`doesNotThrow` take synchronous callbacks; a genuine native
+//! Promise return, checked by the engine's internal slot rather than its
+//! prototype, is a `TypeError` that points at `rejects`/`doesNotReject`, which
+//! return Promises and assimilate a thenable by reading `then` once.
 //!
 //! `age` is synchronous binary age v1 encryption for X25519 recipients. It
 //! exposes `generateIdentity`, `identityToRecipient`, `encrypt`, and `decrypt`.

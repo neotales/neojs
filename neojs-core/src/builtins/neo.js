@@ -3792,16 +3792,17 @@
     // length, and Dates, RegExps, Maps, Sets, ArrayBuffers, DataViews, typed
     // arrays, boxed primitives, and Errors compare their internal state as well
     // as own properties. Maps and Sets are compared without regard to iteration
-    // order; functions, Promises, WeakMaps, WeakSets, and WeakRefs compare by
-    // identity. `NaN` equals `NaN`, `-0` differs from `0`, and cycles are
-    // handled. `strictEquals` is exactly `Object.is`: it never compares two
-    // distinct objects structurally.
+    // order; functions and genuine native Promises, WeakMaps, WeakSets, and
+    // WeakRefs compare by identity. `NaN` equals `NaN`, `-0` differs from `0`,
+    // and cycles are handled. `strictEquals` is exactly `Object.is`: it never
+    // compares two distinct objects structurally.
     //
     // `throws` and `doesNotThrow` take synchronous callbacks. A callback that
-    // returns a native Promise is a `TypeError` that points at `rejects` or
+    // returns a genuine native Promise (its internal slot, not merely
+    // `Promise.prototype`) is a `TypeError` that points at `rejects` or
     // `doesNotReject`, rather than a pass based on work that has not run.
-    // `rejects` and `doesNotReject` return Promises and handle both a
-    // synchronous throw and a returned thenable.
+    // `rejects` and `doesNotReject` return Promises and handle a synchronous
+    // throw and a returned thenable, reading `then` once.
     //
     // Capture the intrinsics used by comparison, callback checks, and
     // reporting. Code in the same realm can replace these globals later; that
@@ -3884,6 +3885,13 @@
         "byteOffset",
     ).get;
     const promiseThen = Function.prototype.call.bind(NativePromise.prototype.then);
+    // deno_core's V8-backed check looks at the internal Promise slot. It does
+    // not read `then`, consult a Symbol.hasInstance, or run a proxy trap, so an
+    // object that merely inherits from Promise.prototype is not a Promise.
+    const coreIsPromise = Deno.core.isPromise;
+    // A value that resolves to this sentinel is not a thenable. The sentinel is
+    // never exposed to caller code.
+    const NOT_THENABLE = {};
     const captureStackTrace = NativeError.captureStackTrace;
 
     const MAX_TEXT = 400;
@@ -3978,19 +3986,49 @@
         }
     }
 
+    // A genuine native Promise check backed by the engine's internal slot. It
+    // does not read a property, consult the prototype chain, or run a proxy
+    // trap, so `Object.create(Promise.prototype)` is not a Promise.
     function isNativePromise(value) {
-        return hasBrand(value, NativePromise);
+        return typeof coreIsPromise === "function" && coreIsPromise(value);
     }
 
-    function isThenable(value) {
-        if (!isObjectLike(value)) return false;
-        if (isNativePromise(value)) return true;
-        try {
-            return typeof value.then === "function";
-        } catch {
-            // Awaiting it will surface the same accessor error as a rejection.
-            return true;
-        }
+    /**
+     * Assimilate a callback result exactly once.
+     *
+     * A native Promise is returned unchanged; the caller awaits its internal
+     * slot, so no user `then` is read. Any other object is treated as a
+     * thenable: `then` is read once and called once by the native Promise
+     * constructor's resolve/reject functions. A value with no callable `then`
+     * resolves to `NOT_THENABLE`, which lets the caller distinguish a plain
+     * return from a rejected thenable without a second read. A throwing `then`
+     * getter or a throwing `then` call rejects the returned Promise, matching
+     * Promise assimilation.
+     */
+    function assimilate(value) {
+        if (isNativePromise(value)) return value;
+        return new NativePromise(function (resolve, reject) {
+            if (!isObjectLike(value)) {
+                resolve(NOT_THENABLE);
+                return;
+            }
+            let then;
+            try {
+                then = value.then;
+            } catch (error) {
+                reject(error);
+                return;
+            }
+            if (typeof then !== "function") {
+                resolve(NOT_THENABLE);
+                return;
+            }
+            try {
+                uncurry(then, value, resolve, reject);
+            } catch (error) {
+                reject(error);
+            }
+        });
     }
 
     // Consume a native Promise that a synchronous assertion is refusing, so a
@@ -4166,7 +4204,7 @@
         if (hasBrand(value, NativeSymbol)) {
             return `[Symbol: ${formatValue(uncurry(symbolValueOf, value), depth + 1, seen)}]`;
         }
-        if (hasBrand(value, NativePromise)) return "Promise { <state unknown> }";
+        if (isNativePromise(value)) return "Promise { <state unknown> }";
         if (hasBrand(value, NativeWeakMap)) return "WeakMap { <items unknown> }";
         if (hasBrand(value, NativeWeakSet)) return "WeakSet { <items unknown> }";
         if (NativeWeakRef && hasBrand(value, NativeWeakRef)) return "WeakRef { <target unknown> }";
@@ -4309,7 +4347,7 @@
         if (NativeBigInt && hasBrand(value, NativeBigInt)) return "bigint";
         if (hasBrand(value, NativeSymbol)) return "symbol";
         if (hasBrand(value, NativeError)) return "error";
-        if (hasBrand(value, NativePromise)) return "promise";
+        if (isNativePromise(value)) return "promise";
         if (hasBrand(value, NativeWeakMap)) return "weakmap";
         if (hasBrand(value, NativeWeakSet)) return "weakset";
         if (NativeWeakRef && hasBrand(value, NativeWeakRef)) return "weakref";
@@ -4357,8 +4395,14 @@
             return mismatch(path, "prototypes differ", actual, expected);
         }
 
-        const actualKind = kindOf(actual);
-        const expectedKind = kindOf(expected);
+        let actualKind;
+        let expectedKind;
+        try {
+            actualKind = kindOf(actual);
+            expectedKind = kindOf(expected);
+        } catch {
+            return mismatch(path, "a value could not be inspected", actual, expected);
+        }
         if (actualKind !== expectedKind) {
             return mismatch(
                 path,
@@ -4872,8 +4916,10 @@
     /**
      * Throw when calling `callback` throws, and otherwise return its result.
      *
-     * The callback must be synchronous: a native Promise return is a
-     * `TypeError` that points at `doesNotReject`.
+     * The callback must be synchronous: a genuine native Promise return is a
+     * `TypeError` that points at `doesNotReject`. The check uses the engine's
+     * internal Promise slot, so an object that merely inherits from
+     * `Promise.prototype` is reported as an ordinary return.
      *
      * @param {() => unknown} callback
      * @param {string} [message]
@@ -4912,8 +4958,10 @@
      *
      * A synchronous throw is treated as a rejection. `expected` has the same
      * meaning as in `throws`. The returned Promise rejects for invalid
-     * arguments. The callback's return value must be a native Promise or a
-     * thenable; a plain value is an `AssertionError`.
+     * arguments. The callback's return value must be a genuine native Promise
+     * or a thenable. A thenable is assimilated by reading `then` once and
+     * calling it once; a throwing `then` accessor or call rejects the returned
+     * Promise. A plain value is an `AssertionError`.
      *
      * @param {() => unknown} callback
      * @param {Function|RegExp|null} [expected]
@@ -4931,7 +4979,13 @@
         } catch (error) {
             return checkThrown(error, expected, message, "rejects");
         }
-        if (!isThenable(result)) {
+        let value;
+        try {
+            value = await assimilate(result);
+        } catch (error) {
+            return checkThrown(error, expected, message, "rejects");
+        }
+        if (value === NOT_THENABLE) {
             throw new AssertionError(
                 withMessage(
                     message,
@@ -4941,30 +4995,21 @@
                 { actual: result, operator: "rejects" },
             );
         }
-        let value;
-        let fulfilled = false;
-        try {
-            value = await result;
-            fulfilled = true;
-        } catch (error) {
-            return checkThrown(error, expected, message, "rejects");
-        }
-        if (fulfilled) {
-            throw new AssertionError(
-                withMessage(
-                    message,
-                    `expected the Promise to reject, but it fulfilled with ${formatValue(value)}`,
-                ),
-                { actual: value, operator: "rejects" },
-            );
-        }
+        throw new AssertionError(
+            withMessage(
+                message,
+                `expected the Promise to reject, but it fulfilled with ${formatValue(value)}`,
+            ),
+            { actual: value, operator: "rejects" },
+        );
     }
 
     /**
      * Resolve with the fulfilment value once `callback` fulfils; reject with an
      * `AssertionError` when it throws or rejects.
      *
-     * The callback's return value must be a native Promise or a thenable.
+     * The callback's return value must be a genuine native Promise or a
+     * thenable, assimilated exactly once as in `rejects`.
      *
      * @param {() => unknown} callback
      * @param {string} [message]
@@ -4987,18 +5032,9 @@
                 { actual: error, operator: "doesNotReject" },
             );
         }
-        if (!isThenable(result)) {
-            throw new AssertionError(
-                withMessage(
-                    message,
-                    "expected the function to return a Promise, " +
-                        `but it returned ${formatValue(result)}`,
-                ),
-                { actual: result, operator: "doesNotReject" },
-            );
-        }
+        let value;
         try {
-            return await result;
+            value = await assimilate(result);
         } catch (error) {
             throw new AssertionError(
                 withMessage(
@@ -5008,6 +5044,17 @@
                 { actual: error, operator: "doesNotReject" },
             );
         }
+        if (value === NOT_THENABLE) {
+            throw new AssertionError(
+                withMessage(
+                    message,
+                    "expected the function to return a Promise, " +
+                        `but it returned ${formatValue(result)}`,
+                ),
+                { actual: result, operator: "doesNotReject" },
+            );
+        }
+        return value;
     }
 
     // The module object is the callable `assert` itself. Its own properties are

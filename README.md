@@ -474,10 +474,10 @@ addition to own properties: `Date` time values, `RegExp` source, flags, and `las
 `ArrayBuffer`/`SharedArrayBuffer` bytes, `DataView` viewed bytes, typed-array element type, length,
 and elements, boxed primitive values, and `Error` `name` and `message`. Maps compare size and match
 entries without regard to insertion order; Sets likewise compare size and values without regard to
-insertion order. `NaN` equals `NaN`, `-0` differs from `0`, and cycles are handled. Functions,
-Promises, WeakMaps, WeakSets, and WeakRefs compare by identity. For property, array, and typed-array
-differences the failure message names the first differing path, such as `$.items[2].name`; Map and
-Set failures report size or entry differences and show both collections.
+insertion order. `NaN` equals `NaN`, `-0` differs from `0`, and cycles are handled. Functions and
+genuine native Promises, WeakMaps, WeakSets, and WeakRefs compare by identity. For property, array,
+and typed-array differences the failure message names the first differing path, such as
+`$.items[2].name`; Map and Set failures report size or entry differences and show both collections.
 
 `strictEquals` is exactly `Object.is`: `strictEquals(NaN, NaN)` passes, `strictEquals(0, -0)` fails,
 and two distinct objects are never identical. `notEquals` and `notStrictEquals` are the negations.
@@ -495,14 +495,17 @@ value. `doesNotThrow(callback[, message])` throws if it throws, and otherwise re
 `Symbol.hasInstance`, or a `RegExp` tested against the thrown error's message (or the string form of
 a non-Error value), or omitted to accept any throw. A string second argument is a `TypeError`, not a
 message; pass the message third. Both functions take synchronous callbacks. A callback that returns
-a native Promise is a `TypeError` that points at the Promise-aware form, so work that has not run
-cannot be reported as a pass.
+a genuine native Promise is a `TypeError` that points at the Promise-aware form, so work that has
+not run cannot be reported as a pass. The check reads the engine's internal Promise slot, not the
+prototype chain, so an object that merely inherits from `Promise.prototype` is an ordinary return.
 
 `rejects(callback[, expected[, message]])` returns a Promise that resolves with the rejection reason
 once `callback` rejects, and rejects with `AssertionError` when it fulfils. A synchronous throw is
-treated as a rejection. The callback's return value must be a native Promise or a thenable.
-`doesNotReject(callback[, message])` resolves with the fulfilment value and rejects with
-`AssertionError` if the callback throws or rejects. Invalid arguments reject the returned Promise.
+treated as a rejection. The callback's return value must be a genuine native Promise or a thenable.
+A thenable is assimilated by reading `then` once and calling it once; a throwing `then` accessor or
+call is treated as a rejection. `doesNotReject(callback[, message])` resolves with the fulfilment
+value and rejects with `AssertionError` if the callback throws or rejects. Invalid arguments reject
+the returned Promise.
 `assert.rejects` and `assert.doesNotReject` work with top-level await; they do not wrap blocking work
 to look asynchronous.
 
@@ -512,8 +515,9 @@ not a compatibility layer for either, and it does not implement Node's `assert/s
 `match`, `ifError`, snapshots, or a `node:assert` specifier.
 
 Diagnostics are bounded: a formatted value is truncated at 400 characters, 50 items, and eight
-levels, cycles print as `[Circular]`, and throwing getters or an unreadable prototype make the
-assertion fail with an `AssertionError` rather than an unrelated exception. Formatting may invoke
+levels, cycles print as `[Circular]`, and throwing getters, an unreadable prototype, or a value
+that cannot be classified make the assertion fail with an `AssertionError` rather than an unrelated
+exception. Formatting may invoke
 getters. The comparison is recursive, so an extremely deep non-cyclic structure can exhaust the
 JavaScript stack; Maps and Sets are matched in quadratic time in their size, which is appropriate
 for tests but not for huge collections. `Error` `cause` and `AggregateError.errors` are
