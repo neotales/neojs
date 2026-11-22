@@ -894,6 +894,117 @@ console.log(strings.trim("\uFEFF a \uFEFF"));
 }
 
 #[test]
+fn assert_builtin_passes_from_the_cli() {
+    let project = Project::new();
+    let file = project.write(
+        "assert-pass.js",
+        r#"
+import assert, { equals, strictEquals } from "assert";
+import { equals as aliased } from "neo:assert";
+
+if (Neo.getBuiltInModule("assert") !== assert) throw new Error("registry identity");
+if (aliased !== equals) throw new Error("specifier alias identity");
+if (assert.ok !== assert) throw new Error("ok identity");
+
+const shared = { value: 1 };
+strictEquals(shared, shared);
+strictEquals(NaN, NaN);
+equals({ a: [1, { b: 2 }] }, { a: [1, { b: 2 }] });
+equals(new Map([["a", 1], [{ b: 2 }, 3]]), new Map([[{ b: 2 }, 3], ["a", 1]]));
+equals(new Set([1, { a: 2 }]), new Set([{ a: 2 }, 1]));
+equals(new Uint8Array([1, 2]), new Uint8Array([1, 2]));
+equals(new DataView(new Uint8Array([9, 1, 2]).buffer, 1, 2), new DataView(new Uint8Array([1, 2]).buffer));
+assert.throws(() => {
+    throw new TypeError("expected");
+}, TypeError);
+await assert.rejects(async () => {
+    throw new RangeError("expected");
+}, RangeError);
+
+let subclassThenCalls = 0;
+class TestPromise extends Promise {
+    then() {
+        subclassThenCalls += 1;
+        throw new Error("overridden then was called");
+    }
+}
+const subclassValue = await assert.doesNotReject(() =>
+    new TestPromise((resolve) => resolve(7)));
+if (subclassValue !== 7 || subclassThenCalls !== 0) {
+    throw new Error("the CLI did not observe a genuine Promise subclass safely");
+}
+
+const hadOwnThen = Object.prototype.hasOwnProperty.call(Object.prototype, "then");
+const savedThen = Object.prototype.then;
+Object.prototype.then = function () {
+    throw new Error("polluted then");
+};
+try {
+    let rejectedPrimitive = false;
+    try {
+        await assert.rejects(() => 42);
+    } catch (error) {
+        rejectedPrimitive = error instanceof assert.AssertionError;
+    }
+    if (!rejectedPrimitive) throw new Error("polluted then caused a false pass");
+} finally {
+    if (hadOwnThen) Object.prototype.then = savedThen;
+    else delete Object.prototype.then;
+}
+console.log("assert ok");
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "assert ok\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn assert_failure_exits_1_with_an_informative_assertion_error() {
+    let project = Project::new();
+    let file = project.write(
+        "assert-fail.js",
+        r#"
+import { equals } from "assert";
+
+equals({ a: { b: [0, 1] } }, { a: { b: [0, 2] } });
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("AssertionError"), "{message}");
+    assert!(message.contains("values are not equal"), "{message}");
+    assert!(message.contains("$.a.b[1]"), "{message}");
+    assert!(message.contains("actual:"), "{message}");
+    assert!(message.contains("expected:"), "{message}");
+}
+
+#[test]
+fn assert_has_no_assert_equals_export_from_the_cli() {
+    let project = Project::new();
+    let file = project.write(
+        "assert-no-alias.js",
+        "import { assertEquals } from \"assert\";\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(
+        message.contains("does not provide an export named 'assertEquals'"),
+        "{message}"
+    );
+    assert!(message.contains("assert"), "{message}");
+}
+
+#[test]
 fn reports_bad_built_in_module_names_and_exits_1() {
     let project = Project::new();
     let file = project.write("bad-name.js", "Neo.getBuiltInModule(42);\n");
@@ -979,7 +1090,7 @@ fn reports_an_unknown_neo_module_and_lists_the_implemented_ones() {
     assert!(message.contains("not implemented"), "{message}");
     assert!(
         message.contains(
-            "neojs implements age, neo:age, chars, neo:chars, console, neo:console, crypto, neo:crypto, path, neo:path, ssh, neo:ssh, stdio, neo:stdio"
+            "neojs implements age, neo:age, assert, neo:assert, chars, neo:chars, console, neo:console, crypto, neo:crypto, path, neo:path, ssh, neo:ssh, stdio, neo:stdio, strings, neo:strings"
         ),
         "{message}"
     );
@@ -1364,7 +1475,8 @@ fn prints_help_and_version() {
     let help = run_args(&["--help"]);
     assert_eq!(help.status.code(), Some(0));
     assert!(stdout(&help).contains("Usage:"));
-    assert!(stdout(&help).contains("age, chars, console, crypto, ssh, and stdio built-in"));
+    assert!(stdout(&help).contains("age, assert, chars, console, crypto, ssh, and stdio"));
+    assert!(stdout(&help).contains("built-in modules are implemented"));
 
     let version = run_args(&["--version"]);
     assert_eq!(version.status.code(), Some(0));

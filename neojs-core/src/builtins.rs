@@ -3,9 +3,11 @@
 //!
 //! The scripts here install globals that neojs supplies: currently [`NEO_SHIM`],
 //! which defines the `Neo` object and its cached built-in modules. `chars`,
-//! `console`, and `strings` are plain ECMAScript. `crypto` calls private host
-//! ops registered by [`crate::crypto`], [`crate::crypto_cipher`],
-//! [`crate::crypto_hash`], and [`crate::crypto_shamir`]; it
+//! `console`, and `strings` are plain ECMAScript; `assert` calls one private host
+//! op registered by [`crate::assert`] to observe a genuine native Promise.
+//! `crypto` calls private host ops registered by [`crate::crypto`],
+//! [`crate::crypto_cipher`], [`crate::crypto_hash`], and
+//! [`crate::crypto_shamir`]; it
 //! adds the operating system CSPRNG, the NEO1 AES-256-GCM envelope, bounded
 //! stateful AES-256-CBC/AES-256-GCM ciphers, SHA-2 hashing and HMAC, PBKDF2,
 //! bcrypt, and GF(256) Shamir secret sharing, but no permission, filesystem
@@ -44,30 +46,32 @@
 //! filesystem, environment, network, or process capability and is not a
 //! containment check.
 //!
-//! [`AGE_MODULE`], [`CHARS_MODULE`], [`CONSOLE_MODULE`], [`CRYPTO_MODULE`],
-//! [`PATH_MODULE`], [`SSH_MODULE`], [`STDIO_MODULE`], and [`STRINGS_MODULE`] are
-//! not evaluated as scripts. They are the sources returned by the module loader
-//! for the built-in specifiers [`AGE_SPECIFIER`], [`CHARS_SPECIFIER`],
-//! [`CONSOLE_SPECIFIER`], [`CRYPTO_SPECIFIER`], [`PATH_SPECIFIER`],
-//! [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], and [`STRINGS_SPECIFIER`], and for
-//! their bare names. All read the public module objects installed by
-//! [`NEO_SHIM`], so the registry and the module bindings share identity. `age`,
-//! `chars`, and `strings` are frozen module objects whose named exports are
-//! their function objects. `console` is the console object the runtime
-//! installed: the default export's value is that object, and the named exports
-//! are its method values when the module is evaluated. `crypto`, `path`, `ssh`,
-//! and `stdio` are frozen module objects whose named exports are their
-//! synchronous classes, functions, constants, and shared stream objects. In
-//! every case the ES module namespace is a separate object from the registry
-//! object.
+//! [`AGE_MODULE`], [`ASSERT_MODULE`], [`CHARS_MODULE`], [`CONSOLE_MODULE`],
+//! [`CRYPTO_MODULE`], [`PATH_MODULE`], [`SSH_MODULE`], [`STDIO_MODULE`], and
+//! [`STRINGS_MODULE`] are not evaluated as scripts. They are the sources
+//! returned by the module loader for the built-in specifiers [`AGE_SPECIFIER`],
+//! [`ASSERT_SPECIFIER`], [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`],
+//! [`CRYPTO_SPECIFIER`], [`PATH_SPECIFIER`], [`SSH_SPECIFIER`],
+//! [`STDIO_SPECIFIER`], and [`STRINGS_SPECIFIER`], and for their bare names.
+//! All read the public module objects installed by [`NEO_SHIM`], so the registry
+//! and the module bindings share identity. `assert` is the frozen callable
+//! `assert` function itself, with its named assertions as properties; it also
+//! has a default export in its module namespace. `age`, `chars`, and `strings`
+//! are frozen module objects whose named exports are their function objects.
+//! `console` is the console object the runtime installed: the default export's
+//! value is that object, and the named exports are its method values when the
+//! module is evaluated. `crypto`, `path`, `ssh`, and `stdio` are frozen module
+//! objects whose named exports are their synchronous classes, functions,
+//! constants, and shared stream objects. In every case the ES module namespace
+//! is a separate object from the registry object.
 
 use deno_core::url::Url;
 
 /// Installs the global `Neo` object and the built-in module registry.
 ///
-/// Evaluation happens once per realm. The `age`, `chars`, `crypto`, `path`,
-/// `ssh`, `stdio`, and `strings` module objects are frozen and cached, so
-/// repeated `Neo.getBuiltInModule` calls return the same object for each. The
+/// Evaluation happens once per realm. The `age`, `assert`, `chars`, `crypto`,
+/// `path`, `ssh`, `stdio`, and `strings` module objects are frozen and cached,
+/// so repeated `Neo.getBuiltInModule` calls return the same object for each. The
 /// `console` module object is the console object the runtime installed,
 /// captured after the console shim runs. At installation time the registry, the
 /// module bindings, and the global console share the same function objects; a
@@ -89,6 +93,22 @@ pub(crate) const AGE_SPECIFIER: &str = "neo:age";
 /// the module and `Neo.getBuiltInModule("age")` share identity. The functions
 /// call host ops registered by [`crate::age`].
 const AGE_MODULE: &str = include_str!("builtins/age.esm.js");
+
+/// The canonical module specifier for the `assert` built-in.
+///
+/// Both `"assert"` and `"neo:assert"` resolve to this URL, so the engine caches
+/// one module instance for both spellings. It is not a `file:` URL and is never
+/// read from disk.
+pub(crate) const ASSERT_SPECIFIER: &str = "neo:assert";
+
+/// The ECMAScript module source served for [`ASSERT_SPECIFIER`].
+///
+/// It re-exports the callable `assert` function and its named assertions from
+/// the public `assert` module object, and also exposes that function as the
+/// default export. The implementations are in [`NEO_SHIM`]; the only host op
+/// called observes a genuine native Promise and is registered by
+/// [`crate::assert`].
+const ASSERT_MODULE: &str = include_str!("builtins/assert.esm.js");
 
 /// The canonical module specifier for the `chars` built-in.
 ///
@@ -201,6 +221,7 @@ const STRINGS_MODULE: &str = include_str!("builtins/strings.esm.js");
 /// messages list the same table, so adding a module in one place is enough.
 const BUILTINS: &[(&str, &str)] = &[
     ("age", AGE_SPECIFIER),
+    ("assert", ASSERT_SPECIFIER),
     ("chars", CHARS_SPECIFIER),
     ("console", CONSOLE_SPECIFIER),
     ("crypto", CRYPTO_SPECIFIER),
@@ -234,6 +255,7 @@ pub(crate) fn resolve(specifier: &str) -> Option<&'static str> {
 pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
     match specifier.as_str() {
         AGE_SPECIFIER => Some(AGE_MODULE),
+        ASSERT_SPECIFIER => Some(ASSERT_MODULE),
         CHARS_SPECIFIER => Some(CHARS_MODULE),
         CONSOLE_SPECIFIER => Some(CONSOLE_MODULE),
         CRYPTO_SPECIFIER => Some(CRYPTO_MODULE),

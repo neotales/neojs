@@ -4,11 +4,36 @@
 //! and drains V8's event loop. A runtime is single-use; a second entry module
 //! returns [`Error::RuntimeConsumed`].
 //!
-//! It provides the `age`, `chars`, `console`, `crypto`, `path`, `ssh`, `stdio`,
-//! and `strings` built-in modules through `Neo.getBuiltInModule(name)` and
-//! through the module specifiers `age`, `neo:age`, `chars`, `neo:chars`,
-//! `console`, `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`,
-//! `neo:ssh`, `stdio`, `neo:stdio`, `strings`, and `neo:strings`.
+//! It provides the `age`, `assert`, `chars`, `console`, `crypto`, `path`, `ssh`,
+//! `stdio`, and `strings` built-in modules through
+//! `Neo.getBuiltInModule(name)` and through the module specifiers `age`,
+//! `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
+//! `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`,
+//! `stdio`, `neo:stdio`, `strings`, and `neo:strings`.
+//!
+//! `assert` is a synchronous assertion surface inspired by Node's
+//! `assert/strict` and Deno's `@std/assert`. The registry object is the
+//! callable `assert` function itself; `equals` is strict structural equality,
+//! `strictEquals` is `Object.is` identity, and `notEquals`, `notStrictEquals`,
+//! `ok`, `fail`, `throws`, `doesNotThrow`, `rejects`, and `doesNotReject` are
+//! available both as named exports and as properties of the callable. Failures
+//! throw `AssertionError`, an `Error` subclass with `name`, `code`
+//! `"NEO_ASSERT"`, `operator`, and the `actual`/`expected` values when present.
+//! Structural equality requires matching prototypes and compares own enumerable
+//! string and symbol properties plus built-in state for Dates, RegExps, Maps,
+//! Sets, ArrayBuffers, DataViews, typed arrays, boxed primitives, and Errors;
+//! cycles are handled, Maps and Sets are order-insensitive, `NaN` equals `NaN`,
+//! and `-0` differs from `0`. Functions and genuine native Promises, WeakMaps,
+//! WeakSets, and WeakRefs compare by identity. There is no `assertEquals`,
+//! `deepEqual`, or `strictEqual`, and this is not a Node or Deno compatibility
+//! layer. `assert` calls one private host op to observe a genuine native
+//! Promise's settlement; the op reads no file, environment, or network.
+//! `throws`/`doesNotThrow` take synchronous callbacks; a genuine native Promise
+//! return, checked by the engine's internal slot rather than its prototype, is
+//! a `TypeError` that points at `rejects`/`doesNotReject`, which return Promises
+//! and assimilate a thenable by reading `then` once. A `rejects` rejection reason
+//! that is itself a thenable is subject to native Promise assimilation in the
+//! returned Promise.
 //!
 //! `age` is synchronous binary age v1 encryption for X25519 recipients. It
 //! exposes `generateIdentity`, `identityToRecipient`, `encrypt`, and `decrypt`.
@@ -131,11 +156,14 @@
 //! `neojs-core/THIRD_PARTY_NOTICES.md` for the cwd, error, security, and
 //! provenance contracts.
 //!
-//! An ES module namespace object is not the registry object. For `age`, `chars`,
-//! `crypto`, `path`, `ssh`, `stdio`, and `strings`, both paths expose the same
-//! classes, functions, and shared stream objects; the namespace is a separate
-//! container over them. For `console`, the registry object is the console
-//! object the runtime installed, and the default export's value is that object.
+//! An ES module namespace object is not the registry object. For `age`,
+//! `assert`, `chars`, `crypto`, `path`, `ssh`, `stdio`, and `strings`, both
+//! paths expose the same classes, functions, and shared stream objects; the
+//! namespace is a separate container over them. For `assert`, the registry
+//! object is the callable function, and the module also has a default export
+//! whose value is that function. For `console`, the registry object is the
+//! console object the runtime installed, and the default export's value is that
+//! object.
 //! The named exports are that
 //! object's method values when the module is
 //! evaluated, so a method replaced before then is what they capture; later
@@ -183,6 +211,7 @@
 //! ```
 
 mod age;
+mod assert;
 mod builtins;
 mod crypto;
 mod crypto_cipher;

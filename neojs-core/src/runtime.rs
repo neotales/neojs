@@ -26,6 +26,7 @@ use deno_core::url::Url;
 
 use crate::Error;
 use crate::age::neojs_age;
+use crate::assert::neojs_assert;
 use crate::builtins::NEO_SHIM;
 use crate::crypto::neojs_crypto;
 use crate::crypto_cipher::neojs_crypto_cipher;
@@ -117,12 +118,15 @@ pub struct Runtime {
 impl Runtime {
     /// Creates a runtime and installs the console and built-in module shims.
     ///
-    /// The runtime has one realm. The `age`, `chars`, `console`, `crypto`,
-    /// `path`, `ssh`, and `stdio` built-in modules are cached in that realm, and
-    /// both bare and `neo:`-prefixed import specifiers resolve to them; a new
-    /// `Runtime` creates a new realm, new functions, and new module instances.
-    /// The `age`, `crypto`, `path`, `ssh`, and `stdio` modules register their
-    /// private host ops in that realm before user code runs. The `console`
+    /// The runtime has one realm. The `age`, `assert`, `chars`, `console`,
+    /// `crypto`, `path`, `ssh`, `stdio`, and `strings` built-in modules are
+    /// cached in that realm, and both bare and `neo:`-prefixed import
+    /// specifiers resolve to them; a new `Runtime` creates a new realm, new
+    /// functions, and new module instances. The `age`, `crypto`, `path`, `ssh`,
+    /// and `stdio` modules
+    /// register their private host ops in that realm before user code runs;
+    /// `chars` and `strings` are plain ECMAScript, and `assert` calls one
+    /// private Promise-observation host op. The `console`
     /// module's object is the console object the runtime installed: its default
     /// export's value is that object, and its
     /// named exports are that object's method values when the module is
@@ -184,6 +188,7 @@ impl Runtime {
         #[allow(unused_mut)]
         let mut extensions = vec![
             neojs_age::init(),
+            neojs_assert::init(),
             neojs_crypto::init(),
             neojs_crypto_cipher::init(),
             neojs_crypto_hash::init(),

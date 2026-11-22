@@ -2176,3 +2176,836 @@ if (reads > 32) {
     );
     run_js(&source);
 }
+
+/// The `assert` module object is the callable function itself, and its named
+/// exports are that function's properties. `assertEquals` is deliberately
+/// absent.
+#[test]
+fn assert_module_exports_the_callable_without_assert_equals() {
+    run_js(
+        r#"
+import assertDefault, * as assertModule from "assert";
+import { AssertionError, equals, ok, strictEquals } from "assert";
+
+const registry = Neo.getBuiltInModule("assert");
+if (registry !== assertDefault) throw new Error("the default export is not the registry");
+if (registry !== assertModule.assert) throw new Error("the named assert is not the registry");
+if (registry !== ok) throw new Error("ok is not the registry callable");
+if (registry.ok !== registry) throw new Error("assert.ok is not the callable");
+if (registry.equals !== equals) throw new Error("equals is not the registry function");
+if (registry.strictEquals !== strictEquals) {
+    throw new Error("strictEquals is not the registry function");
+}
+if (registry.AssertionError !== AssertionError) {
+    throw new Error("AssertionError is not the registry class");
+}
+if (!Object.isFrozen(registry)) throw new Error("the assert module is not frozen");
+if (typeof registry !== "function") throw new Error("the assert module is not callable");
+
+const exported = Object.keys(assertModule).sort();
+const expected = [
+    "AssertionError",
+    "assert",
+    "default",
+    "doesNotReject",
+    "doesNotThrow",
+    "equals",
+    "fail",
+    "notEquals",
+    "notStrictEquals",
+    "ok",
+    "rejects",
+    "strictEquals",
+    "throws",
+].sort();
+if (JSON.stringify(exported) !== JSON.stringify(expected)) {
+    throw new Error(`assert exports ${exported} do not match ${expected}`);
+}
+for (const name of Object.keys(registry)) {
+    const value = registry[name];
+    if (typeof value !== "function") throw new Error(`${name} is not a function`);
+    if (assertModule[name] !== value) throw new Error(`${name} differs from the registry`);
+}
+if ("assertEquals" in registry) throw new Error("assertEquals is a property of assert");
+if ("assertEquals" in assertModule) throw new Error("assertEquals is a module export");
+if (Object.keys(registry).includes("assertEquals")) {
+    throw new Error("assertEquals is an enumerable registry property");
+}
+if ("default" in registry) throw new Error("the registry must not have a default property");
+"#,
+    );
+
+    for specifier in ["assert", "neo:assert"] {
+        let error = run_js_error(&format!(
+            "import {{ assertEquals }} from \"{specifier}\";\n"
+        ));
+        assert!(
+            error.contains("does not provide an export named 'assertEquals'"),
+            "{specifier}: {error}"
+        );
+        assert!(
+            error.contains(specifier.trim_start_matches("neo:")),
+            "{error}"
+        );
+    }
+}
+
+/// `strictEquals` is `Object.is`; `equals` is structural equality. The test
+/// names each semantic so a regression reports which rule changed.
+#[test]
+fn assert_equality_distinguishes_identity_from_structure() {
+    run_js(
+        r#"
+import { AssertionError, equals, notEquals, notStrictEquals, strictEquals } from "assert";
+
+function passes(label, fn) {
+    try {
+        fn();
+    } catch (error) {
+        throw new Error(`${label} failed unexpectedly: ${error}`);
+    }
+}
+function fails(label, fn) {
+    let error;
+    try {
+        fn();
+    } catch (thrown) {
+        error = thrown;
+    }
+    if (!(error instanceof AssertionError)) {
+        throw new Error(`${label} threw ${error} instead of AssertionError`);
+    }
+    return error;
+}
+
+const same = { value: 1 };
+passes("strict same object", () => strictEquals(same, same));
+passes("strict NaN", () => strictEquals(NaN, NaN));
+passes("strict global symbol", () => strictEquals(Symbol.for("k"), Symbol.for("k")));
+fails("strict distinct objects", () => strictEquals({ value: 1 }, { value: 1 }));
+fails("strict -0 and 0", () => strictEquals(0, -0));
+fails("strict local symbols", () => strictEquals(Symbol("k"), Symbol("k")));
+passes("notStrict -0", () => notStrictEquals(0, -0));
+
+passes("structural object", () => equals({ value: 1 }, { value: 1 }));
+passes("structural nested", () => equals({ a: [1, { b: 2 }] }, { a: [1, { b: 2 }] }));
+passes("structural NaN", () => equals(NaN, NaN));
+passes("structural shared graph", () => {
+    const shared = { value: 1 };
+    return equals({ a: shared, b: shared }, { a: { value: 1 }, b: { value: 1 } });
+});
+passes("structural cycle", () => {
+    const actual = { value: 1 };
+    actual.self = actual;
+    const expected = { value: 1 };
+    expected.self = expected;
+    return equals(actual, expected);
+});
+fails("structural prototype", () => equals(Object.create(null), {}));
+fails("structural -0 and 0", () => equals(0, -0));
+fails("structural array length", () => equals([1], [1, 2]));
+fails("structural array hole", () => equals([1, , 3], [1, undefined, 3]));
+fails("structural missing property", () => equals({ a: 1 }, {}));
+fails("structural function identity", () => equals(() => 1, () => 1));
+fails("structural Promise identity", () => equals(Promise.resolve(1), Promise.resolve(1)));
+fails("structural cycle difference", () => {
+    const actual = { value: 1 };
+    actual.self = actual;
+    const expected = { value: 1, extra: true };
+    expected.self = expected;
+    return equals(actual, expected);
+});
+passes("notEquals", () => notEquals({ a: 1 }, { a: 2 }));
+fails("notEquals equal", () => notEquals({ a: 1 }, { a: 1 }));
+
+fails("unreadable prototype", () =>
+    equals({}, new Proxy({}, {
+        getPrototypeOf() {
+            throw new Error("trap");
+        },
+    })));
+let descriptorCalls = 0;
+const unreadableProperties = new Proxy({ a: 1 }, {
+    ownKeys() {
+        return ["a"];
+    },
+    getOwnPropertyDescriptor(target, key) {
+        descriptorCalls += 1;
+        if (descriptorCalls > 1) throw new Error("trap");
+        return Object.getOwnPropertyDescriptor(target, key);
+    },
+});
+fails("unreadable own property", () => equals({ a: 1 }, unreadableProperties));
+
+// `expected`'s prototype trap revokes `actual` after actual's prototype was
+// already read. Kind detection then meets a revoked proxy; it must report an
+// AssertionError rather than let Array.isArray throw a TypeError.
+const crossRevocable = Proxy.revocable({}, {});
+const crossActual = crossRevocable.proxy;
+const crossExpected = new Proxy({}, {
+    getPrototypeOf() {
+        crossRevocable.revoke();
+        return Object.prototype;
+    },
+});
+const crossError = fails("kind detection after cross-revocation", () =>
+    equals(crossActual, crossExpected));
+if (!crossError.message.includes("could not be inspected")) {
+    throw new Error(`unexpected cross-revocation message: ${crossError.message}`);
+}
+
+// The same guard covers a proxy that revokes itself in its prototype trap.
+const selfRevocable = Proxy.revocable({}, {});
+const selfExpected = new Proxy({}, {
+    getPrototypeOf() {
+        selfRevocable.revoke();
+        return Object.prototype;
+    },
+});
+fails("kind detection after self-revocation", () =>
+    equals(selfRevocable.proxy, selfExpected));
+"#,
+    );
+}
+
+/// Map and Set matching is order-insensitive and uses deep keys; typed arrays
+/// compare type, length, and elements with `Object.is`; DataViews compare only
+/// the bytes in their view.
+#[test]
+fn assert_equality_handles_maps_sets_and_binary_views() {
+    run_js(
+        r#"
+import { AssertionError, equals } from "assert";
+
+function passes(label, fn) {
+    try {
+        fn();
+    } catch (error) {
+        throw new Error(`${label} failed unexpectedly: ${error}`);
+    }
+}
+function fails(label, fn) {
+    let error;
+    try {
+        fn();
+    } catch (thrown) {
+        error = thrown;
+    }
+    if (!(error instanceof AssertionError)) {
+        throw new Error(`${label} threw ${error} instead of AssertionError`);
+    }
+    return error;
+}
+
+passes("Map insertion order", () =>
+    equals(
+        new Map([["a", 1], [{ key: 2 }, 3]]),
+        new Map([[{ key: 2 }, 3], ["a", 1]]),
+    ));
+passes("Map deep key", () => equals(new Map([[{ a: [1] }, 2]]), new Map([[{ a: [1] }, 2]])));
+passes("Map cycle key", () => {
+    const actual = { a: 1 };
+    actual.self = actual;
+    const expected = { a: 1 };
+    expected.self = expected;
+    return equals(new Map([[actual, 1]]), new Map([[expected, 1]]));
+});
+fails("Map value", () => equals(new Map([["a", 1]]), new Map([["a", 2]])));
+fails("Map size", () => equals(new Map([["a", 1]]), new Map([["a", 1], ["b", 2]])));
+fails("Map rollback", () => {
+    const one = { a: 1 };
+    one.self = one;
+    const two = { a: 1 };
+    two.self = two;
+    const three = { b: 2 };
+    three.self = three;
+    const four = { b: 2 };
+    four.self = four;
+    return equals(
+        new Map([[one, "wrong"], [three, "right"]]),
+        new Map([[two, "other"], [four, "right"]]),
+    );
+});
+
+passes("Set insertion order", () => equals(new Set([1, { a: 2 }]), new Set([{ a: 2 }, 1])));
+passes("Set cycle value", () => {
+    const actual = { a: 1 };
+    actual.self = actual;
+    const expected = { a: 1 };
+    expected.self = expected;
+    return equals(new Set([actual]), new Set([expected]));
+});
+fails("Set value", () => equals(new Set([1]), new Set([2])));
+fails("Set size", () => equals(new Set([1]), new Set([1, 2])));
+
+passes("typed array elements", () =>
+    equals(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2, 3])));
+passes("typed NaN and -0", () =>
+    equals(new Float64Array([NaN, -0]), new Float64Array([NaN, -0])));
+passes("bigint typed array", () =>
+    equals(new BigInt64Array([1n, -2n]), new BigInt64Array([1n, -2n])));
+fails("typed element", () => equals(new Uint8Array([1, 2]), new Uint8Array([1, 3])));
+fails("typed type", () => equals(new Uint8Array([1, 2]), new Uint8ClampedArray([1, 2])));
+fails("typed length", () => equals(new Uint8Array([1]), new Uint8Array([1, 2])));
+fails("float -0", () => equals(new Float32Array([0]), new Float32Array([-0])));
+
+const first = new Uint8Array([0, 1, 2, 3]);
+const second = new Uint8Array([9, 1, 2, 9]);
+passes("DataView view", () =>
+    equals(new DataView(first.buffer, 1, 2), new DataView(second.buffer, 1, 2)));
+fails("DataView bytes", () =>
+    equals(new DataView(first.buffer, 1, 2), new DataView(first.buffer, 0, 2)));
+
+passes("ArrayBuffer bytes", () => equals(first.buffer, new Uint8Array([0, 1, 2, 3]).buffer));
+fails("ArrayBuffer bytes differ", () => equals(first.buffer, second.buffer));
+
+passes("Date time", () => equals(new Date(123), new Date(123)));
+passes("invalid Date", () => equals(new Date(NaN), new Date(NaN)));
+fails("Date time differs", () => equals(new Date(123), new Date(124)));
+passes("RegExp source and flags", () => equals(/a/gi, /a/gi));
+fails("RegExp flags", () => equals(/a/g, /a/i));
+fails("RegExp lastIndex", () => {
+    const left = /a/g;
+    const right = /a/g;
+    left.lastIndex = 1;
+    right.lastIndex = 2;
+    return equals(left, right);
+});
+
+passes("boxed number", () => equals(Object(1), new Number(1)));
+passes("boxed NaN", () => equals(Object(NaN), Object(NaN)));
+passes("boxed string", () => equals(Object("a"), Object("a")));
+fails("boxed number differs", () => equals(Object(1), Object(2)));
+passes("Error name and message", () => equals(new TypeError("x"), new TypeError("x")));
+fails("Error name", () => equals(new TypeError("x"), new RangeError("x")));
+fails("Error message", () => equals(new TypeError("x"), new TypeError("y")));
+"#,
+    );
+}
+
+/// `AssertionError` exposes a stable neojs code and the failed values, and the
+/// message names the first differing path.
+#[test]
+fn assert_assertion_error_is_informative() {
+    run_js(
+        r#"
+import { AssertionError, assert, equals, fail, strictEquals } from "assert";
+
+let error = null;
+try {
+    equals({ a: { b: [0, 1] } }, { a: { b: [0, 2] } });
+} catch (thrown) {
+    error = thrown;
+}
+if (!(error instanceof AssertionError)) throw new Error("equals did not throw AssertionError");
+if (!(error instanceof Error)) throw new Error("AssertionError is not an Error");
+if (error.name !== "AssertionError") throw new Error(`name was ${error.name}`);
+if (error.code !== "NEO_ASSERT") throw new Error(`code was ${error.code}`);
+if (error.operator !== "equals") throw new Error(`operator was ${error.operator}`);
+if (error.actual.a.b[1] !== 1) throw new Error("actual was not preserved");
+if (error.expected.a.b[1] !== 2) throw new Error("expected was not preserved");
+if (!error.message.includes("$.a.b[1]")) throw new Error(`path missing from ${error.message}`);
+if (!error.message.includes("actual:")) throw new Error(`actual detail missing from ${error.message}`);
+if (!error.message.includes("expected:")) throw new Error(`expected detail missing from ${error.message}`);
+
+error = null;
+try {
+    strictEquals({}, {});
+} catch (thrown) {
+    error = thrown;
+}
+if (!(error instanceof AssertionError)) throw new Error("strictEquals did not throw AssertionError");
+if (error.operator !== "strictEquals") throw new Error(`operator was ${error.operator}`);
+if (!error.message.includes("Object.is")) throw new Error("strictEquals message does not say Object.is");
+
+let custom = null;
+try {
+    equals(1, 2, "the parser");
+} catch (thrown) {
+    custom = thrown;
+}
+if (!custom.message.startsWith("the parser: ")) throw new Error("custom message was not a prefix");
+
+error = null;
+try {
+    assert(0);
+} catch (thrown) {
+    error = thrown;
+}
+if (!(error instanceof AssertionError)) throw new Error("assert did not throw AssertionError");
+if (error.actual !== 0 || error.expected !== true) throw new Error("assert values were wrong");
+if (error.operator !== "assert") throw new Error(`assert operator was ${error.operator}`);
+
+error = null;
+try {
+    fail("stop");
+} catch (thrown) {
+    error = thrown;
+}
+if (!(error instanceof AssertionError) || error.message !== "stop") {
+    throw new Error("fail message was wrong");
+}
+if (error.operator !== "fail") throw new Error(`fail operator was ${error.operator}`);
+
+const typeErrors = [
+    () => assert(),
+    () => assert(true, 1),
+    () => equals(1, 1, null),
+    () => equals(1),
+    () => equals(1, 1, "message", "extra"),
+    () => strictEquals(1, 1, {}),
+    () => fail(1),
+];
+for (const call of typeErrors) {
+    let thrown = null;
+    try {
+        call();
+    } catch (candidate) {
+        thrown = candidate;
+    }
+    if (!(thrown instanceof TypeError)) {
+        throw new Error(`expected TypeError, got ${thrown}`);
+    }
+}
+"#,
+    );
+}
+
+/// `throws` is synchronous and fails closed on a Promise; `rejects` is
+/// Promise-aware and also treats a synchronous throw as a rejection.
+#[test]
+fn assert_throws_and_rejects_handle_sync_and_promise_callbacks() {
+    run_js(
+        r#"
+import {
+    AssertionError,
+    doesNotReject,
+    doesNotThrow,
+    rejects,
+    throws,
+} from "assert";
+
+function fails(label, fn) {
+    let error;
+    try {
+        fn();
+    } catch (thrown) {
+        error = thrown;
+    }
+    if (error === undefined) throw new Error(`${label} did not throw`);
+    return error;
+}
+async function failsAsync(label, fn) {
+    let error;
+    try {
+        await fn();
+    } catch (thrown) {
+        error = thrown;
+    }
+    if (error === undefined) throw new Error(`${label} did not reject`);
+    return error;
+}
+
+const thrown = throws(() => {
+    throw new TypeError("boom");
+}, TypeError);
+if (!(thrown instanceof TypeError) || thrown.message !== "boom") {
+    throw new Error("throws did not return the thrown value");
+}
+throws(() => {
+    throw new Error("boom");
+}, /bo+m/);
+throws(() => {
+    throw "plain";
+}, /plai/);
+
+let error = fails("throws return", () => throws(() => 7));
+if (!(error instanceof AssertionError) || error.operator !== "throws") {
+    throw new Error("throws accepted a return");
+}
+error = fails("throws class", () => throws(() => {
+    throw new TypeError("x");
+}, RangeError));
+if (!(error instanceof AssertionError)) throw new Error("throws wrong class was not AssertionError");
+error = fails("throws regex", () => throws(() => {
+    throw new Error("x");
+}, /y/));
+if (!(error instanceof AssertionError)) throw new Error("throws wrong regex was not AssertionError");
+error = fails("throws async", () => throws(async () => {
+    throw new Error("x");
+}));
+if (!(error instanceof TypeError)) throw new Error("throws async was not a TypeError");
+if (!error.message.includes("assert.rejects")) throw new Error("throws async did not point at rejects");
+error = fails("throws promise", () => throws(() => Promise.reject(new Error("x"))));
+if (!(error instanceof TypeError)) throw new Error("throws promise was not a TypeError");
+error = fails("throws real promise", () => throws(() => Promise.resolve(1)));
+if (!(error instanceof TypeError)) throw new Error("throws real promise was not a TypeError");
+
+// An object that merely inherits from Promise.prototype has no Promise
+// internal slot, so the synchronous guard must treat it as an ordinary return.
+const spoofedPromise = Object.create(Promise.prototype);
+error = fails("throws spoofed promise", () => throws(() => spoofedPromise));
+if (!(error instanceof AssertionError)) {
+    throw new Error("throws spoofed promise was not an AssertionError");
+}
+if (doesNotThrow(() => spoofedPromise) !== spoofedPromise) {
+    throw new Error("doesNotThrow rejected a spoofed Promise");
+}
+
+// A Proxy around a Promise is not the Promise itself.
+const proxiedPromise = new Proxy(Promise.resolve(1), {});
+error = fails("throws proxied promise", () => throws(() => proxiedPromise));
+if (!(error instanceof AssertionError)) {
+    throw new Error("throws proxied promise was not an AssertionError");
+}
+
+// A revoked Proxy has no Promise slot and must not make the guard throw.
+const revoked = Proxy.revocable({}, {});
+revoked.revoke();
+error = fails("throws revoked proxy", () => throws(() => revoked.proxy));
+if (!(error instanceof AssertionError)) {
+    throw new Error("throws revoked proxy was not an AssertionError");
+}
+if (doesNotThrow(() => revoked.proxy) !== revoked.proxy) {
+    throw new Error("doesNotThrow rejected a revoked proxy");
+}
+
+error = fails("throws string expected", () => throws(() => {}, "message"));
+if (!(error instanceof TypeError)) throw new Error("throws string expected was not a TypeError");
+
+if (doesNotThrow(() => 42) !== 42) throw new Error("doesNotThrow did not return the result");
+error = fails("doesNotThrow throw", () => doesNotThrow(() => {
+    throw new Error("x");
+}));
+if (!(error instanceof AssertionError) || error.operator !== "doesNotThrow") {
+    throw new Error("doesNotThrow did not fail with AssertionError");
+}
+error = fails("doesNotThrow async", () => doesNotThrow(async () => 1));
+if (!(error instanceof TypeError)) throw new Error("doesNotThrow async was not a TypeError");
+if (!error.message.includes("assert.doesNotReject")) {
+    throw new Error("doesNotThrow async did not point at doesNotReject");
+}
+
+const syncRejection = await rejects(() => {
+    throw new RangeError("sync");
+}, RangeError);
+if (!(syncRejection instanceof RangeError)) throw new Error("rejects lost a sync throw");
+const asyncRejection = await rejects(async () => {
+    throw new SyntaxError("async");
+}, /async/);
+if (!(asyncRejection instanceof SyntaxError)) throw new Error("rejects lost an async rejection");
+await rejects(() => ({
+    then(resolve, reject) {
+        reject(new TypeError("thenable"));
+    },
+}), TypeError);
+await rejects(() => new Proxy(Promise.resolve(1), {}), TypeError);
+const realReason = await rejects(() => Promise.reject(new RangeError("real")), RangeError);
+if (!(realReason instanceof RangeError)) throw new Error("rejects lost a native rejection");
+
+// A stateful then getter must be read exactly once, then called once. Reading
+// it again to test for thenability would consume the second value or throw.
+let thenReads = 0;
+const statefulThenable = {
+    get then() {
+        thenReads += 1;
+        return function (resolve, reject) {
+            reject(new RangeError("stateful"));
+        };
+    },
+};
+const statefulReason = await rejects(() => statefulThenable, RangeError);
+if (thenReads !== 1) throw new Error(`then was read ${thenReads} times`);
+if (!(statefulReason instanceof RangeError)) {
+    throw new Error("rejects lost a stateful thenable rejection");
+}
+
+let flakyReads = 0;
+const flakyThenable = {
+    get then() {
+        flakyReads += 1;
+        if (flakyReads > 1) throw new SyntaxError("second read");
+        return function (resolve, reject) {
+            reject(new TypeError("first read"));
+        };
+    },
+};
+const flakyReason = await rejects(() => flakyThenable, TypeError);
+if (flakyReads !== 1) throw new Error(`flaky then was read ${flakyReads} times`);
+if (!(flakyReason instanceof TypeError)) {
+    throw new Error("rejects lost a flaky thenable rejection");
+}
+
+await rejects(() => ({
+    get then() {
+        throw new RangeError("getter");
+    },
+}), RangeError);
+await rejects(() => ({
+    then() {
+        throw new SyntaxError("call");
+    },
+}), SyntaxError);
+error = await failsAsync("rejects non-thenable then", () => rejects(() => ({ then: 1 })));
+if (!(error instanceof AssertionError)) {
+    throw new Error("rejects accepted a non-thenable then property");
+}
+error = await failsAsync("rejects null", () => rejects(() => null));
+if (!(error instanceof AssertionError)) {
+    throw new Error("rejects accepted null as a Promise");
+}
+
+// The non-thenable sentinel is a symbol, so a polluted inherited `then` cannot
+// turn a primitive return into a false rejection.
+const hadOwnThen = Object.prototype.hasOwnProperty.call(Object.prototype, "then");
+const originalThen = Object.prototype.then;
+Object.prototype.then = function () {
+    throw new Error("polluted then");
+};
+try {
+    let pollutedError;
+    try {
+        await rejects(() => 42);
+    } catch (caught) {
+        pollutedError = caught;
+    }
+    if (!(pollutedError instanceof AssertionError)) {
+        throw new Error("rejects primitive false-passed under polluted Object.prototype.then");
+    }
+    if (!pollutedError.message.includes("expected the function to return a Promise")) {
+        throw new Error(`unexpected polluted-then rejection: ${pollutedError.message}`);
+    }
+    pollutedError = undefined;
+    try {
+        await doesNotReject(() => 42);
+    } catch (caught) {
+        pollutedError = caught;
+    }
+    if (!(pollutedError instanceof AssertionError)) {
+        throw new Error("doesNotReject primitive did not fail under polluted then");
+    }
+    if (!pollutedError.message.includes("expected the function to return a Promise")) {
+        throw new Error(`unexpected polluted-then assertion: ${pollutedError.message}`);
+    }
+    if (await doesNotReject(() => Promise.resolve(7)) !== 7) {
+        throw new Error("a native Promise was affected by polluted Object.prototype.then");
+    }
+    if (await rejects(() => Promise.reject("polluted primitive")) !== "polluted primitive") {
+        throw new Error("a native primitive rejection was affected by polluted then");
+    }
+} finally {
+    if (hadOwnThen) Object.prototype.then = originalThen;
+    else delete Object.prototype.then;
+}
+
+// A genuine Promise subclass is observed through the V8 host op, not through
+// its overridden `then`. Settled and pending promises use the same observation.
+let overriddenThenCalls = 0;
+class OverriddenThenPromise extends Promise {
+    then() {
+        overriddenThenCalls += 1;
+        throw new Error("overridden then was called");
+    }
+}
+const fulfilledSubclass = new OverriddenThenPromise((resolve) => resolve("subclass value"));
+if (await doesNotReject(() => fulfilledSubclass) !== "subclass value") {
+    throw new Error("doesNotReject lost a fulfilled subclass value");
+}
+const rejectedSubclass = new OverriddenThenPromise((resolve, reject) =>
+    reject(new RangeError("subclass reason")));
+const subclassReason = await rejects(() => rejectedSubclass, RangeError);
+if (!(subclassReason instanceof RangeError)) {
+    throw new Error("rejects lost a rejected subclass reason");
+}
+let settleSubclass;
+const pendingSubclass = new OverriddenThenPromise((resolve) => {
+    settleSubclass = resolve;
+});
+const pendingSubclassResult = doesNotReject(() => pendingSubclass);
+settleSubclass("pending value");
+if (await pendingSubclassResult !== "pending value") {
+    throw new Error("doesNotReject lost a pending subclass value");
+}
+if (overriddenThenCalls !== 0) {
+    throw new Error(`overridden then was called ${overriddenThenCalls} times`);
+}
+
+// The V8 observation does not consult Symbol.species, so settled and pending
+// subclasses whose species throws are still readable.
+let speciesReads = 0;
+class ThrowingSpeciesPromise extends Promise {
+    static get [Symbol.species]() {
+        speciesReads += 1;
+        throw new Error("species trap");
+    }
+}
+const fulfilledBadSpecies = new ThrowingSpeciesPromise((resolve) => resolve("settled"));
+if (await doesNotReject(() => fulfilledBadSpecies) !== "settled") {
+    throw new Error("doesNotReject could not read a settled throwing-species promise");
+}
+const rejectedBadSpecies = new ThrowingSpeciesPromise((resolve, reject) =>
+    reject(new RangeError("settled reason")));
+const badSpeciesReason = await rejects(() => rejectedBadSpecies, RangeError);
+if (!(badSpeciesReason instanceof RangeError)) {
+    throw new Error("rejects could not read a settled rejecting throwing-species promise");
+}
+let settleBadSpecies;
+const pendingBadSpecies = new ThrowingSpeciesPromise((resolve) => {
+    settleBadSpecies = resolve;
+});
+const pendingBadSpeciesResult = doesNotReject(() => pendingBadSpecies);
+settleBadSpecies("pending species value");
+if (await pendingBadSpeciesResult !== "pending species value") {
+    throw new Error("doesNotReject could not read a pending throwing-species promise");
+}
+let rejectBadSpecies;
+const pendingBadRejection = new ThrowingSpeciesPromise((resolve, reject) => {
+    rejectBadSpecies = reject;
+});
+const pendingBadRejectionResult = rejects(() => pendingBadRejection, RangeError);
+rejectBadSpecies(new RangeError("pending species reason"));
+const pendingBadRejectionReason = await pendingBadRejectionResult;
+if (!(pendingBadRejectionReason instanceof RangeError)) {
+    throw new Error("rejects could not read a pending rejecting throwing-species promise");
+}
+if (speciesReads !== 0) {
+    throw new Error(`Symbol.species was read ${speciesReads} times`);
+}
+
+// A rejection reason that is itself a thenable is returned from an async
+// function, so native Promise resolution assimilates it. The target did reject
+// (the assertion passes), but the returned Promise follows that reason's
+// settlement. These cases document both outcomes and keep the distinction from
+// a false pass: a fulfilling target still fails the assertion.
+const fulfillingReason = {
+    then(resolve) {
+        resolve("assimilated reason");
+    },
+};
+if (await rejects(() => Promise.reject(fulfillingReason)) !== "assimilated reason") {
+    throw new Error("a fulfilling thenable reason was not assimilated");
+}
+const rejectingReason = {
+    then(resolve, reject) {
+        reject(new RangeError("assimilated rejection"));
+    },
+};
+let assimilatedRejection;
+try {
+    await rejects(() => Promise.reject(rejectingReason));
+} catch (caught) {
+    assimilatedRejection = caught;
+}
+if (
+    !(assimilatedRejection instanceof RangeError) ||
+    assimilatedRejection.message !== "assimilated rejection"
+) {
+    throw new Error("a rejecting thenable reason did not reject the returned Promise");
+}
+const promiseReason = Promise.resolve("promise assimilation");
+if (await rejects(() => Promise.reject(promiseReason)) !== "promise assimilation") {
+    throw new Error("a Promise reason was not assimilated");
+}
+const rejectedPromiseReason = Promise.reject(new SyntaxError("promise rejection"));
+let assimilatedPromiseRejection;
+try {
+    await rejects(() => Promise.reject(rejectedPromiseReason));
+} catch (caught) {
+    assimilatedPromiseRejection = caught;
+}
+if (
+    !(assimilatedPromiseRejection instanceof SyntaxError) ||
+    assimilatedPromiseRejection.message !== "promise rejection"
+) {
+    throw new Error("a rejected Promise reason did not reject the returned Promise");
+}
+const fulfillingTarget = {
+    then(resolve) {
+        resolve("not a rejection");
+    },
+};
+let fulfillingTargetError;
+try {
+    await rejects(() => fulfillingTarget);
+} catch (caught) {
+    fulfillingTargetError = caught;
+}
+if (!(fulfillingTargetError instanceof AssertionError)) {
+    throw new Error("a fulfilling thenable was accepted as a rejection");
+}
+
+error = await failsAsync("rejects arity", () => rejects());
+if (!(error instanceof TypeError)) throw new Error("rejects arity was not a TypeError");
+error = await failsAsync("doesNotReject arity", () => doesNotReject());
+if (!(error instanceof TypeError)) throw new Error("doesNotReject arity was not a TypeError");
+
+error = await failsAsync("rejects fulfilled", () => rejects(async () => 1));
+if (!(error instanceof AssertionError) || error.operator !== "rejects") {
+    throw new Error("rejects accepted a fulfilment");
+}
+error = await failsAsync("rejects non-promise", () => rejects(() => 1));
+if (!(error instanceof AssertionError)) throw new Error("rejects accepted a plain return");
+error = await failsAsync("rejects wrong class", () => rejects(async () => {
+    throw new TypeError("x");
+}, RangeError));
+if (!(error instanceof AssertionError)) throw new Error("rejects accepted the wrong class");
+error = await failsAsync("rejects wrong regex", () => rejects(async () => {
+    throw new Error("x");
+}, /y/));
+if (!(error instanceof AssertionError)) throw new Error("rejects accepted the wrong regex");
+
+if (await doesNotReject(async () => "fulfilled") !== "fulfilled") {
+    throw new Error("doesNotReject did not return the fulfilment value");
+}
+if (await doesNotReject(() => Promise.resolve("real")) !== "real") {
+    throw new Error("doesNotReject lost a native fulfilment");
+}
+let doesNotThenReads = 0;
+const fulfillingThenable = {
+    get then() {
+        doesNotThenReads += 1;
+        return function (resolve) {
+            resolve(42);
+        };
+    },
+};
+if (await doesNotReject(() => fulfillingThenable) !== 42) {
+    throw new Error("doesNotReject lost a thenable fulfilment");
+}
+if (doesNotThenReads !== 1) {
+    throw new Error(`doesNotReject read then ${doesNotThenReads} times`);
+}
+const firstWins = {
+    then(resolve, reject) {
+        resolve("first");
+        reject(new Error("second"));
+    },
+};
+if (await doesNotReject(() => firstWins) !== "first") {
+    throw new Error("doesNotReject did not use the first resolution");
+}
+error = await failsAsync("doesNotReject throwing then getter", () =>
+    doesNotReject(() => ({
+        get then() {
+            throw new RangeError("getter");
+        },
+    })));
+if (!(error instanceof AssertionError)) {
+    throw new Error("doesNotReject accepted a throwing then getter");
+}
+error = await failsAsync("doesNotReject rejection", () =>
+    doesNotReject(async () => {
+        throw new Error("x");
+    }));
+if (!(error instanceof AssertionError) || error.operator !== "doesNotReject") {
+    throw new Error("doesNotReject accepted a rejection");
+}
+error = await failsAsync("doesNotReject non-promise", () => doesNotReject(() => 1));
+if (!(error instanceof AssertionError)) throw new Error("doesNotReject accepted a plain return");
+error = await failsAsync("doesNotReject sync throw", () => doesNotReject(() => {
+    throw new Error("x");
+}));
+if (!(error instanceof AssertionError)) throw new Error("doesNotReject accepted a sync throw");
+"#,
+    );
+}
