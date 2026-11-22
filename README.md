@@ -1285,9 +1285,10 @@ The QuickJS runtime currently runs `.js`, `.mjs`, and extensionless ECMAScript m
 relative imports and `file:` URLs, and awaits top-level `await` that settles from QuickJS's job
 queue. It then drains queued jobs, bounded at 100,000, so trailing `.then` callbacks and unawaited
 dynamic imports still run; a nonconverging job chain or a throwing queued job fails closed, and a
-promise still rejected without a handler when the queue empties is an error. It does **not**
-implement TypeScript, host asynchrony or timers, `neo:` built-in modules, permissions, or a
-sandbox, and it does not claim parity with the V8 runtime. Both runtimes share
+promise still rejected without a handler when the queue empties is an error; rejection diagnostics use
+primitive values and an Error's own data without invoking getters, proxies, `toString`, or `String`.
+It does **not** implement TypeScript, host asynchrony or timers, `neo:` built-in modules, permissions,
+or a sandbox, and it does not claim parity with the V8 runtime. Both runtimes share
 `neojs-module-policy` for executable-extension decisions and rejection reasons, so `.cjs`, JSX/TSX,
 declaration files, JSON, WebAssembly, and native addons fail with the same explanation in either.
 

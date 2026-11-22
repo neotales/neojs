@@ -21,6 +21,7 @@
 //!   closed on a nonconverging chain. A queued job that throws is an error.
 //! * A promise that is still rejected without a handler when the queue empties
 //!   is an error. A rejection handled later in the queue is not an error.
+//!   Reporting never invokes getters, proxy traps, `toString`, or `String`.
 //! * `console.log` and `console.error` write to the process streams.
 //!
 //! # What is not implemented yet

@@ -23,7 +23,8 @@ queue, so a trailing `.then` or an unawaited dynamic import still runs. The
 drain stops after 100,000 jobs and fails closed on a nonconverging chain. A
 queued job that throws is an error. A promise still rejected without a handler
 when the queue empties is an error; a rejection handled later in the queue is
-not.
+not. Diagnostics do not execute script code: primitive values and an Error's own
+`message`/`stack` data are used, never getters, proxies, `toString`, or `String`.
 
 ## Embedding
 

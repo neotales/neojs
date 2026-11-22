@@ -115,59 +115,120 @@ fn clear_pending_exception(ctx: &Ctx<'_>) {
     }
 }
 
-/// Reads a string property for diagnostics, clearing a getter's exception.
-fn diagnostic_string<'js>(
-    ctx: &Ctx<'js>,
-    object: &rquickjs::Object<'js>,
-    key: &str,
+/// Reads an own data property that is already a string primitive.
+///
+/// This uses `JS_GetOwnProperty`, which returns a descriptor without invoking a
+/// getter. Only an ordinary Error object is inspected, so no proxy trap runs.
+/// An accessor (including a user-defined `message` or `stack`) is ignored, and
+/// any descriptor value or exception is freed/cleared before returning.
+fn own_string_property(
+    ctx: &Ctx<'_>,
+    object: qjs::JSValue,
+    name: &std::ffi::CStr,
 ) -> Option<String> {
-    match object.get::<_, String>(key) {
-        Ok(value) => Some(value),
-        Err(_) => {
-            clear_pending_exception(ctx);
-            None
-        }
+    let raw = ctx.as_raw().as_ptr();
+    let atom = unsafe { qjs::JS_NewAtom(raw, name.as_ptr()) };
+    if atom == qjs::JS_ATOM_NULL {
+        return None;
+    }
+    let mut descriptor = MaybeUninit::<qjs::JSPropertyDescriptor>::uninit();
+    let found = unsafe { qjs::JS_GetOwnProperty(raw, descriptor.as_mut_ptr(), object, atom) };
+    unsafe { qjs::JS_FreeAtom(raw, atom) };
+    if found < 0 {
+        clear_pending_exception(ctx);
+        return None;
+    }
+    if found == 0 {
+        return None;
+    }
+
+    let descriptor = unsafe { descriptor.assume_init() };
+    let is_data = (descriptor.flags as u32 & qjs::JS_PROP_GETSET) == 0;
+    let text = if is_data && unsafe { qjs::JS_IsString(descriptor.value) } {
+        string_primitive(ctx, descriptor.value)
+    } else {
+        None
+    };
+    unsafe {
+        qjs::JS_FreeValue(raw, descriptor.value);
+        qjs::JS_FreeValue(raw, descriptor.getter);
+        qjs::JS_FreeValue(raw, descriptor.setter);
+    }
+    text
+}
+
+/// Converts a string primitive to Rust without invoking conversion hooks.
+fn string_primitive(ctx: &Ctx<'_>, value: qjs::JSValue) -> Option<String> {
+    let mut len = 0;
+    let raw = ctx.as_raw().as_ptr();
+    let ptr = unsafe { qjs::JS_ToCStringLen2(raw, &mut len, value, false) };
+    if ptr.is_null() {
+        clear_pending_exception(ctx);
+        return None;
+    }
+    // SAFETY: QuickJS returns a NUL-terminated buffer of `len` bytes, valid
+    // until JS_FreeCString. The bytes may contain arbitrary UTF-8 input.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    unsafe { qjs::JS_FreeCString(raw, ptr) };
+    Some(text)
+}
+
+/// Formats a primitive rejection reason using only intrinsic value access.
+fn primitive_reason(ctx: &Ctx<'_>, reason: &Value<'_>) -> Option<String> {
+    match reason.type_of() {
+        rquickjs::Type::String => string_primitive(ctx, reason.as_raw()),
+        rquickjs::Type::Int => reason.as_int().map(|value| value.to_string()),
+        rquickjs::Type::Float => reason.as_float().map(|value| value.to_string()),
+        rquickjs::Type::Bool => reason.as_bool().map(|value| value.to_string()),
+        rquickjs::Type::Null => Some("null".to_string()),
+        rquickjs::Type::Undefined => Some("undefined".to_string()),
+        _ => None,
+    }
+}
+
+/// Formats an Error object from own data properties only.
+///
+/// `JS_IsError` is a class-id check and does not call user code. Error objects
+/// are ordinary objects in QuickJS, so the descriptor lookup cannot run a proxy
+/// trap or getter. The result is `Error: <message>` plus stack when both are
+/// plain string data.
+fn error_reason(ctx: &Ctx<'_>, reason: &Value<'_>) -> Option<String> {
+    if !reason.is_error() || reason.is_proxy() {
+        return None;
+    }
+    let message = own_string_property(ctx, reason.as_raw(), c"message")?;
+    let head = if message.is_empty() {
+        "Error".to_string()
+    } else {
+        format!("Error: {message}")
+    };
+    match own_string_property(ctx, reason.as_raw(), c"stack") {
+        Some(stack) if message.is_empty() || stack.contains(&message) => Some(stack),
+        Some(stack) => Some(format!("{head}\n{stack}")),
+        None => Some(head),
     }
 }
 
 /// Formats a rejection reason after the run has finished.
 ///
-/// This is deliberately deferred: reading `name`, `message`, or `stack`, or
-/// calling `String`, can execute user code. By the time it runs, the unhandled
-/// set has already been snapshotted, so a getter that attaches a handler cannot
-/// retroactively change the report. Every failure is cleared and falls back to a
-/// type-only description that executes no user code.
-fn rejection_message<'js>(ctx: &Ctx<'js>, reason: &Value<'js>) -> String {
-    if let Some(object) = reason.as_object() {
-        let name = diagnostic_string(ctx, object, "name");
-        let message = diagnostic_string(ctx, object, "message");
-        if name.is_some() || message.is_some() {
-            let head = match (name.as_deref(), message.as_deref()) {
-                (Some(name), Some(message)) if !name.is_empty() => format!("{name}: {message}"),
-                (_, Some(message)) => message.to_string(),
-                (Some(name), None) => name.to_string(),
-                (None, None) => String::new(),
-            };
-            if let Some(stack) = diagnostic_string(ctx, object, "stack") {
-                if head.is_empty() || stack.contains(&head) {
-                    return stack;
-                }
-                return format!("{head}\n{stack}");
-            }
-            if !head.is_empty() {
-                return head;
-            }
-        }
+/// This never invokes arbitrary JavaScript: no getters, proxy traps,
+/// `toString`, or `String` conversion. Primitive values are read directly, an
+/// ordinary Error's own data `message`/`stack` strings are used when present,
+/// and everything else becomes a type-only description. Any exception raised
+/// by QuickJS while inspecting a descriptor is cleared.
+fn rejection_message(ctx: &Ctx<'_>, reason: &Value<'_>) -> String {
+    if let Some(text) = primitive_reason(ctx, reason) {
+        return text;
     }
-    if let Ok(string) = ctx.globals().get::<_, Function>("String") {
-        match string.call::<_, String>((reason.clone(),)) {
-            Ok(text) => return text,
-            Err(_) => clear_pending_exception(ctx),
-        }
+    if let Some(text) = error_reason(ctx, reason) {
+        return text;
+    }
+    if reason.is_error() {
+        "<rejected Error with no readable message>".to_string()
     } else {
-        clear_pending_exception(ctx);
+        format!("<rejected {:?}>", reason.type_of())
     }
-    format!("<unformattable rejection reason: {:?}>", reason.type_of())
 }
 
 /// A failure while constructing or running a QuickJS program.
@@ -346,9 +407,11 @@ impl Runtime {
     /// [`Error::NonConvergingJobs`] instead of spinning forever.
     ///
     /// A promise that rejects without a handler by the time the queue is empty
-    /// fails with [`Error::UnhandledRejection`], including the reason and stack
-    /// when QuickJS supplies them. A rejection that gains a handler before the
-    /// drain finishes is not reported.
+    /// fails with [`Error::UnhandledRejection`]. The report formats primitive
+    /// values directly and an Error's own `message`/`stack` data properties when
+    /// present; it never invokes getters, proxy traps, `toString`, or `String`.
+    /// A rejection that gains a handler before the drain finishes is not
+    /// reported.
     ///
     /// A failure before evaluation (unsupported format, unreadable file) leaves
     /// the runtime unused. Once evaluation starts the runtime is consumed even
@@ -429,8 +492,19 @@ impl Runtime {
                 })?;
             drive_entry(&ctx, &name, &promise)
         });
-        result?;
-        self.report_unhandled_rejections(name)
+        match result {
+            Ok(()) => self.report_unhandled_rejections(name),
+            Err(error) => {
+                self.clear_rejection_roots();
+                Err(error)
+            }
+        }
+    }
+
+    /// Releases every retained promise and reason while the context is alive.
+    fn clear_rejection_roots(&self) {
+        self.context
+            .with(|_ctx| self.rejections.borrow_mut().clear());
     }
 
     /// Turns rejections still unhandled after the drain into one error.
@@ -658,61 +732,114 @@ for (let i = 0; i < count; i++) {
     }
 
     #[test]
-    fn formatting_a_reason_that_attaches_a_handler_keeps_the_report() {
+    fn formatting_never_invokes_reason_getters_or_string() {
         let mut runtime = Runtime::new().expect("runtime");
         let error = runtime
             .run_source(
                 "memory.js",
                 r#"
-const reason = {
-    get name() {
-        promise.catch(() => {});
-        return "LateHandled";
-    },
-    get message() {
-        return "attached during formatting";
-    },
-};
-const promise = Promise.reject(reason);
-"#,
-            )
-            .expect_err("unhandled rejection");
-        let Error::UnhandledRejection { count, details, .. } = error else {
-            panic!("expected an unhandled rejection, got {error:?}");
-        };
-        assert_eq!(count, 1);
-        assert!(details.contains("LateHandled"), "{details}");
-        assert!(details.contains("attached during formatting"), "{details}");
-    }
-
-    #[test]
-    fn formatting_clears_throwing_getters_and_string() {
-        let mut runtime = Runtime::new().expect("runtime");
-        let error = runtime
-            .run_source(
-                "memory.js",
-                r#"
+globalThis.__calls = { getters: 0, strings: 0, jobs: 0, rejections: 0 };
 const reason = {};
 Object.defineProperty(reason, "name", {
-    get() { throw new Error("name getter"); },
+    get() {
+        __calls.getters++;
+        Promise.resolve().then(() => { __calls.jobs++; });
+        return "getter name";
+    },
 });
 Object.defineProperty(reason, "message", {
-    get() { throw new Error("message getter"); },
+    get() {
+        __calls.getters++;
+        Promise.reject(new Error("getter rejection"));
+        __calls.rejections++;
+        return "getter message";
+    },
 });
 Object.defineProperty(reason, "stack", {
-    get() { throw new Error("stack getter"); },
+    get() {
+        __calls.getters++;
+        for (let i = 0; i < 10000; i++) { __calls.loop = i; }
+        return "getter stack";
+    },
 });
-globalThis.String = () => { throw new Error("String replaced"); };
+Object.defineProperty(reason, "toString", {
+    get() {
+        __calls.getters++;
+        return () => "getter string";
+    },
+});
+globalThis.String = () => {
+    __calls.strings++;
+    return "String called";
+};
 Promise.reject(reason);
 "#,
             )
             .expect_err("unhandled rejection");
+        let Error::UnhandledRejection { details, .. } = error else {
+            panic!("expected an unhandled rejection, got {error:?}");
+        };
+        assert!(details.contains("<rejected Object>"), "{details}");
+        assert!(!details.contains("getter"), "{details}");
+        let calls = runtime
+            .context
+            .with(|ctx| {
+                let getters = ctx.eval::<i32, _>("__calls.getters")?;
+                let strings = ctx.eval::<i32, _>("__calls.strings")?;
+                let jobs = ctx.eval::<i32, _>("__calls.jobs")?;
+                let rejections = ctx.eval::<i32, _>("__calls.rejections")?;
+                rquickjs::Result::Ok((getters, strings, jobs, rejections))
+            })
+            .expect("inspect getter counters");
+        assert_eq!(calls, (0, 0, 0, 0), "formatting invoked user code");
+        assert!(!runtime.context.with(|ctx| ctx.has_exception()));
+    }
+
+    #[test]
+    fn error_reasons_use_only_own_data_message() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let error = runtime
+            .run_source(
+                "memory.js",
+                r#"
+globalThis.__calls = 0;
+const error = new Error("safe message");
+Object.defineProperty(error, "message", {
+    get() {
+        __calls++;
+        throw new Error("getter must not run");
+    },
+});
+Promise.reject(error);
+"#,
+            )
+            .expect_err("unhandled rejection");
+        let Error::UnhandledRejection { details, .. } = error else {
+            panic!("expected an unhandled rejection, got {error:?}");
+        };
         assert!(
-            matches!(error, Error::UnhandledRejection { count: 1, .. }),
-            "{error:?}"
+            details.contains("<rejected Error with no readable message>"),
+            "{details}"
         );
-        let pending = runtime.context.with(|ctx| ctx.has_exception());
-        assert!(!pending, "formatting left an exception pending");
+        let calls = runtime
+            .context
+            .with(|ctx| ctx.eval::<i32, _>("__calls"))
+            .expect("inspect getter counter");
+        assert_eq!(calls, 0, "the message getter ran");
+        assert!(!runtime.context.with(|ctx| ctx.has_exception()));
+    }
+
+    #[test]
+    fn error_reasons_are_useful_without_user_code() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let error = runtime
+            .run_source("memory.js", "Promise.reject(new Error('safe message'));")
+            .expect_err("unhandled rejection");
+        let Error::UnhandledRejection { details, .. } = error else {
+            panic!("expected an unhandled rejection, got {error:?}");
+        };
+        assert!(details.contains("Error: safe message"), "{details}");
+        assert!(!runtime.context.with(|ctx| ctx.has_exception()));
     }
 
     #[test]
@@ -749,5 +876,55 @@ Promise.resolve().then(() => {{ globalThis.__extra = 1; }});
             .with(|ctx| ctx.eval::<bool, _>("globalThis.__extra !== undefined"))
             .expect("inspect marker");
         assert!(!extra_ran, "the over-budget job ran before failing");
+    }
+
+    fn assert_roots_cleared(runtime: &Runtime) {
+        assert_eq!(runtime.rejections.borrow().unhandled.len(), 0);
+        runtime
+            .context
+            .with(|ctx| ctx.eval::<(), _>("__neoltjsGc()"))
+            .expect("collect after terminal error");
+    }
+
+    #[test]
+    fn terminal_entry_error_clears_retained_rejections() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let error = runtime
+            .run_source(
+                "memory.js",
+                "Promise.reject(new Error('pending')); throw new Error('terminal');",
+            )
+            .expect_err("entry error");
+        assert!(matches!(error, Error::Module { .. }), "{error:?}");
+        assert_roots_cleared(&runtime);
+    }
+
+    #[test]
+    fn terminal_job_error_clears_retained_rejections() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let error = runtime
+            .run_source(
+                "memory.js",
+                "Promise.reject(new Error('pending')); queueMicrotask(() => { throw new Error('job terminal'); });",
+            )
+            .expect_err("job error");
+        assert!(matches!(error, Error::Module { .. }), "{error:?}");
+        assert_roots_cleared(&runtime);
+    }
+
+    #[test]
+    fn terminal_budget_error_clears_retained_rejections() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let error = runtime
+            .run_source(
+                "memory.js",
+                "Promise.reject(new Error('pending')); function again() { Promise.resolve().then(again); } again();",
+            )
+            .expect_err("budget error");
+        assert!(
+            matches!(error, Error::NonConvergingJobs { jobs, .. } if jobs == JOB_BUDGET),
+            "{error:?}"
+        );
+        assert_roots_cleared(&runtime);
     }
 }
