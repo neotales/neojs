@@ -33,6 +33,46 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## NeoLiteJS `neo:assert`
+
+Source: NeoLiteJS `neojs-core/src/js/assert.js`.
+
+Revision `bafa9bc14cfbdbc50d64b3c68d63d1fceb2b8afa`; file SHA-256
+`e0f032306c0b2179941978483a80d6b0d3bc2fec8e6cf09552854052cad7dfbb`.
+
+`neojs-core/src/builtins/neo.js` adapts comparison, cycle tracking, value formatting,
+and assertion-error structure from this MIT-licensed source for the `assert` built-in. The
+adaptation renames the equality surface to `equals` and `strictEquals`, removes the NeoLiteJS
+`guard` dependency in favour of local synchronous and Promise callback handling, adds
+`AssertionError` with a neojs-specific `NEO_ASSERT` code, and combines a Map key and value into one
+rollback checkpoint. The API is not Node or Deno compatible.
+
+Copyright (c) 2026 NeoTales contributors
+
+Licensed under the MIT License:
+
+MIT License
+
+Copyright (c) 2026 NeoTales contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## `neotales-age`
 
 Source: <https://github.com/neotales/rs-age>, crate `neotales-age` 0.0.0-alpha.1.

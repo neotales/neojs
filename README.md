@@ -446,6 +446,80 @@ Folding and trimming are independent implementations informed by `@neotales/stri
 `@neotales/slices`. They do not port those packages' tables and do not claim compatibility with
 their code point indexing or their `Uint8Array`/`Uint16Array` buffer forms.
 
+**Use the assert built-in.** `Neo.getBuiltInModule("assert")` returns the frozen callable `assert`
+function itself, cached for the realm. `assert` is the canonical bare specifier and `neo:assert` is
+an alias for the same module instance. The default export is that function, and the named exports
+`assert`, `AssertionError`, `ok`, `equals`, `notEquals`, `strictEquals`, `notStrictEquals`, `fail`,
+`throws`, `doesNotThrow`, `rejects`, and `doesNotReject` are its own properties. `assert.ok` is the
+callable itself. The module is plain ECMAScript: it calls no host op and adds no capability.
+
+```js
+import assert, { equals, strictEquals } from "assert";
+
+const value = 1;
+assert(value, "optional message");
+equals({ a: [1, 2] }, { a: [1, 2] }); // structural equality
+const same = { a: 1 };
+strictEquals(same, same); // Object.is identity
+assert.throws(() => JSON.parse("{"), SyntaxError);
+await assert.rejects(async () => {
+    throw new Error("no");
+});
+```
+
+`equals` is strict structural equality, not `==` and not identity. Prototypes must match. Own
+enumerable string and symbol properties are compared, and getters are invoked. Arrays also compare
+length and distinguish a hole from an own `undefined` property. Built-in state is compared in
+addition to own properties: `Date` time values, `RegExp` source, flags, and `lastIndex`,
+`ArrayBuffer`/`SharedArrayBuffer` bytes, `DataView` viewed bytes, typed-array element type, length,
+and elements, boxed primitive values, and `Error` `name` and `message`. Maps compare size and match
+entries without regard to insertion order; Sets likewise compare size and values without regard to
+insertion order. `NaN` equals `NaN`, `-0` differs from `0`, and cycles are handled. Functions,
+Promises, WeakMaps, WeakSets, and WeakRefs compare by identity. For property, array, and typed-array
+differences the failure message names the first differing path, such as `$.items[2].name`; Map and
+Set failures report size or entry differences and show both collections.
+
+`strictEquals` is exactly `Object.is`: `strictEquals(NaN, NaN)` passes, `strictEquals(0, -0)` fails,
+and two distinct objects are never identical. `notEquals` and `notStrictEquals` are the negations.
+`equals` and `strictEquals` take `(actual, expected[, message])`; the message is optional and must be
+a string. Argument counts are strict, and arguments are not coerced.
+
+Every failed assertion throws `AssertionError`, an `Error` subclass. It has `name`
+`"AssertionError"`, a stable own `code` of `"NEO_ASSERT"`, an `operator` naming the failed
+assertion, and `actual` and `expected` when the assertion had them. The code is neojs-specific; it
+is not Node's `ERR_ASSERTION`.
+
+`throws(callback[, expected[, message]])` throws unless `callback` throws, and returns the thrown
+value. `doesNotThrow(callback[, message])` throws if it throws, and otherwise returns its result.
+`expected` is an error constructor, checked with the intrinsic `instanceof` and not a custom
+`Symbol.hasInstance`, or a `RegExp` tested against the thrown error's message (or the string form of
+a non-Error value), or omitted to accept any throw. A string second argument is a `TypeError`, not a
+message; pass the message third. Both functions take synchronous callbacks. A callback that returns
+a native Promise is a `TypeError` that points at the Promise-aware form, so work that has not run
+cannot be reported as a pass.
+
+`rejects(callback[, expected[, message]])` returns a Promise that resolves with the rejection reason
+once `callback` rejects, and rejects with `AssertionError` when it fulfils. A synchronous throw is
+treated as a rejection. The callback's return value must be a native Promise or a thenable.
+`doesNotReject(callback[, message])` resolves with the fulfilment value and rejects with
+`AssertionError` if the callback throws or rejects. Invalid arguments reject the returned Promise.
+`assert.rejects` and `assert.doesNotReject` work with top-level await; they do not wrap blocking work
+to look asynchronous.
+
+There is deliberately no `assertEquals`, `deepEqual`, `deepStrictEqual`, `strictEqual`, `equal`, or
+`notDeepEqual`. The surface is inspired by Node's `assert/strict` and Deno's `@std/assert`, but it is
+not a compatibility layer for either, and it does not implement Node's `assert/strict` aliases,
+`match`, `ifError`, snapshots, or a `node:assert` specifier.
+
+Diagnostics are bounded: a formatted value is truncated at 400 characters, 50 items, and eight
+levels, cycles print as `[Circular]`, and throwing getters or an unreadable prototype make the
+assertion fail with an `AssertionError` rather than an unrelated exception. Formatting may invoke
+getters. The comparison is recursive, so an extremely deep non-cyclic structure can exhaust the
+JavaScript stack; Maps and Sets are matched in quadratic time in their size, which is appropriate
+for tests but not for huge collections. `Error` `cause` and `AggregateError.errors` are
+non-enumerable and are not compared. Proxies can run their traps during comparison and formatting;
+this is a test helper in the caller's realm, not an isolation boundary.
+
 **Use the age built-in.** `Neo.getBuiltInModule("age")` returns a frozen module object that is
 cached for the realm. `age` is the canonical bare specifier and `neo:age` is an alias for the same
 module instance. The named exports are `generateIdentity`, `identityToRecipient`, `encrypt`, and
@@ -966,10 +1040,11 @@ thread that will use it; it is not `Send`.
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
-local module loading, imports of the `age`, `chars`, `console`, `crypto`, `path`, `ssh`, `stdio`,
-and `strings` built-ins by their bare or `neo:` specifiers, console output, bounded in-memory byte
-streams, writes to the process's stdout and stderr, lexical POSIX and Windows path operations,
-SHA-2 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous SSH command
+local module loading, imports of the `age`, `assert`, `chars`, `console`, `crypto`, `path`, `ssh`,
+`stdio`, and `strings` built-ins by their bare or `neo:` specifiers, console output, bounded
+in-memory byte streams, writes to the process's stdout and stderr, lexical POSIX and Windows path
+operations, SHA-2 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous
+SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
 authentication, the built-in module registry, and the embedding API above. Features outside this
 list are not implemented.
@@ -981,15 +1056,16 @@ list are not implemented.
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
 - `node:`, `npm:`, `jsr:`, `http:`, `https:`, `data:`, and `blob:` imports are rejected. The
-  built-in modules are `age`, `chars`, `console`, `crypto`, `path`, `ssh`, `stdio`, and `strings`,
-  reached through `Neo.getBuiltInModule("age")`, `Neo.getBuiltInModule("chars")`,
+  built-in modules are `age`, `assert`, `chars`, `console`, `crypto`, `path`, `ssh`, `stdio`, and
+  `strings`, reached through `Neo.getBuiltInModule("age")`,
+  `Neo.getBuiltInModule("assert")`, `Neo.getBuiltInModule("chars")`,
   `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("crypto")`,
   `Neo.getBuiltInModule("path")`, `Neo.getBuiltInModule("ssh")`,
   `Neo.getBuiltInModule("stdio")`, and `Neo.getBuiltInModule("strings")`, or through the import
-  specifiers `age`, `neo:age`, `chars`, `neo:chars`, `console`, `neo:console`, `crypto`,
-  `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`, and
-  `neo:strings`. Other `neo:` modules are rejected by name. Bare module specifiers that are not a
-  built-in, and import maps, are not supported.
+  specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
+  `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`, `stdio`,
+  `neo:stdio`, `strings`, and `neo:strings`. Other `neo:` modules are rejected by name. Bare module
+  specifiers that are not a built-in, and import maps, are not supported.
 - Module type attributes are rejected. `with { type: "json" }`, `with { type: "text" }`, `with {
   type: "bytes" }`, and custom types fail with a reason on static and dynamic imports, including for
   built-in modules. Only untyped ECMAScript modules are loaded. Attributes that do not name a type
@@ -997,9 +1073,9 @@ list are not implemented.
 - JSON and WebAssembly module files are rejected, both as the entry file and as imports. V8's
   `WebAssembly` global is present but untested.
 - There is no permission system. The loader reads any file the process can read. neojs is not a
-  sandbox. `chars`, `console`, and `strings` are plain ECMAScript and add no capability beyond the
-  globals they expose; the `console` module writes to the process streams already used by the
-  global console.
+  sandbox. `assert`, `chars`, `console`, and `strings` are plain ECMAScript and add no capability
+  beyond the globals they expose; the `console` module writes to the process streams already used
+  by the global console.
   `age` calls four host ops for X25519 identity generation and binary age v1 encryption/decryption.
   `crypto` calls twenty-six host ops: four for the operating system CSPRNG and AES-256-GCM, eight
   for bounded stateful AES-256-CBC/AES-256-GCM ciphers, seven for SHA-2 hashing and HMAC, and seven
@@ -1051,7 +1127,10 @@ Other platforms are unverified.
 `neojs-core/src/crypto.rs` adapts the envelope and core encryption logic, and several test cases,
 from the MIT-licensed `neo:crypto` module in the NeoLiteJS project, Copyright (c) 2026 NeoTales
 contributors. `neojs-core/src/age.rs` adapts the JavaScript-facing surface, limits, and test cases
-from the MIT-licensed `neo:age` module in the same project. The `stdio` module's API shape and error
+from the MIT-licensed `neo:age` module in the same project. The `assert` module adapts comparison,
+cycle tracking, value formatting, and assertion-error structure from the MIT-licensed `neo:assert`
+module in the same project; the adaptation renames the equality surface, adds identity and Promise
+forms, and changes Map-entry rollback and callback handling. The `stdio` module's API shape and error
 conventions are informed by the MIT-licensed `neo:io` and `neo:process` modules in the same project;
 its implementation and tests are original, so no additional notice is required for it. The `path`
 module adapts lexical algorithms from the MIT-licensed `neo:path` module in NeoLiteJS and from
