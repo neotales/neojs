@@ -185,6 +185,36 @@ console.log("after-close");
     assert_eq!(output.stderr, vec![0x65, 0x00, 0xff, 0x0a]);
 }
 
+/// The path module must be resolvable from the CLI through both spellings and
+/// must keep its lexical results independent of the host dialect.
+#[test]
+fn path_built_in_is_available_from_the_cli() {
+    let project = Project::new();
+    let file = project.write(
+        "main.js",
+        r#"
+import * as path from "path";
+import * as alias from "neo:path";
+
+if (path !== alias) throw new Error("path and neo:path namespaces differ");
+if (Neo.getBuiltInModule("path").join !== path.join) {
+    throw new Error("registry and import disagree");
+}
+console.log(path.posix.join("/a", "b"));
+console.log(path.win32.normalize("C:/foo/../bar"));
+console.log(path.posix.normalize("a/../../b"));
+console.log(path.posix.sep + path.win32.sep);
+console.log(path.relative(path.resolve("."), path.resolve("child")));
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "/a/b\nC:\\bar\n../b\n/\\\nchild\n");
+    assert_eq!(stderr(&output), "");
+}
+
 #[test]
 fn resolves_relative_imports_from_each_module() {
     let project = Project::new();
@@ -875,7 +905,7 @@ fn reports_an_unknown_neo_module_and_lists_the_implemented_ones() {
     assert!(message.contains("not implemented"), "{message}");
     assert!(
         message.contains(
-            "neojs implements age, neo:age, chars, neo:chars, console, neo:console, crypto, neo:crypto, ssh, neo:ssh, stdio, neo:stdio"
+            "neojs implements age, neo:age, chars, neo:chars, console, neo:console, crypto, neo:crypto, path, neo:path, ssh, neo:ssh, stdio, neo:stdio"
         ),
         "{message}"
     );
@@ -894,6 +924,22 @@ fn a_local_module_named_chars_is_not_shadowed() {
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(stdout(&output), "7\n");
+}
+
+#[test]
+fn a_local_module_named_path_is_not_shadowed() {
+    let project = Project::new();
+    project.write("path.js", "export const value = 7;\n");
+    let file = project.write(
+        "main.js",
+        "import { value } from \"./path.js\";\nimport { posix } from \"path\";\nconsole.log(value, posix.join(\"/a\", \"b\"));\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "7 /a/b\n");
+    assert_eq!(stderr(&output), "");
 }
 
 #[test]
