@@ -209,10 +209,13 @@ impl Runtime {
     /// digest, so corruption is a cache miss. A per-key lock and persistent
     /// monotonic revision files make a `200` lose to a newer entry or no-store
     /// tombstone, make a `304` use its request revision and not a later
-    /// completion token, and compare representations separately from publication
-    /// revisions so a newer `304` for the same bytes can supersede an older one.
-    /// Ordering is independent of the wall clock. A stale lock only delays a cache write and never
-    /// blocks loading. There is no signature or content-addressed store: the
+    /// completion token, and compare a representation (validator plus actual
+    /// body digest) separately from publication revisions, so a newer `304` for
+    /// the same bytes can supersede an older one while a weak ETag shared by
+    /// different bytes cannot. Ordering is independent of the wall clock. Lock
+    /// waits are bounded by the fetch deadline; an unavailable lock skips the
+    /// cache operation instead of blocking loading indefinitely. There is no
+    /// signature or content-addressed store: the
     /// cache is not integrity protection against someone who can write it and
     /// pins no version. See [`RemoteOptions`] to change the directory or disable
     /// it.

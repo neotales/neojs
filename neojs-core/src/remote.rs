@@ -50,15 +50,17 @@
 //! Publications are serialized by a per-key lock file. Each request receives a
 //! monotonic per-key revision from a revision file updated under that lock, so
 //! ordering does not depend on the wall clock. A separate representation
-//! identity (ETag, or body digest) lets two `304`s for the same underlying bytes
-//! supersede one another by revision: a `200` publishes only when its request
-//! revision is newer than the current entry or tombstone, a `304` publishes only
-//! when the current representation still matches and its request revision is not
-//! older, and `no-store` publishes an absent-entry tombstone.
+//! identity combines the validator (when present) with the actual body digest,
+//! so a weak ETag shared by different bytes is not treated as the same
+//! representation. A `200` publishes only when its request revision is newer than
+//! the current entry or tombstone, a `304` publishes only when the current
+//! representation still matches and its request revision is not older, and
+//! `no-store` publishes an absent-entry tombstone.
 //! Thus an older `200` cannot resurrect an entry after a newer `no-store`, and a
-//! `304` cannot outrank a later-started `200` or `no-store`. A stale lock left by a crash can delay a
-//! cache write until the lock times out; it never blocks loading, which falls
-//! back to the network.
+//! `304` cannot outrank a later-started `200` or `no-store`. Lock acquisition for
+//! revision allocation and publication is bounded by the same fetch deadline; a
+//! held or stale lock causes the cache operation to be skipped rather than
+//! blocking past the deadline.
 //! This detects corruption, torn writes, and lost-update races, not an adversary
 //! who can write both the metadata and the body in the user's cache directory.
 //! There is no signature or content-addressed store, so the cache does not pin a
@@ -581,11 +583,11 @@ impl RemoteClient {
     /// With a cache, the token comes from a persistent per-key revision file
     /// updated under the interprocess lock, so it does not depend on the wall
     /// clock. Without a cache there is nothing to order across processes.
-    fn next_request_generation(&self, url: &Url) -> Option<String> {
+    fn next_request_generation(&self, url: &Url, deadline: Instant) -> Option<String> {
         if let Some(cache) = &self.cache {
             // A failed revision means publication ordering is unknown. The
             // fetch may continue, but it must not publish over newer state.
-            return cache.next_revision(url).ok();
+            return cache.next_revision(url, deadline).ok();
         }
         let revision = self.local_revision.fetch_add(1, Ordering::SeqCst) + 1;
         Some(format!("{revision:020}"))
@@ -709,7 +711,7 @@ impl RemoteClient {
             // Reserve the request before revision-file I/O: a retry cannot
             // avoid the request budget by failing while allocating a token.
             self.budget.charge_request(&self.options)?;
-            let request_generation = self.next_request_generation(&current);
+            let request_generation = self.next_request_generation(&current, deadline);
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(format!("timed out fetching {}", display_url(&current)));
@@ -774,11 +776,15 @@ impl RemoteClient {
                     (request_generation.as_deref(), &self.cache)
                 {
                     if directives.no_store {
-                        let _ = cache.tombstone_if_newer(&current, generation);
+                        let _ = cache.tombstone_if_newer(&current, generation, deadline);
                     } else {
                         cached.generation = generation.to_string();
-                        let _ =
-                            cache.store_revalidated(&current, &cached, &previous_representation);
+                        let _ = cache.store_revalidated(
+                            &current,
+                            &cached,
+                            &previous_representation,
+                            deadline,
+                        );
                     }
                 }
                 return Ok(FetchedModule {
@@ -844,7 +850,7 @@ impl RemoteClient {
             let representation = representation_id(&body, response.etag.as_deref());
             if let (Some(generation), Some(cache)) = (request_generation.as_deref(), &self.cache) {
                 if directives.no_store {
-                    let _ = cache.tombstone_if_newer(&current, generation);
+                    let _ = cache.tombstone_if_newer(&current, generation, deadline);
                 } else {
                     let entry = CachedModule {
                         body: body.clone(),
@@ -865,7 +871,7 @@ impl RemoteClient {
                         generation: generation.to_string(),
                         representation,
                     };
-                    let _ = cache.store_if_newer(&current, &entry);
+                    let _ = cache.store_if_newer(&current, &entry, deadline);
                 }
             }
             return Ok(FetchedModule {
@@ -1373,9 +1379,12 @@ fn parse_metadata(metadata: &str) -> Option<(CachedModule, usize, String)> {
 /// digest is the identity, so a later `304` can still be recognized as
 /// revalidating the same bytes.
 fn representation_id(body: &[u8], etag: Option<&str>) -> String {
+    let digest = hex_encode(&Sha256::digest(body));
     match etag {
-        Some(etag) => format!("etag:{etag}"),
-        None => format!("sha256:{}", hex_encode(&Sha256::digest(body))),
+        // A weak (or even incorrect strong) validator may be shared by
+        // different bytes. The digest is the independent identity.
+        Some(etag) => format!("etag:{etag};sha256:{digest}"),
+        None => format!("sha256:{digest}"),
     }
 }
 
@@ -1545,12 +1554,18 @@ impl Cache {
     }
 
     /// Acquires the per-key publication lock.
-    fn lock(&self, url: &Url) -> std::io::Result<CacheLock> {
+    fn lock(&self, url: &Url, deadline: Instant) -> std::io::Result<CacheLock> {
         std::fs::create_dir_all(&self.dir)?;
         let mut lock_path = self.path(url).into_os_string();
         lock_path.push(".lock");
         let lock_path = PathBuf::from(lock_path);
-        for _ in 0..2000 {
+        loop {
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "cache publication lock timed out",
+                ));
+            }
             match OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -1558,15 +1573,12 @@ impl Cache {
             {
                 Ok(_file) => return Ok(CacheLock { path: lock_path }),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    std::thread::sleep(Duration::from_millis(5));
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    std::thread::sleep(remaining.min(Duration::from_millis(5)));
                 }
                 Err(error) => return Err(error),
             }
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "cache publication lock timed out",
-        ))
     }
 
     fn tombstone_path(&self, url: &Url) -> PathBuf {
@@ -1587,8 +1599,8 @@ impl Cache {
     /// and is never removed when the body or tombstone changes. It therefore
     /// remains monotonic across processes even if the system clock moves
     /// backwards.
-    fn next_revision(&self, url: &Url) -> std::io::Result<String> {
-        let _lock = self.lock(url)?;
+    fn next_revision(&self, url: &Url, deadline: Instant) -> std::io::Result<String> {
+        let _lock = self.lock(url, deadline)?;
         let path = self.revision_path(url);
         let current = File::open(&path)
             .ok()
@@ -1648,7 +1660,7 @@ impl Cache {
     /// Writes an entry atomically, returning a filesystem error on failure.
     #[cfg(test)]
     fn store(&self, url: &Url, entry: &CachedModule) -> std::io::Result<()> {
-        let _lock = self.lock(url)?;
+        let _lock = self.lock(url, Instant::now() + Duration::from_secs(5))?;
         self.write_entry(url, entry)?;
         let _ = std::fs::remove_file(self.tombstone_path(url));
         Ok(())
@@ -1656,8 +1668,13 @@ impl Cache {
 
     /// Publishes a fresh `200` only when its request is newer than the current
     /// generation or tombstone.
-    fn store_if_newer(&self, url: &Url, entry: &CachedModule) -> std::io::Result<bool> {
-        let _lock = self.lock(url)?;
+    fn store_if_newer(
+        &self,
+        url: &Url,
+        entry: &CachedModule,
+        deadline: Instant,
+    ) -> std::io::Result<bool> {
+        let _lock = self.lock(url, deadline)?;
         if self
             .state(url)
             .is_some_and(|current| current.as_str() >= entry.generation.as_str())
@@ -1677,8 +1694,9 @@ impl Cache {
         url: &Url,
         entry: &CachedModule,
         expected_representation: &str,
+        deadline: Instant,
     ) -> std::io::Result<bool> {
-        let _lock = self.lock(url)?;
+        let _lock = self.lock(url, deadline)?;
         if self.read_tombstone(url).is_some() {
             return Ok(false);
         }
@@ -1697,8 +1715,13 @@ impl Cache {
 
     /// Publishes a `no-store` tombstone only when its request is newer than the
     /// current generation.
-    fn tombstone_if_newer(&self, url: &Url, generation: &str) -> std::io::Result<bool> {
-        let _lock = self.lock(url)?;
+    fn tombstone_if_newer(
+        &self,
+        url: &Url,
+        generation: &str,
+        deadline: Instant,
+    ) -> std::io::Result<bool> {
+        let _lock = self.lock(url, deadline)?;
         if self
             .state(url)
             .is_some_and(|current| current.as_str() >= generation)
@@ -1786,12 +1809,17 @@ struct UreqTransport {
 }
 
 impl UreqTransport {
-    fn new() -> Self {
+    /// Returns the one production agent configuration.
+    ///
+    /// Tests with a local CA variant must start from this builder, so the
+    /// transport policy (HTTPS-only, no redirects, no environment proxy, no idle
+    /// pooling, timeout, user agent) is shared rather than duplicated.
+    fn agent_builder() -> ureq::AgentBuilder {
         // `https_only` and `redirects(0)` mirror the policy in `RemoteClient`;
         // they are defence in depth, because every hop is already checked there.
         // Environment proxy detection is not enabled, and no cookie store or
         // authorization header exists on this agent.
-        let agent = ureq::AgentBuilder::new()
+        ureq::AgentBuilder::new()
             .https_only(true)
             .redirects(0)
             // Explicit even though the `proxy-from-env` feature is off: no
@@ -1804,11 +1832,15 @@ impl UreqTransport {
             .max_idle_connections_per_host(0)
             .timeout(DEFAULT_TIMEOUT)
             .user_agent(concat!("neojs/", env!("CARGO_PKG_VERSION")))
-            .build();
-        Self { agent }
     }
 
-    /// Wraps an agent built with a test-only trust store.
+    fn new() -> Self {
+        Self {
+            agent: Self::agent_builder().build(),
+        }
+    }
+
+    /// Wraps an agent built from [`Self::agent_builder`] with a test trust store.
     #[cfg(test)]
     fn with_agent(agent: ureq::Agent) -> Self {
         Self { agent }
@@ -1967,6 +1999,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
+    use std::time::Instant;
     use std::time::SystemTime;
 
     use deno_core::url::Url;
@@ -2027,6 +2060,10 @@ mod tests {
 
     fn client(options: RemoteOptions, transport: Arc<ScriptedTransport>) -> RemoteClient {
         RemoteClient::with_transport(options, transport)
+    }
+
+    fn test_deadline() -> Instant {
+        Instant::now() + Duration::from_secs(5)
     }
 
     /// A client with caching disabled, so these policy tests touch no disk.
@@ -2808,6 +2845,40 @@ mod tests {
     }
 
     #[test]
+    fn a_held_cache_lock_is_bounded_by_the_fetch_deadline() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let _held = cache
+            .lock(&url, Instant::now() + Duration::from_secs(5))
+            .expect("held lock");
+
+        let started = Instant::now();
+        let error = cache
+            .next_revision(&url, Instant::now() + Duration::from_millis(50))
+            .expect_err("revision lock must expire");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let entry = super::CachedModule {
+            body: b"body".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: "test".to_string(),
+        };
+        let started = Instant::now();
+        let error = cache
+            .store_if_newer(&url, &entry, Instant::now() + Duration::from_millis(50))
+            .expect_err("publication lock must expire");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
     fn a_failed_revision_allocation_skips_cache_publication() {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache = super::Cache::new(dir.path().to_path_buf());
@@ -3290,24 +3361,24 @@ mod tests {
         (port, accepted, handle)
     }
 
-    fn trusted_agent(cert_der: &[u8]) -> ureq::Agent {
+    fn trusted_tls_config(cert_der: &[u8]) -> Arc<rustls::ClientConfig> {
         use rustls::pki_types::CertificateDer;
 
         let mut roots = rustls::RootCertStore::empty();
         roots
             .add(CertificateDer::from(cert_der.to_vec()))
             .expect("trust test certificate");
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        ureq::AgentBuilder::new()
-            .https_only(true)
-            .redirects(0)
-            .try_proxy_from_env(false)
-            .max_idle_connections(0)
-            .max_idle_connections_per_host(0)
+        Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    }
+
+    fn trusted_agent(cert_der: &[u8]) -> ureq::Agent {
+        super::UreqTransport::agent_builder()
             .timeout(Duration::from_secs(5))
-            .tls_config(Arc::new(config))
+            .tls_config(trusted_tls_config(cert_der))
             .build()
     }
 
@@ -3386,12 +3457,62 @@ mod tests {
                 })
                 .expect("TLS response");
             assert_eq!(response.status, 200);
+            let mut body = Vec::new();
+            response
+                .body
+                .take(1024)
+                .read_to_end(&mut body)
+                .expect("consume body");
         }
         handle.join().expect("server");
         assert_eq!(
             accepted.load(Ordering::SeqCst),
             2,
-            "two requests must open two connections when pooling is disabled"
+            "two consumed responses must open two connections with pooling disabled"
+        );
+    }
+
+    #[test]
+    fn enabling_idle_pooling_breaks_the_connection_count() {
+        let (cert_der, key_der) = certificate();
+        let (port, accepted, _handle) = spawn_counting_tls_server(cert_der.clone(), key_der, 2);
+        let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js")).expect("url");
+        // Deliberately mutate the shared production builder to allow pooling.
+        let agent = super::UreqTransport::agent_builder()
+            .timeout(Duration::from_millis(500))
+            .max_idle_connections(1)
+            .max_idle_connections_per_host(1)
+            .tls_config(trusted_tls_config(&cert_der))
+            .build();
+        let transport = super::UreqTransport::with_agent(agent);
+        let first = transport
+            .get(&super::RemoteRequest {
+                url: &url,
+                timeout: Duration::from_millis(500),
+                if_none_match: None,
+                if_modified_since: None,
+            })
+            .expect("first response");
+        let mut body = Vec::new();
+        first
+            .body
+            .take(1024)
+            .read_to_end(&mut body)
+            .expect("consume first body");
+        let second = transport.get(&super::RemoteRequest {
+            url: &url,
+            timeout: Duration::from_millis(500),
+            if_none_match: None,
+            if_modified_since: None,
+        });
+        assert!(
+            second.is_err(),
+            "with pooling enabled the second request reuses the held connection"
+        );
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "pooling hides the second request from the connection count"
         );
     }
 
@@ -3528,7 +3649,7 @@ mod tests {
         cache.store(&url, &new).expect("new store");
 
         let published = cache
-            .store_revalidated(&url, &loaded, &loaded.representation)
+            .store_revalidated(&url, &loaded, &loaded.representation, test_deadline())
             .expect("conditional store");
         assert!(!published, "the old generation must lose");
         assert_eq!(cache.load(&url, 1024).expect("current").body, b"new");
@@ -3540,16 +3661,20 @@ mod tests {
         let cache = super::Cache::new(dir.path().to_path_buf());
         let url = Url::parse("https://example.test/mod.js").expect("url");
         assert_eq!(
-            cache.next_revision(&url).expect("first"),
+            cache.next_revision(&url, test_deadline()).expect("first"),
             "00000000000000000001"
         );
         assert_eq!(
-            cache.next_revision(&url).expect("second"),
+            cache.next_revision(&url, test_deadline()).expect("second"),
             "00000000000000000002"
         );
-        assert!(cache.tombstone_if_newer(&url, "0002").expect("tombstone"));
+        assert!(
+            cache
+                .tombstone_if_newer(&url, "0002", test_deadline())
+                .expect("tombstone")
+        );
         assert_eq!(
-            cache.next_revision(&url).expect("third"),
+            cache.next_revision(&url, test_deadline()).expect("third"),
             "00000000000000000003"
         );
     }
@@ -3563,7 +3688,9 @@ mod tests {
         let dir = std::env::var_os("NEOJS_CACHE_DIR").expect("cache dir");
         let url = Url::parse(&std::env::var("NEOJS_CACHE_URL").expect("cache url")).expect("url");
         let cache = super::Cache::new(PathBuf::from(dir));
-        let revision = cache.next_revision(&url).expect("revision");
+        let revision = cache
+            .next_revision(&url, test_deadline())
+            .expect("revision");
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -3581,7 +3708,7 @@ mod tests {
         let url = Url::parse("https://example.test/mod.js").expect("url");
         let out = dir.path().join("revisions");
         let cache = super::Cache::new(dir.path().to_path_buf());
-        let first = cache.next_revision(&url).expect("first");
+        let first = cache.next_revision(&url, test_deadline()).expect("first");
         assert_eq!(first, "00000000000000000001");
         for _ in 0..2 {
             let mut child = Command::new(std::env::current_exe().expect("test binary"))
@@ -3601,7 +3728,7 @@ mod tests {
             let status = child.wait().expect("child status");
             assert!(status.success(), "revision child failed: {status}");
         }
-        let fourth = cache.next_revision(&url).expect("fourth");
+        let fourth = cache.next_revision(&url, test_deadline()).expect("fourth");
         assert_eq!(fourth, "00000000000000000004");
         let revisions = std::fs::read_to_string(&out).expect("revision output");
         assert_eq!(
@@ -3626,9 +3753,15 @@ mod tests {
             representation: "test".to_string(),
         };
 
-        assert!(cache.tombstone_if_newer(&url, "0002").expect("tombstone"));
         assert!(
-            !cache.store_if_newer(&url, &old).expect("old store"),
+            cache
+                .tombstone_if_newer(&url, "0002", test_deadline())
+                .expect("tombstone")
+        );
+        assert!(
+            !cache
+                .store_if_newer(&url, &old, test_deadline())
+                .expect("old store"),
             "the older 200 must lose to the tombstone"
         );
         assert!(cache.load(&url, 1024).is_none());
@@ -3636,8 +3769,16 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("temp dir");
         let cache = super::Cache::new(dir.path().to_path_buf());
-        assert!(cache.store_if_newer(&url, &old).expect("old store"));
-        assert!(cache.tombstone_if_newer(&url, "0002").expect("tombstone"));
+        assert!(
+            cache
+                .store_if_newer(&url, &old, test_deadline())
+                .expect("old store")
+        );
+        assert!(
+            cache
+                .tombstone_if_newer(&url, "0002", test_deadline())
+                .expect("tombstone")
+        );
         assert!(
             cache.load(&url, 1024).is_none(),
             "the newer no-store must remove the older 200"
@@ -3674,7 +3815,7 @@ mod tests {
         cache.store(&url, &new).expect("new store");
         assert!(
             !cache
-                .tombstone_if_newer(&url, "0001")
+                .tombstone_if_newer(&url, "0001", test_deadline())
                 .expect("conditional tombstone")
         );
         assert_eq!(cache.load(&url, 1024).expect("current").body, b"new");
@@ -3702,10 +3843,74 @@ mod tests {
         revalidated.generation = "generation-2".to_string();
         assert!(
             cache
-                .store_revalidated(&url, &revalidated, &revalidated.representation)
+                .store_revalidated(
+                    &url,
+                    &revalidated,
+                    &revalidated.representation,
+                    test_deadline()
+                )
                 .expect("conditional store")
         );
         assert_eq!(cache.load(&url, 1024).expect("entry").max_age, Some(60));
+    }
+
+    #[test]
+    fn a_weak_etag_does_not_make_different_bodies_the_same_representation() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let weak = Some("W/\"shared\"");
+        let body_a = b"body-a";
+        let body_b = b"body-b";
+        assert_ne!(
+            super::representation_id(body_a, weak),
+            super::representation_id(body_b, weak)
+        );
+
+        let cached = super::CachedModule {
+            body: body_a.to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(0),
+            etag: Some("W/\"shared\"".to_string()),
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: super::representation_id(body_a, weak),
+        };
+        let mut revalidated = cached.clone();
+        revalidated.generation = "0002".to_string();
+        let mut changed = cached.clone();
+        changed.body = body_b.to_vec();
+        changed.generation = "0003".to_string();
+        changed.representation = super::representation_id(body_b, weak);
+
+        // 200 B completes after 304 A: B wins.
+        cache.store(&url, &cached).expect("cached");
+        assert!(
+            cache
+                .store_revalidated(&url, &revalidated, &cached.representation, test_deadline())
+                .expect("304")
+        );
+        assert!(
+            cache
+                .store_if_newer(&url, &changed, test_deadline())
+                .expect("200 B")
+        );
+        assert_eq!(cache.load(&url, 1024).expect("current").body, body_b);
+
+        // 200 B completes first: 304 A cannot replace it despite same weak tag.
+        cache.store(&url, &cached).expect("cached again");
+        assert!(
+            cache
+                .store_if_newer(&url, &changed, test_deadline())
+                .expect("200 B")
+        );
+        assert!(
+            !cache
+                .store_revalidated(&url, &revalidated, &cached.representation, test_deadline())
+                .expect("old 304")
+        );
+        assert_eq!(cache.load(&url, 1024).expect("current").body, body_b);
     }
 
     #[test]
@@ -3733,12 +3938,12 @@ mod tests {
         cache.store(&url, &cached).expect("cached");
         assert!(
             cache
-                .store_revalidated(&url, &older, &cached.representation)
+                .store_revalidated(&url, &older, &cached.representation, test_deadline())
                 .expect("older 304")
         );
         assert!(
             cache
-                .store_revalidated(&url, &newer, &cached.representation)
+                .store_revalidated(&url, &newer, &cached.representation, test_deadline())
                 .expect("newer 304 supersedes")
         );
         let current = cache.load(&url, 1024).expect("current");
@@ -3747,7 +3952,7 @@ mod tests {
 
         assert!(
             !cache
-                .store_revalidated(&url, &older, &cached.representation)
+                .store_revalidated(&url, &older, &cached.representation, test_deadline())
                 .expect("older 304 after newer")
         );
         assert_eq!(cache.load(&url, 1024).expect("current").max_age, Some(60));
@@ -3756,10 +3961,14 @@ mod tests {
         changed.generation = "0004".to_string();
         changed.body = b"changed".to_vec();
         changed.representation = "etag:\"v2\"".to_string();
-        assert!(cache.store_if_newer(&url, &changed).expect("changed 200"));
+        assert!(
+            cache
+                .store_if_newer(&url, &changed, test_deadline())
+                .expect("changed 200")
+        );
         assert!(
             !cache
-                .store_revalidated(&url, &newer, &cached.representation)
+                .store_revalidated(&url, &newer, &cached.representation, test_deadline())
                 .expect("old representation")
         );
         assert_eq!(
@@ -3794,18 +4003,26 @@ mod tests {
         cache.store(&url, &cached).expect("cached");
         assert!(
             cache
-                .store_revalidated(&url, &revalidated, &cached.representation)
+                .store_revalidated(&url, &revalidated, &cached.representation, test_deadline())
                 .expect("304")
         );
-        assert!(cache.store_if_newer(&url, &later).expect("later 200"));
+        assert!(
+            cache
+                .store_if_newer(&url, &later, test_deadline())
+                .expect("later 200")
+        );
         assert_eq!(cache.load(&url, 1024).expect("current").body, b"later");
 
         // Later-started 200 completes first; the older 304 cannot publish.
         cache.store(&url, &cached).expect("cached again");
-        assert!(cache.store_if_newer(&url, &later).expect("later 200"));
+        assert!(
+            cache
+                .store_if_newer(&url, &later, test_deadline())
+                .expect("later 200")
+        );
         assert!(
             !cache
-                .store_revalidated(&url, &revalidated, &cached.representation)
+                .store_revalidated(&url, &revalidated, &cached.representation, test_deadline())
                 .expect("old 304")
         );
         assert_eq!(cache.load(&url, 1024).expect("current").body, b"later");
@@ -3814,10 +4031,14 @@ mod tests {
         cache.store(&url, &cached).expect("cached third time");
         assert!(
             cache
-                .store_revalidated(&url, &revalidated, &cached.representation)
+                .store_revalidated(&url, &revalidated, &cached.representation, test_deadline())
                 .expect("304")
         );
-        assert!(cache.tombstone_if_newer(&url, "0003").expect("no-store"));
+        assert!(
+            cache
+                .tombstone_if_newer(&url, "0003", test_deadline())
+                .expect("no-store")
+        );
         assert!(cache.load(&url, 1024).is_none());
         assert_eq!(cache.state(&url).as_deref(), Some("0003"));
     }
@@ -3846,7 +4067,12 @@ mod tests {
         newer_headers.generation = "0003".to_string();
         assert!(
             cache
-                .store_revalidated(&url, &newer_headers, &initial.representation)
+                .store_revalidated(
+                    &url,
+                    &newer_headers,
+                    &initial.representation,
+                    test_deadline()
+                )
                 .expect("first 304")
         );
 
@@ -3855,7 +4081,12 @@ mod tests {
         older_headers.generation = "0002".to_string();
         assert!(
             !cache
-                .store_revalidated(&url, &older_headers, &initial.representation)
+                .store_revalidated(
+                    &url,
+                    &older_headers,
+                    &initial.representation,
+                    test_deadline()
+                )
                 .expect("second 304")
         );
         let current = cache.load(&url, 1024).expect("current");
@@ -3903,7 +4134,9 @@ mod tests {
                 let url = url.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    cache.store_if_newer(&url, &new).expect("new store");
+                    cache
+                        .store_if_newer(&url, &new, test_deadline())
+                        .expect("new store");
                 })
             };
             let right = {
@@ -3911,7 +4144,12 @@ mod tests {
                 std::thread::spawn(move || {
                     barrier.wait();
                     right_cache
-                        .store_revalidated(&url_for_old, &old_entry, &old_entry.representation)
+                        .store_revalidated(
+                            &url_for_old,
+                            &old_entry,
+                            &old_entry.representation,
+                            test_deadline(),
+                        )
                         .expect("old conditional store");
                 })
             };
@@ -3953,10 +4191,12 @@ mod tests {
             representation: "test".to_string(),
         };
         if role == "new" {
-            cache.store_if_newer(&url, &entry).expect("new store");
+            cache
+                .store_if_newer(&url, &entry, test_deadline())
+                .expect("new store");
         } else {
             cache
-                .store_revalidated(&url, &entry, &entry.representation)
+                .store_revalidated(&url, &entry, &entry.representation, test_deadline())
                 .expect("old conditional store");
         }
     }
@@ -3973,7 +4213,7 @@ mod tests {
         let cache = super::Cache::new(PathBuf::from(dir));
         if role == "no-store" {
             cache
-                .tombstone_if_newer(&url, &generation)
+                .tombstone_if_newer(&url, &generation, test_deadline())
                 .expect("tombstone");
         } else {
             let entry = super::CachedModule {
@@ -3986,7 +4226,9 @@ mod tests {
                 generation,
                 representation: "test".to_string(),
             };
-            cache.store_if_newer(&url, &entry).expect("old store");
+            cache
+                .store_if_newer(&url, &entry, test_deadline())
+                .expect("old store");
         }
     }
 
