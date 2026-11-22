@@ -6,7 +6,14 @@
 //! modules. `chars`, `console`, `os`, `slices`, `strings`, and `test` are
 //! plain ECMAScript (the `os` module contains two build-target constants
 //! substituted by [`neo_shim`]); `assert` calls one private host op registered
-//! by [`crate::assert`] to observe a genuine native Promise.
+//! by [`crate::assert`] to observe a genuine native Promise. `cron` calls six
+//! private host ops registered by [`crate::cron`]: it parses a UTC five-field
+//! expression, computes the next occurrence, sleeps on the runtime's Tokio
+//! timer, and cancels a job. An undisposed job keeps the event loop alive; one
+//! callback runs at a time, and overlap, missed ticks, and callback failures are
+//! reported through an optional observer. It adds no filesystem, environment,
+//! network, or process capability and has no local-time, DST, time-zone, or
+//! fake-timer surface.
 //! `crypto` calls private host ops registered by [`crate::crypto`],
 //! [`crate::crypto_cipher`], [`crate::crypto_hash`], and
 //! [`crate::crypto_shamir`]; it
@@ -62,20 +69,22 @@
 //! containment check.
 //!
 //! [`AGE_MODULE`], [`ASSERT_MODULE`], [`CHARS_MODULE`], [`CONSOLE_MODULE`],
-//! [`CRYPTO_MODULE`], [`OS_MODULE`], [`PATH_MODULE`], [`SLICES_MODULE`],
+//! [`CRON_MODULE`], [`CRYPTO_MODULE`], [`OS_MODULE`], [`PATH_MODULE`],
+//! [`SLICES_MODULE`],
 //! [`SSH_MODULE`], [`STDIO_MODULE`], [`STRINGS_MODULE`], and [`TEST_MODULE`]
 //! are not evaluated as scripts. They are the sources returned by the module
 //! loader for the built-in specifiers [`AGE_SPECIFIER`], [`ASSERT_SPECIFIER`],
-//! [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`], [`CRYPTO_SPECIFIER`],
-//! [`OS_SPECIFIER`], [`PATH_SPECIFIER`], [`SLICES_SPECIFIER`],
+//! [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`], [`CRON_SPECIFIER`],
+//! [`CRYPTO_SPECIFIER`], [`OS_SPECIFIER`], [`PATH_SPECIFIER`],
+//! [`SLICES_SPECIFIER`],
 //! [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], [`STRINGS_SPECIFIER`], and
 //! [`TEST_SPECIFIER`], and for their bare names.
 //! All read the public module objects installed by [`neo_shim`], so the registry
 //! and the module bindings share identity. `assert` is the frozen callable
 //! `assert` function itself, with its named assertions as properties; it also
-//! has a default export in its module namespace. `age`, `chars`, `slices`,
-//! `strings`, and `test` are frozen module objects whose named exports are their
-//! function or class objects, plus `test`'s constants. `console` is the console
+//! has a default export in its module namespace. `age`, `chars`, `cron`,
+//! `slices`, `strings`, and `test` are frozen module objects whose named exports
+//! are their functions or classes, plus `test`'s constants. `console` is the console
 //! object the runtime installed: the
 //! default export's value is that object, and the named exports are its method
 //! values when the module is evaluated. `crypto`, `path`, `ssh`, and `stdio` are
@@ -88,9 +97,9 @@ use deno_core::url::Url;
 
 /// Installs the global `Neo` object and the built-in module registry.
 ///
-/// Evaluation happens once per realm. The `age`, `assert`, `chars`, `crypto`,
-/// `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, and `test` module objects
-/// are frozen and
+/// Evaluation happens once per realm. The `age`, `assert`, `chars`, `cron`,
+/// `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, and `test`
+/// module objects are frozen and
 /// cached, so repeated `Neo.getBuiltInModule` calls return the same object for
 /// each. The `console` module object is the console object the runtime
 /// installed, captured after the console shim runs. At installation time the
@@ -200,6 +209,22 @@ pub(crate) const CONSOLE_SPECIFIER: &str = "neo:console";
 /// are read when the module is evaluated, so a replacement made before then is
 /// captured. The ES module namespace is a separate object from the registry.
 const CONSOLE_MODULE: &str = include_str!("builtins/console.esm.js");
+
+/// The canonical module specifier for the `cron` built-in.
+///
+/// Both `"cron"` and `"neo:cron"` resolve to this URL, so the engine caches one
+/// module instance for both spellings. It is not a `file:` URL and is never read
+/// from disk.
+pub(crate) const CRON_SPECIFIER: &str = "neo:cron";
+
+/// The ECMAScript module source served for [`CRON_SPECIFIER`].
+///
+/// It re-exports `cron`, `next`, and `CronError` from the public `cron` module
+/// object, so the module and `Neo.getBuiltInModule("cron")` share identity. The
+/// functions call host ops registered by [`crate::cron`]; scheduling uses the
+/// runtime's own Tokio timer and a pending op keeps the event loop alive until
+/// the job is disposed.
+const CRON_MODULE: &str = include_str!("builtins/cron.esm.js");
 
 /// The canonical module specifier for the `crypto` built-in.
 ///
@@ -334,6 +359,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("assert", ASSERT_SPECIFIER),
     ("chars", CHARS_SPECIFIER),
     ("console", CONSOLE_SPECIFIER),
+    ("cron", CRON_SPECIFIER),
     ("crypto", CRYPTO_SPECIFIER),
     ("os", OS_SPECIFIER),
     ("path", PATH_SPECIFIER),
@@ -371,6 +397,7 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         ASSERT_SPECIFIER => Some(ASSERT_MODULE),
         CHARS_SPECIFIER => Some(CHARS_MODULE),
         CONSOLE_SPECIFIER => Some(CONSOLE_MODULE),
+        CRON_SPECIFIER => Some(CRON_MODULE),
         CRYPTO_SPECIFIER => Some(CRYPTO_MODULE),
         OS_SPECIFIER => Some(OS_MODULE),
         PATH_SPECIFIER => Some(PATH_MODULE),

@@ -656,6 +656,86 @@ reference's `ReadonlyCharSlice` spelling and some method names differ; there is 
 `slices.Slice`-compatible `map`/`update`/`replace` surface in this slice. Views are aliases within
 one realm, not a Rust zero-copy bridge.
 
+**Use the cron built-in.** `Neo.getBuiltInModule("cron")` returns a frozen module object cached for
+the realm. `cron`, `neo:cron`, and the matching bare and prefixed imports expose the same
+`cron`, `next`, and `CronError` values.
+
+```js
+import { cron, next } from "neo:cron";
+
+console.log(next("*/5 * * * *", new Date("2024-01-01T00:00:00Z")).toISOString());
+// 2024-01-01T00:05:00.000Z
+
+const job = cron("0 9 * * MON-FRI", async () => {
+    await doWork();
+});
+job.dispose();
+```
+
+`cron(expression, callback, options?)` parses a standard five-field UTC expression and returns a
+frozen controller. The first tick is strictly after the call. `dispose()` is idempotent and cancels
+the pending wait; when the engine provides `Symbol.dispose`, the controller also has
+`[Symbol.dispose]` set to `dispose`. An undisposed job keeps the isolate alive. Disposing stops
+future ticks but does not interrupt a callback that is already running, and dropping the runtime
+abandons every job. There is no `ref`/`unref`, no backoff or retry option, and no name; those are
+deliberately absent.
+
+`next(expression, after?)` is a pure query: it creates no job and schedules nothing. `after` is a
+`Date` or an epoch millisecond number and defaults to the host clock. The result is a `Date` for the
+first occurrence strictly after `after`, or `null` when a valid expression has no occurrence in the
+100-year search window, as with `0 0 31 2 *`, or when the next occurrence would fall outside the
+JavaScript `Date` range of ±8.64e15 milliseconds. The returned value is therefore always a valid
+`Date`, and the last representable instant has no successor.
+
+The grammar is `minute hour day-of-month month day-of-week`. Each field accepts `*`, a value, a
+`start-end` range, and comma-separated lists, with an optional `/step`; a step on a bare value runs
+from that value to the field maximum. Values are minute `0`-`59`, hour `0`-`23`, day-of-month
+`1`-`31`, month `1`-`12` or `JAN`-`DEC`, and day-of-week `0`-`7` or `SUN`-`SAT`, where `0` and `7`
+are Sunday. The three-letter and full English month and weekday names are accepted
+case-insensitively. Ranges must not wrap, steps must be at least one and no greater than the field
+maximum, and the extended syntax `L`, `W`, `#`, and `?` is rejected. The whole expression is limited
+to 512 bytes. When both day fields are restricted, a day matches when **either** matches, the
+POSIX/Vixie rule; `*/2` counts as restricted, so `0 0 */2 * MON` means every second day of the month
+**or** any Monday.
+
+There is one callback invocation at a time. A tick that arrives while the previous callback is still
+running is skipped and reported as an `overlap` event. A wake-up so late that the following
+occurrence is already due is reported as `missed`, and the stale occurrence is not run: the schedule
+continues from the current time rather than replaying a backlog. A thrown value or rejected Promise
+from the callback is reported as `error` and does not stop the schedule. Pass
+`{ onEvent(event) {} }` to observe these events; unknown option keys are rejected. Overlap and
+missed events are dropped when no observer is passed. With no observer, callback failures are
+re-thrown from a microtask so they are not silently lost. An exception thrown by `onEvent` itself is
+discarded so the schedule keeps running.
+
+```js
+const job = cron("* * * * *", async () => {
+    await sync();
+}, {
+    onEvent(event) {
+        if (event.type === "error") console.error(event.error);
+    },
+});
+```
+
+All times are UTC. There is no local-time interpretation, DST handling, time-zone option, seconds
+field, or `@daily`-style nickname. The scheduler uses the runtime's Tokio timer rather than a
+JavaScript fake-timer surface: a synchronous callback blocks the isolate and delays every timer, and
+a callback that only awaits an ordinary Promise does not keep the process alive by itself. In a
+`neojs test` file, dispose every job: an undisposed job is pending event-loop work and makes the
+settle check fail. This is
+not Deno's `Deno.cron`, Bun's `Bun.cron`, `node-cron`, or a compatibility layer for any of them.
+The deterministic clock used by the tests is compiled only with the off-by-default `test-support`
+feature and is absent from a normal build.
+
+Scheduling still follows the host wall clock, including manual and NTP adjustments. A wait re-reads
+the clock at least once a minute and resolves only after the clock reaches the occurrence, so a
+backward adjustment postpones a tick instead of running it early; the scheduler checks once more
+immediately before dispatch for the same reason. A forward adjustment is noticed within that minute,
+and if it passes the following occurrence the normal `missed` rule discards the stale tick instead of
+replaying a backlog. A large jump can therefore skip occurrences, and these rechecks bound the effect
+of a clock change rather than making scheduling monotonic.
+
 **Run tests.** `neojs test` takes one or more files or shell-style globs, expands them
 deterministically, sorts the selected files by canonical path, removes duplicates, and runs each
 file in a fresh runtime. `test` and `neo:test` import the same built-in module.
@@ -1277,11 +1357,12 @@ not implemented behavior.
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
-local module loading, imports of the `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`,
-`slices`, `ssh`, `stdio`, `strings`, and `test` built-ins by their bare or `neo:` specifiers,
-console output, `neojs test` over multiple files and globs, bounded in-memory byte streams, live
-mutable and read-only array and typed-array views, mutable and read-only Unicode code point buffers,
-writes to the process's stdout and stderr, lexical POSIX and Windows path operations,
+local module loading, imports of the `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`,
+`path`, `slices`, `ssh`, `stdio`, `strings`, and `test` built-ins by their bare or `neo:`
+specifiers, console output, `neojs test` over multiple files and globs, bounded in-memory byte
+streams, live mutable and read-only array and typed-array views, mutable and read-only Unicode code
+point buffers, UTC five-field cron parsing and in-process scheduling, writes to the process's stdout
+and stderr, lexical POSIX and Windows path operations,
 SHA-2 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
 authentication, the built-in module registry, and the embedding API above. Features outside this
@@ -1295,19 +1376,19 @@ list are not implemented.
   ECMAScript module first.
 - `node:`, `npm:`, `jsr:`, `http:`, `https:`, `data:`, and `blob:` imports are rejected. In
   particular, `node:test` is not an alias for the `test` built-in; a Node-module opt-in is not
-  implemented. The built-in modules are `age`, `assert`, `chars`, `console`, `crypto`, `os`,
-  `path`, `slices`, `ssh`, `stdio`, `strings`, and `test`, reached through
+  implemented. The built-in modules are `age`, `assert`, `chars`, `console`, `cron`, `crypto`,
+  `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, and `test`, reached through
   `Neo.getBuiltInModule("age")`,
   `Neo.getBuiltInModule("assert")`, `Neo.getBuiltInModule("chars")`,
-  `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("crypto")`,
-  `Neo.getBuiltInModule("os")`, `Neo.getBuiltInModule("path")`,
-  `Neo.getBuiltInModule("slices")`, `Neo.getBuiltInModule("ssh")`,
-  `Neo.getBuiltInModule("stdio")`, `Neo.getBuiltInModule("strings")`, and
-  `Neo.getBuiltInModule("test")`, or through the import
+  `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("cron")`,
+  `Neo.getBuiltInModule("crypto")`, `Neo.getBuiltInModule("os")`,
+  `Neo.getBuiltInModule("path")`, `Neo.getBuiltInModule("slices")`,
+  `Neo.getBuiltInModule("ssh")`, `Neo.getBuiltInModule("stdio")`,
+  `Neo.getBuiltInModule("strings")`, and `Neo.getBuiltInModule("test")`, or through the import
   specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
-  `neo:console`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`, `slices`,
-  `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`, and
-  `neo:test`. Other `neo:` modules are rejected by name.
+  `neo:console`, `cron`, `neo:cron`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`,
+  `slices`, `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`, `neo:strings`,
+  `test`, and `neo:test`. Other `neo:` modules are rejected by name.
   Bare module specifiers that are not a built-in, and import maps, are not supported.
 - Module type attributes are rejected. `with { type: "json" }`, `with { type: "text" }`, `with {
   type: "bytes" }`, and custom types fail with a reason on static and dynamic imports, including for
@@ -1323,7 +1404,13 @@ list are not implemented.
   buffer, opens no file, and is not a snapshot or an isolation boundary. `assert` calls
   one host op that observes a genuine native Promise's settlement by
   attaching settlement handlers without reading a user `then` or consulting `Symbol.species`; it
-  adds no other capability. `test` is implemented in the realm and registers no private host op; it
+  adds no other capability. `cron` calls six host ops: it parses and validates an expression, stores
+  one schedule per job in the resource table, reads the host clock, computes the following
+  occurrence, sleeps on the runtime's Tokio timer, and cancels a job. It reads no file, environment,
+  network, or process state and adds no capability beyond keeping the event loop alive until the
+  job is disposed. The scheduler behind it is a UTC five-field implementation; it has no local-time,
+  DST, time-zone, backoff, or fake-timer surface, and `test-support` clock hooks are absent from a
+  normal build. `test` is implemented in the realm and registers no private host op; it
   uses the runtime's existing print, timer, and event-loop primitives and adds no filesystem,
   environment, network, or process authority. It runs test callbacks in this realm, so it is not
   isolation or a sandbox.

@@ -4,13 +4,34 @@
 //! and drains V8's event loop. A runtime is single-use; a second entry module
 //! returns [`Error::RuntimeConsumed`].
 //!
-//! It provides the `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`,
-//! `slices`, `ssh`, `stdio`, `strings`, and `test` built-in modules through
-//! `Neo.getBuiltInModule(name)` and through the module specifiers `age`,
+//! It provides the `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`,
+//! `path`, `slices`, `ssh`, `stdio`, `strings`, and `test` built-in modules
+//! through `Neo.getBuiltInModule(name)` and through the module specifiers `age`,
 //! `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
-//! `neo:console`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`,
-//! `slices`, `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`,
-//! `neo:strings`, `test`, and `neo:test`.
+//! `neo:console`, `cron`, `neo:cron`, `crypto`, `neo:crypto`, `os`, `neo:os`,
+//! `path`, `neo:path`, `slices`, `neo:slices`, `ssh`, `neo:ssh`, `stdio`,
+//! `neo:stdio`, `strings`, `neo:strings`, `test`, and `neo:test`.
+//!
+//! `cron` parses standard five-field UTC cron expressions and runs a callback
+//! on the schedule. `cron(expression, callback, options?)` returns a frozen
+//! controller whose `dispose()` and, when the engine provides it,
+//! `[Symbol.dispose]` cancel the job; `next(expression, after?)` returns the
+//! next occurrence as a `Date`, or `null` when the expression has none in the
+//! 100-year search window or the next occurrence is outside the JavaScript
+//! `Date` range. The first tick is strictly after registration. One callback
+//! runs at a time: an occurrence that arrives while the previous callback is
+//! still running is skipped and reported, as is a run that wakes so late that
+//! the following occurrence is already due. The wait re-reads the host wall
+//! clock at least once a minute and does not dispatch before the due time, so a
+//! backward clock adjustment postpones a tick; a forward jump is noticed within
+//! a minute and can make a tick late. Callback failures are reported and do not
+//! stop the schedule. An undisposed job keeps the isolate alive; disposing
+//! cancels the pending sleep but does not interrupt a callback that is already
+//! running. Times are UTC only: there is no local-time, DST, or
+//! time-zone option, and this is not Deno's `Deno.cron`, Bun's `Bun.cron`,
+//! `node-cron`, or a compatibility layer for any of them. See
+//! `neojs-core/src/cron.rs` for the grammar, the POSIX day-of-month/day-of-week
+//! rule, and the scheduler's liveness contract.
 //!
 //! `assert` is a synchronous assertion surface inspired by Node's
 //! `assert/strict` and Deno's `@std/assert`. The registry object is the
@@ -196,9 +217,9 @@
 //! provenance contracts.
 //!
 //! An ES module namespace object is not the registry object. For `age`,
-//! `assert`, `chars`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, and
-//! `strings`, both paths expose the same classes, functions, and shared stream
-//! objects;
+//! `assert`, `chars`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`,
+//! `stdio`, and `strings`, both paths expose the same classes, functions, and
+//! shared stream objects;
 //! the
 //! namespace is a separate container over them. For `assert`, the registry
 //! object is the callable function, and the module also has a default export
@@ -256,6 +277,7 @@
 mod age;
 mod assert;
 mod builtins;
+mod cron;
 mod crypto;
 mod crypto_cipher;
 mod crypto_hash;
@@ -291,6 +313,13 @@ pub mod test_support {
     /// Used by the path tests to prove that `relative` takes one lazy cwd
     /// snapshot per call. Compiled only with `test-support`.
     pub use crate::path::with_cwd_sequence;
+
+    /// Install a deterministic `neo:cron` clock on the current thread.
+    ///
+    /// The runtime and its host ops must stay on that thread, as
+    /// [`crate::Runtime`] already requires. Compiled only with `test-support`;
+    /// a normal build has no clock hook.
+    pub use crate::cron::CronTestClock;
 
     /// Test-only gate that holds a real blocking hash worker after it starts.
     pub use crate::crypto_hash::CancellationGate;
