@@ -1546,7 +1546,7 @@ fn prints_help_and_version() {
     assert_eq!(help.status.code(), Some(0));
     assert!(stdout(&help).contains("Usage:"));
     assert!(stdout(&help).contains("age, assert, chars, console, crypto, os, path, slices"));
-    assert!(stdout(&help).contains("ssh, and stdio"));
+    assert!(stdout(&help).contains("ssh, stdio, and strings"));
     assert!(stdout(&help).contains("built-in modules are implemented"));
 
     let version = run_args(&["--version"]);
