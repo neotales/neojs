@@ -23,7 +23,8 @@
 //! (`equalFold`, `startsWithFold`, `endsWithFold`, `indexOfFold`,
 //! `lastIndexOfFold`) and trimming of a caller-supplied code point set. The
 //! search functions are linear in the text plus the needle and use O(needle)
-//! extra memory. It returns UTF-16 code unit indices like
+//! extra memory; `lastIndexOfFold` also stops once no match can begin at or
+//! before its limit. It returns UTF-16 code unit indices like
 //! `String.prototype`, calls no host op,
 //! and adds no capability. Its folding is ECMAScript simple case folding,
 //! decided by the engine's own RegExp `/iu` canonicalization, so it is

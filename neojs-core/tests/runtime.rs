@@ -2018,3 +2018,54 @@ for (let limit = -1; limit <= overlapText.length + 1; limit += 1) {
 "#,
     );
 }
+
+#[test]
+fn strings_last_index_stops_at_a_small_limit() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+// One million code points with no match. With fromIndex 0 the scan must stop
+// as soon as no pending or future match can start at or before 0; a scan that
+// ignores the limit reads the whole text.
+const astral = "\u{1F600}".repeat(1000000) + "needle";
+if (strings.lastIndexOfFold(astral, "zzz", 0) !== -1) {
+    throw new Error("small-limit no-match found something");
+}
+if (strings.lastIndexOfFold(astral, "NEEDLE", 0) !== -1) {
+    throw new Error("a match after the limit was reported");
+}
+
+// A match at the limit is still found.
+if (strings.lastIndexOfFold("needle" + "x".repeat(1000000), "NEEDLE", 0) !== 0) {
+    throw new Error("a match at the limit was skipped");
+}
+if (strings.lastIndexOfFold("a".repeat(1000000) + "b", "B", 1000000) !== 1000000) {
+    throw new Error("a match exactly at a large limit was skipped");
+}
+if (strings.lastIndexOfFold("a".repeat(1000000) + "b", "B", 999999) !== -1) {
+    throw new Error("a match after the limit was reported");
+}
+
+// A pending partial match that starts at the limit keeps the scan alive until
+// it fails; a limit inside a surrogate pair admits no boundary after it.
+if (strings.lastIndexOfFold("ab" + "x".repeat(1000000), "abc", 0) !== -1) {
+    throw new Error("a pending match at the limit was mishandled");
+}
+if (strings.lastIndexOfFold("\u{1F600}" + "a".repeat(1000000), "a", 1) !== -1) {
+    throw new Error("a mid-pair limit matched a later boundary");
+}
+if (strings.lastIndexOfFold("ab" + "x".repeat(1000000), "ab", 0) !== 0) {
+    throw new Error("an overlapping match at the limit was skipped");
+}
+
+// Folded characters behave the same way under a small limit.
+if (strings.lastIndexOfFold("\u03C3".repeat(1000000) + "x", "\u03A3", 0) !== 0) {
+    throw new Error("a folded match at the limit was skipped");
+}
+if (strings.lastIndexOfFold("\u03C3" + "\u03A3".repeat(1000000), "z", 0) !== -1) {
+    throw new Error("a folded small-limit no-match found something");
+}
+"#,
+    );
+}

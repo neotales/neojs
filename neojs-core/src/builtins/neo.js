@@ -577,8 +577,9 @@
      *
      * Linear in the text and the search string, with the same KMP scan as
      * `indexOfFold`, so a repeated prefix cannot make it quadratic. It scans
-     * from the start and stops at the first completed match that starts after
-     * `fromIndex`; extra memory is O(search).
+     * from the start and stops as soon as no pending or future match can begin
+     * at or before `fromIndex`, so a small limit does not read the rest of a
+     * long text; extra memory is O(search).
      *
      * @param {string} text
      * @param {string} search
@@ -604,6 +605,7 @@
         let slot = 0;
         while (offset < text.length) {
             const point = codePointAt(text, offset);
+            const width = codepointWidth(point);
             starts[slot] = offset;
             slot += 1;
             if (slot === length) slot = 0;
@@ -613,13 +615,22 @@
             if (foldEqual(pattern[matched], point)) matched += 1;
             if (matched === length) {
                 const start = starts[slot];
-                // Starts only increase as the scan advances, so no later
-                // match can satisfy the limit once this one does not.
                 if (start > limit) break;
                 last = start;
                 matched = prefix[matched - 1];
             }
-            offset += codepointWidth(point);
+            // The earliest match that can still complete begins at the start
+            // of the surviving partial match, or at the next code point when
+            // no partial match survives. Start offsets only increase with the
+            // scan, so once that candidate is past the limit no match can be
+            // recorded and the rest of the text need not be read.
+            if (matched > 0) {
+                const candidate = (slot + length - matched) % length;
+                if (starts[candidate] > limit) break;
+            } else if (offset + width > limit) {
+                break;
+            }
+            offset += width;
         }
         return last;
     }
