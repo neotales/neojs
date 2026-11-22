@@ -129,7 +129,8 @@ The SQL scanner understands strings, quoted identifiers, comments, PostgreSQL do
 operators that contain `@` or `?`. It rejects ambiguity instead of guessing: `?NNN`, `:name`,
 `$name`, `??`, bare `@`, mixed forms, multiple statements, and trigger bodies are errors. MySQL
 `--` starts a comment only when the next character is whitespace or a control character, matching
-the server rule; `SELECT 1--2` is not a comment. A string whose closing boundary depends on a
+the server rule; `SELECT 1--2` is not a comment. MySQL `/*! ... */` and MariaDB `/*M! ... */`
+executable comments are rejected. A string whose closing boundary depends on a
 server escape mode (MySQL `NO_BACKSLASH_ESCAPES` or PostgreSQL
 `standard_conforming_strings`) is rejected rather than guessed; use an explicit PostgreSQL
 `E'...'`/`U&'...'` string or bind the value as a parameter. No configuration flag forces a server
@@ -166,18 +167,22 @@ returns a possibly-active connection to the pool.
 
 ## Cancellation and uncertain outcomes
 
-The API creates no task and no timeout. Dropping an in-flight future is the cancellation signal.
-With SQLite, the provider's progress handler observes a cancellation flag that the drop sets, and
-the provider discards that connection if a dispatched statement is interrupted. The handler cannot
-interrupt a blocked user-defined function, a VFS call, or a busy handler; `busy_timeout` bounds lock
-waits but is not a prompt-cancellation guarantee. Validation failures detected before dispatch
-leave the session usable.
+The API creates no task and no timeout. Dropping an in-flight future is the cancellation signal:
+no result is returned. With SQLite, the provider's progress handler observes a cancellation flag
+that the drop sets, and an interrupted dispatched statement discards that connection. The handler
+cannot interrupt a blocked user-defined function, a VFS call, or a busy handler; `busy_timeout`
+bounds lock waits but is not a prompt-cancellation guarantee. Effects of a dropped future are
+unobservable to that call and must be treated as possibly applied, not as proof that nothing
+happened. Validation failures detected before dispatch leave the session usable.
 
-A cancelled or interrupted write, including a fetch of `INSERT ... RETURNING`, can be reported as
-`WriteOutcomeUnknown`. A dispatched `COMMIT` that does not return a confirmed success is reported
-as `CommitOutcomeUnknown`, which means success is unknown, not that the transaction rolled back.
-Do not retry either operation blindly: acquire a new connection and verify the data. Use
-`Error::database_kind()` to distinguish the categories.
+A returned error is different. A standalone write, or an `INSERT ... RETURNING` fetch, whose
+dispatch outcome is unknown is reported as `WriteOutcomeUnknown`. A dispatched `COMMIT` error is
+reported as `CommitOutcomeUnknown`, which means success is unknown, not that the transaction rolled
+back. A transaction statement error is mapped by the provider's general mapper, so it may be
+`Connection`, `Timeout`, or `Cancelled` rather than `WriteOutcomeUnknown`; that category is still
+not proof the statement had no effect, and the connection is discarded. Do not retry any of these
+automatically: acquire a new connection and verify the data. Use `Error::database_kind()` to
+distinguish the categories.
 
 ## License
 

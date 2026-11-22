@@ -59,8 +59,9 @@ deliberately does not provide (it requires native placeholder syntax and does no
   (SQLite/SQL Server), line and block comments, nested block comments (PostgreSQL/SQL Server),
   PostgreSQL dollar quoting, and MySQL/PostgreSQL backslash-escape rules are handled. A
   placeholder inside a string, quoted identifier, or comment is not a placeholder. MySQL
-  executable comments (`/*! ... */`) are rejected in both the primary scan and the trailing
-  terminator scan because MySQL executes their contents.
+  executable comments (`/*! ... */`) and MariaDB executable comments (`/*M! ... */`) are rejected
+  in both the primary scan and the trailing terminator scan because the server executes their
+  contents.
 - **Server-mode ambiguity.** A MySQL string and an ordinary PostgreSQL string can change where
   they end depending on `NO_BACKSLASH_ESCAPES` or `standard_conforming_strings`. The scanner
   evaluates both interpretations and rejects the string unless they agree on the end boundary.
@@ -94,19 +95,26 @@ deliberately does not provide (it requires native placeholder syntax and does no
 
 ## Cancellation and outcomes
 
-The crate creates no task and no timeout. Dropping an in-flight future is the cancellation signal.
-The SQLite provider installs a progress handler on the connection; dropping an in-flight future
-sets the cancellation flag it observes, and an interrupted dispatched statement discards that
-connection. The handler interrupts SQLite VM
-execution but not a blocked user-defined function, a VFS call, or a busy handler, and
-`busy_timeout` bounds a lock wait rather than guaranteeing prompt cancellation. A validation
-failure detected before dispatch does not invalidate the session.
+The crate creates no task and no timeout. Dropping an in-flight future is the cancellation signal:
+no result is returned. The SQLite provider installs a progress handler on the connection; dropping
+an in-flight future sets the cancellation flag it observes, and an interrupted dispatched statement
+discards that connection. The handler interrupts SQLite VM execution but not a blocked
+user-defined function, a VFS call, or a busy handler, and `busy_timeout` bounds a lock wait rather
+than guaranteeing prompt cancellation. A validation failure detected before dispatch does not
+invalidate the session. Effects of a dropped future are unobservable to that call and must be
+treated as possibly applied.
 
-A cancelled or interrupted write, including an `INSERT ... RETURNING` fetch, can be reported as
-`WriteOutcomeUnknown`. The SQLite provider maps a dispatched `COMMIT` error to
-`CommitOutcomeUnknown` and discards the connection: the commit may have succeeded, so it is not a
-rollback. Callers must not blindly retry either category; acquire a new connection and verify.
-`Error::database_kind()` exposes the provider category.
+A returned error is different. The SQLite provider maps a standalone write, or an `INSERT ...
+RETURNING` fetch, with an unknown dispatch outcome to `WriteOutcomeUnknown`. A dispatched `COMMIT`
+error is mapped to `CommitOutcomeUnknown` and discards the connection: the commit may have
+succeeded, so it is not a rollback. A transaction statement is mapped with the provider's general
+`map_error`, so a returned `Connection`, `Timeout`, or `Cancelled` error is not reported as
+`WriteOutcomeUnknown`; it is still not proof the write had no effect, and the connection is
+discarded. Do not retry any category automatically; acquire a new connection and verify.
+`Error::database_kind()` exposes the provider category. This description matches
+`neotales-dbapi-sqlite` 0.0.0-alpha.0, whose transaction statements use `map_error`, whose
+standalone writes use `map_write_error`, and whose `COMMIT` failure maps to
+`CommitOutcomeUnknown`.
 
 ## Verification
 

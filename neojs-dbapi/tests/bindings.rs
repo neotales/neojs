@@ -249,14 +249,14 @@ fn mysql_double_dash_without_space_keeps_placeholders() {
 }
 
 #[test]
-fn mysql_executable_comment_after_a_terminator_is_rejected() {
-    let error = compile(
+fn mysql_and_mariadb_executable_comments_after_a_terminator_are_rejected() {
+    for sql in [
         "SELECT 1; /*!50700 SELECT 2 */",
-        &Params::none(),
-        Dialect::MySql,
-    )
-    .expect_err("executable comment after terminator");
-    assert_eq!(error.kind(), ErrorKind::Sql);
+        "SELECT 1; /*M!100100 SELECT 2 */",
+    ] {
+        let error = compile(sql, &Params::none(), Dialect::MySql).expect_err(sql);
+        assert_eq!(error.kind(), ErrorKind::Sql, "{sql}");
+    }
 }
 
 #[test]
@@ -292,14 +292,11 @@ fn mssql_nested_block_comments_are_recognized() {
 }
 
 #[test]
-fn mysql_executable_comments_are_rejected() {
-    let error = compile(
-        "SELECT 1 /*!50700 , @id */",
-        &Params::none(),
-        Dialect::MySql,
-    )
-    .expect_err("executable comment");
-    assert_eq!(error.kind(), ErrorKind::Sql);
+fn mysql_and_mariadb_executable_comments_are_rejected() {
+    for sql in ["SELECT 1 /*!50700 , @id */", "SELECT 1 /*M!100100 , @id */"] {
+        let error = compile(sql, &Params::none(), Dialect::MySql).expect_err(sql);
+        assert_eq!(error.kind(), ErrorKind::Sql, "{sql}");
+    }
 }
 
 #[test]

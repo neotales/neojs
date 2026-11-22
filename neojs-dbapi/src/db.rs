@@ -29,21 +29,24 @@ use neotales_dbapi_sqlite::{SqliteConfig as ProviderSqliteConfig, SqlitePoolProv
 ///
 /// # Cancellation and uncertain outcomes
 ///
-/// This type does not create a task or a timeout. Dropping an in-flight future
-/// is the cancellation signal. With SQLite, the provider's progress handler
-/// observes a cancellation flag that the drop sets, and the provider discards
-/// that connection if a dispatched statement is interrupted. The handler
+/// This type creates no task or timeout. Dropping an in-flight future is the
+/// cancellation signal: no `Result` is returned, the provider's progress
+/// handler observes the cancellation flag that the drop sets, and an
+/// interrupted dispatched statement discards the connection. The handler
 /// interrupts SQLite VM execution but cannot interrupt a blocked user-defined
 /// function, a VFS call, or a busy handler; `busy_timeout` bounds a lock wait
-/// and is not a prompt cancellation guarantee. A validation failure detected
-/// before dispatch leaves the session usable.
+/// and is not a prompt cancellation guarantee. Effects of a dropped future are
+/// unobservable to that call and must be treated as possibly applied, not as
+/// proof that nothing happened. A validation failure detected before dispatch
+/// leaves the session usable.
 ///
-/// A cancelled or interrupted write, including a fetch of `INSERT ...
-/// RETURNING`, can be reported as `WriteOutcomeUnknown`; never replay it
-/// without caller-owned idempotency. A dispatched `COMMIT` that does not
-/// return a confirmed success is reported as `CommitOutcomeUnknown`: success is
-/// unknown, not a rollback. Use [`Error::database_kind`] to distinguish these
-/// categories.
+/// A returned error is different from a dropped future. The SQLite provider
+/// maps a standalone write, or an `INSERT ... RETURNING` fetch, whose dispatch
+/// outcome is unknown to `WriteOutcomeUnknown`. A dispatched `COMMIT` error is
+/// reported as `CommitOutcomeUnknown`: success is unknown, not a rollback.
+/// Neither category is returned when the future is dropped, because there is no
+/// result to return. Do not retry automatically; only a caller that can verify
+/// the data or tolerate a repeat may retry. Use [`Error::database_kind`].
 pub struct Db {
     driver: Driver,
     dialect: Dialect,
@@ -117,10 +120,11 @@ impl Db {
 
     /// Executes one statement and returns the affected-row count.
     ///
-    /// A write whose dispatch outcome is unknown, including one cancelled by
-    /// dropping the returned future, is reported as `WriteOutcomeUnknown`.
-    /// Check [`Error::database_kind`] before retrying; this facade does not
-    /// infer replay safety from SQL shape.
+    /// A standalone write that returns with an unknown dispatch outcome is
+    /// reported as `WriteOutcomeUnknown`. Dropping the future returns no error
+    /// and has the unobservable effects described on [`Db`]. Check
+    /// [`Error::database_kind`] before retrying; this facade does not infer
+    /// replay safety from SQL shape.
     ///
     /// # Errors
     /// Returns a SQL, parameter, or provider error.
@@ -252,10 +256,11 @@ pub struct Connection {
 impl Connection {
     /// Executes one statement on this connection.
     ///
-    /// A write whose dispatch outcome is unknown, including one cancelled by
-    /// dropping the returned future, is reported as `WriteOutcomeUnknown`. A
-    /// dispatched failure or interruption discards this connection; acquire a
-    /// new one rather than assuming the session is usable.
+    /// A standalone write that returns with an unknown dispatch outcome is
+    /// reported as `WriteOutcomeUnknown`. Dropping the future returns no error
+    /// and has the unobservable effects described on [`Db`]. A dispatched
+    /// failure or interruption discards this connection; acquire a new one
+    /// rather than assuming the session is usable.
     ///
     /// # Errors
     /// Returns a SQL, parameter, or provider error.
@@ -355,8 +360,11 @@ impl fmt::Debug for Connection {
 /// cancellation signal, and the SQLite progress handler has the limits
 /// described on [`Connection`].
 ///
-/// A statement inside the transaction can write, so a cancelled execute has the
-/// same unknown-outcome risk as one outside a transaction.
+/// A statement inside the transaction can write. A returned `Connection`,
+/// `Timeout`, or `Cancelled` error after dispatch is not proof that the
+/// statement had no effect, even though the SQLite provider maps transaction
+/// statements with `map_error` rather than the standalone `WriteOutcomeUnknown`
+/// mapping.
 pub struct Transaction<'a> {
     inner: Box<dyn DbTransaction<'a> + 'a>,
     dialect: Dialect,
@@ -365,9 +373,11 @@ pub struct Transaction<'a> {
 impl Transaction<'_> {
     /// Executes one statement inside this transaction.
     ///
-    /// A write whose dispatch outcome is unknown is reported as
-    /// `WriteOutcomeUnknown`; the transaction must not be reused after that or
-    /// after any dispatched failure.
+    /// The SQLite provider maps a transaction statement error with its general
+    /// mapper, not the standalone write mapper. A returned `Connection`,
+    /// `Timeout`, or `Cancelled` error does not mean the statement had no
+    /// effect, and `WriteOutcomeUnknown` is not produced here. The connection is
+    /// discarded after a dispatched failure; do not reuse the transaction.
     ///
     /// # Errors
     /// Returns a SQL, parameter, or provider error.
@@ -428,10 +438,11 @@ impl Transaction<'_> {
 
     /// Commits the transaction and returns the borrowed connection.
     ///
-    /// If `COMMIT` was dispatched and did not return a confirmed success, the
-    /// SQLite provider reports `CommitOutcomeUnknown` and discards the
-    /// connection. That category means the commit may have succeeded; it is not
-    /// a rollback. Do not retry the commit on this transaction. Acquire a new
+    /// If `COMMIT` was dispatched and returned an error, the SQLite provider
+    /// reports `CommitOutcomeUnknown` and discards the connection. That category
+    /// means the commit may have succeeded; it is not a rollback. If the future
+    /// is dropped instead, no category is returned and success is unobservable.
+    /// In either case, do not retry the commit on this transaction. Acquire a new
     /// connection and verify the data instead.
     ///
     /// # Errors
@@ -442,9 +453,11 @@ impl Transaction<'_> {
 
     /// Rolls the transaction back and returns the borrowed connection.
     ///
-    /// A failed rollback is reported as `Connection` after the provider discards
-    /// the connection; the rollback is not confirmed. Dropping an in-flight
-    /// rollback future has the same cancellation limits as other operations.
+    /// A returned rollback error is reported as `Connection` after the provider
+    /// discards the connection; the rollback is not confirmed. Dropping an
+    /// in-flight rollback future returns no error and leaves an unobservable
+    /// outcome; the connection is discarded if the drop interrupts a dispatched
+    /// rollback.
     ///
     /// # Errors
     /// Returns a provider error.

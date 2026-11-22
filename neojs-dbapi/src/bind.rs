@@ -27,6 +27,8 @@
 //!   trigger bodies are rejected.
 //! * `@>`, `<@`, `@@`, `@?`, `@-@`, `?|`, and `?&` are preserved as operators.
 //!   `??` is rejected as ambiguous. A bare `@` is rejected.
+//! * MySQL `/*! ... */` and MariaDB `/*M! ... */` executable comments are
+//!   rejected in both the statement and the trailing-terminator scan.
 //!
 //! PostgreSQL uses `$1`, `$2`; MySQL and SQLite use `?`; Microsoft SQL Server
 //! uses `@p1`, `@p2`. Only the SQLite output is wired to a provider in this
@@ -567,8 +569,10 @@ impl Compiler<'_> {
     }
 
     fn copy_block_comment(&mut self, start: usize) -> Result<usize, Error> {
-        if self.dialect == Dialect::MySql && self.bytes.get(start + 2) == Some(&b'!') {
-            return Err(Error::sql("MySQL executable comments are not supported"));
+        if self.executable_comment(start) {
+            return Err(Error::sql(
+                "MySQL/MariaDB executable comments are not supported",
+            ));
         }
         let mut depth = 1usize;
         let mut index = start + 2;
@@ -754,8 +758,10 @@ impl Compiler<'_> {
                         .map_or(self.bytes.len(), |offset| index + offset);
                 }
                 b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
-                    if self.dialect == Dialect::MySql && self.bytes.get(index + 2) == Some(&b'!') {
-                        return Err(Error::sql("MySQL executable comments are not supported"));
+                    if self.executable_comment(index) {
+                        return Err(Error::sql(
+                            "MySQL/MariaDB executable comments are not supported",
+                        ));
                     }
                     let Some(offset) = self.bytes[index + 2..]
                         .windows(2)
@@ -775,6 +781,15 @@ impl Compiler<'_> {
             }
         }
         Ok(true)
+    }
+
+    fn executable_comment(&self, index: usize) -> bool {
+        if self.dialect != Dialect::MySql {
+            return false;
+        }
+        self.bytes.get(index + 2) == Some(&b'!')
+            || (self.bytes.get(index + 2) == Some(&b'M')
+                && self.bytes.get(index + 3) == Some(&b'!'))
     }
 
     fn mysql_dash_starts_comment(&self, index: usize) -> bool {

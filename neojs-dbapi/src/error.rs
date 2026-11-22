@@ -89,7 +89,9 @@ impl Error {
     ///
     /// `WriteOutcomeUnknown` means a dispatched write may or may not have
     /// happened; `CommitOutcomeUnknown` means a dispatched `COMMIT` may have
-    /// succeeded. Both require caller-owned verification, not a blind retry.
+    /// succeeded. Both are returned errors that require caller-owned
+    /// verification, not a blind retry. A dropped future returns no error at
+    /// all, so its effects are unobservable rather than categorized.
     #[must_use]
     pub const fn database_kind(self) -> Option<ProviderErrorKind> {
         self.database_kind
