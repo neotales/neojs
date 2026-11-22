@@ -23,33 +23,40 @@
 //! byte streams and writes to the current process's standard output and standard
 //! error. It adds no filesystem, process, environment, or stdin capability. The
 //! `console` module is the realm's installed console object, not a separate
-//! console or an isolation boundary.
+//! console or an isolation boundary. `path` is lexical POSIX and Windows path
+//! manipulation adapted from NeoLiteJS and `@neotales/path`; its only host read
+//! is the process working directory, through [`crate::path`], and only when a
+//! resolve/relative operation lacks an explicit absolute base. It adds no
+//! filesystem, environment, network, or process capability and is not a
+//! containment check.
 //!
 //! [`AGE_MODULE`], [`CHARS_MODULE`], [`CONSOLE_MODULE`], [`CRYPTO_MODULE`],
-//! [`SSH_MODULE`], and [`STDIO_MODULE`] are not evaluated as scripts. They are
-//! the sources returned by the module loader for the built-in specifiers
-//! [`AGE_SPECIFIER`], [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`],
-//! [`CRYPTO_SPECIFIER`], [`SSH_SPECIFIER`], and [`STDIO_SPECIFIER`], and for
-//! their bare names. All read the public module objects installed by
-//! [`NEO_SHIM`], so the registry and the module bindings share identity. `age`
-//! and `chars` are frozen module objects whose named exports are their function
-//! objects. `console` is the console object the runtime installed: the default
-//! export's value is that object, and the named exports are its method values
-//! when the module is evaluated. `crypto`, `ssh`, and `stdio` are frozen module
-//! objects whose named exports are their synchronous classes, functions,
-//! constants, and shared stream objects. In every case the ES module namespace
-//! is a separate object from the registry object.
+//! [`PATH_MODULE`], [`SSH_MODULE`], and [`STDIO_MODULE`] are not evaluated as
+//! scripts. They are the sources returned by the module loader for the built-in
+//! specifiers [`AGE_SPECIFIER`], [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`],
+//! [`CRYPTO_SPECIFIER`], [`PATH_SPECIFIER`], [`SSH_SPECIFIER`], and
+//! [`STDIO_SPECIFIER`], and for their bare names. All read the public module
+//! objects installed by [`NEO_SHIM`], so the registry and the module bindings
+//! share identity. `age` and `chars` are frozen module objects whose named
+//! exports are their function objects. `console` is the console object the
+//! runtime installed: the default export's value is that object, and the named
+//! exports are its method values when the module is evaluated. `crypto`,
+//! `path`, `ssh`, and `stdio` are frozen module objects whose named exports are
+//! their synchronous classes, functions, constants, and shared stream objects.
+//! In every case the ES module namespace is a separate object from the registry
+//! object.
 
 use deno_core::url::Url;
 
 /// Installs the global `Neo` object and the built-in module registry.
 ///
-/// Evaluation happens once per realm. The `age`, `chars`, and `crypto` module
-/// objects are frozen and cached, so repeated `Neo.getBuiltInModule` calls
-/// return the same object for each. The `console` module object is the console
-/// object the runtime installed, captured after the console shim runs. At
-/// installation time the registry, the module bindings, and the global console
-/// share the same function objects; a method replaced before the console module
+/// Evaluation happens once per realm. The `age`, `chars`, `crypto`, `path`,
+/// `ssh`, and `stdio` module objects are frozen and cached, so repeated
+/// `Neo.getBuiltInModule` calls return the same object for each. The `console`
+/// module object is the console object the runtime installed, captured after
+/// the console shim runs. At installation time the registry, the module
+/// bindings, and the global console share the same function objects; a method
+/// replaced before the console module
 /// is evaluated is what its named exports capture. Names that are not
 /// implemented return `undefined`.
 pub(crate) const NEO_SHIM: &str = include_str!("builtins/neo.js");
@@ -142,6 +149,22 @@ pub(crate) const STDIO_SPECIFIER: &str = "neo:stdio";
 /// ops registered by [`crate::stdio`].
 const STDIO_MODULE: &str = include_str!("builtins/stdio.esm.js");
 
+/// The canonical module specifier for the `path` built-in.
+///
+/// Both `"path"` and `"neo:path"` resolve to this URL, so the engine caches one
+/// module instance for both spellings. It is not a `file:` URL and is never read
+/// from disk.
+pub(crate) const PATH_SPECIFIER: &str = "neo:path";
+
+/// The ECMAScript module source served for [`PATH_SPECIFIER`].
+///
+/// It re-exports the frozen POSIX and Windows namespaces, their functions, and
+/// the host-selected aliases from the public `path` module object, so the module
+/// and `Neo.getBuiltInModule("path")` share identity. The functions are lexical;
+/// their host ops report the build dialect and the process working directory,
+/// the latter only when an operation lacks an explicit absolute base.
+const PATH_MODULE: &str = include_str!("builtins/path.esm.js");
+
 /// Registry name and canonical specifier for each implemented built-in module.
 ///
 /// The loader serves one module instance per canonical specifier, and the error
@@ -151,6 +174,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("chars", CHARS_SPECIFIER),
     ("console", CONSOLE_SPECIFIER),
     ("crypto", CRYPTO_SPECIFIER),
+    ("path", PATH_SPECIFIER),
     ("ssh", SSH_SPECIFIER),
     ("stdio", STDIO_SPECIFIER),
 ];
@@ -182,6 +206,7 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         CHARS_SPECIFIER => Some(CHARS_MODULE),
         CONSOLE_SPECIFIER => Some(CONSOLE_MODULE),
         CRYPTO_SPECIFIER => Some(CRYPTO_MODULE),
+        PATH_SPECIFIER => Some(PATH_MODULE),
         SSH_SPECIFIER => Some(SSH_MODULE),
         STDIO_SPECIFIER => Some(STDIO_MODULE),
         _ => None,

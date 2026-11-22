@@ -4,10 +4,11 @@
 //! and drains V8's event loop. A runtime is single-use; a second entry module
 //! returns [`Error::RuntimeConsumed`].
 //!
-//! It provides the `age`, `chars`, `console`, `crypto`, `ssh`, and `stdio`
-//! built-in modules through `Neo.getBuiltInModule(name)` and through the module
-//! specifiers `age`, `neo:age`, `chars`, `neo:chars`, `console`, `neo:console`,
-//! `crypto`, `neo:crypto`, `ssh`, `neo:ssh`, `stdio`, and `neo:stdio`.
+//! It provides the `age`, `chars`, `console`, `crypto`, `path`, `ssh`, and
+//! `stdio` built-in modules through `Neo.getBuiltInModule(name)` and through the
+//! module specifiers `age`, `neo:age`, `chars`, `neo:chars`, `console`,
+//! `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`,
+//! `stdio`, and `neo:stdio`.
 //!
 //! `age` is synchronous binary age v1 encryption for X25519 recipients. It
 //! exposes `generateIdentity`, `identityToRecipient`, `encrypt`, and `decrypt`.
@@ -86,11 +87,25 @@
 //! `neojs-core/src/ssh.rs` for the trust, credential, deadline, bound, and
 //! error contracts.
 //!
+//! `path` is lexical POSIX and Windows path manipulation adapted from NeoLiteJS
+//! `neo:path` and `@neotales/path`. It exposes frozen `posix` and `win32`
+//! namespaces plus host-selected `join`, `normalize`, `basename`, `dirname`,
+//! `extname`, `isAbsolute`, `parse`, `format`, `common`, `resolve`, `relative`,
+//! `toNamespacedPath`, `SEPARATOR`, `DELIMITER`, and `SEPARATOR_PATTERN`. The
+//! only host read is the process working directory, and only when `resolve`,
+//! `relative`, or Windows `toNamespacedPath` lacks a complete explicit base. It
+//! does not read the filesystem, environment, network, or process table, and it
+//! is not a containment check. Glob and file URL helpers are deliberately
+//! absent. See `neojs-core/src/path.rs`, the path tests, and
+//! `neojs-core/THIRD_PARTY_NOTICES.md` for the cwd, error, security, and
+//! provenance contracts.
+//!
 //! An ES module namespace object is not the registry object. For `age`, `chars`,
-//! `crypto`, `ssh`, and `stdio`, both paths expose the same classes, functions,
-//! and shared stream objects; the namespace is a separate container over them. For
-//! `console`, the registry object is the console object the runtime installed,
-//! and the default export's value is that object. The named exports are that
+//! `crypto`, `path`, `ssh`, and `stdio`, both paths expose the same classes,
+//! functions, and shared stream objects; the namespace is a separate container
+//! over them. For `console`, the registry object is the console object the
+//! runtime installed, and the default export's value is that object. The named
+//! exports are that
 //! object's method values when the module is
 //! evaluated, so a method replaced before then is what they capture; later
 //! replacements are not followed. Neither path follows a replacement of the
@@ -143,6 +158,7 @@ mod crypto_cipher;
 mod crypto_hash;
 mod error;
 mod loader;
+mod path;
 mod runtime;
 mod ssh;
 mod stdio;

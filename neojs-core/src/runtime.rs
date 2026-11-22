@@ -33,6 +33,7 @@ use crate::crypto_hash::neojs_crypto_hash;
 use crate::loader::FileModuleLoader;
 use crate::loader::ModuleFormat;
 use crate::loader::module_format;
+use crate::path::neojs_path;
 use crate::ssh::neojs_ssh;
 use crate::stdio::neojs_stdio;
 use crate::typescript;
@@ -116,12 +117,13 @@ impl Runtime {
     /// Creates a runtime and installs the console and built-in module shims.
     ///
     /// The runtime has one realm. The `age`, `chars`, `console`, `crypto`,
-    /// `ssh`, and `stdio` built-in modules are cached in that realm, and both
-    /// bare and `neo:`-prefixed import specifiers resolve to them; a new
+    /// `path`, `ssh`, and `stdio` built-in modules are cached in that realm, and
+    /// both bare and `neo:`-prefixed import specifiers resolve to them; a new
     /// `Runtime` creates a new realm, new functions, and new module instances.
-    /// The `age`, `crypto`, `ssh`, and `stdio` modules register their private
-    /// host ops in that realm before user code runs. The `console` module's object is the console object
-    /// the runtime installed: its default export's value is that object, and its
+    /// The `age`, `crypto`, `path`, `ssh`, and `stdio` modules register their
+    /// private host ops in that realm before user code runs. The `console`
+    /// module's object is the console object the runtime installed: its default
+    /// export's value is that object, and its
     /// named exports are that object's method values when the module is
     /// evaluated. Importing it shares function identity and stream behaviour at
     /// that point, and does not follow a replacement of the whole global
@@ -184,6 +186,7 @@ impl Runtime {
             neojs_crypto::init(),
             neojs_crypto_cipher::init(),
             neojs_crypto_hash::init(),
+            neojs_path::init(),
             neojs_ssh::init(),
             neojs_stdio::init(),
         ];

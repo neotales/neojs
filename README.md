@@ -244,6 +244,88 @@ will be additive, `Promise`-based, and will perform its work on a real asynchron
 no `pipe`, `on`, event, backpressure, or `Buffer` surface, and none is promised. The module is not a
 permission, sandbox, or isolation boundary; `Deno.core` remains reachable, as noted below.
 
+**Use the path built-in.** `Neo.getBuiltInModule("path")` returns a frozen module object cached for
+the realm. `path` is the canonical bare specifier and `neo:path` is an alias for the same module
+instance. It exports frozen `posix` and `win32` namespaces plus host-selected functions, so the same
+code can use an explicit syntax on any host.
+
+```js
+import { posix, win32, SEPARATOR, SEPARATOR_PATTERN } from "path";
+
+posix.join("/srv", "app", "..", "data"); // "/srv/data"
+posix.parse("/srv/data/file.txt");
+// { root: "/", dir: "/srv/data", base: "file.txt", ext: ".txt", name: "file" }
+win32.normalize("C:/work/out/../log"); // "C:\\work\\log"
+win32.resolve("C:/work/out", "../log"); // "C:\\work\\log", on any host
+["app", "data"].join(SEPARATOR); // "app/data" or "app\\data"
+"app///data".split(SEPARATOR_PATTERN); // ["app", "data"]
+```
+
+The module exports `join`, `normalize`, `basename`, `dirname`, `extname`, `isAbsolute`, `parse`,
+`format`, `common`, `resolve`, `relative`, and `toNamespacedPath`. `SEPARATOR` and `DELIMITER` match
+the selected namespace's `sep` and `delimiter`: `/` and `:` on POSIX, `\` and `;` on Windows.
+`SEPARATOR_PATTERN` matches runs of host separators; on Windows it matches both `/` and `\`.
+
+Every path argument is a primitive string; a boxed `String`, `URL`, buffer, number, `null`,
+`undefined`, or other value throws `TypeError`. `basename`'s optional suffix must be a string.
+`format` requires a non-null, non-array object whose `root`, `dir`, `base`, `ext`, and `name` fields
+are strings or absent. `common` requires an array of strings. A NUL (U+0000) in any argument throws
+`TypeError`: it cannot name a usable file, and returning a lexical result containing one would look
+usable when it is not. Error messages do not repeat the rejected path.
+
+Empty input follows the conventional dot where a path is required: `normalize("")`, `join()` with no
+non-empty segment, and `dirname("")` are `"."`. `basename("")` and `extname("")` are empty,
+`parse("")` has five empty fields, `isAbsolute("")` is false, and `format({})` is empty. `parse`
+returns a fresh plain object on every call.
+
+**POSIX rules.** The separator is `/` only; a backslash is an ordinary filename character.
+`normalize` collapses `/` runs, removes `.`, applies `..`, preserves leading `..` only in relative
+paths, and preserves at most one trailing `/`. `//` and `///` collapse to `/`; there is no distinct
+`//` network root. `join` validates every argument, concatenates with `/`, and normalizes; it does
+not restart at a later absolute segment, so `join("a", "/b")` is `"a/b"`. `basename` ignores
+trailing separators, a separator-only path has an empty basename, and a suffix is removed only when
+it is non-empty, strictly shorter than the name, and an exact suffix. `dirname` returns the text
+before the final separator with trailing separators removed; a separator-only path returns `/`, and
+an empty or relative path with no parent returns `"."`. `extname` ignores trailing separators; dot
+files, `.`, and `..` have no extension; the last dot of the final component starts the extension.
+`parse` does not normalize the whole path. `format` appends a non-empty `base` literally, even when
+it is a separator, so `format({ dir: "foo", base: "/" })` is `"foo//"`.
+
+**Windows rules.** Both `\` and `/` are input separators; `join`, `normalize`, and `format` produce
+`\`. `common` is the documented exception: it compares components as written, without normalization
+or case folding, and splits on `\` only, so `/` is not a component boundary there. Roots are
+recognized in this order: UNC `\\server\share`; ASCII drive root `C:\`; drive-relative
+`C:`; a single rooted separator; otherwise relative. Exactly two leading separators plus a non-empty
+server and share form a UNC root; three or more collapse to one rooted separator. `normalize`
+preserves the root and at most one trailing `\`; a bare drive becomes `C:.`; `C:..` is preserved, and
+no per-drive working directory is consulted. `join("C:", "foo")` is `"C:\\foo"`; `join("//server",
+"share")` is `"\\\\server\\share\\"`. A complete UNC root, `C:\`, and `C:` have an empty basename and
+extension even when the share contains a dot. `dirname("C:/")` preserves the root as written.
+`relative` compares roots and components case-insensitively but preserves destination spelling; a
+different drive or share returns the absolute destination. `toNamespacedPath` maps drive paths to
+`\\?\` and UNC paths to `\\?\UNC\`; empty, already namespaced, and device paths are returned
+unchanged.
+
+**Working directory and errors.** `resolve` works right-to-left, validates every segment, ignores
+empty strings, and resets at an absolute segment. `resolve`, `relative`, and Windows
+`toNamespacedPath` read the current process working directory only when their inputs do not supply a
+complete base. There is no runtime-local `chdir` and no per-drive environment lookup. A failure is an
+ordinary `Error` with `name = "PathError"` and a stable own `code`: `PATH_CWD` when the working
+directory is unavailable or not valid UTF-8, `PATH_CWD_DIALECT` when the non-host dialect needs a
+working directory, and `PATH_WINDOWS_ROOT` when Windows cannot establish a matching drive, share, or
+complete namespace root. There is no `PATH_PERMISSION`; neojs has no permission system.
+
+**Scope.** This is lexical string manipulation, not a filesystem, permission, or containment
+boundary. It does not read, write, stat, or authorize a file; resolve symlinks, junctions, drive
+mappings, or short names; validate Windows reserved device names or alternate data streams; fold
+Unicode confusables; or promise that a result stays inside a directory. `normalize("a/../../b")` is
+`"../b"`; enforce containment with the operating system after resolving the real path. Glob helpers
+and file URL conversion are deliberately not implemented in this slice. This is not Node's `path`,
+not `@neotales/path`, and not NeoLiteJS `neo:path`; URL inputs, coercion, and those compatibility
+surfaces are not promised. The path algorithms are adapted from NeoLiteJS and `@neotales/path` under
+the MIT license; see [`neojs-core/THIRD_PARTY_NOTICES.md`](neojs-core/THIRD_PARTY_NOTICES.md) for the
+exact revision, adapted files, and notices.
+
 **Use the character built-in.** The global `Neo` object exposes the modules this runtime ships.
 `Neo.getBuiltInModule("chars")` returns a frozen module object that is cached for the realm, so
 repeated lookups return the same object. An unknown name returns `undefined`; a non-string name
@@ -839,13 +921,13 @@ thread that will use it; it is not `Send`.
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
-local module loading, imports of the `age`, `chars`, `console`, `crypto`, `ssh`, and `stdio`
-built-ins by their bare or `neo:` specifiers, console output, bounded in-memory byte streams,
-writes to the process's stdout and stderr, SHA-2 hashing and HMAC (synchronous incremental and
-Promise-based one-shot), synchronous SSH command execution with mandatory host-key
-verification and password, in-memory-key, or explicit Unix-agent authentication, the built-in module
-registry, and the embedding API above. Features outside this list
-are not implemented.
+local module loading, imports of the `age`, `chars`, `console`, `crypto`, `path`, `ssh`, and
+`stdio` built-ins by their bare or `neo:` specifiers, console output, bounded in-memory byte
+streams, writes to the process's stdout and stderr, lexical POSIX and Windows path operations,
+SHA-2 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous SSH command
+execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
+authentication, the built-in module registry, and the embedding API above. Features outside this
+list are not implemented.
 
 - TypeScript has no type checking and no transpilation. Only syntax that can be erased is accepted:
   `enum`, `namespace`, parameter properties, `import =`, `export =`, decorators, and angle-bracket
@@ -854,14 +936,14 @@ are not implemented.
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
 - `node:`, `npm:`, `jsr:`, `http:`, `https:`, `data:`, and `blob:` imports are rejected. The
-  built-in modules are `age`, `chars`, `console`, `crypto`, `ssh`, and `stdio`, reached through
-  `Neo.getBuiltInModule("age")`, `Neo.getBuiltInModule("chars")`,
+  built-in modules are `age`, `chars`, `console`, `crypto`, `path`, `ssh`, and `stdio`, reached
+  through `Neo.getBuiltInModule("age")`, `Neo.getBuiltInModule("chars")`,
   `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("crypto")`,
-  `Neo.getBuiltInModule("ssh")`, and `Neo.getBuiltInModule("stdio")`, or through the import
-  specifiers `age`, `neo:age`, `chars`, `neo:chars`, `console`, `neo:console`, `crypto`,
-  `neo:crypto`, `ssh`, `neo:ssh`, `stdio`, and `neo:stdio`. Other
-  `neo:` modules are rejected by name. Bare module specifiers that are not a built-in, and import
-  maps, are not supported.
+  `Neo.getBuiltInModule("path")`, `Neo.getBuiltInModule("ssh")`, and
+  `Neo.getBuiltInModule("stdio")`, or through the import specifiers `age`, `neo:age`, `chars`,
+  `neo:chars`, `console`, `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`,
+  `neo:ssh`, `stdio`, and `neo:stdio`. Other `neo:` modules are rejected by name. Bare module
+  specifiers that are not a built-in, and import maps, are not supported.
 - Module type attributes are rejected. `with { type: "json" }`, `with { type: "text" }`, `with {
   type: "bytes" }`, and custom types fail with a reason on static and dynamic imports, including for
   built-in modules. Only untyped ECMAScript modules are loaded. Attributes that do not name a type
@@ -890,8 +972,12 @@ are not implemented.
   deadlines; there is no asynchronous form. `stdio` calls four
   host ops: it copies or UTF-8 encodes bounded byte data, copies a byte range out of a private
   snapshot, and writes to the process's own stdout and stderr descriptors, which the console already
-  uses. It adds no filesystem, process, environment, network, or stdin access. None of these modules
-  manages keys or provides a permission or isolation boundary.
+  uses. It adds no filesystem, process, environment, network, or stdin access. `path` calls two host
+  ops: one reports the build target's path dialect, and one returns the process working directory as
+  a UTF-8 string or `null`. The cwd op is used only when `resolve`, `relative`, or Windows
+  `toNamespacedPath` lacks a complete explicit base. `path` reads no file, environment variable,
+  per-drive directory, network, or process table, and it is not a containment check. None of these
+  modules manages keys or provides a permission or isolation boundary.
 - There is no REPL, stdin input, worker, timer, `fetch`, `URL`, or `TextEncoder`. V8 supplies the
   ECMAScript built-ins.
 - `Deno.core` internals are reachable from JavaScript. They are not a supported API.
@@ -920,7 +1006,11 @@ from the MIT-licensed `neo:crypto` module in the NeoLiteJS project, Copyright (c
 contributors. `neojs-core/src/age.rs` adapts the JavaScript-facing surface, limits, and test cases
 from the MIT-licensed `neo:age` module in the same project. The `stdio` module's API shape and error
 conventions are informed by the MIT-licensed `neo:io` and `neo:process` modules in the same project;
-its implementation and tests are original, so no additional notice is required for it. The `age` format and X25519 handling come
+its implementation and tests are original, so no additional notice is required for it. The `path`
+module adapts lexical algorithms from the MIT-licensed `neo:path` module in NeoLiteJS and from
+`@neotales/path`; `neojs-core/src/builtins/neo.js` removes the glob and file URL helpers, adds the
+two-namespace host-selection shape, validation, the NUL rule, and the cwd policy. The exact upstream
+revision, adapted-file list, and MIT notices are in `neojs-core/THIRD_PARTY_NOTICES.md`. The `age` format and X25519 handling come
 from the MIT-licensed `neotales-age` crate, Copyright (c) 2026 Neotales and x0craft. The `ssh`
 built-in uses the MIT-licensed `neotales-ssh` crate, Copyright (c) 2026 Neotales and x0craft, for the
 SSH-2 protocol; `neojs-core/src/ssh.rs` adds only the JavaScript-facing slice and policy described in

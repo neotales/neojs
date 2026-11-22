@@ -279,3 +279,53 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## NeoLiteJS `neo:path` and `@neotales/path`
+
+Source: NeoLiteJS `neojs-core/src/js/path.js` and `path.LICENSE.md`, and the
+`@neotales/path` module in `neotales/js-libraries`, directory `std/jsr/path`.
+
+`neojs-core/src/builtins/neo.js` adapts lexical path algorithms from these
+MIT-licensed sources for the `path` built-in. The adaptation removes the glob
+and file URL helpers, URL inputs, and the NeoLiteJS `PATH_PERMISSION` branch;
+it adds the two-namespace host-selection shape, argument validation, the NUL
+rule, `PathError`, and the process-cwd policy. The exact upstream revisions,
+adapted-file list, and complete license blocks are in
+`neojs-core/src/builtins/path.LICENSE.md`.
+
+- NeoLiteJS revision `bafa9bc14cfbdbc50d64b3c68d63d1fceb2b8afa`; file
+  `neojs-core/src/js/path.LICENSE.md` SHA-256
+  `26607003517b277b2611beb8d66cf9d2c37e4b1064df7250f17dacede2cf8a2a`.
+- `@neotales/path` revision `c7e88644f45a78f65bf639c9d365bb9eff21bcfe`;
+  LICENSE.md SHA-256
+  `4a9edd22e4358ff7607cfd6e056e8640712b5e60100a5c339f842e02d3ad8acb`.
+
+Copyright (c) 2026 NeoTales contributors
+
+Copyright 2022-2026 Neotales
+
+Copyright 2018-2022 the Deno authors.
+
+Copyright (c) 2013 James Halliday
+
+Licensed under the MIT License:
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
