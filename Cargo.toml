@@ -28,6 +28,13 @@ cbc = { version = "0.2.1", default-features = false, features = ["block-padding"
 bcrypt = { version = "0.19.3" }
 deno_ast = { version = "0.53.3", default-features = false, features = ["type_strip"] }
 deno_core = "0.413.0"
+# Experimental Web Crypto evaluation only. These are optional dependencies of
+# `neojs-core` behind the off-by-default `webcrypto-proto` feature. `deno_crypto`
+# 0.274.0, `deno_web` 0.291.0, and `deno_webidl` 0.260.0 all require
+# `deno_core` 0.413.0, the version above.
+deno_crypto = "0.274.0"
+deno_web = "0.291.0"
+deno_webidl = "0.260.0"
 deno_error = "0.7"
 getrandom = "0.4"
 # SHA-2 and HMAC are the RustCrypto crates already linked transitively by the

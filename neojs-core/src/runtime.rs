@@ -139,8 +139,24 @@ impl Runtime {
     /// Fails if a runtime cannot be started, or if a shim cannot be installed,
     /// which indicates a broken embedded script. V8 creates its isolate on a
     /// single thread; create one `Runtime` per thread and per entry module.
+    ///
+    /// With the off-by-default `webcrypto-proto` feature, this also registers
+    /// the `deno_crypto`, `deno_web`, and `deno_webidl` extensions and installs
+    /// the Web Crypto globals. The feature is an evaluation surface and does
+    /// not make this type a sandbox.
     pub fn new() -> Result<Self, Error> {
-        Self::with_shims(CONSOLE_SHIM, NEO_SHIM)
+        #[cfg_attr(not(feature = "webcrypto-proto"), allow(unused_mut))]
+        let mut runtime = Self::with_shims(CONSOLE_SHIM, NEO_SHIM)?;
+        #[cfg(feature = "webcrypto-proto")]
+        {
+            let js = runtime
+                .js
+                .as_mut()
+                .expect("the isolate is present until Drop");
+            js.execute_script("<neojs:webcrypto>", crate::webcrypto_proto::WEBCRYPTO_SHIM)
+                .map_err(|error| Error::Core(error.into()))?;
+        }
+        Ok(runtime)
     }
 
     /// Creates a runtime and installs the given shim scripts.
@@ -190,6 +206,8 @@ impl Runtime {
             neojs_ssh::init(),
             neojs_stdio::init(),
         ];
+        #[cfg(feature = "webcrypto-proto")]
+        extensions.extend(crate::webcrypto_proto::extensions());
         #[cfg(feature = "test-support")]
         extensions.push(crate::crypto_hash::test_support_extension());
         let js = {
@@ -269,6 +287,13 @@ impl Runtime {
     /// is polled inside such a runtime, as it is under [`Runtime::run_file`],
     /// and otherwise fail with `NEO_CRYPTO_NO_EXECUTOR`. The synchronous hash,
     /// HMAC, PBKDF2, and bcrypt API does not depend on the executor.
+    ///
+    /// With the off-by-default `webcrypto-proto` feature, a Web Crypto call
+    /// made through this method is stricter: `deno_crypto` uses
+    /// `tokio::task::spawn_blocking` directly, so polling this future without
+    /// an ambient Tokio runtime aborts the process instead of returning an
+    /// error. Wrap the future in a Tokio runtime, or use [`Runtime::run_file`],
+    /// when Web Crypto may run.
     ///
     /// Entry preparation is not offloaded: the file read and any TypeScript type
     /// stripping run synchronously on the thread that polls this future, and

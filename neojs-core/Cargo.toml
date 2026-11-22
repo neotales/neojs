@@ -13,6 +13,10 @@ default = []
 # Test-only fault injection for the peer-close reply branch. Never enabled by a
 # normal build; `neojs` enables it only for its own dev/test targets.
 test-support = []
+# Experimental: exposes the Web Crypto API through `deno_crypto`, plus the
+# `deno_webidl` and `deno_web` extensions it requires. Off by default. This is
+# an evaluation surface, not a stable or reviewed API.
+webcrypto-proto = ["dep:deno_crypto", "dep:deno_web", "dep:deno_webidl"]
 
 [dependencies]
 aes.workspace = true
@@ -21,7 +25,10 @@ bcrypt.workspace = true
 cbc.workspace = true
 deno_ast.workspace = true
 deno_core.workspace = true
+deno_crypto = { workspace = true, optional = true }
 deno_error.workspace = true
+deno_web = { workspace = true, optional = true }
+deno_webidl = { workspace = true, optional = true }
 getrandom.workspace = true
 hmac.workspace = true
 neotales-age.workspace = true
@@ -36,3 +43,7 @@ zeroize.workspace = true
 ed25519-dalek = { version = "3.0.0", features = ["pkcs8"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros"] }
+
+[[example]]
+name = "webcrypto_async_probe"
+required-features = ["webcrypto-proto"]

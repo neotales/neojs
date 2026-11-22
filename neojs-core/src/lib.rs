@@ -159,6 +159,14 @@
 //! Module loading uses the process's filesystem authority. neojs is not a
 //! sandbox.
 //!
+//! The off-by-default `webcrypto-proto` feature adds an experimental Web Crypto
+//! surface through the `deno_crypto` crate: the `crypto`, `Crypto`,
+//! `CryptoKey`, `SubtleCrypto`, and `DOMException` globals. It is an evaluation
+//! surface, not a stable API, and it is not claimed to be secure or complete.
+//! It also registers the host ops of `deno_web`, and it needs a Tokio runtime
+//! on the polling thread for the blocking algorithm work. See
+//! `neojs-core/src/webcrypto_proto.rs`.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -183,6 +191,8 @@ mod runtime;
 mod ssh;
 mod stdio;
 mod typescript;
+#[cfg(feature = "webcrypto-proto")]
+mod webcrypto_proto;
 
 pub use error::Error;
 pub use runtime::Runtime;
