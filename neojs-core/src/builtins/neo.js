@@ -27,8 +27,9 @@
 // no filesystem, stdin, or permission capability and never forwards an agent.
 // The `console` module is the realm's installed console
 // object, not a separate console or an isolation boundary. The `test` module
-// is plain ECMAScript: it registers sync and async tests, reports failures,
-// pending tests, timeouts, and unhandled rejections, and calls no host op. It
+// runs in the realm without a private host op: it registers sync and async
+// tests, reports failures, pending tests, timeouts, and unhandled rejections,
+// and uses the runtime's existing print, timer, and event-loop primitives. It
 // is not Node's `node:test` and is not an isolation boundary.
 //
 // The `chars` module is an independent implementation for neojs. It is
@@ -5476,16 +5477,23 @@
     //
     // The bookkeeping below avoids mutable prototypes for the queue and the
     // failure list, so replacing array methods after this shim runs cannot drop
-    // a registration. A test can still replace `Deno.core`, mutate the test
-    // module object, or interfere with console output; this is not isolation.
+    // a registration. Promise operations are captured at bootstrap too, so a
+    // test that replaces `Promise.resolve` or `Promise.prototype.then` cannot
+    // turn a never-settling test into a pass. A test can still replace
+    // `Deno.core`, mutate the test module object, or interfere with console
+    // output; this is not isolation.
     const testObjectToString = Object.prototype.toString;
     const testCore = Deno.core;
     const testCreateTimer = testCore.createTimer;
     const testCancelTimer = testCore.cancelTimer;
     const testSetUnhandledRejectionHandler = testCore.setUnhandledPromiseRejectionHandler;
+    const testEventLoopHasMoreWork = testCore.eventLoopHasMoreWork;
+    const testPromiseResolve = NativePromise.resolve;
+    const testPromiseThen = NativePromise.prototype.then;
     const TEST_MAX = 10000;
     const TEST_DEFAULT_TIMEOUT_MS = 30000;
     const TEST_MAX_TEXT = 2000;
+    const TEST_SETTLE_ROUNDS = 100;
 
     let testQueueLength = 0;
     const testQueue = [];
@@ -5497,6 +5505,8 @@
     let testFailed = 0;
     let testPending = 0;
     let testUnhandled = 0;
+    let testUnsettled = 0;
+    let testUnsettledRecorded = false;
     const testFailures = [];
     let testHandlerInstalled = false;
 
@@ -5650,6 +5660,11 @@
         if (value === null || (typeof value !== "object" && typeof value !== "function")) {
             return null;
         }
+        // A genuine native Promise is observed with the captured intrinsic.
+        // Reading `value.then` here would consult a replaced
+        // `Promise.prototype.then`, which could make a pending Promise look
+        // settled or discard its rejection.
+        if (coreIsPromise(value)) return testPromiseThen;
         const then = value.then;
         return typeof then === "function" ? then : null;
     }
@@ -5672,9 +5687,36 @@
         );
     }
 
+    function testTimeoutUnavailable(name) {
+        return testError(
+            "NEO_TEST_NO_TIMER",
+            `cannot enforce the test timeout for "${name}": timer support is unavailable`,
+            "Error",
+        );
+    }
+
     function testWithTimeout(value, milliseconds, name) {
+        let promise;
+        try {
+            // Captured at bootstrap: a later `Promise.resolve` replacement
+            // must not make a never-settling Promise resolve.
+            promise = uncurry(testPromiseResolve, NativePromise, value);
+        } catch (error) {
+            return new NativePromise(function (resolve, reject) {
+                reject(error);
+            });
+        }
         if (typeof testCreateTimer !== "function" || typeof testCancelTimer !== "function") {
-            return NativePromise.resolve(value);
+            // Never return an unbounded Promise: without a timer the timeout
+            // cannot be enforced, so fail instead of hanging the runner.
+            try {
+                uncurry(testPromiseThen, promise, function () {}, function () {});
+            } catch {
+                // The timer failure is the useful result.
+            }
+            return new NativePromise(function (resolve, reject) {
+                reject(testTimeoutUnavailable(name));
+            });
         }
         return new NativePromise(function (resolve, reject) {
             let settled = false;
@@ -5693,35 +5735,53 @@
                     false,
                 );
             } catch {
-                NativePromise.resolve(value).then(resolve, reject);
+                try {
+                    uncurry(testPromiseThen, promise, function () {}, function () {});
+                } catch {
+                    // The timer failure is the useful result.
+                }
+                reject(testTimeoutUnavailable(name));
                 return;
             }
-            NativePromise.resolve(value).then(
-                function (fulfilled) {
-                    if (settled) return;
-                    settled = true;
-                    try {
-                        testCancelTimer(timer);
-                    } catch {
-                        // The timer already fired or was cleaned up.
-                    }
-                    resolve(fulfilled);
-                },
-                function (rejected) {
-                    if (settled) return;
-                    settled = true;
-                    try {
-                        testCancelTimer(timer);
-                    } catch {
-                        // The timer already fired or was cleaned up.
-                    }
-                    reject(rejected);
-                },
-            );
+            try {
+                uncurry(
+                    testPromiseThen,
+                    promise,
+                    function (fulfilled) {
+                        if (settled) return;
+                        settled = true;
+                        try {
+                            testCancelTimer(timer);
+                        } catch {
+                            // The timer already fired or was cleaned up.
+                        }
+                        resolve(fulfilled);
+                    },
+                    function (rejected) {
+                        if (settled) return;
+                        settled = true;
+                        try {
+                            testCancelTimer(timer);
+                        } catch {
+                            // The timer already fired or was cleaned up.
+                        }
+                        reject(rejected);
+                    },
+                );
+            } catch (error) {
+                settled = true;
+                try {
+                    testCancelTimer(timer);
+                } catch {
+                    // The timer already fired or was cleaned up.
+                }
+                reject(error);
+            }
         });
     }
 
-    function testDrain() {
+    function testDrain(milliseconds) {
+        const delay = milliseconds === undefined ? 1 : milliseconds;
         return new NativePromise(function (resolve) {
             if (typeof testCreateTimer !== "function") {
                 resolve(undefined);
@@ -5732,7 +5792,7 @@
                     function () {
                         resolve(undefined);
                     },
-                    1,
+                    delay,
                     undefined,
                     false,
                     true,
@@ -5742,6 +5802,22 @@
                 resolve(undefined);
             }
         });
+    }
+
+    /// Wait for a bounded number of event-loop turns and report whether the
+    /// runtime still sees pending work. `false` means the verdict is unsafe:
+    /// a detached timer, async op, dynamic import, or rejection event may
+    /// still change the result after the summary was built.
+    async function testSettle() {
+        if (typeof testEventLoopHasMoreWork !== "function") {
+            await testDrain();
+            return true;
+        }
+        for (let round = 0; round < TEST_SETTLE_ROUNDS; round += 1) {
+            await testDrain();
+            if (!testEventLoopHasMoreWork()) return true;
+        }
+        return false;
     }
 
     function testIsBlank(name) {
@@ -5779,22 +5855,28 @@
     }
 
     function testRunOptions(options) {
-        if (options === undefined) return true;
+        if (options === undefined) return { throwOnFailure: true, settle: false };
         if (options === null || typeof options !== "object") {
             throw new makeTypeError("run options must be an object");
         }
         const keys = objectKeys(options);
         for (let index = 0; index < keys.length; index += 1) {
-            if (keys[index] !== "throwOnFailure") {
+            if (keys[index] !== "throwOnFailure" && keys[index] !== "settle") {
                 throw new makeTypeError(`unknown run option \`${NativeString(keys[index])}\``);
             }
         }
-        const value = options.throwOnFailure;
-        if (value === undefined) return true;
-        if (typeof value !== "boolean") {
+        const throwOnFailure = options.throwOnFailure;
+        if (throwOnFailure !== undefined && typeof throwOnFailure !== "boolean") {
             throw new makeTypeError("run option throwOnFailure must be a boolean");
         }
-        return value;
+        const settle = options.settle;
+        if (settle !== undefined && typeof settle !== "boolean") {
+            throw new makeTypeError("run option settle must be a boolean");
+        }
+        return {
+            throwOnFailure: throwOnFailure === undefined ? true : throwOnFailure,
+            settle: settle === undefined ? false : settle,
+        };
     }
 
     function testSummaryObject() {
@@ -5804,6 +5886,7 @@
         defineField(summary, "failed", testFailed);
         defineField(summary, "pending", testPending);
         defineField(summary, "unhandled", testUnhandled);
+        defineField(summary, "unsettled", testUnsettled);
         const failures = [];
         for (let index = 0; index < testFailures.length; index += 1) {
             append(failures, testFailures[index]);
@@ -5818,6 +5901,7 @@
         append(parts, `${testFailed} failed`);
         if (testPending > 0) append(parts, `${testPending} pending`);
         if (testUnhandled > 0) append(parts, `${testUnhandled} unhandled`);
+        if (testUnsettled > 0) append(parts, `${testUnsettled} unsettled`);
         testPrintLine(`# ${arrayJoin(parts, ", ")}`);
     }
 
@@ -5920,14 +6004,21 @@
     /**
      * Run every queued test in registration order and return cumulative counts.
      *
-     * A failing test does not stop later tests. Failures, pending tests, and
-     * unhandled rejections are printed and retained. `options.throwOnFailure`
-     * defaults to true; the host passes false so it can read the report after a
-     * failing run. A callback that never settles is failed after its timeout,
-     * which defaults to 30 seconds and can be set per test.
+     * A failing test does not stop later tests. Failures, pending tests,
+     * unhandled rejections, and an unsettled event loop are printed and
+     * retained. `options.throwOnFailure` defaults to true and throws whenever
+     * the cumulative report has any failure, including one retained from an
+     * earlier call. The host passes false so it can read the report after a
+     * failing run. `options.settle` defaults to false and is intended for the
+     * host's final pass: a bounded event-loop settle check is only meaningful
+     * after the entry module has finished, because a call made from top-level
+     * await sees its own pending module evaluation. A callback that never
+     * settles is failed after its timeout, which defaults to 30 seconds and can
+     * be set per test.
      */
     async function run(options) {
-        const throwOnFailure = testRunOptions(options);
+        const runOptions = testRunOptions(options);
+        const throwOnFailure = runOptions.throwOnFailure;
         if (testRunning) {
             throw testError(
                 "NEO_TEST_ALREADY_RUNNING",
@@ -5935,9 +6026,6 @@
                 "Error",
             );
         }
-        const beforeFailed = testFailed;
-        const beforePending = testPending;
-        const beforeUnhandled = testUnhandled;
         testRunning = true;
         try {
             const start = testCursor;
@@ -5980,9 +6068,27 @@
                 }
             }
             testCursor = testQueueLength;
-            // Give deno_core a tick to deliver unhandled rejections that were
-            // queued by a test body but not returned from it.
-            await testDrain();
+            if (runOptions.settle) {
+                // Drain bounded event-loop work so a detached timer or async op
+                // that was scheduled by a test gets a chance to settle or
+                // reject. If the loop still reports work, the verdict is
+                // unsafe.
+                const settled = await testSettle();
+                if (!settled && !testUnsettledRecorded) {
+                    testUnsettledRecorded = true;
+                    testUnsettled = 1;
+                    const detail =
+                        `unsettled work: pending event-loop work remained after ` +
+                        `${TEST_SETTLE_ROUNDS} ms`;
+                    testRecordFailure(detail);
+                    testPrintLine(`# ${detail}`);
+                }
+            } else {
+                // Deliver microtask/macrotask rejection events without claiming
+                // to have observed all detached work. The host's final pass
+                // uses `settle: true`.
+                await testDrain();
+            }
         } finally {
             testRunning = false;
         }
@@ -5990,12 +6096,10 @@
         testPrintSummary();
         if (
             throwOnFailure &&
-            (testFailed > beforeFailed ||
-                testPending > beforePending ||
-                testUnhandled > beforeUnhandled)
+            (testFailed > 0 || testPending > 0 || testUnhandled > 0 || testUnsettled > 0)
         ) {
             throw new TestFailureError(
-                `${testFailed} failed, ${testPending} pending, ${testUnhandled} unhandled`,
+                `${testFailed} failed, ${testPending} pending, ${testUnhandled} unhandled, ${testUnsettled} unsettled`,
                 summary.failures,
             );
         }

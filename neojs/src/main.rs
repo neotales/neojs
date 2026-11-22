@@ -141,6 +141,7 @@ struct TestTotals {
     failed: u32,
     pending: u32,
     unhandled: u32,
+    unsettled: u32,
 }
 
 impl TestTotals {
@@ -151,10 +152,11 @@ impl TestTotals {
         self.failed += report.failed;
         self.pending += report.pending;
         self.unhandled += report.unhandled;
+        self.unsettled += report.unsettled;
     }
 
     fn all_passed(&self) -> bool {
-        self.failed == 0 && self.pending == 0 && self.unhandled == 0
+        self.failed == 0 && self.pending == 0 && self.unhandled == 0 && self.unsettled == 0
     }
 }
 
@@ -209,13 +211,14 @@ fn run_tests(patterns: &[String]) -> ExitCode {
     }
 
     println!(
-        "# {} selected file(s): {} test(s): {} passed, {} failed, {} pending, {} unhandled; {} file(s) failed",
+        "# {} selected file(s): {} test(s): {} passed, {} failed, {} pending, {} unhandled, {} unsettled; {} file(s) failed",
         files.len(),
         totals.total,
         totals.passed,
         totals.failed,
         totals.pending,
         totals.unhandled,
+        totals.unsettled,
         failed_files
     );
     if failed_files > 0 || !totals.all_passed() {
@@ -252,8 +255,7 @@ Neo.getBuiltInModule(\"strings\"), and Neo.getBuiltInModule(\"test\"), and as
 the import specifiers \"age\", \"neo:age\", \"assert\", \"neo:assert\",
 \"chars\", \"neo:chars\", \"console\", \"neo:console\", \"crypto\",
 \"neo:crypto\", \"path\", \"neo:path\", \"ssh\", \"neo:ssh\", \"stdio\",
-\"neo:stdio\", \"strings\", \"neo:strings\", \"test\", \"neo:test\", and the
-narrow alias \"node:test\".
+\"neo:stdio\", \"strings\", \"neo:strings\", \"test\", and \"neo:test\".
 The stdio module writes to this process's stdout and stderr and offers bounded
 in-memory byte streams; it adds no filesystem, process, environment, or stdin
 access. The ssh module requires an explicit host-key pin or known-hosts
@@ -262,9 +264,11 @@ command execution, authenticates with a password, an in-memory key, or an
 explicit Unix agent opt-in, and reads no files or environment except
 SSH_AUTH_SOCK in that agent mode. It never forwards an agent. The test module
 registers sync and async tests, treats a rejected Promise, a generator object,
-a pending test, a per-test timeout, and an unhandled rejection as failures,
-and is not Node's node:test. .cjs files, other neo: and node: imports, remote
-imports, module type attributes, and permissions are not.
+a pending test, a per-test timeout, an unhandled rejection, and event-loop work
+that remains after a bounded settle window as failures, and is not Node's
+node:test. node: modules, including node:test, are rejected while no explicit
+Node-module opt-in exists. .cjs files, other neo: imports, remote imports,
+module type attributes, and permissions are not.
 
 The test command expands every argument as an existing file or a shell-style
 glob. Globs are case-sensitive, * and ? do not cross a path separator, and a
@@ -273,7 +277,10 @@ canonical path and deduplicated, so overlapping arguments run once. A missing
 literal, a malformed glob, or a glob that selects no regular file is an error;
 there is no default discovery pattern. Each file gets a fresh runtime, so
 global state and the test queue do not leak between files, and a failed file
-does not stop later files. A file that registers no tests fails. Test files run
+does not stop later files. A file that registers no tests fails. The runner
+waits up to about 100 ms of event-loop turns for detached timers, async ops,
+imports, and rejection events; if work remains, the verdict is unsettled and
+fails rather than passing on partial evidence. Test files run
 with this process's full filesystem authority; there is no sandbox, watch
 mode, parallelism, filtering, retry, subtests, mocks, snapshots, or Node
 compatibility claim.
@@ -281,7 +288,8 @@ compatibility claim.
 Exit codes:
   0  the module finished, or every test file ran with no failures
   1  the module failed to compile, resolve imports, link, or run; or a test
-     failed, was pending, left an unhandled rejection, or registered no tests
+     failed, was pending, left an unhandled rejection or unsettled event-loop
+     work, or registered no tests
   2  neojs could not start (bad arguments, unreadable or unsupported entry file,
      or a test file/glob that could not be expanded)
 ",

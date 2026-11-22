@@ -3,7 +3,8 @@
 //!
 //! The scripts here install globals that neojs supplies: currently [`NEO_SHIM`],
 //! which defines the `Neo` object and its cached built-in modules. `chars`,
-//! `console`, `strings`, and `test` are plain ECMAScript; `assert` calls one
+//! `console`, `strings`, and `test` are implemented in the shim without a
+//! private host op; `assert` calls one
 //! private host op registered by [`crate::assert`] to observe a genuine native
 //! Promise.
 //! `crypto` calls private host ops registered by [`crate::crypto`],
@@ -54,8 +55,7 @@
 //! [`AGE_SPECIFIER`], [`ASSERT_SPECIFIER`], [`CHARS_SPECIFIER`],
 //! [`CONSOLE_SPECIFIER`], [`CRYPTO_SPECIFIER`], [`PATH_SPECIFIER`],
 //! [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], [`STRINGS_SPECIFIER`], and
-//! [`TEST_SPECIFIER`], and for their bare names. `node:test` resolves to
-//! [`TEST_SPECIFIER`] as a narrow alias.
+//! [`TEST_SPECIFIER`], and for their bare names.
 //! All read the public module objects installed by [`NEO_SHIM`], so the registry
 //! and the module bindings share identity. `assert` is the frozen callable
 //! `assert` function itself, with its named assertions as properties; it also
@@ -220,9 +220,10 @@ const STRINGS_MODULE: &str = include_str!("builtins/strings.esm.js");
 
 /// The canonical module specifier for the `test` built-in.
 ///
-/// Both `"test"`, `"neo:test"`, and the narrow alias `"node:test"` resolve to
-/// this URL, so the engine caches one module instance for all three spellings.
-/// It is not a `file:` URL and is never read from disk.
+/// Both `"test"` and `"neo:test"` resolve to this URL, so the engine caches one
+/// module instance for both spellings. It is not a `file:` URL and is never
+/// read from disk. `node:test` is deliberately not an alias while neojs has no
+/// explicit Node-module opt-in.
 pub(crate) const TEST_SPECIFIER: &str = "neo:test";
 
 /// The ECMAScript module source served for [`TEST_SPECIFIER`].
@@ -230,8 +231,7 @@ pub(crate) const TEST_SPECIFIER: &str = "neo:test";
 /// It re-exports the callable `test` function and the runner helpers from the
 /// public `test` module object, so the module and
 /// `Neo.getBuiltInModule("test")` share identity. The implementation is in
-/// [`NEO_SHIM`]; it calls no host op. The `node:test` spelling is an alias for
-/// this module only; no other Node built-in is implemented.
+/// [`NEO_SHIM`]; it calls no host op.
 const TEST_MODULE: &str = include_str!("builtins/test.esm.js");
 
 /// Registry name and canonical specifier for each implemented built-in module.
@@ -268,12 +268,6 @@ pub(crate) fn resolve_name(name: &str) -> Option<&'static str> {
 /// that is not listed is not treated as a module name, and a relative or
 /// absolute path is never intercepted.
 pub(crate) fn resolve(specifier: &str) -> Option<&'static str> {
-    // `node:test` is the one Node built-in neojs provides. It is the same
-    // module as `test` and `neo:test`, so a portable test file can keep the
-    // import it already has without claiming Node compatibility.
-    if specifier == "node:test" {
-        return Some(TEST_SPECIFIER);
-    }
     resolve_name(specifier.strip_prefix("neo:").unwrap_or(specifier))
 }
 
@@ -296,13 +290,10 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
 
 /// Human-readable list of implemented built-in specifiers, for error messages.
 pub(crate) fn implemented_specifiers() -> String {
-    let mut specifiers = Vec::with_capacity(BUILTINS.len() * 2 + 1);
+    let mut specifiers = Vec::with_capacity(BUILTINS.len() * 2);
     for (registry, canonical) in BUILTINS {
         specifiers.push(*registry);
         specifiers.push(*canonical);
-        if *registry == "test" {
-            specifiers.push("node:test");
-        }
     }
     specifiers.join(", ")
 }

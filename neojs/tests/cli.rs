@@ -130,6 +130,20 @@ fn run_args(args: &[&str]) -> Output {
         .expect("spawn neojs")
 }
 
+/// Runs the command and fails the test if it is still alive at `timeout`.
+///
+/// Used by the test-runner lifecycle cases: a leaked refed timer must not keep
+/// the test command alive after the runner has returned its verdict.
+fn run_args_with_timeout(args: &[&str], timeout: Duration) -> Output {
+    let child = Command::new(env!("CARGO_BIN_EXE_neojs"))
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn neojs");
+    run_child(child, timeout)
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -1478,7 +1492,7 @@ fn prints_help_and_version() {
     assert!(stdout(&help).contains("neojs test <file-or-glob>..."));
     assert!(stdout(&help).contains("age, assert, chars, console, crypto, path, ssh,"));
     assert!(stdout(&help).contains("stdio, strings, and test built-in modules are implemented"));
-    assert!(stdout(&help).contains("node:test"));
+    assert!(stdout(&help).contains("Node-module opt-in"));
 
     let version = run_args(&["--version"]);
     assert_eq!(version.status.code(), Some(0));
@@ -2465,7 +2479,7 @@ fn test_command_expands_files_and_globs_without_duplicates() {
     );
     project.write(
         "sub/c.test.js",
-        "import test from \"node:test\";\ntest(\"c\", () => {});\n",
+        "import test from \"test\";\ntest(\"c\", () => {});\n",
     );
     let dir = project.dir.path().to_str().expect("utf-8 path");
     let literal = format!("{dir}/a.test.js");
@@ -2724,4 +2738,75 @@ try {
     let printed = stdout(&output);
     assert!(printed.contains("not ok 1 - fails once"), "{printed}");
     assert!(printed.contains("1 failed"), "{printed}");
+}
+
+/// `node:test` is not an alias. Node modules need an explicit opt-in, which
+/// this build does not have.
+#[test]
+fn test_command_rejects_node_test_without_an_opt_in() {
+    let project = Project::new();
+    let file = project.write(
+        "node.test.js",
+        "import test from \"node:test\";\ntest(\"x\", () => {});\n",
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let message = stderr(&output);
+    assert!(
+        message.contains("Node.js built-in modules are not implemented"),
+        "{message}"
+    );
+    assert!(message.contains("node:test"), "{message}");
+}
+
+/// Replacing Promise.resolve or Promise.prototype.then after the shim runs
+/// must not make a never-settling test look settled.
+#[test]
+fn test_command_timeout_survives_replaced_promise_intrinsics() {
+    let project = Project::new();
+    let file = project.write(
+        "promise-ops.test.js",
+        r#"
+import test from "test";
+Promise.resolve = () => ({ then: (fulfilled) => fulfilled() });
+Promise.prototype.then = function (fulfilled) { fulfilled(); return this; };
+test("never settles", () => new Promise(() => {}), { timeout: 20 });
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(printed.contains("not ok 1 - never settles"), "{printed}");
+    assert!(printed.contains("did not settle within 20 ms"), "{printed}");
+}
+
+/// A refed timer left by a test is discoverable event-loop work. The settle
+/// window is bounded, the run is reported unsettled, and the runtime is
+/// dropped without waiting for the timer.
+#[test]
+fn test_command_fails_unsettled_detached_timer_without_hanging() {
+    let project = Project::new();
+    let file = project.write(
+        "detached.test.js",
+        r#"
+import test from "test";
+test("leaves a long timer", () => {
+    Deno.core.createTimer(() => {}, 60_000, undefined, false, true, false);
+});
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args_with_timeout(&["test", path], Duration::from_secs(10));
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(printed.contains("unsettled work"), "{printed}");
+    assert!(printed.contains("1 unsettled"), "{printed}");
 }

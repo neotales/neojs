@@ -3142,3 +3142,110 @@ test("async pass", async () => { await Promise.resolve(); });
         assert!(report.all_passed());
     });
 }
+
+/// The default `run()` throws whenever the cumulative retained report has a
+/// failure, including on a second call with no new tests.
+#[test]
+fn test_built_in_repeated_run_throws_on_retained_failure() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write_module(
+        &dir,
+        "main.js",
+        r#"
+import test, { run, TestFailureError } from "test";
+test("fails once", () => { throw new Error("retained"); });
+let first = false;
+let second = false;
+try { await run(); } catch (error) { first = error instanceof TestFailureError; }
+try { await run(); } catch (error) { second = error instanceof TestFailureError; }
+if (!first || !second) throw new Error(`repeated run: ${first}/${second}`);
+"#,
+    );
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_file(&file)
+        .expect("both default runs must throw and be caught");
+    let report = runtime.run_tests().expect("run tests");
+
+    assert_eq!(report.total, 1);
+    assert_eq!(report.failed, 1);
+    assert!(!report.all_passed());
+}
+
+/// A refed timer left by a test is reported as unsettled after the bounded
+/// settle window, and `run_tests` returns instead of waiting for it.
+#[test]
+fn test_built_in_reports_unsettled_detached_timer() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write_module(
+        &dir,
+        "main.js",
+        r#"
+import test from "test";
+test("leaves a long timer", () => {
+    Deno.core.createTimer(() => {}, 60_000, undefined, false, true, false);
+});
+"#,
+    );
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime.run_file(&file).expect("run file");
+    let report = runtime.run_tests().expect("run tests");
+
+    assert_eq!(report.total, 1);
+    assert_eq!(report.passed, 1);
+    assert_eq!(report.unsettled, 1);
+    assert!(!report.all_passed());
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|line| line.contains("unsettled work")),
+        "{:?}",
+        report.failures
+    );
+}
+
+/// A short detached timer that rejects is drained inside the bounded settle
+/// window and reported as an unhandled rejection, not silently lost and not
+/// mislabeled as unsettled.
+#[test]
+fn test_built_in_drains_short_detached_rejection() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write_module(
+        &dir,
+        "main.js",
+        r#"
+import test from "test";
+test("late rejection", () => {
+    Deno.core.createTimer(
+        () => { Promise.reject(new Error("late rejection")); },
+        10,
+        undefined,
+        false,
+        true,
+        false,
+    );
+});
+"#,
+    );
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime.run_file(&file).expect("run file");
+    let report = runtime.run_tests().expect("run tests");
+
+    assert_eq!(report.total, 1);
+    assert_eq!(report.passed, 1);
+    assert_eq!(report.unhandled, 1);
+    assert_eq!(report.unsettled, 0);
+    assert!(!report.all_passed());
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|line| line.contains("late rejection")),
+        "{:?}",
+        report.failures
+    );
+}

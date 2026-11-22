@@ -9,8 +9,7 @@
 //! `Neo.getBuiltInModule(name)` and through the module specifiers `age`,
 //! `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
 //! `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`,
-//! `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`, `neo:test`, and the
-//! narrow alias `node:test`.
+//! `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`, and `neo:test`.
 //!
 //! `assert` is a synchronous assertion surface inspired by Node's
 //! `assert/strict` and Deno's `@std/assert`. The registry object is the
@@ -42,13 +41,18 @@
 //! queue after the entry module settles, so tests registered after a top-level
 //! await are included, and it gives each file a fresh [`Runtime`]. `run()`
 //! returns cumulative counts and throws `TestFailureError` (`code`
-//! `"NEO_TEST_FAILURES"`) unless called with `{ throwOnFailure: false }`, which
-//! is what the host does. A rejected Promise, a rejected thenable, a timeout,
-//! a generator object, and an unhandled rejection are failures. The default
-//! per-test timeout is 30 seconds and can be set with `{ timeout }`. The module
-//! is available as `test`, `neo:test`, and the narrow alias `node:test`; no
-//! other Node built-in is implemented. It is not Node's `node:test`: there are
-//! no subtests, hooks, mocks, snapshots, tags, filters, retries, or parallel
+//! `"NEO_TEST_FAILURES"`) whenever that cumulative report has a failure, unless
+//! called with `{ throwOnFailure: false }`, which is what the host does. The
+//! host also passes `{ settle: true }` for a bounded event-loop settle check; a
+//! user call inside top-level await must leave `settle` false because it would
+//! see its own pending module evaluation. A
+//! rejected Promise, a rejected thenable, a timeout, a generator object, an
+//! unhandled rejection, and event-loop work that remains after a bounded settle
+//! window are failures. The default per-test timeout is 30 seconds and can be
+//! set with `{ timeout }`. The module is available as `test` and `neo:test`;
+//! `node:` modules, including `node:test`, remain rejected while no explicit
+//! Node-module opt-in exists. It is not Node's `node:test`: there are no
+//! subtests, hooks, mocks, snapshots, tags, filters, retries, or parallel
 //! tests, and `test()` returns `undefined`. Tests in one file share one realm
 //! and its mutable state, so this is not isolation or a sandbox.
 //!
@@ -186,10 +190,11 @@
 //! evaluated, so a method replaced before then is what they capture; later
 //! replacements are not followed. Neither path follows a replacement of the
 //! whole `globalThis.console` property. It does not provide other `neo:` or
-//! `node:` import specifiers except the `node:test` alias described above;
-//! CommonJS (`.cjs` and `.cts` files), remote imports, module type attributes,
-//! and a permission system are not implemented. See the repository README for
-//! the full list of limits.
+//! `node:` import specifiers; `node:` modules, including `node:test`, remain
+//! rejected while no explicit Node-module opt-in exists. CommonJS (`.cjs` and
+//! `.cts` files), remote imports, module type attributes, and a permission
+//! system are not implemented. See the repository README for the full list of
+//! limits.
 //!
 //! A [`Runtime`] owns two Tokio runtimes: a multi-thread driver with one worker
 //! thread for V8's delayed foreground tasks and `crypto`'s bounded blocking

@@ -138,14 +138,18 @@ pub struct TestReport {
     pub pending: u32,
     /// Unhandled Promise rejections observed while the test module was active.
     pub unhandled: u32,
+    /// 1 when the event loop still reported pending work after the bounded
+    /// settle window, otherwise 0. An unsettled verdict is a failure.
+    pub unsettled: u32,
     /// One summary line per failure, in execution order.
     pub failures: Vec<String>,
 }
 
 impl TestReport {
-    /// True when no test failed, no test is pending, and no rejection was unhandled.
+    /// True when no test failed, none is pending, no rejection was unhandled,
+    /// and no event-loop work was left unsettled.
     pub fn all_passed(&self) -> bool {
-        self.failed == 0 && self.pending == 0 && self.unhandled == 0
+        self.failed == 0 && self.pending == 0 && self.unhandled == 0 && self.unsettled == 0
     }
 }
 
@@ -153,14 +157,14 @@ impl Runtime {
     /// Creates a runtime and installs the console and built-in module shims.
     ///
     /// The runtime has one realm. The `age`, `assert`, `chars`, `console`,
-    /// `crypto`, `path`, `ssh`, `stdio`, and `strings` built-in modules are
-    /// cached in that realm, and both bare and `neo:`-prefixed import
+    /// `crypto`, `path`, `ssh`, `stdio`, `strings`, and `test` built-in modules
+    /// are cached in that realm, and both bare and `neo:`-prefixed import
     /// specifiers resolve to them; a new `Runtime` creates a new realm, new
     /// functions, and new module instances. The `age`, `crypto`, `path`, `ssh`,
     /// and `stdio` modules
     /// register their private host ops in that realm before user code runs;
-    /// `chars` and `strings` are plain ECMAScript, and `assert` calls one
-    /// private Promise-observation host op. The `console`
+    /// `chars`, `strings`, and `test` are plain ECMAScript, and `assert` calls
+    /// one private Promise-observation host op. The `console`
     /// module's object is the console object the runtime installed: its default
     /// export's value is that object, and its
     /// named exports are that object's method values when the module is
@@ -344,13 +348,21 @@ impl Runtime {
     /// current-thread executor, so it must not be called from inside a Tokio
     /// runtime; use [`Runtime::run_tests_async`] there.
     ///
-    /// A failing test, a pending test, or an unhandled rejection is reported in
-    /// the returned [`TestReport`], not as an `Err`. `Err` means the runner
-    /// itself failed or its counts were inconsistent. The test module prints
+    /// A failing test, a pending test, an unhandled rejection, or a bounded
+    /// settle window that still reports event-loop work is recorded in the
+    /// returned [`TestReport`], not as an `Err`. `Err` means the runner itself
+    /// failed or its counts were inconsistent. The test module prints
     /// `ok`/`not ok` lines and a summary to the process's standard output; a
     /// test can replace `Deno.core`, so that output is observable but not a
     /// security boundary. The runtime is not a sandbox and a synchronous
     /// callback that never returns still hangs the process.
+    ///
+    /// The runner waits up to about 100 ms of event-loop turns after the tests.
+    /// If the runtime still reports pending timers, async ops, imports, or
+    /// rejection events, the verdict is marked unsettled and fails. Unrefed
+    /// work that the event loop does not report is outside this check. The
+    /// report does not cancel outstanding work; dropping the runtime discards
+    /// it.
     ///
     /// # Example
     ///
@@ -431,7 +443,8 @@ async fn run_entry(js: &mut JsRuntime, consumed: &mut bool, path: &Path) -> Resu
 /// `throwOnFailure: false` makes the runner return its report even when tests
 /// failed; the host decides the exit status. `Neo` and its module registry are
 /// installed as non-writable globals before user code runs.
-const TEST_RUN_SCRIPT: &str = r#"Neo.getBuiltInModule("test").run({ throwOnFailure: false })"#;
+const TEST_RUN_SCRIPT: &str =
+    r#"Neo.getBuiltInModule("test").run({ throwOnFailure: false, settle: true })"#;
 
 /// Runs the `test` built-in and reads its cumulative report.
 async fn run_tests(js: &mut JsRuntime) -> Result<TestReport, Error> {
@@ -477,6 +490,7 @@ fn read_test_report(js: &mut JsRuntime, value: v8::Global<v8::Value>) -> Result<
     let failed = number("failed")?;
     let pending = number("pending")?;
     let unhandled = number("unhandled")?;
+    let unsettled = number("unsettled")?;
     if passed
         .checked_add(failed)
         .and_then(|count| count.checked_add(pending))
@@ -484,6 +498,11 @@ fn read_test_report(js: &mut JsRuntime, value: v8::Global<v8::Value>) -> Result<
     {
         return Err(Error::TestRunner(
             "the test counts do not add up".to_string(),
+        ));
+    }
+    if unsettled > 1 {
+        return Err(Error::TestRunner(
+            "the `unsettled` field must be 0 or 1".to_string(),
         ));
     }
 
@@ -511,10 +530,11 @@ fn read_test_report(js: &mut JsRuntime, value: v8::Global<v8::Value>) -> Result<
     let expected_failures = failed
         .checked_add(pending)
         .and_then(|count| count.checked_add(unhandled))
+        .and_then(|count| count.checked_add(unsettled))
         .ok_or_else(|| Error::TestRunner("the test failure count overflowed".to_string()))?;
     if lines.len() as u64 != u64::from(expected_failures) {
         return Err(Error::TestRunner(format!(
-            "the test report has {} failure line(s) for {} failed, pending, or unhandled test(s)",
+            "the test report has {} failure line(s) for {} failed, pending, unhandled, or unsettled result(s)",
             lines.len(),
             expected_failures
         )));
@@ -526,6 +546,7 @@ fn read_test_report(js: &mut JsRuntime, value: v8::Global<v8::Value>) -> Result<
         failed,
         pending,
         unhandled,
+        unsettled,
         failures: lines,
     })
 }

@@ -538,8 +538,8 @@ this is a test helper in the caller's realm, not an isolation boundary.
 
 **Run tests.** `neojs test` takes one or more files or shell-style globs, expands them
 deterministically, sorts the selected files by canonical path, removes duplicates, and runs each
-file in a fresh runtime. `test`, `neo:test`, and the narrow alias `node:test` import the same
-built-in module. `test(name, fn)` accepts a synchronous or async callback; `test(name)` registers a
+file in a fresh runtime. `test` and `neo:test` import the same built-in module.
+`test(name, fn)` accepts a synchronous or async callback; `test(name)` registers a
 pending test, which fails the run.
 
 `math.test.js`:
@@ -567,16 +567,28 @@ test /repo/tests/math.test.js:
 ok 1 - adds
 ok 2 - adds asynchronously
 # 2 tests, 2 passed, 0 failed
-# 1 selected file(s): 2 test(s): 2 passed, 0 failed, 0 pending, 0 unhandled; 0 file(s) failed
+# 1 selected file(s): 2 test(s): 2 passed, 0 failed, 0 pending, 0 unhandled, 0 unsettled; 0 file(s) failed
 ```
 
 The runner is registration-based, not Node's `node:test`. The CLI runs it after the entry module
 settles, so a test registered after a top-level `await` is included. A file that registers no tests
 fails. A rejected Promise, a rejected thenable, a returned generator object, a pending test, an
-unhandled rejection, and a test that does not settle within its timeout are failures, so none can
-look like a pass. The default timeout is 30 seconds and can be set per test:
+unhandled rejection, a test that does not settle within its timeout, and event-loop work that
+remains after a bounded settle window are failures, so none can look like a pass. The default
+timeout is 30 seconds and can be set per test:
 `test("slow", fn, { timeout: 60_000 })`. `run()` returns cumulative counts and, unless called with
-`{ throwOnFailure: false }`, throws `TestFailureError` (`code: "NEO_TEST_FAILURES"`).
+`{ throwOnFailure: false }`, throws `TestFailureError` (`code: "NEO_TEST_FAILURES"`) whenever that
+cumulative report has a failure, including a failure from an earlier call. The host also passes
+`{ settle: true }` for its bounded event-loop check; a user call inside a top-level `await` must
+leave `settle` false because it would see its own pending module evaluation.
+
+After the queue, the runner waits up to about 100 ms of event-loop turns for detached timers, async
+ops, dynamic imports, and rejection events. If deno_core still reports pending work, the report is
+marked unsettled and fails; an unrefed task that the event loop does not report is outside this
+guarantee. Work scheduled at module top level is part of module evaluation, so a refed top-level
+timer can keep `run_file` waiting before the test runner starts; keep detached work inside test
+callbacks or do not schedule it. `node:` modules, including `node:test`, remain rejected while no
+explicit Node-module opt-in exists.
 
 A failed file does not stop later files, and each file gets its own isolate so globals, module state,
 and the queue do not leak. A literal file, a malformed glob, and a glob that selects no regular file
@@ -1128,8 +1140,8 @@ thread that will use it; it is not `Send`.
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
 local module loading, imports of the `age`, `assert`, `chars`, `console`, `crypto`, `path`, `ssh`,
-`stdio`, `strings`, and `test` built-ins by their bare or `neo:` specifiers (and `node:test` for the
-test module), console output, `neojs test` over multiple files and globs, bounded in-memory byte
+`stdio`, `strings`, and `test` built-ins by their bare or `neo:` specifiers, console output,
+`neojs test` over multiple files and globs, bounded in-memory byte
 streams, writes to the process's stdout and stderr, lexical POSIX and Windows path operations, SHA-2
 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
@@ -1142,8 +1154,9 @@ list are not implemented.
   rejected by extension. CommonJS is rejected by the `.cjs` and `.cts` extensions; a `.js` file
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
-- `node:`, `npm:`, `jsr:`, `http:`, `https:`, `data:`, and `blob:` imports are rejected, with one
-  exception: `node:test` resolves to the `test` built-in. The built-in modules are `age`, `assert`,
+- `node:`, `npm:`, `jsr:`, `http:`, `https:`, `data:`, and `blob:` imports are rejected. In
+  particular, `node:test` is not an alias for the `test` built-in; a
+  Node-module opt-in is not implemented. The built-in modules are `age`, `assert`,
   `chars`, `console`, `crypto`, `path`, `ssh`, `stdio`, `strings`, and `test`, reached through
   `Neo.getBuiltInModule("age")`,
   `Neo.getBuiltInModule("assert")`, `Neo.getBuiltInModule("chars")`,
@@ -1153,7 +1166,7 @@ list are not implemented.
   `Neo.getBuiltInModule("test")`, or through the import
   specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
   `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`, `stdio`,
-  `neo:stdio`, `strings`, `neo:strings`, `test`, `neo:test`, and `node:test`. Other `neo:` modules
+  `neo:stdio`, `strings`, `neo:strings`, `test`, and `neo:test`. Other `neo:` modules
   are rejected by name. Bare module specifiers that are not a built-in, and import maps, are not
   supported.
 - Module type attributes are rejected. `with { type: "json" }`, `with { type: "text" }`, `with {
@@ -1167,9 +1180,10 @@ list are not implemented.
   globals they expose; the `console` module writes to the process streams already used by the
   global console. `assert` calls one host op that observes a genuine native Promise's settlement by
   attaching settlement handlers without reading a user `then` or consulting `Symbol.species`; it
-  adds no other capability. `test` is plain ECMAScript and writes only to the process's standard
-  output; it registers no host op and adds no filesystem, environment, network, or process
-  authority. It runs test callbacks in this realm, so it is not isolation or a sandbox.
+  adds no other capability. `test` is implemented in the realm and registers no private host op; it
+  uses the runtime's existing print, timer, and event-loop primitives and adds no filesystem,
+  environment, network, or process authority. It runs test callbacks in this realm, so it is not
+  isolation or a sandbox.
   `age` calls four host ops for X25519 identity generation and binary age v1 encryption/decryption.
   `crypto` calls thirty-two host ops: four for the operating system CSPRNG and AES-256-GCM, eight
   for bounded stateful AES-256-CBC/AES-256-GCM ciphers, seven for SHA-2 hashing and HMAC, seven for
@@ -1209,8 +1223,9 @@ list are not implemented.
   from `deno_core`; their behaviour is not part of neojs's documented surface.
 - Exit codes: `0` the module finished, or every selected test file ran with no failures; `1` the
   module failed to compile, resolve imports, link, or run, or a test failed, was pending, left an
-  unhandled rejection, or registered no tests; `2` neojs could not start (bad arguments, unreadable
-  or unsupported entry file, or a test file/glob that could not be expanded).
+  unhandled rejection or unsettled event-loop work, or registered no tests; `2` neojs could not
+  start (bad arguments, unreadable or unsupported entry file, or a test file/glob that could not be
+  expanded).
 
 Built on `deno_core` 0.413.0, with type stripping by `deno_ast` 0.53.3, test-file expansion by
 `glob` 0.3.4, AES-256-GCM by
@@ -1231,7 +1246,8 @@ module in the same project; the adaptation renames the equality surface, adds id
 forms, and changes Map-entry rollback and callback handling. The `test` module adapts the
 registration queue, failure bookkeeping, report shape, and prototype-independent append helpers from
 the MIT-licensed `neo:test` module in the same project; the adaptation adds async callbacks,
-per-test timeouts, pending tests, unhandled-rejection capture, and the host report. The `stdio`
+per-test timeouts, pending tests, unhandled-rejection capture, a bounded event-loop settle check,
+and the host report. The `stdio`
 module's API shape and error
 conventions are informed by the MIT-licensed `neo:io` and `neo:process` modules in the same project;
 its implementation and tests are original, so no additional notice is required for it. The `path`
