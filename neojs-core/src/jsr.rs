@@ -53,9 +53,11 @@
 //!
 //! Package metadata (`meta.json`) supplies published versions and yank state.
 //! Version metadata (`<version>_meta.json`) supplies the file manifest and
-//! normalized exports. The version metadata has no version field, so it cannot
-//! prove which version it belongs to; a caller must pair it with the selected
-//! version, for example through a lockfile.
+//! normalized exports. The document has no package or version field, so it
+//! cannot prove its own identity. [`VersionMetadata::parse`] therefore takes
+//! the [`PackageVersion`] the caller fetched it for and stores that binding;
+//! [`resolve_module`] rejects metadata whose binding does not match the version
+//! selected from package metadata.
 //!
 //! [`VersionMetadata::verify_file`] checks a file's byte length and
 //! `sha256-<lowercase hex>` checksum against the manifest before a later loader
@@ -63,10 +65,15 @@
 //! does not establish publisher identity and does not protect an extracted
 //! cache from later mutation.
 //!
-//! JSON parsing uses `serde_json`. Duplicate object keys are not diagnosed and
-//! the last value wins; this parser is the only interpreter of those bytes in
-//! this process. The `moduleGraph1` and `moduleGraph2` fields are not
-//! interpreted; they are a fetch optimization, not part of module identity.
+//! JSON parsing uses `serde_json`. A duplicate recognized field on a fixed
+//! object (for example the top-level `scope` or `name`, or a manifest entry's
+//! `size` or `checksum`) is rejected by serde. A duplicate key inside a
+//! map-like object (`versions` entries, `manifest` entries, or `exports`
+//! entries) is not diagnosed; serde_json inserts into a `BTreeMap` and the last
+//! value wins. This parser is the only interpreter of those bytes in this
+//! process, but a duplicate map key remains ambiguity that a later cache or
+//! lockfile must not inherit. The `moduleGraph1` and `moduleGraph2` fields are
+//! not interpreted; they are a fetch optimization, not part of module identity.
 //!
 //! # Remaining integration
 //!
@@ -191,6 +198,25 @@ pub(crate) struct PackageId {
 impl fmt::Display for PackageId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "@{}/{}", self.scope, self.name)
+    }
+}
+
+/// A validated package identity at one exact version.
+///
+/// This is the identity that binds version metadata to what was fetched. A
+/// `PackageVersion` is constructed from a validated [`PackageId`] and an exact
+/// parsed [`Version`]; it is not parsed from untrusted text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PackageVersion {
+    /// The package.
+    pub(crate) package: PackageId,
+    /// The exact version.
+    pub(crate) version: Version,
+}
+
+impl fmt::Display for PackageVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}@{}", self.package, self.version)
     }
 }
 
@@ -550,9 +576,11 @@ impl PackageMetadata {
     }
 }
 
-/// Validated `<version>_meta.json` version metadata.
+/// Validated `<version>_meta.json` version metadata bound to one package
+/// version.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VersionMetadata {
+    package_version: PackageVersion,
     manifest: BTreeMap<String, ManifestEntry>,
     exports: Option<BTreeMap<String, String>>,
 }
@@ -605,14 +633,20 @@ impl ExportTarget {
 }
 
 impl VersionMetadata {
-    /// Parses and validates one `<version>_meta.json` document.
+    /// Parses and validates one `<version>_meta.json` document for a known
+    /// [`PackageVersion`].
+    ///
+    /// The document itself has no package or version field, so the binding is
+    /// the caller's assertion about what was fetched. [`resolve_module`] checks
+    /// that binding against the package metadata before resolving an
+    /// entrypoint.
     ///
     /// Manifest paths, export keys, and export targets are validated, and each
     /// checksum must be `sha256-` followed by 64 lowercase hex characters.
     /// Export targets are not required to appear in the manifest here;
     /// [`Self::resolve_export`] reports that inconsistency when an entrypoint is
     /// actually requested.
-    pub(crate) fn parse(json: &str) -> Result<Self, Error> {
+    pub(crate) fn parse(json: &str, package_version: PackageVersion) -> Result<Self, Error> {
         if json.len() > MAX_METADATA_BYTES {
             return Err(Error::Metadata(format!(
                 "the version metadata is {} bytes, over the {MAX_METADATA_BYTES}-byte limit",
@@ -677,7 +711,16 @@ impl VersionMetadata {
             }
         };
 
-        Ok(Self { manifest, exports })
+        Ok(Self {
+            package_version,
+            manifest,
+            exports,
+        })
+    }
+
+    /// Returns the package version this metadata was parsed for.
+    pub(crate) fn package_version(&self) -> &PackageVersion {
+        &self.package_version
     }
 
     /// Resolves an export key to its manifest entry.
@@ -790,10 +833,9 @@ impl fmt::Display for ResolvedModule {
 
 /// Resolves a parsed specifier against package and version metadata.
 ///
-/// The package metadata must describe the specifier's package. The caller must
-/// pass the version metadata for the version selected by the package metadata;
-/// the version metadata has no version field, so this function cannot verify
-/// that pairing.
+/// The package metadata must describe the specifier's package. The version
+/// metadata must be bound to the exact package version selected from that
+/// package metadata; a mismatch is rejected before any entrypoint is resolved.
 pub(crate) fn resolve_module(
     specifier: &Specifier,
     package: &PackageMetadata,
@@ -806,10 +848,20 @@ pub(crate) fn resolve_module(
         )));
     }
     let selected = package.select(&specifier.constraint)?;
-    let target = version_metadata.resolve_export(&specifier.export_key())?;
-    Ok(ResolvedModule {
+    let expected = PackageVersion {
         package: package.package.clone(),
         version: selected.version,
+    };
+    if version_metadata.package_version() != &expected {
+        return Err(Error::Metadata(format!(
+            "version metadata is for `{}`, but the specifier resolves to `{expected}`",
+            version_metadata.package_version()
+        )));
+    }
+    let target = version_metadata.resolve_export(&specifier.export_key())?;
+    Ok(ResolvedModule {
+        package: expected.package,
+        version: expected.version,
         yanked: selected.yanked,
         target,
     })
@@ -1032,8 +1084,23 @@ mod tests {
         Specifier::parse(input).expect("specifier fixture")
     }
 
+    fn package_version(version: &str) -> PackageVersion {
+        PackageVersion {
+            package: PackageId {
+                scope: "scope".to_owned(),
+                name: "pkg".to_owned(),
+            },
+            version: Version::parse(version).expect("version fixture"),
+        }
+    }
+
+    fn version_metadata_for(version: &str) -> VersionMetadata {
+        VersionMetadata::parse(VERSION_JSON, package_version(version))
+            .expect("version metadata fixture")
+    }
+
     fn version_metadata() -> VersionMetadata {
-        VersionMetadata::parse(VERSION_JSON).expect("version metadata fixture")
+        version_metadata_for("1.1.0")
     }
 
     fn select(
@@ -1265,6 +1332,55 @@ mod tests {
         assert!(error.contains("lowercase ASCII"), "{error}");
     }
 
+    // Unit test: duplicate fixed JSON fields; exact assertion on serde rejection.
+    #[test]
+    fn rejects_duplicate_fixed_json_fields() {
+        let duplicate_scope =
+            r#"{"scope":"scope","scope":"other","name":"pkg","versions":{"1.0.0":{}}}"#;
+        let error = error_text(PackageMetadata::parse(duplicate_scope));
+        assert!(error.contains("duplicate field `scope`"), "{error}");
+
+        let duplicate_checksum = format!(
+            r#"{{"manifest":{{"/mod.ts":{{"size":24,"checksum":"{MOD_SHA}","checksum":"{JOIN_SHA}"}}}},"exports":{{".":"./mod.ts"}}}}"#
+        );
+        let error = error_text(VersionMetadata::parse(
+            &duplicate_checksum,
+            package_version("1.1.0"),
+        ));
+        assert!(error.contains("duplicate field `checksum`"), "{error}");
+    }
+
+    // Unit test: duplicate map entries; exact assertions on last-value wins.
+    #[test]
+    fn duplicate_map_entries_use_the_last_value() {
+        let duplicate_versions =
+            r#"{"scope":"scope","name":"pkg","versions":{"1.0.0":{},"1.0.0":{"yanked":true}}}"#;
+        let package = PackageMetadata::parse(duplicate_versions).expect("last version entry wins");
+        let selected = package
+            .select(&VersionConstraint::parse("1.0.0").expect("constraint"))
+            .expect("selected version");
+        assert!(selected.yanked);
+
+        let duplicate_manifest = format!(
+            r#"{{"manifest":{{"/mod.ts":{{"size":24,"checksum":"{JOIN_SHA}"}},"/mod.ts":{{"size":24,"checksum":"{MOD_SHA}"}}}},"exports":{{".":"./mod.ts"}}}}"#
+        );
+        let metadata = VersionMetadata::parse(&duplicate_manifest, package_version("1.1.0"))
+            .expect("last manifest entry wins");
+        metadata
+            .verify_file("/mod.ts", MOD_FILE)
+            .expect("last checksum wins");
+
+        let duplicate_exports = format!(
+            r#"{{"manifest":{{"/mod.ts":{{"size":24,"checksum":"{MOD_SHA}"}},"/join.ts":{{"size":45,"checksum":"{JOIN_SHA}"}}}},"exports":{{".":"./mod.ts",".":"./join.ts"}}}}"#
+        );
+        let metadata = VersionMetadata::parse(&duplicate_exports, package_version("1.1.0"))
+            .expect("last export entry wins");
+        assert_eq!(
+            metadata.resolve_export(".").expect("default export").path,
+            "/join.ts"
+        );
+    }
+
     // Unit test: export resolution and exact version identity.
     #[test]
     fn resolves_entrypoints_and_builds_exact_identities() {
@@ -1288,16 +1404,24 @@ mod tests {
         assert_eq!(join.canonical_specifier(), "jsr:@scope/pkg@1.1.0/join");
         assert_eq!(join.registry_path(), "@scope/pkg/1.1.0/join.ts");
 
-        let yanked = resolve_module(&specifier("jsr:@scope/pkg@1.0.1"), &package, &version)
-            .expect("explicit yanked version");
+        let yanked = resolve_module(
+            &specifier("jsr:@scope/pkg@1.0.1"),
+            &package,
+            &version_metadata_for("1.0.1"),
+        )
+        .expect("explicit yanked version");
         assert!(yanked.yanked);
         assert_eq!(yanked.version.to_string(), "1.0.1");
 
         let equivalent = resolve_module(&specifier("jsr:@scope/pkg@1"), &package, &version)
             .expect("equivalent resolution");
         assert_eq!(root, equivalent);
-        let other = resolve_module(&specifier("jsr:@scope/pkg@1.0.0"), &package, &version)
-            .expect("other exact version");
+        let other = resolve_module(
+            &specifier("jsr:@scope/pkg@1.0.0"),
+            &package,
+            &version_metadata_for("1.0.0"),
+        )
+        .expect("other exact version");
         assert_ne!(root, other);
     }
 
@@ -1306,9 +1430,10 @@ mod tests {
     fn reports_missing_exports_and_manifest_targets() {
         let package = default_package_metadata();
 
-        let without_exports = VersionMetadata::parse(&format!(
-            r#"{{"manifest":{{"/mod.ts":{{"size":24,"checksum":"{MOD_SHA}"}}}}}}"#
-        ))
+        let without_exports = VersionMetadata::parse(
+            &format!(r#"{{"manifest":{{"/mod.ts":{{"size":24,"checksum":"{MOD_SHA}"}}}}}}"#),
+            package_version("1.1.0"),
+        )
         .expect("manifest-only metadata");
         let error = error_text(resolve_module(
             &specifier("jsr:@scope/pkg@1"),
@@ -1321,9 +1446,12 @@ mod tests {
         let error = error_text(version.resolve_export("./missing"));
         assert!(error.contains("has no export `./missing`"), "{error}");
 
-        let missing_target = VersionMetadata::parse(&format!(
-            r#"{{"manifest":{{"/mod.ts":{{"size":24,"checksum":"{MOD_SHA}"}}}},"exports":{{".":"./missing.ts"}}}}"#
-        ))
+        let missing_target = VersionMetadata::parse(
+            &format!(
+                r#"{{"manifest":{{"/mod.ts":{{"size":24,"checksum":"{MOD_SHA}"}}}},"exports":{{".":"./missing.ts"}}}}"#
+            ),
+            package_version("1.1.0"),
+        )
         .expect("metadata with a dangling export target");
         let error = error_text(missing_target.resolve_export("."));
         assert!(error.contains("not listed in the manifest"), "{error}");
@@ -1383,7 +1511,7 @@ mod tests {
             ),
         ];
         for (json, expected) in cases {
-            let error = error_text(VersionMetadata::parse(&json));
+            let error = error_text(VersionMetadata::parse(&json, package_version("1.1.0")));
             assert!(
                 error.contains(expected),
                 "fixture produced `{error}`, expected `{expected}`"
@@ -1431,7 +1559,7 @@ mod tests {
             let json = format!(
                 r#"{{"manifest":{{"/mod.ts":{{"size":24,"checksum":"{checksum}"}}}},"exports":{{".":"./mod.ts"}}}}"#
             );
-            let error = error_text(VersionMetadata::parse(&json));
+            let error = error_text(VersionMetadata::parse(&json, package_version("1.1.0")));
             assert!(
                 error.contains("checksum") || error.contains("hex"),
                 "`{checksum}` produced `{error}`"
@@ -1444,7 +1572,7 @@ mod tests {
         let json = format!(
             r#"{{"manifest":{{"/mod.ts":{{"size":24,"checksum":"{multibyte}"}}}},"exports":{{".":"./mod.ts"}}}}"#
         );
-        let error = error_text(VersionMetadata::parse(&json));
+        let error = error_text(VersionMetadata::parse(&json, package_version("1.1.0")));
         assert!(error.contains("lowercase hexadecimal"), "{error}");
     }
 
@@ -1461,6 +1589,58 @@ mod tests {
         ));
         assert!(error.contains("metadata is for `@other/pkg`"), "{error}");
         assert!(error.contains("names `@scope/pkg`"), "{error}");
+    }
+
+    // Unit test: version metadata binding; exact assertion on wrong package.
+    #[test]
+    fn rejects_version_metadata_bound_to_another_package() {
+        let metadata = VersionMetadata::parse(
+            VERSION_JSON,
+            PackageVersion {
+                package: PackageId {
+                    scope: "other".to_owned(),
+                    name: "pkg".to_owned(),
+                },
+                version: Version::parse("1.1.0").expect("version"),
+            },
+        )
+        .expect("version metadata fixture");
+        let error = error_text(resolve_module(
+            &specifier("jsr:@scope/pkg@1"),
+            &default_package_metadata(),
+            &metadata,
+        ));
+        assert!(
+            error.contains("version metadata is for `@other/pkg@1.1.0`"),
+            "{error}"
+        );
+        assert!(
+            error.contains("specifier resolves to `@scope/pkg@1.1.0`"),
+            "{error}"
+        );
+    }
+
+    // Unit test: version metadata binding; wrong version is rejected before exports.
+    #[test]
+    fn rejects_version_metadata_bound_to_another_version_before_resolving_exports() {
+        let manifest_only =
+            format!(r#"{{"manifest":{{"/mod.ts":{{"size":24,"checksum":"{MOD_SHA}"}}}}}}"#);
+        let metadata = VersionMetadata::parse(&manifest_only, package_version("1.0.0"))
+            .expect("manifest-only metadata");
+        let error = error_text(resolve_module(
+            &specifier("jsr:@scope/pkg@1"),
+            &default_package_metadata(),
+            &metadata,
+        ));
+        assert!(
+            error.contains("version metadata is for `@scope/pkg@1.0.0`"),
+            "{error}"
+        );
+        assert!(
+            error.contains("specifier resolves to `@scope/pkg@1.1.0`"),
+            "{error}"
+        );
+        assert!(!error.contains("has no exports"), "{error}");
     }
 
     // Unit test: size limit; exact assertion on the metadata bound.
