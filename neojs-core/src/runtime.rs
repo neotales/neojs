@@ -26,6 +26,7 @@ use deno_core::url::Url;
 
 use crate::Error;
 use crate::age::neojs_age;
+use crate::assert::neojs_assert;
 use crate::builtins::NEO_SHIM;
 use crate::crypto::neojs_crypto;
 use crate::crypto_cipher::neojs_crypto_cipher;
@@ -123,7 +124,8 @@ impl Runtime {
     /// functions, and new module instances. The `age`, `crypto`, `path`, `ssh`,
     /// and `stdio` modules
     /// register their private host ops in that realm before user code runs;
-    /// `assert`, `chars`, and `strings` are plain ECMAScript. The `console`
+    /// `chars` and `strings` are plain ECMAScript, and `assert` calls one
+    /// private Promise-observation host op. The `console`
     /// module's object is the console object the runtime installed: its default
     /// export's value is that object, and its
     /// named exports are that object's method values when the module is
@@ -185,6 +187,7 @@ impl Runtime {
         #[allow(unused_mut)]
         let mut extensions = vec![
             neojs_age::init(),
+            neojs_assert::init(),
             neojs_crypto::init(),
             neojs_crypto_cipher::init(),
             neojs_crypto_hash::init(),

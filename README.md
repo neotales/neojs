@@ -451,7 +451,8 @@ function itself, cached for the realm. `assert` is the canonical bare specifier 
 an alias for the same module instance. The default export is that function, and the named exports
 `assert`, `AssertionError`, `ok`, `equals`, `notEquals`, `strictEquals`, `notStrictEquals`, `fail`,
 `throws`, `doesNotThrow`, `rejects`, and `doesNotReject` are its own properties. `assert.ok` is the
-callable itself. The module is plain ECMAScript: it calls no host op and adds no capability.
+callable itself. The module calls one private host op to observe a genuine native Promise; it adds
+no filesystem, network, environment, or permission capability.
 
 ```js
 import assert, { equals, strictEquals } from "assert";
@@ -502,8 +503,10 @@ prototype chain, so an object that merely inherits from `Promise.prototype` is a
 `rejects(callback[, expected[, message]])` returns a Promise that resolves with the rejection reason
 once `callback` rejects, and rejects with `AssertionError` when it fulfils. A synchronous throw is
 treated as a rejection. The callback's return value must be a genuine native Promise or a thenable.
-A thenable is assimilated by reading `then` once and calling it once; a throwing `then` accessor or
-call is treated as a rejection. `doesNotReject(callback[, message])` resolves with the fulfilment
+A genuine native Promise is observed through a private host op that attaches settlement handlers
+without reading an overridden `then` and without consulting `Symbol.species`. A thenable is
+assimilated by reading `then` once and calling it once; a throwing `then` accessor or call is
+treated as a rejection. `doesNotReject(callback[, message])` resolves with the fulfilment
 value and rejects with `AssertionError` if the callback throws or rejects. Invalid arguments reject
 the returned Promise.
 `assert.rejects` and `assert.doesNotReject` work with top-level await; they do not wrap blocking work
@@ -1077,9 +1080,12 @@ list are not implemented.
 - JSON and WebAssembly module files are rejected, both as the entry file and as imports. V8's
   `WebAssembly` global is present but untested.
 - There is no permission system. The loader reads any file the process can read. neojs is not a
-  sandbox. `assert`, `chars`, `console`, and `strings` are plain ECMAScript and add no capability
-  beyond the globals they expose; the `console` module writes to the process streams already used
-  by the global console.
+  sandbox. `chars`, `console`, and `strings` are plain ECMAScript and add no capability beyond the
+  globals they expose; the `console` module writes to the process streams already used by the
+  global console. `assert` calls one host op that observes a genuine native Promise's settlement;
+  it adds no other capability.
+  `assert` calls one host op that attaches settlement handlers to a genuine native Promise without
+  reading a user `then` or consulting `Symbol.species`.
   `age` calls four host ops for X25519 identity generation and binary age v1 encryption/decryption.
   `crypto` calls twenty-six host ops: four for the operating system CSPRNG and AES-256-GCM, eight
   for bounded stateful AES-256-CBC/AES-256-GCM ciphers, seven for SHA-2 hashing and HMAC, and seven

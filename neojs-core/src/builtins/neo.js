@@ -1,7 +1,8 @@
 // neojs built-in modules.
 //
 // This script is evaluated once per realm before the entry module. It installs
-// the global `Neo` object and the module objects that object caches. `chars` and
+// the global `Neo` object and the module objects that object caches. `assert`
+// calls one private host op that observes a genuine native Promise; `chars` and
 // `console` are plain ECMAScript; `crypto` calls twenty-six private host ops:
 // four use the operating system CSPRNG and AES-256-GCM in
 // `neojs-core/src/crypto.rs`; eight implement bounded AES-256-CBC/AES-256-GCM
@@ -3884,14 +3885,19 @@
         TypedArrayPrototype,
         "byteOffset",
     ).get;
-    const promiseThen = Function.prototype.call.bind(NativePromise.prototype.then);
-    // deno_core's V8-backed check looks at the internal Promise slot. It does
+    // deno_core's V8-backed checks look at the internal Promise slot. They do
     // not read `then`, consult a Symbol.hasInstance, or run a proxy trap, so an
     // object that merely inherits from Promise.prototype is not a Promise.
     const coreIsPromise = Deno.core.isPromise;
-    // A value that resolves to this sentinel is not a thenable. The sentinel is
-    // never exposed to caller code.
-    const NOT_THENABLE = {};
+    const observePromiseOp = Deno.core.ops.op_neo_assert_observe_promise;
+    // Status and sentinel values are symbols. They are primitives, so native
+    // Promise resolution never reads an inherited `Object.prototype.then` from
+    // one, and they are never exposed to caller code.
+    const NOT_THENABLE = NativeSymbol("assert.not-thenable");
+    const OBSERVE_PENDING = NativeSymbol("assert.pending");
+    const OBSERVE_FULFILLED = NativeSymbol("assert.fulfilled");
+    const OBSERVE_REJECTED = NativeSymbol("assert.rejected");
+    const OBSERVE_FAILED = NativeSymbol("assert.inspection-failed");
     const captureStackTrace = NativeError.captureStackTrace;
 
     const MAX_TEXT = 400;
@@ -3994,19 +4000,54 @@
     }
 
     /**
-     * Assimilate a callback result exactly once.
+     * Observe a genuine native Promise without trusting its `then`.
      *
-     * A native Promise is returned unchanged; the caller awaits its internal
-     * slot, so no user `then` is read. Any other object is treated as a
-     * thenable: `then` is read once and called once by the native Promise
-     * constructor's resolve/reject functions. A value with no callable `then`
-     * resolves to `NOT_THENABLE`, which lets the caller distinguish a plain
-     * return from a rejected thenable without a second read. A throwing `then`
-     * getter or a throwing `then` call rejects the returned Promise, matching
-     * Promise assimilation.
+     * V8's internal Promise observation attaches the handlers without reading
+     * an own or inherited `then` and without creating a derived promise through
+     * `Symbol.species`. If V8 declines the observation, the result is
+     * `OBSERVE_FAILED` instead of a fulfillment or rejection. The wrapper
+     * promise always resolves with `undefined`; it never resolves with an
+     * object that a polluted `Object.prototype.then` could assimilate.
      */
-    function assimilate(value) {
-        if (isNativePromise(value)) return value;
+    function observePromise(promise) {
+        const observation = {
+            status: OBSERVE_PENDING,
+            value: undefined,
+            error: undefined,
+        };
+        observation.promise = new NativePromise(function (resolve) {
+            try {
+                observePromiseOp(
+                    promise,
+                    function (value) {
+                        observation.status = OBSERVE_FULFILLED;
+                        observation.value = value;
+                        resolve(undefined);
+                    },
+                    function (reason) {
+                        observation.status = OBSERVE_REJECTED;
+                        observation.value = reason;
+                        resolve(undefined);
+                    },
+                );
+            } catch (error) {
+                observation.status = OBSERVE_FAILED;
+                observation.error = error;
+                resolve(undefined);
+            }
+        });
+        return observation;
+    }
+
+    /**
+     * Assimilate a non-native thenable by reading `then` exactly once.
+     *
+     * Native `resolve`/`reject` are passed to `then`, so nested thenables and
+     * rejection handling follow ordinary Promise resolution. A plain value
+     * resolves with the non-thenable `NOT_THENABLE` symbol, which cannot pick
+     * up an inherited `Object.prototype.then`.
+     */
+    function assimilateThenable(value) {
         return new NativePromise(function (resolve, reject) {
             if (!isObjectLike(value)) {
                 resolve(NOT_THENABLE);
@@ -4033,12 +4074,13 @@
 
     // Consume a native Promise that a synchronous assertion is refusing, so a
     // later rejection is reported as handled rather than as a second failure.
+    // The same V8-backed observer avoids a user `then` and `Symbol.species`.
     function settlePromise(promise) {
         try {
-            promiseThen(promise, undefined, function () {});
+            observePromiseOp(promise, function () {}, function () {});
         } catch {
-            // A subclass with a hostile species constructor may refuse; the
-            // TypeError below is still the useful result.
+            // The TypeError from the synchronous guard is still the useful
+            // result if V8 declines the observation.
         }
     }
 
@@ -4979,9 +5021,44 @@
         } catch (error) {
             return checkThrown(error, expected, message, "rejects");
         }
+        if (isNativePromise(result)) {
+            const observation = observePromise(result);
+            try {
+                await observation.promise;
+            } catch (error) {
+                throw new AssertionError(
+                    withMessage(
+                        message,
+                        `could not inspect the Promise: ${formatValue(error)}`,
+                    ),
+                    { actual: error, operator: "rejects" },
+                );
+            }
+            if (observation.status === OBSERVE_REJECTED) {
+                return checkThrown(observation.value, expected, message, "rejects");
+            }
+            if (observation.status !== OBSERVE_FULFILLED) {
+                const detail =
+                    observation.status === OBSERVE_FAILED
+                        ? `: ${formatValue(observation.error)}`
+                        : "";
+                throw new AssertionError(
+                    withMessage(message, `could not inspect the Promise${detail}`),
+                    { actual: observation.error, operator: "rejects" },
+                );
+            }
+            throw new AssertionError(
+                withMessage(
+                    message,
+                    "expected the Promise to reject, " +
+                        `but it fulfilled with ${formatValue(observation.value)}`,
+                ),
+                { actual: observation.value, operator: "rejects" },
+            );
+        }
         let value;
         try {
-            value = await assimilate(result);
+            value = await assimilateThenable(result);
         } catch (error) {
             return checkThrown(error, expected, message, "rejects");
         }
@@ -5032,9 +5109,44 @@
                 { actual: error, operator: "doesNotReject" },
             );
         }
+        if (isNativePromise(result)) {
+            const observation = observePromise(result);
+            try {
+                await observation.promise;
+            } catch (error) {
+                throw new AssertionError(
+                    withMessage(
+                        message,
+                        `could not inspect the Promise: ${formatValue(error)}`,
+                    ),
+                    { actual: error, operator: "doesNotReject" },
+                );
+            }
+            if (observation.status === OBSERVE_REJECTED) {
+                throw new AssertionError(
+                    withMessage(
+                        message,
+                        "expected the Promise not to reject, " +
+                            `but it rejected with ${formatValue(observation.value)}`,
+                    ),
+                    { actual: observation.value, operator: "doesNotReject" },
+                );
+            }
+            if (observation.status !== OBSERVE_FULFILLED) {
+                const detail =
+                    observation.status === OBSERVE_FAILED
+                        ? `: ${formatValue(observation.error)}`
+                        : "";
+                throw new AssertionError(
+                    withMessage(message, `could not inspect the Promise${detail}`),
+                    { actual: observation.error, operator: "doesNotReject" },
+                );
+            }
+            return observation.value;
+        }
         let value;
         try {
-            value = await assimilate(result);
+            value = await assimilateThenable(result);
         } catch (error) {
             throw new AssertionError(
                 withMessage(

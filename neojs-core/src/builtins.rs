@@ -2,9 +2,10 @@
 //! synthetic ECMAScript modules that import specifiers reach.
 //!
 //! The scripts here install globals that neojs supplies: currently [`NEO_SHIM`],
-//! which defines the `Neo` object and its cached built-in modules. `assert`,
-//! `chars`, `console`, and `strings` are plain ECMAScript. `crypto` calls
-//! private host ops registered by [`crate::crypto`], [`crate::crypto_cipher`], and
+//! which defines the `Neo` object and its cached built-in modules. `chars`,
+//! `console`, and `strings` are plain ECMAScript; `assert` calls one private host
+//! op registered by [`crate::assert`] to observe a genuine native Promise.
+//! `crypto` calls private host ops registered by [`crate::crypto`], [`crate::crypto_cipher`], and
 //! [`crate::crypto_hash`]; it
 //! adds the operating system CSPRNG, the NEO1 AES-256-GCM envelope, bounded
 //! stateful AES-256-CBC/AES-256-GCM ciphers, SHA-2 hashing and HMAC, PBKDF2,
@@ -100,8 +101,9 @@ pub(crate) const ASSERT_SPECIFIER: &str = "neo:assert";
 ///
 /// It re-exports the callable `assert` function and its named assertions from
 /// the public `assert` module object, and also exposes that function as the
-/// default export. The implementations are plain ECMAScript in [`NEO_SHIM`]; no
-/// host op is called.
+/// default export. The implementations are in [`NEO_SHIM`]; the only host op
+/// called observes a genuine native Promise and is registered by
+/// [`crate::assert`].
 const ASSERT_MODULE: &str = include_str!("builtins/assert.esm.js");
 
 /// The canonical module specifier for the `chars` built-in.

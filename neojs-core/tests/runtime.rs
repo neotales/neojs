@@ -2755,6 +2755,125 @@ if (!(error instanceof AssertionError)) {
     throw new Error("rejects accepted null as a Promise");
 }
 
+// The non-thenable sentinel is a symbol, so a polluted inherited `then` cannot
+// turn a primitive return into a false rejection.
+const hadOwnThen = Object.prototype.hasOwnProperty.call(Object.prototype, "then");
+const originalThen = Object.prototype.then;
+Object.prototype.then = function () {
+    throw new Error("polluted then");
+};
+try {
+    let pollutedError;
+    try {
+        await rejects(() => 42);
+    } catch (caught) {
+        pollutedError = caught;
+    }
+    if (!(pollutedError instanceof AssertionError)) {
+        throw new Error("rejects primitive false-passed under polluted Object.prototype.then");
+    }
+    if (!pollutedError.message.includes("expected the function to return a Promise")) {
+        throw new Error(`unexpected polluted-then rejection: ${pollutedError.message}`);
+    }
+    pollutedError = undefined;
+    try {
+        await doesNotReject(() => 42);
+    } catch (caught) {
+        pollutedError = caught;
+    }
+    if (!(pollutedError instanceof AssertionError)) {
+        throw new Error("doesNotReject primitive did not fail under polluted then");
+    }
+    if (!pollutedError.message.includes("expected the function to return a Promise")) {
+        throw new Error(`unexpected polluted-then assertion: ${pollutedError.message}`);
+    }
+    if (await doesNotReject(() => Promise.resolve(7)) !== 7) {
+        throw new Error("a native Promise was affected by polluted Object.prototype.then");
+    }
+    if (await rejects(() => Promise.reject("polluted primitive")) !== "polluted primitive") {
+        throw new Error("a native primitive rejection was affected by polluted then");
+    }
+} finally {
+    if (hadOwnThen) Object.prototype.then = originalThen;
+    else delete Object.prototype.then;
+}
+
+// A genuine Promise subclass is observed by its internal slot, not by its
+// overridden `then`. Settled promises use the engine's state directly; a
+// pending one uses the captured intrinsic Promise.prototype.then.
+let overriddenThenCalls = 0;
+class OverriddenThenPromise extends Promise {
+    then() {
+        overriddenThenCalls += 1;
+        throw new Error("overridden then was called");
+    }
+}
+const fulfilledSubclass = new OverriddenThenPromise((resolve) => resolve("subclass value"));
+if (await doesNotReject(() => fulfilledSubclass) !== "subclass value") {
+    throw new Error("doesNotReject lost a fulfilled subclass value");
+}
+const rejectedSubclass = new OverriddenThenPromise((resolve, reject) =>
+    reject(new RangeError("subclass reason")));
+const subclassReason = await rejects(() => rejectedSubclass, RangeError);
+if (!(subclassReason instanceof RangeError)) {
+    throw new Error("rejects lost a rejected subclass reason");
+}
+let settleSubclass;
+const pendingSubclass = new OverriddenThenPromise((resolve) => {
+    settleSubclass = resolve;
+});
+const pendingSubclassResult = doesNotReject(() => pendingSubclass);
+settleSubclass("pending value");
+if (await pendingSubclassResult !== "pending value") {
+    throw new Error("doesNotReject lost a pending subclass value");
+}
+if (overriddenThenCalls !== 0) {
+    throw new Error(`overridden then was called ${overriddenThenCalls} times`);
+}
+
+// An already-settled subclass whose species throws is readable from internal
+// state. A pending one is not safely observable: report an inspection failure,
+// never a fulfillment or a false rejection.
+let speciesReads = 0;
+class ThrowingSpeciesPromise extends Promise {
+    static get [Symbol.species]() {
+        speciesReads += 1;
+        throw new Error("species trap");
+    }
+}
+const fulfilledBadSpecies = new ThrowingSpeciesPromise((resolve) => resolve("settled"));
+if (await doesNotReject(() => fulfilledBadSpecies) !== "settled") {
+    throw new Error("doesNotReject could not read a settled throwing-species promise");
+}
+const rejectedBadSpecies = new ThrowingSpeciesPromise((resolve, reject) =>
+    reject(new RangeError("settled reason")));
+const badSpeciesReason = await rejects(() => rejectedBadSpecies, RangeError);
+if (!(badSpeciesReason instanceof RangeError)) {
+    throw new Error("rejects could not read a settled rejecting throwing-species promise");
+}
+let settleBadSpecies;
+const pendingBadSpecies = new ThrowingSpeciesPromise((resolve) => {
+    settleBadSpecies = resolve;
+});
+const pendingBadSpeciesResult = doesNotReject(() => pendingBadSpecies);
+settleBadSpecies("pending species value");
+if (await pendingBadSpeciesResult !== "pending species value") {
+    throw new Error("doesNotReject could not read a pending throwing-species promise");
+}
+let rejectBadSpecies;
+const pendingBadRejection = new ThrowingSpeciesPromise((resolve, reject) => {
+    rejectBadSpecies = reject;
+});
+const pendingBadRejectionResult = rejects(() => pendingBadRejection, RangeError);
+rejectBadSpecies(new RangeError("pending species reason"));
+const pendingBadRejectionReason = await pendingBadRejectionResult;
+if (!(pendingBadRejectionReason instanceof RangeError)) {
+    throw new Error("rejects could not read a pending rejecting throwing-species promise");
+}
+if (speciesReads !== 0) {
+    throw new Error(`Symbol.species was read ${speciesReads} times`);
+}
+
 error = await failsAsync("rejects arity", () => rejects());
 if (!(error instanceof TypeError)) throw new Error("rejects arity was not a TypeError");
 error = await failsAsync("doesNotReject arity", () => doesNotReject());

@@ -870,6 +870,37 @@ assert.throws(() => {
 await assert.rejects(async () => {
     throw new RangeError("expected");
 }, RangeError);
+
+let subclassThenCalls = 0;
+class TestPromise extends Promise {
+    then() {
+        subclassThenCalls += 1;
+        throw new Error("overridden then was called");
+    }
+}
+const subclassValue = await assert.doesNotReject(() =>
+    new TestPromise((resolve) => resolve(7)));
+if (subclassValue !== 7 || subclassThenCalls !== 0) {
+    throw new Error("the CLI did not observe a genuine Promise subclass safely");
+}
+
+const hadOwnThen = Object.prototype.hasOwnProperty.call(Object.prototype, "then");
+const savedThen = Object.prototype.then;
+Object.prototype.then = function () {
+    throw new Error("polluted then");
+};
+try {
+    let rejectedPrimitive = false;
+    try {
+        await assert.rejects(() => 42);
+    } catch (error) {
+        rejectedPrimitive = error instanceof assert.AssertionError;
+    }
+    if (!rejectedPrimitive) throw new Error("polluted then caused a false pass");
+} finally {
+    if (hadOwnThen) Object.prototype.then = savedThen;
+    else delete Object.prototype.then;
+}
 console.log("assert ok");
 "#,
     );
