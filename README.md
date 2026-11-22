@@ -139,12 +139,13 @@ without a request; freshness includes the upstream `Age` and `Date`, so a respon
 old when it arrived is stale immediately. A stale entry is revalidated with
 `If-None-Match`/`If-Modified-Since`, and a `304` reuses the cached body. `no-store` does not store the
 body; it leaves an absent-entry tombstone so an older `200` cannot resurrect it. A response without a
-freshness lifetime is revalidated on the next run. Publications are serialized
-per key and carry a sortable generation: a `200` loses to a newer entry or `no-store` tombstone, and
-a successful `304` advances the generation so an older `304` cannot replace newer headers. A stale
-lock from a crash only delays a cache write; loading falls back to the network. Header and metadata
-lines are bounded, one file handle is used per read, and the body length is checked before
-allocation. There is no signature or content-addressed store, so the cache is not integrity
+freshness lifetime is revalidated on the next run. Publications are serialized per key and use
+persistent monotonic revision files: a `200` loses to a newer entry or `no-store` tombstone, and a
+`304` uses its own request revision rather than a later completion token, so it cannot outrank a
+later-started `200` or `no-store`. Ordering does not depend on the wall clock. A stale lock from a
+crash only delays a cache write; loading falls back to the network. Header and metadata lines are
+bounded, one file handle is used per read, the body length is checked before allocation, and
+appended bytes are rejected as a cache miss. There is no signature or content-addressed store, so the cache is not integrity
 protection against someone who can write it and does not pin a version;
 `RemoteOptions::with_cache_dir` and `without_cache` control the directory.
 
@@ -154,17 +155,20 @@ aggregate byte limit, and a remote module count limit. A module and its bytes ar
 network or cache is consulted, a body is read only up to the remaining aggregate allowance, and a
 rejected module is neither fetched nor cached. Each distinct requested URL consumes a module slot
 even when its fetch fails, so repeatedly caught oversized imports cannot grow the graph without
-bound. Retrying the same URL reuses its slot but repeats the I/O; a failed entry preflight is
-refunded because the runtime is still unused. The redaction URL set is capped by the module limit.
-The deadline is per module, not a wall-clock bound on the whole program: running code can keep
-importing modules until the aggregate limits are reached. These are resource bounds, not a sandbox
+bound. Retrying the same URL reuses its slot but repeats the I/O. A separate request limit counts
+every network request, including retries and each redirect hop, so repeating one failed URL cannot
+bypass the network bound. A failed entry preflight is refunded, including its redaction entry,
+because the runtime is still unused. The redaction URL set is capped by the module limit. The
+deadline is per module, not a wall-clock bound on the whole program: running code can keep importing
+modules until the aggregate limits are reached. These are resource bounds, not a sandbox
 or a CPU or V8 heap bound.
 
-Generated V8 errors redact known remote module URLs from stack-frame locations, generated
-`at <URL>:line:column` suffixes, and positively identified generated link/resolution messages. The
-module's identity and `import.meta.url` stay the final URL. A script-supplied exception message,
-including a quoted relative URL-like string in it, and a custom stack are preserved, so code can
-still expose a URL it puts in its own error; do not use module specifiers as secret storage.
+Generated V8 errors redact known remote module URLs from stack-frame locations and only from
+messages whose error name and prefix match a generated diagnostic shape. The module's identity and
+`import.meta.url` stay the final URL. A script-supplied exception message, including a quoted
+relative URL-like string, text shaped like "Cannot find module", or ` at <URL>:`, and a custom stack
+are preserved, so code can still expose a URL it puts in its own error; do not use module specifiers
+as secret storage.
 
 Remote loading is a capability switch, not a permission system. It is **not SSRF protection**: there
 is no host allowlist, private-address rejection, or DNS pinning, and neojs fetches whatever HTTPS URL
