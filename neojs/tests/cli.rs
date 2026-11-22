@@ -54,11 +54,19 @@ impl Project {
     }
 }
 
+/// A spawned `neojs` with the persisted remote setting cleared.
+///
+/// Tests run under whatever environment the developer has, so an ambient
+/// `NEOJS_ALLOW_REMOTE` must not change a verdict. Tests that exercise the
+/// setting add it explicitly with [`run_args_with_env`].
+fn neojs_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_neojs"));
+    command.env_remove("NEOJS_ALLOW_REMOTE");
+    command
+}
+
 fn run_file(path: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_neojs"))
-        .arg(path)
-        .output()
-        .expect("spawn neojs")
+    neojs_command().arg(path).output().expect("spawn neojs")
 }
 
 /// Runs the command and fails the test if it is still alive at `timeout`.
@@ -67,7 +75,7 @@ fn run_file(path: &Path) -> Output {
 /// would report as a signal status. A hang would block the test suite, so the
 /// child is killed at the deadline instead.
 fn run_file_with_timeout(path: &Path, timeout: Duration) -> Output {
-    let child = Command::new(env!("CARGO_BIN_EXE_neojs"))
+    let child = neojs_command()
         .arg(path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -79,7 +87,7 @@ fn run_file_with_timeout(path: &Path, timeout: Duration) -> Output {
 /// Runs `neojs` with an isolated `SSH_AUTH_SOCK`, for agent tests.
 #[cfg(unix)]
 fn run_file_with_agent(path: &Path, socket: &Path, timeout: Duration) -> Output {
-    let child = Command::new(env!("CARGO_BIN_EXE_neojs"))
+    let child = neojs_command()
         .arg(path)
         .env("SSH_AUTH_SOCK", socket)
         .stdout(Stdio::piped())
@@ -124,10 +132,18 @@ fn run_child(mut child: std::process::Child, timeout: Duration) -> Output {
 }
 
 fn run_args(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_neojs"))
-        .args(args)
-        .output()
-        .expect("spawn neojs")
+    neojs_command().args(args).output().expect("spawn neojs")
+}
+
+/// Runs `neojs` with the listed environment values after clearing the
+/// persisted remote setting, so each case starts from a known state.
+fn run_args_with_env(args: &[&str], environment: &[(&str, &str)]) -> Output {
+    let mut command = neojs_command();
+    command.args(args);
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    command.output().expect("spawn neojs")
 }
 
 /// Runs the command and fails the test if it is still alive at `timeout`.
@@ -135,7 +151,7 @@ fn run_args(args: &[&str]) -> Output {
 /// Used by the test-runner lifecycle cases: a leaked refed timer must not keep
 /// the test command alive after the runner has returned its verdict.
 fn run_args_with_timeout(args: &[&str], timeout: Duration) -> Output {
-    let child = Command::new(env!("CARGO_BIN_EXE_neojs"))
+    let child = neojs_command()
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1661,6 +1677,8 @@ fn help_documents_remote_loading_without_promising_isolation() {
     assert_eq!(help.status.code(), Some(0));
     let text = stdout(&help);
     assert!(text.contains("--allow-remote"), "{text}");
+    assert!(text.contains("--no-allow-remote"), "{text}");
+    assert!(text.contains("NEOJS_ALLOW_REMOTE"), "{text}");
     assert!(text.contains("disabled by default"), "{text}");
     assert!(text.contains("not SSRF"), "{text}");
     assert!(text.contains("not a sandbox"), "{text}");
@@ -2726,6 +2744,172 @@ fn test_command_refuses_remote_imports_without_allow_remote() {
         message.contains("remote module loading is disabled"),
         "{message}"
     );
+}
+
+/// An unset or false `NEOJS_ALLOW_REMOTE` must keep the default closed.
+#[test]
+fn env_allow_remote_absent_and_false_keep_remote_disabled() {
+    let project = Project::new();
+    let url = format!("https://127.0.0.1:{}/dep.js", unused_loopback_port());
+    let file = write_remote_importing_test(&project, "remote.test.js", &url);
+    let path = file.to_str().expect("utf-8 path");
+
+    let absent = run_args(&["test", path]);
+    assert_eq!(absent.status.code(), Some(1), "stderr: {}", stderr(&absent));
+    assert!(
+        stderr(&absent).contains("remote module loading is disabled"),
+        "{}",
+        stderr(&absent)
+    );
+
+    for value in ["0", "false", "FALSE"] {
+        let output = run_args_with_env(&["test", path], &[("NEOJS_ALLOW_REMOTE", value)]);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "value {value:?}, stderr: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("remote module loading is disabled"),
+            "value {value:?}, stderr: {}",
+            stderr(&output)
+        );
+    }
+}
+
+/// `NEOJS_ALLOW_REMOTE` applies to a module run, not only the test command.
+#[test]
+fn env_allow_remote_true_enables_remote_imports_in_a_module() {
+    let project = Project::new();
+    let url = format!("https://127.0.0.1:{}/dep.js", unused_loopback_port());
+    let file = project.write(
+        "main.js",
+        &format!("import {{ value }} from \"{url}\";\nconsole.log(value);\n"),
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args_with_env(&[path], &[("NEOJS_ALLOW_REMOTE", "1")]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let message = stderr(&output);
+    assert!(
+        !message.contains("remote module loading is disabled"),
+        "{message}"
+    );
+    assert!(message.contains("cannot load"), "{message}");
+}
+
+/// `NEOJS_ALLOW_REMOTE` reaches every fresh test runtime.
+#[test]
+fn env_allow_remote_true_enables_remote_imports_in_the_test_command() {
+    let project = Project::new();
+    let url = format!("https://127.0.0.1:{}/dep.js", unused_loopback_port());
+    let file = write_remote_importing_test(&project, "remote.test.js", &url);
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args_with_env(&["test", path], &[("NEOJS_ALLOW_REMOTE", "true")]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let message = stderr(&output);
+    assert!(
+        !message.contains("remote module loading is disabled"),
+        "{message}"
+    );
+    assert!(message.contains("cannot load"), "{message}");
+}
+
+/// An invalid setting is a startup error, never an implicit opt-in, and it is
+/// validated even when an explicit flag is present. Help still works because it
+/// resolves no runtime setting.
+#[test]
+fn invalid_env_allow_remote_fails_before_running() {
+    let project = Project::new();
+    let file = project.write("main.js", "console.log(\"should not run\");\n");
+    let path = file.to_str().expect("utf-8 path");
+
+    for value in ["", "yes", "on", "2", " true"] {
+        let output = run_args_with_env(&[path], &[("NEOJS_ALLOW_REMOTE", value)]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "value {value:?}, stderr: {}",
+            stderr(&output)
+        );
+        assert_eq!(stdout(&output), "", "value {value:?}");
+        let message = stderr(&output);
+        assert!(
+            message.contains("invalid NEOJS_ALLOW_REMOTE"),
+            "value {value:?}, stderr: {message}"
+        );
+        assert!(
+            message.contains("`1`, `0`, `true`, or `false`"),
+            "value {value:?}, stderr: {message}"
+        );
+    }
+
+    let explicit = run_args_with_env(
+        &["--allow-remote", path],
+        &[("NEOJS_ALLOW_REMOTE", "maybe")],
+    );
+    assert_eq!(
+        explicit.status.code(),
+        Some(2),
+        "stderr: {}",
+        stderr(&explicit)
+    );
+    assert!(
+        stderr(&explicit).contains("invalid NEOJS_ALLOW_REMOTE"),
+        "{}",
+        stderr(&explicit)
+    );
+
+    let help = run_args_with_env(&["--help"], &[("NEOJS_ALLOW_REMOTE", "yes")]);
+    assert_eq!(help.status.code(), Some(0));
+    assert!(stdout(&help).contains("NEOJS_ALLOW_REMOTE"));
+}
+
+/// An explicit flag decides the effective setting, including the direction the
+/// environment cannot express.
+#[test]
+fn explicit_remote_flags_override_the_environment_setting() {
+    let project = Project::new();
+    let url = format!("https://127.0.0.1:{}/dep.js", unused_loopback_port());
+    let file = write_remote_importing_test(&project, "remote.test.js", &url);
+    let path = file.to_str().expect("utf-8 path");
+
+    let disabled = run_args_with_env(
+        &["--no-allow-remote", "test", path],
+        &[("NEOJS_ALLOW_REMOTE", "true")],
+    );
+    assert_eq!(
+        disabled.status.code(),
+        Some(1),
+        "stderr: {}",
+        stderr(&disabled)
+    );
+    assert!(
+        stderr(&disabled).contains("remote module loading is disabled"),
+        "{}",
+        stderr(&disabled)
+    );
+
+    let enabled = run_args_with_env(
+        &["test", "--allow-remote", path],
+        &[("NEOJS_ALLOW_REMOTE", "false")],
+    );
+    assert_eq!(
+        enabled.status.code(),
+        Some(1),
+        "stderr: {}",
+        stderr(&enabled)
+    );
+    let message = stderr(&enabled);
+    assert!(
+        !message.contains("remote module loading is disabled"),
+        "{message}"
+    );
+    assert!(message.contains("cannot load"), "{message}");
 }
 
 /// Enabling remote loading must not change the per-file runtime isolation: a

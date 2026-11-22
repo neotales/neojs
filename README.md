@@ -115,6 +115,16 @@ import { greet } from "https://example.com/greet.js";
 console.log(greet("world"));
 ```
 
+**Persist remote loading with `NEOJS_ALLOW_REMOTE`.** `--allow-remote` is a per-command
+choice. Setting `NEOJS_ALLOW_REMOTE=1` or `NEOJS_ALLOW_REMOTE=true` makes remote loading the
+default for every `neojs` run and `neojs test` in that environment; `0` and `false` keep it off.
+The words are case-insensitive, and any other value, including an empty one, is a startup error
+(exit 2) rather than an implicit opt-in. An explicit `--allow-remote` or `--no-allow-remote`
+overrides a valid setting; the value is still validated so a typo cannot hide. This is a
+security-relevant persistent switch: it lets every module and test file in that environment load
+and run remote code with the same authority as local code. Set it deliberately, not in a shared
+shell profile.
+
 A relative import inside a remote module resolves against that module's URL, so it stays remote.
 `.js`, `.mjs`, `.ts`, and `.mts` work, statically and dynamically, and TypeScript is type-stripped
 as it is locally. Only `https:` is accepted. A remote module cannot import a `file:` URL: there is
@@ -780,7 +790,9 @@ ok 2 - adds asynchronously
 
 The runner is registration-based, not Node's `node:test`. The CLI runs it after the entry module
 settles, so a test registered after a top-level `await` is included. A file that registers no tests
-fails. A rejected Promise, a rejected thenable, a returned generator object, a pending test, an
+fails. Remote loading stays off unless `--allow-remote`, `--no-allow-remote`, or
+`NEOJS_ALLOW_REMOTE` selects it, and it applies to every selected file's fresh runtime. A rejected
+Promise, a rejected thenable, a returned generator object, a pending test, an
 unhandled rejection, a test that does not settle within its timeout, and event-loop work that
 remains after a bounded settle window are failures, so none can look like a pass. The default
 timeout is 30 seconds and can be set per test:
@@ -1461,10 +1473,11 @@ list are not implemented.
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
 - `node:`, `npm:`, `jsr:`, `http:`, `data:`, and `blob:` imports are rejected. `https:` imports are
-  rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`), and
-  `http:` is always rejected. In particular, `node:test` is not an alias for the `test` built-in; a
-  Node-module opt-in is not implemented. The built-in modules are `age`, `assert`, `chars`,
-  `console`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid`,
+  rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`, or
+  `NEOJS_ALLOW_REMOTE=1`), and `http:` is always rejected. In particular, `node:test` is not an
+  alias for the `test` built-in; a Node-module opt-in is not implemented. The built-in modules are
+  `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
+  `strings`, `test`, and `uuid`,
   reached through `Neo.getBuiltInModule("age")`,
   `Neo.getBuiltInModule("assert")`, `Neo.getBuiltInModule("chars")`,
   `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("crypto")`,
