@@ -1274,6 +1274,20 @@ thread that will use it; it is not `Send`.
 The [ECMAScript npm modules proposal](docs/esm-npm-proposal.md) is a design proposal for review,
 not implemented behavior.
 
+### Separate QuickJS runtime
+
+`neoltjs-core` and the `neoltjs` command are a second, opt-in runtime built on QuickJS through
+`rquickjs`. They are separate workspace members and are not part of the default build:
+`cargo build` neither compiles QuickJS nor puts `rquickjs` in the V8 dependency graph. Build them
+explicitly with `cargo build -p neoltjs`.
+
+The QuickJS runtime currently runs `.js`, `.mjs`, and extensionless ECMAScript modules, resolves
+relative imports and `file:` URLs, and awaits top-level `await` that settles from QuickJS's job
+queue. It does **not** implement TypeScript, host asynchrony or timers, `neo:` built-in modules,
+permissions, or a sandbox, and it does not claim parity with the V8 runtime. Both runtimes share
+`neojs-module-policy` for executable-extension decisions and rejection reasons, so `.cjs`, JSX/TSX,
+declaration files, JSON, WebAssembly, and native addons fail with the same explanation in either.
+
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,

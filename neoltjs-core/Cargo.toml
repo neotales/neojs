@@ -1,0 +1,21 @@
+[package]
+name = "neoltjs-core"
+description = "Small embeddable QuickJS runtime for NeoLTJS, sharing module policy with neojs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
+# Pinned: the C API and Rust API change between minor releases. 0.14.0 is the
+# version reviewed for this crate; `loader` supplies the module resolver and
+# loader traits, and `std` supplies filesystem resolution helpers.
+rquickjs = { version = "=0.14.0", default-features = false, features = ["loader", "std"] }
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
