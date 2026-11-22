@@ -198,6 +198,19 @@ impl Runtime {
     /// [`Runtime`]'s `Drop`, which does not block. Building the runtimes is the
     /// only failure before a `Runtime` exists.
     fn with_shims(console: &'static str, builtins: String) -> Result<Self, Error> {
+        Self::with_module_loader(console, builtins, Rc::new(FileModuleLoader))
+    }
+
+    /// Creates a runtime with an explicit module loader.
+    ///
+    /// [`Runtime::new`] installs [`FileModuleLoader`]. The crate's JSR tests use
+    /// this to install a loader backed by an in-memory registry. It remains
+    /// crate-private: no public constructor can enable remote or `jsr:` loading.
+    fn with_module_loader(
+        console: &'static str,
+        builtins: String,
+        loader: Rc<dyn deno_core::ModuleLoader>,
+    ) -> Result<Self, Error> {
         let driver = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             // Bounded pool for `neo:crypto` asynchronous hashing and password
@@ -240,7 +253,7 @@ impl Runtime {
         let js = {
             let _guard = driver.enter();
             JsRuntime::new(RuntimeOptions {
-                module_loader: Some(Rc::new(FileModuleLoader)),
+                module_loader: Some(loader),
                 extensions,
                 ..Default::default()
             })
@@ -260,6 +273,19 @@ impl Runtime {
         js.execute_script("<neojs:builtins>", builtins)
             .map_err(|error| Error::Core(error.into()))?;
         Ok(runtime)
+    }
+
+    /// Creates a runtime whose loader resolves `jsr:` from the given registry.
+    ///
+    /// This exists only for the crate's loader tests. The registry fixture is
+    /// in-memory; no production build compiles this constructor, and
+    /// [`Runtime::new`] still installs only [`FileModuleLoader`].
+    #[cfg(test)]
+    pub(crate) fn with_jsr_registry(
+        registry: Rc<dyn crate::jsr_loader::Registry>,
+    ) -> Result<Self, Error> {
+        let loader = crate::jsr_loader::JsrModuleLoader::new(registry);
+        Self::with_module_loader(CONSOLE_SHIM, neo_shim(), Rc::new(loader))
     }
 
     /// Runs one entry module to completion and blocks until it finishes.

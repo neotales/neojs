@@ -105,7 +105,7 @@ pub(crate) fn module_format(path: &Path) -> Result<ModuleFormat, String> {
 /// rejected, whether it names a known type (`json`, `text`, `bytes`), an
 /// unknown one, or a built-in module. Ignoring the attribute would execute a
 /// file as JavaScript when the importer asked for a different representation.
-fn unsupported_module_type(requested: &RequestedModuleType) -> Option<String> {
+pub(crate) fn unsupported_module_type(requested: &RequestedModuleType) -> Option<String> {
     let kind = match requested {
         RequestedModuleType::None => return None,
         RequestedModuleType::Json => "json".to_string(),
