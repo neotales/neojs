@@ -86,6 +86,118 @@ if (value !== 7) throw new Error(`await returned ${value}`);
 }
 
 #[test]
+fn queued_jobs_run_after_the_entry_settles() {
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime
+        .run_source(
+            "memory.js",
+            r#"
+Promise.resolve().then(() => {
+    Promise.reject(new Error("queued job ran"));
+});
+"#,
+        )
+        .expect_err("queued rejection");
+    let Error::UnhandledRejection { details, .. } = error else {
+        panic!("expected an unhandled rejection, got {error:?}");
+    };
+    assert!(details.contains("queued job ran"), "{details}");
+}
+
+#[test]
+fn unawaited_dynamic_import_is_drained() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(&dir, "child.js", "throw new Error('dynamic child ran');\n");
+    let main = write(&dir, "main.js", "import('./child.js');\n");
+
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime.run_file(&main).expect_err("import rejection");
+    let Error::UnhandledRejection { details, .. } = error else {
+        panic!("expected an unhandled rejection, got {error:?}");
+    };
+    assert!(details.contains("dynamic child ran"), "{details}");
+}
+
+#[test]
+fn unhandled_rejections_are_reported_with_their_cause() {
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime
+        .run_source("memory.js", "Promise.reject(new Error('not handled'));\n")
+        .expect_err("unhandled rejection");
+    let Error::UnhandledRejection { count, details, .. } = error else {
+        panic!("expected an unhandled rejection, got {error:?}");
+    };
+    assert_eq!(count, 1);
+    assert!(details.contains("not handled"), "{details}");
+}
+
+#[test]
+fn a_rejection_handled_later_is_not_reported() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "memory.js",
+            r#"
+const rejected = Promise.reject(new Error("handled later"));
+Promise.resolve().then(() => rejected.catch(() => {}));
+"#,
+        )
+        .expect("late handler");
+}
+
+#[test]
+fn a_nonconverging_job_queue_fails_closed() {
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime
+        .run_source(
+            "memory.js",
+            r#"
+function again() {
+    Promise.resolve().then(again);
+}
+again();
+"#,
+        )
+        .expect_err("nonconverging queue");
+    assert!(
+        matches!(error, Error::NonConvergingJobs { jobs, .. } if jobs > 100_000),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_throwing_queued_job_fails() {
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime
+        .run_source(
+            "memory.js",
+            "queueMicrotask(() => { throw new Error('microtask boom'); });\n",
+        )
+        .expect_err("throwing job");
+    let Error::Module { message, .. } = error else {
+        panic!("expected a module error, got {error:?}");
+    };
+    assert!(
+        message.contains("uncaught exception in queued job"),
+        "{message}"
+    );
+    assert!(message.contains("microtask boom"), "{message}");
+}
+
+#[test]
+fn run_source_resolves_relative_imports_from_an_absolute_identity() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(&dir, "child.js", "console.log('child loaded');\n");
+    let identity = dir.path().join("memory.js");
+    let identity = identity.to_str().expect("UTF-8 path");
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(identity, "import './child.js';\n")
+        .expect("relative import from in-memory entry");
+}
+
+#[test]
 fn javascript_errors_are_reported() {
     let dir = tempfile::tempdir().expect("temp dir");
     let file = write(&dir, "main.js", "throw new Error('boom');\n");

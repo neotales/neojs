@@ -95,7 +95,9 @@ fn run(path: &Path) -> ExitCode {
 /// the same across the two commands even though the prefixes differ.
 fn exit_code(error: &Error) -> u8 {
     match error {
-        Error::Module { .. } => EXIT_RUNTIME_FAILURE,
+        Error::Module { .. }
+        | Error::UnhandledRejection { .. }
+        | Error::NonConvergingJobs { .. } => EXIT_RUNTIME_FAILURE,
         Error::Init { .. } | Error::Entry { .. } | Error::UnsupportedEntry { .. } => {
             EXIT_STARTUP_FAILURE
         }

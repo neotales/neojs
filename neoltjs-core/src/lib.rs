@@ -10,10 +10,17 @@
 //! # What works
 //!
 //! * [`Runtime::run_file`] reads an entry module and evaluates it.
+//! * [`Runtime::run_source`] evaluates an in-memory module; its name is the
+//!   identity and base for relative imports.
 //! * Relative imports, absolute paths, and `file:` URLs are resolved from the
 //!   importing module. Static imports and dynamic `import()` use the same loader.
 //! * Top-level `await` works when it settles from the QuickJS job queue, for
 //!   example `await Promise.resolve(value)`.
+//! * After the entry settles, queued jobs are drained, so a trailing `.then` or
+//!   an unawaited dynamic import still runs. The drain is bounded and fails
+//!   closed on a nonconverging chain. A queued job that throws is an error.
+//! * A promise that is still rejected without a handler when the queue empties
+//!   is an error. A rejection handled later in the queue is not an error.
 //! * `console.log` and `console.error` write to the process streams.
 //!
 //! # What is not implemented yet
