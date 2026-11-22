@@ -911,6 +911,37 @@ fn a_preflight_rejection_refunds_the_entry_budget() {
 }
 
 #[test]
+fn a_utf8_preflight_rejection_refunds_the_entry_budget() {
+    let transport = |url: &str, _: Duration, _: Option<&str>, _: Option<&str>| {
+        if url.ends_with("bad.js") {
+            Ok(TestRemoteResponse {
+                status: 200,
+                body: vec![0xff, 0xfe],
+                ..TestRemoteResponse::default()
+            })
+        } else {
+            Ok(TestRemoteResponse {
+                status: 200,
+                body: b"globalThis.__good = true;\n".to_vec(),
+                ..TestRemoteResponse::default()
+            })
+        }
+    };
+    let options = RemoteOptions::new()
+        .with_max_remote_modules(1)
+        .without_cache();
+    let mut runtime = Runtime::with_remote_transport(options, transport).expect("runtime");
+
+    let error = runtime
+        .run_url("https://mods.test/bad.js")
+        .expect_err("invalid UTF-8 fails preflight");
+    assert!(matches!(error, Error::RemoteEntry { .. }), "{error:?}");
+    runtime
+        .run_url("https://mods.test/good.js")
+        .expect("a failed preflight must refund the module slot");
+}
+
+#[test]
 fn a_typescript_preflight_rejection_refunds_the_entry_budget() {
     let server = Server::new(&[
         (
