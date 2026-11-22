@@ -43,13 +43,15 @@
 //! Each entry records the body length and SHA-256 digest; a mismatch or a
 //! truncation is a cache miss, not an executable body. Header and metadata
 //! lines are bounded, one file handle is used per read, and the body length is
-//! checked before allocation. Publications are serialized by a per-key lock
-//! file, and every entry carries a sortable generation. A `200` publishes only
-//! when its request is newer than the current entry or tombstone, a `304`
-//! publishes only when its base generation is still current and then advances to
-//! a new generation, and `no-store` publishes an absent-entry tombstone. Thus an
-//! older `200` cannot resurrect an entry after a newer `no-store`, and an older
-//! `304` cannot replace newer headers. A stale lock left by a crash can delay a
+//! checked before allocation, and a body followed by extra bytes is rejected.
+//! Publications are serialized by a per-key lock file. Each request receives a
+//! monotonic per-key revision from a revision file updated under that lock, so
+//! ordering does not depend on the wall clock. A `200` publishes only when its
+//! request revision is newer than the current entry or tombstone, a `304`
+//! publishes only when its base generation is still current and then uses its
+//! own request revision, and `no-store` publishes an absent-entry tombstone.
+//! Thus an older `200` cannot resurrect an entry after a newer `no-store`, and a
+//! `304` cannot outrank a later-started `200` or `no-store`. A stale lock left by a crash can delay a
 //! cache write until the lock times out; it never blocks loading, which falls
 //! back to the network.
 //! This detects corruption, torn writes, and lost-update races, not an adversary
@@ -67,9 +69,11 @@
 //! neither fetched nor published to the cache. Each distinct requested URL
 //! consumes one module slot even when its fetch fails, so repeatedly caught
 //! oversized imports cannot grow the graph without bound. Retrying the same URL
-//! reuses its slot but repeats the I/O; a failed entry preflight is the exception
-//! and is refunded so the unused runtime can try again. The redaction URL set is
-//! capped by the module limit. The deadline is per module, not a wall-clock
+//! reuses its slot but repeats the I/O. A separate request limit counts every
+//! network request, including retries and each redirect hop, so retrying one URL
+//! cannot bypass the network bound. A failed entry preflight is the exception
+//! and is refunded so the unused runtime can try again. The redaction URL set and
+//! its rollback are capped by the module limit. The deadline is per module, not a wall-clock
 //! bound on the whole graph: JavaScript can keep running and dynamically import
 //! more modules, each with its own deadline, until the aggregate module or byte
 //! limit is reached. Module execution and compilation are trusted; these are
@@ -77,12 +81,13 @@
 //!
 //! Generated V8 errors are redacted as they leave the runtime: known remote
 //! module URLs are removed from stack-frame locations, from the generated
-//! ` at <URL>:line:column` suffix, and from positively identified generated
-//! link/resolution messages, without changing the module identity or
-//! `import.meta.url`, which remain the final URL. A script-supplied exception
-//! message, a quoted relative string inside it, and a custom stack are
-//! preserved, so code that puts a URL (or any other value) in its own error
-//! still exposes it. Module specifiers are not secret storage.
+//! ` at <URL>:line:column` suffix, and from generated link/resolution messages
+//! only when both the error name and message prefix match a V8 diagnostic shape.
+//! Module identity and `import.meta.url` remain the final URL. A user-thrown
+//! `Error` whose message merely contains "Cannot find module" or ` at <URL>:`
+//! keeps its text, as do a quoted relative string and a custom stack, so code
+//! that puts a URL (or any other value) in its own error still exposes it.
+//! Module specifiers are not secret storage.
 //!
 //! This is not SSRF protection. There is no host allowlist, no private-address
 //! rejection, and no DNS pinning: neojs fetches whatever HTTPS URL the program
@@ -128,8 +133,13 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_REMOTE_MODULES: usize = 256;
 /// Default maximum aggregate remote body bytes loaded by one runtime.
 const DEFAULT_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+/// Default maximum HTTP requests one runtime may make, including retries and
+/// redirects.
+const DEFAULT_MAX_REQUESTS: usize = 512;
 /// The first line of a cache entry.
-const CACHE_MAGIC: &str = "neojs-remote-cache 3";
+const CACHE_MAGIC: &str = "neojs-remote-cache 4";
+/// The first line of an absent-entry tombstone.
+const TOMBSTONE_MAGIC: &str = "neojs-remote-tombstone 4";
 /// Largest metadata block accepted from a cache entry.
 const MAX_META_BYTES: usize = 64 * 1024;
 
@@ -137,8 +147,9 @@ const MAX_META_BYTES: usize = 64 * 1024;
 ///
 /// Create one with [`RemoteOptions::new`] and adjust it with the `with_*`
 /// methods. The defaults are a 30-second per-module deadline, a 16 MiB body
-/// limit, a 64 MiB aggregate byte limit, 256 remote modules, five redirects, and
-/// the user-profile package cache. These are resource bounds, not permissions:
+/// limit, a 64 MiB aggregate byte limit, 256 remote modules, 512 HTTP requests,
+/// five redirects per module, and the user-profile package cache. These are
+/// resource bounds, not permissions:
 /// enabling remote loading is the permission decision. There is no aggregate
 /// wall-clock deadline; each module fetch has its own.
 #[derive(Clone, Debug)]
@@ -147,6 +158,7 @@ pub struct RemoteOptions {
     max_module_bytes: usize,
     max_total_bytes: usize,
     max_remote_modules: usize,
+    max_requests: usize,
     max_redirects: u32,
     cache_dir: Option<PathBuf>,
 }
@@ -158,6 +170,7 @@ impl Default for RemoteOptions {
             max_module_bytes: DEFAULT_MAX_MODULE_BYTES,
             max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
             max_remote_modules: DEFAULT_MAX_REMOTE_MODULES,
+            max_requests: DEFAULT_MAX_REQUESTS,
             max_redirects: DEFAULT_MAX_REDIRECTS,
             cache_dir: default_cache_dir(),
         }
@@ -211,6 +224,16 @@ impl RemoteOptions {
         self
     }
 
+    /// Sets the maximum number of HTTP requests one runtime may make.
+    ///
+    /// Every network request counts, including retries of the same URL and each
+    /// redirect hop. Cache hits do not count. A zero limit refuses all network
+    /// requests.
+    pub fn with_max_requests(mut self, max_requests: usize) -> Self {
+        self.max_requests = max_requests;
+        self
+    }
+
     /// Sets how many redirects one module fetch may follow.
     ///
     /// Zero refuses every redirect. The limit counts redirect *responses*, so a
@@ -257,6 +280,11 @@ impl RemoteOptions {
     /// Returns how many distinct remote modules one runtime may load.
     pub fn max_remote_modules(&self) -> usize {
         self.max_remote_modules
+    }
+
+    /// Returns the maximum number of HTTP requests one runtime may make.
+    pub fn max_requests(&self) -> usize {
+        self.max_requests
     }
 
     /// Returns how many redirects one module fetch may follow.
@@ -361,6 +389,7 @@ pub(crate) trait RemoteTransport: Send + Sync {
 struct RemoteBudget {
     modules: AtomicUsize,
     bytes: AtomicUsize,
+    requests: AtomicUsize,
 }
 
 impl RemoteBudget {
@@ -392,6 +421,18 @@ impl RemoteBudget {
             retain_on_error,
             committed: false,
         })
+    }
+
+    /// Charges one network request, including retries and redirect hops.
+    fn charge_request(&self, options: &RemoteOptions) -> Result<(), String> {
+        let requests = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+        if requests > options.max_requests {
+            return Err(format!(
+                "the remote module graph exceeds the {} request limit",
+                options.max_requests
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -455,6 +496,8 @@ pub(crate) struct RemoteClient {
     /// Distinct requested URLs that have consumed a module slot, including
     /// failed imports. Retrying the same URL does not consume another slot.
     attempted: Arc<Mutex<BTreeSet<String>>>,
+    /// Fallback revision source when the cache is disabled.
+    local_revision: Arc<AtomicU64>,
     redactions: Redactions,
 }
 
@@ -471,6 +514,7 @@ impl RemoteClient {
             cache,
             budget: Arc::new(RemoteBudget::default()),
             attempted: Arc::new(Mutex::new(BTreeSet::new())),
+            local_revision: Arc::new(AtomicU64::new(0)),
             redactions: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
@@ -491,6 +535,7 @@ impl RemoteClient {
             cache,
             budget: Arc::new(RemoteBudget::default()),
             attempted: Arc::new(Mutex::new(BTreeSet::new())),
+            local_revision: Arc::new(AtomicU64::new(0)),
             redactions: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
@@ -500,30 +545,42 @@ impl RemoteClient {
     /// The runtime is still unused, so an entry that was fetched but rejected
     /// for its format, UTF-8, or TypeScript must not spend a module slot or
     /// bytes from a later retry.
-    pub(crate) fn refund_entry(
-        &self,
-        requested: &Url,
-        final_url: &Url,
-        bytes: usize,
-        module_charged: bool,
-    ) {
+    pub(crate) fn refund_entry(&self, requested: &Url, bytes: usize, module_charged: bool) {
         if module_charged {
             self.budget.modules.fetch_sub(1, Ordering::SeqCst);
             self.attempted
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&request_url(requested).to_string());
-            self.redactions
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&final_url.to_string());
         }
+        self.redactions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         self.budget.bytes.fetch_sub(bytes, Ordering::SeqCst);
     }
 
     /// Returns the shared set of module URLs to redact from V8 diagnostics.
     pub(crate) fn redactions(&self) -> Redactions {
         Arc::clone(&self.redactions)
+    }
+
+    /// Allocates a monotonic per-key request-order token.
+    ///
+    /// With a cache, the token comes from a persistent per-key revision file
+    /// updated under the interprocess lock, so it does not depend on the wall
+    /// clock. Without a cache there is nothing to order across processes.
+    fn next_request_generation(&self, url: &Url) -> Result<String, String> {
+        if let Some(cache) = &self.cache
+            && let Ok(revision) = cache.next_revision(url)
+        {
+            return Ok(revision);
+        }
+        // A cache failure is best-effort: loading continues with a local,
+        // non-persistent ordering token and what remains of the publication
+        // attempt will also fail harmlessly.
+        let revision = self.local_revision.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(format!("{revision:020}"))
     }
 
     /// Records a URL whose query must not appear in a generated diagnostic.
@@ -587,12 +644,20 @@ impl RemoteClient {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .insert(key.clone());
         }
-        let result = self.fetch_body(requested, &mut admission, &new_generation());
-        if result.is_err() && entry_mode && !already_attempted {
-            self.attempted
+        let result = self.fetch_body(requested, &mut admission);
+        if result.is_err() && entry_mode {
+            // The runtime has not run any module, so no redaction URL from this
+            // failed entry fetch should remain charged.
+            self.redactions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&key);
+                .clear();
+            if !already_attempted {
+                self.attempted
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&key);
+            }
         }
         result
     }
@@ -601,7 +666,6 @@ impl RemoteClient {
         &self,
         requested: &Url,
         admission: &mut Admission<'_>,
-        request_generation: &str,
     ) -> Result<FetchedModule, String> {
         let deadline = Instant::now()
             .checked_add(self.options.timeout)
@@ -634,6 +698,8 @@ impl RemoteClient {
             let last_modified = cached
                 .as_ref()
                 .and_then(|entry| entry.last_modified.as_deref());
+            let request_generation = self.next_request_generation(&current)?;
+            self.budget.charge_request(&self.options)?;
             let request_started = Instant::now();
             let response = self
                 .transport
@@ -690,10 +756,10 @@ impl RemoteClient {
                 self.record_url(&current)?;
                 admission.commit(cached.body.len())?;
                 let previous_generation = cached.generation.clone();
-                cached.generation = new_generation();
+                cached.generation = request_generation.to_string();
                 if let Some(cache) = &self.cache {
                     if directives.no_store {
-                        let _ = cache.tombstone_if_newer(&current, request_generation);
+                        let _ = cache.tombstone_if_newer(&current, &request_generation);
                     } else {
                         let _ = cache.store_revalidated(&current, &cached, &previous_generation);
                     }
@@ -760,7 +826,7 @@ impl RemoteClient {
             let directives = CacheDirectives::parse(response.cache_control.as_deref());
             if let Some(cache) = &self.cache {
                 if directives.no_store {
-                    let _ = cache.tombstone_if_newer(&current, request_generation);
+                    let _ = cache.tombstone_if_newer(&current, &request_generation);
                 } else {
                     let entry = CachedModule {
                         body: body.clone(),
@@ -881,7 +947,7 @@ pub(crate) fn redact_core_error(error: CoreError, redactions: &Redactions) -> Co
         other => {
             let original = CoreError(Box::new(other));
             let text = original.to_string();
-            let redacted = redact_generated_mentions(&text, &urls, true);
+            let redacted = redact_generated_mentions(&text, &urls, true, true);
             if redacted == text {
                 return original;
             }
@@ -901,18 +967,30 @@ fn redact_js_error(mut error: JsError, urls: &BTreeSet<String>) -> JsError {
         }
     }
     if !error.stack_is_custom {
-        if let Some(stack) = error.stack.take() {
-            error.stack = Some(redact_stack(&stack, urls));
-        }
         // V8 puts generated locations in syntax, link, and resolution errors.
-        // Only known module URLs in those generated positions are replaced, so
-        // an ordinary thrown value that merely contains a URL is preserved.
-        let generated_link = is_generated_link_message(&error.exception_message);
-        error.exception_message =
-            redact_generated_mentions(&error.exception_message, urls, generated_link);
+        // The name and prefix must identify a generated shape; a user value is
+        // preserved even if its text happens to contain "Cannot find module" or
+        // an ` at <URL>:` fragment.
+        let (generated_link, generated_location) =
+            generated_flags(&error.exception_message, error.name.as_deref());
+        if let Some(stack) = error.stack.take() {
+            error.stack = Some(redact_stack(
+                &stack,
+                urls,
+                generated_link,
+                generated_location,
+            ));
+        }
+        error.exception_message = redact_generated_mentions(
+            &error.exception_message,
+            urls,
+            generated_link,
+            generated_location,
+        );
         error.message = error.message.take().map(|message| {
-            let generated_link = is_generated_link_message(&message);
-            redact_generated_mentions(&message, urls, generated_link)
+            let (generated_link, generated_location) =
+                generated_flags(&message, error.name.as_deref());
+            redact_generated_mentions(&message, urls, generated_link, generated_location)
         });
     }
     error.cause = error
@@ -928,14 +1006,24 @@ fn redact_js_error(mut error: JsError, urls: &BTreeSet<String>) -> JsError {
     error
 }
 
-/// Redacts generated frame lines but leaves the first stack line (the
-/// exception value) untouched.
-fn redact_stack(stack: &str, urls: &BTreeSet<String>) -> String {
+/// Redacts generated frame lines. The first stack line is the exception value,
+/// so it is only rewritten when the error is positively identified as a
+/// generated link or location diagnostic.
+fn redact_stack(
+    stack: &str,
+    urls: &BTreeSet<String>,
+    generated_link: bool,
+    generated_location: bool,
+) -> String {
     let mut lines = stack.lines();
     let Some(first) = lines.next() else {
         return String::new();
     };
-    let mut redacted = String::from(first);
+    let mut redacted = if generated_location {
+        redact_generated_mentions(first, urls, generated_link, generated_location)
+    } else {
+        String::from(first)
+    };
     for line in lines {
         redacted.push('\n');
         redacted.push_str(&redact_known_urls(line, urls));
@@ -952,11 +1040,14 @@ fn redact_generated_mentions(
     message: &str,
     urls: &BTreeSet<String>,
     generated_link: bool,
+    generated_location: bool,
 ) -> String {
     let mut redacted = message.to_string();
     for url in urls {
         let replacement = redact_url_string(url);
-        redacted = redacted.replace(&format!(" at {url}:"), &format!(" at {replacement}:"));
+        if generated_location {
+            redacted = redacted.replace(&format!(" at {url}:"), &format!(" at {replacement}:"));
+        }
         if generated_link {
             redacted = redacted.replace(&format!("'{url}'"), &format!("'{replacement}'"));
             redacted = redacted.replace(&format!("\"{url}\""), &format!("\"{replacement}\""));
@@ -969,12 +1060,37 @@ fn redact_generated_mentions(
     }
 }
 
-/// Returns whether a message is one of V8's generated module-link diagnostics.
-fn is_generated_link_message(message: &str) -> bool {
-    (message.contains("The requested module") && message.contains("does not provide an export"))
-        || message.contains("Cannot resolve module")
-        || message.contains("Cannot find module")
-        || message.contains("Failed to resolve module specifier")
+/// Returns whether a message has the structure of a generated V8 link or
+/// location diagnostic.
+///
+/// The name and message prefix must both match a generated shape. A user-thrown
+/// `Error` whose text happens to contain "Cannot find module" or ` at <URL>:`
+/// does not qualify.
+fn generated_flags(message: &str, name: Option<&str>) -> (bool, bool) {
+    let diagnostic_name = matches!(name, Some("SyntaxError") | Some("TypeError"));
+    let message = message
+        .strip_prefix("Uncaught SyntaxError: ")
+        .or_else(|| message.strip_prefix("Uncaught TypeError: "))
+        .or_else(|| message.strip_prefix("Uncaught (in promise) SyntaxError: "))
+        .or_else(|| message.strip_prefix("Uncaught (in promise) TypeError: "))
+        .unwrap_or(message);
+    let link = diagnostic_name
+        && message.starts_with("The requested module ")
+        && message.contains(" does not provide an export");
+    let location = diagnostic_name
+        && message.contains(" at ")
+        && (link
+            || [
+                "Unexpected token",
+                "Unexpected identifier",
+                "Invalid or unexpected token",
+                "Missing initializer",
+                "Identifier '",
+                "Invalid left-hand side",
+            ]
+            .iter()
+            .any(|prefix| message.starts_with(prefix)));
+    (link, location)
 }
 
 /// Removes the query from a quoted relative module specifier in a generated
@@ -1299,22 +1415,6 @@ fn response_age(date: Option<&str>, age: Option<&str>, now: u64, response_delay:
     apparent.max(age_value.saturating_add(response_delay))
 }
 
-/// Makes cache generations unique within and across processes.
-static GENERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Returns a new opaque cache generation.
-fn new_generation() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    // Fixed-width, time-first fields make lexical order match request order.
-    format!(
-        "{nanos:032x}-{:08x}-{:016x}",
-        std::process::id(),
-        GENERATION_COUNTER.fetch_add(1, Ordering::SeqCst)
-    )
-}
-
 /// The user-profile module cache.
 ///
 /// One file per URL holds a short metadata block and the body. Writes go to a
@@ -1392,6 +1492,10 @@ impl Cache {
         }
         let mut body = vec![0u8; expected_length];
         reader.read_exact(&mut body).ok()?;
+        let mut extra = [0u8; 1];
+        if reader.read(&mut extra).ok()? != 0 {
+            return None;
+        }
         if !expected_digest.eq_ignore_ascii_case(&hex_encode(&Sha256::digest(&body))) {
             return None;
         }
@@ -1433,9 +1537,57 @@ impl Cache {
         PathBuf::from(path)
     }
 
+    fn revision_path(&self, url: &Url) -> PathBuf {
+        let mut path = self.path(url).into_os_string();
+        path.push(".rev");
+        PathBuf::from(path)
+    }
+
+    /// Allocates the next request-order revision for a key.
+    ///
+    /// The revision file is updated under the same per-key lock as publication
+    /// and is never removed when the body or tombstone changes. It therefore
+    /// remains monotonic across processes even if the system clock moves
+    /// backwards.
+    fn next_revision(&self, url: &Url) -> std::io::Result<String> {
+        let _lock = self.lock(url)?;
+        let path = self.revision_path(url);
+        let current = File::open(&path)
+            .ok()
+            .and_then(|file| {
+                let mut reader = BufReader::new(file);
+                read_line_bounded(&mut reader, 32)
+            })
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let next = current.saturating_add(1);
+        let temporary = self.dir.join(format!(
+            ".rev-{}-{}-{}",
+            std::process::id(),
+            unix_now(),
+            TEMPORARY_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            writeln!(file, "{next}")?;
+            std::fs::rename(&temporary, &path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result?;
+        Ok(format!("{next:020}"))
+    }
+
     fn read_tombstone(&self, url: &Url) -> Option<String> {
         let file = File::open(self.tombstone_path(url)).ok()?;
         let mut reader = BufReader::new(file);
+        if read_line_bounded(&mut reader, 64)?.trim_end() != TOMBSTONE_MAGIC {
+            return None;
+        }
         let generation = read_line_bounded(&mut reader, 128)?;
         let generation = generation.trim().to_string();
         if generation.is_empty() {
@@ -1528,7 +1680,7 @@ impl Cache {
                 use std::os::unix::fs::PermissionsExt;
                 file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
             }
-            writeln!(file, "{generation}")?;
+            writeln!(file, "{TOMBSTONE_MAGIC}\n{generation}")?;
             std::fs::rename(&temporary, self.tombstone_path(url))
         })();
         if result.is_err() {
@@ -1750,6 +1902,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::fs::OpenOptions;
     use std::io::Read;
     use std::io::Write;
     use std::net::TcpListener;
@@ -2488,6 +2641,36 @@ mod tests {
     }
 
     #[test]
+    fn the_default_request_limit_is_explicit() {
+        assert_eq!(RemoteOptions::new().max_requests(), 512);
+        assert_eq!(RemoteOptions::new().with_max_requests(3).max_requests(), 3);
+    }
+
+    #[test]
+    fn the_request_limit_counts_retries_and_redirects() {
+        let transport =
+            ScriptedTransport::new(vec![response(200, None, "a"), response(200, None, "b")]);
+        let saw = Arc::clone(&transport);
+        let request_limited = client(options().with_max_requests(1), transport);
+        let url = Url::parse("https://example.test/one.js").expect("url");
+        request_limited.fetch(&url).expect("first request");
+        let error = request_limited
+            .fetch(&url)
+            .expect_err("the retry exceeds the request cap");
+        assert!(error.contains("1 request limit"), "{error}");
+        assert_eq!(saw.seen.lock().expect("seen").len(), 1);
+
+        let transport = ScriptedTransport::new(vec![response(302, Some("/next.js"), "")]);
+        let saw = Arc::clone(&transport);
+        let client = client(options().with_max_requests(1), transport);
+        let error = client
+            .fetch(&url)
+            .expect_err("the redirect hop exceeds the request cap");
+        assert!(error.contains("1 request limit"), "{error}");
+        assert_eq!(saw.seen.lock().expect("seen").len(), 1);
+    }
+
+    #[test]
     fn a_failed_import_keeps_its_distinct_attempt_slot() {
         let transport =
             ScriptedTransport::new(vec![response(200, None, "aa"), response(200, None, "bb")]);
@@ -2549,6 +2732,50 @@ mod tests {
             .fetch(&one)
             .expect_err("a retry with a new final URL exceeds the redaction cap");
         assert!(error.contains("cannot retain"), "{error}");
+    }
+
+    #[test]
+    fn an_entry_failed_on_a_cached_over_budget_body_clears_redactions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transport = ScriptedTransport::new(vec![
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: None,
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"0123456789".to_vec())),
+            },
+            response(200, None, "ok"),
+        ]);
+        let url = Url::parse("https://example.test/cached.js").expect("url");
+        let other = Url::parse("https://example.test/other.js").expect("url");
+        client(
+            RemoteOptions::new()
+                .with_max_total_bytes(100)
+                .with_cache_dir(dir.path()),
+            Arc::clone(&transport),
+        )
+        .fetch_entry(&url)
+        .expect("prime cache");
+
+        let retry = client(
+            RemoteOptions::new()
+                .with_max_total_bytes(5)
+                .with_max_remote_modules(1)
+                .with_cache_dir(dir.path()),
+            Arc::clone(&transport),
+        );
+        let error = retry
+            .fetch_entry(&url)
+            .expect_err("the cached body exceeds the total budget");
+        assert!(error.contains("5 byte total limit"), "{error}");
+        retry
+            .fetch_entry(&other)
+            .expect("the failed cached entry must not retain a redaction URL");
     }
 
     #[test]
@@ -2714,6 +2941,14 @@ mod tests {
 
         std::fs::write(&path, &original).expect("restore");
         assert_eq!(cache.load(&url, 1024).expect("restored").body, entry.body);
+
+        let mut appended = original;
+        appended.push(b'x');
+        std::fs::write(&path, appended).expect("append");
+        assert!(
+            cache.load(&url, 1024).is_none(),
+            "appended bytes must be rejected"
+        );
     }
 
     #[test]
@@ -3082,6 +3317,82 @@ mod tests {
     }
 
     #[test]
+    fn cache_revisions_are_monotonic_and_survive_tombstones() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        assert_eq!(
+            cache.next_revision(&url).expect("first"),
+            "00000000000000000001"
+        );
+        assert_eq!(
+            cache.next_revision(&url).expect("second"),
+            "00000000000000000002"
+        );
+        assert!(cache.tombstone_if_newer(&url, "0002").expect("tombstone"));
+        assert_eq!(
+            cache.next_revision(&url).expect("third"),
+            "00000000000000000003"
+        );
+    }
+
+    /// Child half of [`cache_revisions_are_monotonic_across_processes`].
+    #[test]
+    fn cache_revision_child() {
+        let Some(out) = std::env::var_os("NEOJS_REVISION_OUT") else {
+            return;
+        };
+        let dir = std::env::var_os("NEOJS_CACHE_DIR").expect("cache dir");
+        let url = Url::parse(&std::env::var("NEOJS_CACHE_URL").expect("cache url")).expect("url");
+        let cache = super::Cache::new(PathBuf::from(dir));
+        let revision = cache.next_revision(&url).expect("revision");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(out)
+            .expect("open revision output");
+        writeln!(file, "{revision}").expect("write revision");
+    }
+
+    #[test]
+    fn cache_revisions_are_monotonic_across_processes() {
+        if std::env::var_os("NEOJS_REVISION_OUT").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("temp dir");
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let out = dir.path().join("revisions");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let first = cache.next_revision(&url).expect("first");
+        assert_eq!(first, "00000000000000000001");
+        for _ in 0..2 {
+            let mut child = Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "remote::tests::cache_revision_child",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("NEOJS_REVISION_OUT", &out)
+                .env("NEOJS_CACHE_DIR", dir.path())
+                .env("NEOJS_CACHE_URL", url.as_str())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn revision child");
+            let status = child.wait().expect("child status");
+            assert!(status.success(), "revision child failed: {status}");
+        }
+        let fourth = cache.next_revision(&url).expect("fourth");
+        assert_eq!(fourth, "00000000000000000004");
+        let revisions = std::fs::read_to_string(&out).expect("revision output");
+        assert_eq!(
+            revisions.lines().collect::<Vec<_>>(),
+            ["00000000000000000002", "00000000000000000003",]
+        );
+    }
+
+    #[test]
     fn a_cold_cache_tombstone_blocks_an_older_200_in_both_orders() {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache = super::Cache::new(dir.path().to_path_buf());
@@ -3173,6 +3484,59 @@ mod tests {
                 .expect("conditional store")
         );
         assert_eq!(cache.load(&url, 1024).expect("entry").max_age, Some(60));
+    }
+
+    #[test]
+    fn a_304_cannot_outrank_a_later_started_200_or_no_store() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let cached = super::CachedModule {
+            body: b"cached".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(0),
+            etag: None,
+            last_modified: None,
+            generation: "0001".to_string(),
+        };
+        let mut revalidated = cached.clone();
+        revalidated.body = b"revalidated".to_vec();
+        revalidated.generation = "0002".to_string();
+        let mut later = cached.clone();
+        later.body = b"later".to_vec();
+        later.generation = "0003".to_string();
+
+        // 304 completes first, then the later-started 200 wins.
+        cache.store(&url, &cached).expect("cached");
+        assert!(
+            cache
+                .store_revalidated(&url, &revalidated, "0001")
+                .expect("304")
+        );
+        assert!(cache.store_if_newer(&url, &later).expect("later 200"));
+        assert_eq!(cache.load(&url, 1024).expect("current").body, b"later");
+
+        // Later-started 200 completes first; the older 304 cannot publish.
+        cache.store(&url, &cached).expect("cached again");
+        assert!(cache.store_if_newer(&url, &later).expect("later 200"));
+        assert!(
+            !cache
+                .store_revalidated(&url, &revalidated, "0001")
+                .expect("old 304")
+        );
+        assert_eq!(cache.load(&url, 1024).expect("current").body, b"later");
+
+        // A later-started no-store outranks a completed 304.
+        cache.store(&url, &cached).expect("cached third time");
+        assert!(
+            cache
+                .store_revalidated(&url, &revalidated, "0001")
+                .expect("304")
+        );
+        assert!(cache.tombstone_if_newer(&url, "0003").expect("no-store"));
+        assert!(cache.load(&url, 1024).is_none());
+        assert_eq!(cache.state(&url).as_deref(), Some("0003"));
     }
 
     #[test]

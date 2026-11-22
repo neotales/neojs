@@ -204,10 +204,11 @@ impl Runtime {
     /// not store the body and leaves an absent-entry tombstone. Writes are atomic
     /// and concurrent processes cannot publish a
     /// partial body. Each entry records and verifies the body length and SHA-256
-    /// digest, so corruption is a cache miss. A per-key lock and sortable
-    /// generations make a `200` lose to a newer entry or no-store tombstone, and
-    /// make a successful `304` advance the generation so an older `304` cannot
-    /// replace newer headers. A stale lock only delays a cache write and never
+    /// digest, so corruption is a cache miss. A per-key lock and persistent
+    /// monotonic revision files make a `200` lose to a newer entry or no-store
+    /// tombstone, make a `304` use its request revision and not a later
+    /// completion token, and keep ordering independent of the wall clock. A
+    /// stale lock only delays a cache write and never
     /// blocks loading. There is no signature or content-addressed store: the
     /// cache is not integrity protection against someone who can write it and
     /// pins no version. See [`RemoteOptions`] to change the directory or disable
@@ -219,16 +220,19 @@ impl Runtime {
     /// remaining aggregate allowance, and a rejected module is neither fetched
     /// nor published to the cache. Each distinct requested URL consumes one
     /// module slot even when its fetch fails; retrying the same URL reuses that
-    /// slot but repeats the I/O. A failed entry preflight is refunded because the
-    /// runtime remains unused. The deadline is per module, not for the whole
-    /// wall-clock execution of a program. These are resource bounds, not a
-    /// sandbox or a CPU or V8 heap bound.
+    /// slot but repeats the I/O. A separate request limit counts every network
+    /// request, including retries and redirect hops. A failed entry preflight is
+    /// refunded because the runtime remains unused. The deadline is per module,
+    /// not for the whole wall-clock execution of a program. These are resource
+    /// bounds, not a sandbox or a CPU or V8 heap bound.
     ///
     /// Generated V8 errors redact known remote module URLs from frame locations
-    /// and generated diagnostic locations. Module identity and `import.meta.url`
-    /// are unchanged, and a script-supplied exception message or custom stack is
-    /// preserved, so a program can still expose a URL it puts in its own error.
-    /// Do not treat a module specifier as secret storage.
+    /// and only from messages whose name and prefix match a generated
+    /// diagnostic. Module identity and `import.meta.url` are unchanged, and a
+    /// script-supplied exception message, including text shaped like "Cannot
+    /// find module" or ` at <URL>:`, and a custom stack are preserved, so a
+    /// program can still expose a URL it puts in its own error. Do not treat a
+    /// module specifier as secret storage.
     ///
     /// Remote loading is not SSRF protection: there is no host allowlist,
     /// private-address rejection, or DNS pinning, so the program can fetch any
@@ -661,7 +665,7 @@ fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, 
     let format = match module_format(Path::new(fetched.final_url.path())) {
         Ok(format) => format,
         Err(reason) => {
-            remote.refund_entry(&requested, &fetched.final_url, body_len, module_charged);
+            remote.refund_entry(&requested, body_len, module_charged);
             return Err(Error::RemoteEntry {
                 url: display_url(&requested),
                 reason,
@@ -671,7 +675,7 @@ fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, 
     let code = match String::from_utf8(fetched.body) {
         Ok(code) => code,
         Err(_) => {
-            remote.refund_entry(&requested, &fetched.final_url, body_len, module_charged);
+            remote.refund_entry(&requested, body_len, module_charged);
             return Err(Error::RemoteEntry {
                 url: display_url(&requested),
                 reason: "the module is not valid UTF-8".to_string(),
@@ -684,7 +688,7 @@ fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, 
             match typescript::strip(&diagnostic_url(&fetched.final_url), code) {
                 Ok(source) => source,
                 Err(reason) => {
-                    remote.refund_entry(&requested, &fetched.final_url, body_len, module_charged);
+                    remote.refund_entry(&requested, body_len, module_charged);
                     return Err(Error::RemoteTypeScript {
                         url: display_url(&requested),
                         reason,

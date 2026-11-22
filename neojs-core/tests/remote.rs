@@ -611,6 +611,24 @@ fn imported_v8_errors_do_not_echo_a_redirected_final_query() {
 }
 
 #[test]
+fn generated_syntax_errors_do_not_echo_a_module_query() {
+    let server = Server::new(&[(
+        "https://mods.test/bad.js?token=secret",
+        Reply::ok("const value: number = 1;\n"),
+    )]);
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/bad.js?token=secret")
+        .expect_err("the module has a syntax error");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let message = error.to_string();
+    assert!(!message.contains("token"), "{message}");
+    assert!(!message.contains("secret"), "{message}");
+}
+
+#[test]
 fn link_errors_do_not_echo_a_module_query() {
     let server = Server::new(&[
         (
@@ -688,6 +706,25 @@ fn a_script_supplied_exception_value_is_not_rewritten() {
     let message = error.to_string();
     assert!(
         message.contains("keep './module.js?token=secret'"),
+        "{message}"
+    );
+
+    let server = Server::new(&[(
+        "https://mods.test/error-shaped.js",
+        Reply::ok(
+            "throw new Error(\"Cannot find module './module.js?token=secret' at https://mods.test/error-shaped.js?token=secret:1:1\");\n",
+        ),
+    )]);
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/error-shaped.js")
+        .expect_err("throws");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("Cannot find module './module.js?token=secret' at https://mods.test/error-shaped.js?token=secret:1:1"),
         "{message}"
     );
 }
