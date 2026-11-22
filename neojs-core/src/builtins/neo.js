@@ -5749,8 +5749,13 @@
      */
     async function testResolveValue(value, seen, depth, name) {
         if (depth > TEST_MAX_CHAIN) throw testChainError(name);
+        // Check identity before reading `then` again. A stateful getter can
+        // return a function on the first read and undefined or throw on the
+        // second; reading it first would turn a cycle into a pass or mask the
+        // cycle with the getter's later error. Plain objects are never added to
+        // `seen`, so an ordinary value that is encountered again is not a cycle.
+        if (contains(seen, value)) throw testCycleError(name);
         if (coreIsPromise(value)) {
-            if (contains(seen, value)) throw testCycleError(name);
             append(seen, value);
             const observation = observePromise(value);
             await observation.promise;
@@ -5762,7 +5767,6 @@
         }
         const then = testThen(value);
         if (then === null) return testSettledWrapper("fulfilled", value);
-        if (contains(seen, value)) throw testCycleError(name);
         append(seen, value);
         const outcome = await testCallThenable(value, then);
         if (outcome.status === "rejected") throw outcome.value;

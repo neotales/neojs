@@ -54,6 +54,8 @@
 //! internal Promise state rather than those properties. A non-native thenable
 //! is read once, called once, and its first settlement wins; nested promises and
 //! thenables are assimilated recursively, with cycle and chain-length guards.
+//! Identity is checked before a later `then` read, so a stateful getter is read
+//! once and cannot turn its own cycle into a plain value.
 //! The module is available as `test` and `neo:test`;
 //! `node:` modules, including `node:test`, remain rejected while no explicit
 //! Node-module opt-in exists. It is not Node's `node:test`: there are no

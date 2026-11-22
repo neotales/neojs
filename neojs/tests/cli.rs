@@ -2962,3 +2962,77 @@ test("deep chain", () => {
         stdout(&output)
     );
 }
+
+/// A stateful `then` getter must not be read a second time to discover a
+/// cycle. The first read makes the object a thenable; resolving to itself is
+/// a cycle, whether a second read would return undefined or throw.
+#[test]
+fn test_command_stateful_then_getter_cycle_is_not_reread() {
+    let project = Project::new();
+    let file = project.write(
+        "stateful.test.js",
+        r#"
+import test from "test";
+let undefinedReads = 0;
+const undefinedCycle = {
+    get then() {
+        undefinedReads += 1;
+        if (undefinedReads === 1) {
+            return function (resolve) { resolve(undefinedCycle); };
+        }
+        if (undefinedReads === 2) return undefined;
+        throw new Error("undefined cycle read more than twice");
+    },
+};
+let throwingReads = 0;
+const throwingCycle = {
+    get then() {
+        throwingReads += 1;
+        if (throwingReads === 1) {
+            return function (resolve) { resolve(throwingCycle); };
+        }
+        throw new Error("throwing cycle reread");
+    },
+};
+const plain = { ok: true };
+test("stateful undefined cycle", () => undefinedCycle);
+test("stateful throwing cycle", () => throwingCycle);
+test("getters read once", () => {
+    if (undefinedReads !== 1) throw new Error(`undefined getter read ${undefinedReads}`);
+    if (throwingReads !== 1) throw new Error(`throwing getter read ${throwingReads}`);
+});
+test("plain object", () => plain);
+test("plain through thenable", () => ({ then(resolve) { resolve(plain); } }));
+test("nested native", () => ({
+    then(resolve) { resolve(Promise.resolve("ok")); },
+}));
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(
+        printed.contains("not ok 1 - stateful undefined cycle"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("not ok 2 - stateful throwing cycle"),
+        "{printed}"
+    );
+    assert_eq!(printed.matches("NEO_TEST_CYCLE").count(), 2, "{printed}");
+    assert!(printed.contains("ok 3 - getters read once"), "{printed}");
+    assert!(printed.contains("ok 4 - plain object"), "{printed}");
+    assert!(
+        printed.contains("ok 5 - plain through thenable"),
+        "{printed}"
+    );
+    assert!(printed.contains("ok 6 - nested native"), "{printed}");
+    assert!(
+        !printed.contains("undefined cycle read more than twice"),
+        "{printed}"
+    );
+    assert!(!printed.contains("throwing cycle reread"), "{printed}");
+}

@@ -587,7 +587,9 @@ their real internal state rather than `then`, `constructor`, or `Symbol.species`
 throwing prototype getters therefore fulfils, rejects, or stays pending according to what actually
 happened. A non-native thenable is read once, called once, and its first settlement wins.
 Nested promises and thenables are assimilated recursively, cycles fail with `NEO_TEST_CYCLE`, and a
-chain longer than 1000 steps fails with `NEO_TEST_CHAIN`. The per-test timeout covers the whole
+chain longer than 1000 steps fails with `NEO_TEST_CHAIN`. Identity is checked before reading `then`
+again, so a stateful getter is read once and cannot turn its own cycle into a plain value or mask it
+with a later error. The per-test timeout covers the whole
 chain. `NEO_TEST_OBSERVE` means the V8 observer could not inspect a native Promise, and
 `NEO_TEST_NO_TIMER` means timer support was unavailable and the runner failed closed rather than
 hang. A synchronous loop or a thenable that blocks or starves the isolate is still not
