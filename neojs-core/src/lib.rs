@@ -31,7 +31,9 @@
 //! `throws`/`doesNotThrow` take synchronous callbacks; a genuine native Promise
 //! return, checked by the engine's internal slot rather than its prototype, is
 //! a `TypeError` that points at `rejects`/`doesNotReject`, which return Promises
-//! and assimilate a thenable by reading `then` once.
+//! and assimilate a thenable by reading `then` once. A `rejects` rejection reason
+//! that is itself a thenable is subject to native Promise assimilation in the
+//! returned Promise.
 //!
 //! `age` is synchronous binary age v1 encryption for X25519 recipients. It
 //! exposes `generateIdentity`, `identityToRecipient`, `encrypt`, and `decrypt`.

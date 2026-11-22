@@ -2798,9 +2798,8 @@ try {
     else delete Object.prototype.then;
 }
 
-// A genuine Promise subclass is observed by its internal slot, not by its
-// overridden `then`. Settled promises use the engine's state directly; a
-// pending one uses the captured intrinsic Promise.prototype.then.
+// A genuine Promise subclass is observed through the V8 host op, not through
+// its overridden `then`. Settled and pending promises use the same observation.
 let overriddenThenCalls = 0;
 class OverriddenThenPromise extends Promise {
     then() {
@@ -2831,9 +2830,8 @@ if (overriddenThenCalls !== 0) {
     throw new Error(`overridden then was called ${overriddenThenCalls} times`);
 }
 
-// An already-settled subclass whose species throws is readable from internal
-// state. A pending one is not safely observable: report an inspection failure,
-// never a fulfillment or a false rejection.
+// The V8 observation does not consult Symbol.species, so settled and pending
+// subclasses whose species throws are still readable.
 let speciesReads = 0;
 class ThrowingSpeciesPromise extends Promise {
     static get [Symbol.species]() {
@@ -2872,6 +2870,68 @@ if (!(pendingBadRejectionReason instanceof RangeError)) {
 }
 if (speciesReads !== 0) {
     throw new Error(`Symbol.species was read ${speciesReads} times`);
+}
+
+// A rejection reason that is itself a thenable is returned from an async
+// function, so native Promise resolution assimilates it. The target did reject
+// (the assertion passes), but the returned Promise follows that reason's
+// settlement. These cases document both outcomes and keep the distinction from
+// a false pass: a fulfilling target still fails the assertion.
+const fulfillingReason = {
+    then(resolve) {
+        resolve("assimilated reason");
+    },
+};
+if (await rejects(() => Promise.reject(fulfillingReason)) !== "assimilated reason") {
+    throw new Error("a fulfilling thenable reason was not assimilated");
+}
+const rejectingReason = {
+    then(resolve, reject) {
+        reject(new RangeError("assimilated rejection"));
+    },
+};
+let assimilatedRejection;
+try {
+    await rejects(() => Promise.reject(rejectingReason));
+} catch (caught) {
+    assimilatedRejection = caught;
+}
+if (
+    !(assimilatedRejection instanceof RangeError) ||
+    assimilatedRejection.message !== "assimilated rejection"
+) {
+    throw new Error("a rejecting thenable reason did not reject the returned Promise");
+}
+const promiseReason = Promise.resolve("promise assimilation");
+if (await rejects(() => Promise.reject(promiseReason)) !== "promise assimilation") {
+    throw new Error("a Promise reason was not assimilated");
+}
+const rejectedPromiseReason = Promise.reject(new SyntaxError("promise rejection"));
+let assimilatedPromiseRejection;
+try {
+    await rejects(() => Promise.reject(rejectedPromiseReason));
+} catch (caught) {
+    assimilatedPromiseRejection = caught;
+}
+if (
+    !(assimilatedPromiseRejection instanceof SyntaxError) ||
+    assimilatedPromiseRejection.message !== "promise rejection"
+) {
+    throw new Error("a rejected Promise reason did not reject the returned Promise");
+}
+const fulfillingTarget = {
+    then(resolve) {
+        resolve("not a rejection");
+    },
+};
+let fulfillingTargetError;
+try {
+    await rejects(() => fulfillingTarget);
+} catch (caught) {
+    fulfillingTargetError = caught;
+}
+if (!(fulfillingTargetError instanceof AssertionError)) {
+    throw new Error("a fulfilling thenable was accepted as a rejection");
 }
 
 error = await failsAsync("rejects arity", () => rejects());

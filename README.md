@@ -500,15 +500,23 @@ a genuine native Promise is a `TypeError` that points at the Promise-aware form,
 not run cannot be reported as a pass. The check reads the engine's internal Promise slot, not the
 prototype chain, so an object that merely inherits from `Promise.prototype` is an ordinary return.
 
-`rejects(callback[, expected[, message]])` returns a Promise that resolves with the rejection reason
-once `callback` rejects, and rejects with `AssertionError` when it fulfils. A synchronous throw is
-treated as a rejection. The callback's return value must be a genuine native Promise or a thenable.
-A genuine native Promise is observed through a private host op that attaches settlement handlers
-without reading an overridden `then` and without consulting `Symbol.species`. A thenable is
-assimilated by reading `then` once and calling it once; a throwing `then` accessor or call is
-treated as a rejection. `doesNotReject(callback[, message])` resolves with the fulfilment
-value and rejects with `AssertionError` if the callback throws or rejects. Invalid arguments reject
-the returned Promise.
+`rejects(callback[, expected[, message]])` returns a Promise that rejects with `AssertionError`
+when `callback` fulfils, and otherwise records a rejection. A synchronous throw is treated as a
+rejection. The callback's return value must be a genuine native Promise or a thenable. A genuine
+native Promise is observed through a private host op that attaches settlement handlers without
+reading an overridden `then` and without consulting `Symbol.species`. A thenable is assimilated by
+reading `then` once and calling it once; a throwing `then` accessor or call is treated as a
+rejection.
+
+For a non-thenable rejection reason, the returned Promise resolves with that reason. Because
+`rejects` is an async function, a thenable or Promise reason is assimilated by native Promise
+resolution: the returned Promise may resolve with that reason's fulfilment value or reject with its
+rejection. The assertion has already passed when the target rejected; this later assimilation is
+the return value's semantics, not a second assertion. If a reason is thenable, do not rely on the
+return value to recover the original object.
+
+`doesNotReject(callback[, message])` resolves with the fulfilment value and rejects with
+`AssertionError` if the callback throws or rejects. Invalid arguments reject the returned Promise.
 `assert.rejects` and `assert.doesNotReject` work with top-level await; they do not wrap blocking work
 to look asynchronous.
 

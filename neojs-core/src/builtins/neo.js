@@ -5005,10 +5005,17 @@
      * calling it once; a throwing `then` accessor or call rejects the returned
      * Promise. A plain value is an `AssertionError`.
      *
+     * A non-thenable rejection reason is returned as the Promise value. Because
+     * this is an async function, a thenable or Promise reason is assimilated by
+     * native Promise resolution, so the returned Promise can instead fulfil
+     * with that reason's value or reject with its rejection. The assertion has
+     * already passed when the target rejected.
+     *
      * @param {() => unknown} callback
      * @param {Function|RegExp|null} [expected]
      * @param {string} [message]
-     * @returns {Promise<unknown>} the rejection reason.
+     * @returns {Promise<unknown>} the rejection reason, subject to native
+     * Promise assimilation when the reason is a thenable.
      */
     async function rejects(callback, expected, message) {
         checkArity(arguments, "assert.rejects", 1, 3);
