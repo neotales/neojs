@@ -798,9 +798,10 @@ impl CryptoExecutor {
     /// probe, and enters the cancellation gate before running `work`. The
     /// closure returns its raw bytes; an empty vector is the internal-failure
     /// sentinel used by the join ops.
-    pub(crate) fn spawn_blocking<F>(&self, work: F) -> JoinHandle<Vec<u8>>
+    pub(crate) fn spawn_blocking<F, R>(&self, work: F) -> JoinHandle<R>
     where
-        F: FnOnce() -> Vec<u8> + Send + 'static,
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
     {
         let handle = self
             .handle

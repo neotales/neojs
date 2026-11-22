@@ -205,6 +205,16 @@ const detached = new Uint8Array(8);
 detached.buffer.transfer();
 expectCode(() => shamirSplit(detached, 2, 3), "NEO_CRYPTO_DETACHED", "split detached");
 
+// A SharedArrayBuffer view cannot be copied as one coherent snapshot.
+const shared = new SharedArrayBuffer(8);
+const sharedView = new Uint8Array(shared);
+sharedView.set([1, 2, 3]);
+expectCode(
+    () => shamirSplit(sharedView, 2, 3),
+    "NEO_CRYPTO_SHAMIR_SHARED",
+    "split shared",
+);
+
 expectTypeError(() => shamirCombine(), "combine no args");
 expectTypeError(() => shamirCombine(shares, 2, 3), "combine extra");
 expectTypeError(() => shamirCombine({}), "combine object");
@@ -282,6 +292,16 @@ const detachedShares = [
 ];
 detachedShares[1].value.buffer.transfer();
 expectCode(() => shamirCombine(detachedShares), "NEO_CRYPTO_DETACHED", "combine detached share");
+
+const sharedShares = [
+    { index: 1, value: sharedView },
+    { index: 2, value: Uint8Array.of(5) },
+];
+expectCode(
+    () => shamirCombine(sharedShares),
+    "NEO_CRYPTO_SHAMIR_SHARED",
+    "combine shared share",
+);
 "#,
     );
 }
@@ -360,6 +380,38 @@ try {
     duplicate = error.code === "NEO_CRYPTO_SHAMIR_DUPLICATE";
 }
 if (!duplicate) throw new Error("async combine did not reject duplicate shares");
+
+const shared = new SharedArrayBuffer(3);
+const sharedView = new Uint8Array(shared);
+sharedView.set([1, 2, 3]);
+let sharedSplit = "none";
+try {
+    await shamirSplitAsync(sharedView, 2, 3);
+} catch (error) {
+    sharedSplit = error.code;
+}
+if (sharedSplit !== "NEO_CRYPTO_SHAMIR_SHARED") {
+    throw new Error("async split shared: " + sharedSplit);
+}
+let sharedCombine = "none";
+try {
+    await shamirCombineAsync([
+        { index: 1, value: sharedView },
+        { index: 2, value: Uint8Array.of(5) },
+    ]);
+} catch (error) {
+    sharedCombine = error.code;
+}
+if (sharedCombine !== "NEO_CRYPTO_SHAMIR_SHARED") {
+    throw new Error("async combine shared: " + sharedCombine);
+}
+
+// Finished joins are consumed by the take op, not left as resources.
+for (const name of Object.values(Deno.core.resources())) {
+    if (name === "neo::crypto::AsyncShamir") {
+        throw new Error("an async Shamir job resource was retained");
+    }
+}
 "#,
     );
 }
@@ -389,6 +441,45 @@ if (combineAsync !== registry.shamirCombineAsync) throw new Error("named combine
 if ("default" in crypto) throw new Error("crypto must not have a default export");
 if (import.meta.resolve("crypto") !== "neo:crypto") throw new Error("resolve");
 if (import.meta.resolve("neo:crypto") !== "neo:crypto") throw new Error("alias resolve");
+"#,
+    );
+}
+
+#[test]
+fn shamir_ignores_poisoned_array_index_setters() {
+    run_js(
+        r#"
+import { shamirCombine, shamirSplit, shamirSplitAsync } from "neo:crypto";
+
+const secret = Uint8Array.of(1, 2, 3, 4);
+const original = Object.getOwnPropertyDescriptor(Array.prototype, "0");
+let poisoned = 0;
+Object.defineProperty(Array.prototype, "0", {
+    configurable: true,
+    get() { return undefined; },
+    set() { poisoned += 1; },
+});
+try {
+    const syncShares = shamirSplit(secret, 2, 3);
+    if (poisoned !== 0) throw new Error("sync split used the prototype setter");
+    if (syncShares[0].index !== 1) throw new Error("sync share 0 was intercepted");
+    if (shamirCombine([syncShares[0], syncShares[2]])[0] !== 1) {
+        throw new Error("sync combine after poisoning");
+    }
+
+    const asyncShares = await shamirSplitAsync(secret, 2, 3);
+    if (poisoned !== 0) throw new Error("async split used the prototype setter");
+    if (asyncShares[0].index !== 1) throw new Error("async share 0 was intercepted");
+    if (shamirCombine([asyncShares[1], asyncShares[2]])[0] !== 1) {
+        throw new Error("async combine after poisoning");
+    }
+} finally {
+    if (original === undefined) {
+        delete Array.prototype[0];
+    } else {
+        Object.defineProperty(Array.prototype, "0", original);
+    }
+}
 "#,
     );
 }

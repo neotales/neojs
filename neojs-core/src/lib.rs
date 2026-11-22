@@ -60,7 +60,10 @@
 //! bounds, memory policy, and interoperability are documented in
 //! `neojs-core/src/crypto_shamir.rs`. Shamir shares are bytewise compatible
 //! with the Neotales PLAB and rust-libraries encodings, are not authenticated,
-//! and cannot detect a wrong reconstruction.
+//! and cannot detect a wrong reconstruction. `SharedArrayBuffer`-backed inputs
+//! are rejected because a copy is not one coherent snapshot. Returned share and
+//! secret bytes use V8 backing stores that are cleared when V8 releases them;
+//! JavaScript-made copies remain outside that guarantee.
 //!
 //! `stdio` is a synchronous byte-stream foundation over bounded memory:
 //! `Readable` reads from an owned snapshot of a `Uint8Array`, `Writable`
@@ -240,5 +243,21 @@ pub mod test_support {
     /// production hook.
     pub fn fail_next_shamir_random() {
         crate::crypto_shamir::fail_next_shamir_random();
+    }
+
+    /// Count Shamir V8 backing stores cleared by the zeroizing deleter.
+    ///
+    /// Used to prove that dropped share arrays and secrets are cleared when
+    /// V8 releases them. Compiled only with `test-support`.
+    pub fn zeroized_shamir_buffers() -> usize {
+        crate::crypto_shamir::zeroized_v8_buffers()
+    }
+
+    /// Count dropped Shamir worker-result owners.
+    ///
+    /// Used to prove that a finished worker result is dropped, and therefore
+    /// its zeroizing data is cleared, when the runtime is torn down.
+    pub fn dropped_shamir_worker_results() -> usize {
+        crate::crypto_shamir::dropped_worker_results()
     }
 }

@@ -73,6 +73,12 @@
 //! refused reservation is `NEO_CRYPTO_LIMIT`. V8 and the JavaScript heap
 //! allocate too, so recovery from out-of-memory is not guaranteed.
 //!
+//! Inputs backed by a `SharedArrayBuffer` are rejected with
+//! `NEO_CRYPTO_SHAMIR_SHARED`. Copying such a view is not one atomic snapshot:
+//! another agent can change bytes during the copy, so a split or combine would
+//! silently use an incoherent value. A caller that needs shared memory must
+//! first copy a synchronized snapshot into a non-shared buffer.
+//!
 //! # Asynchronous API
 //!
 //! `shamirSplitAsync` and `shamirCombineAsync` return a `Promise`. Validation,
@@ -86,15 +92,18 @@
 //! isolate is not blocked by entropy reads or polynomial arithmetic. The
 //! pending-job and pending-byte budgets are the same ones used by
 //! `hashAsync`, `pbkdf2Async`, and bcrypt: at most
-//! [`MAX_PENDING_ASYNC_JOBS`] jobs and [`MAX_PENDING_ASYNC_BYTES`] of copied
-//! input plus intended output may be pending. A submission over either bound
-//! rejects with `NEO_CRYPTO_BUSY`. The reservation is released when the worker
-//! finishes, panics, or is aborted before it starts; an already-running job
-//! stays charged until it returns. Because an asynchronous split reserves its
-//! intended share output as well as the secret copy, a split whose total share
-//! bytes are close to the 64 MiB limit can be accepted synchronously but
-//! rejected with `NEO_CRYPTO_BUSY` asynchronously when no room remains in the
-//! pending-byte budget.
+//! [`MAX_PENDING_ASYNC_JOBS`] jobs and [`MAX_PENDING_ASYNC_BYTES`] of the
+//! worker's exact owned peak may be pending. A split reserves the secret copy,
+//! one packed output, and the temporary noise buffer; it writes the packed
+//! representation directly and never builds a second full share set. A combine
+//! reserves the copied shares, the recovered secret, and the public
+//! interpolation basis. A submission over either bound rejects with
+//! `NEO_CRYPTO_BUSY`. The reservation is released when the worker finishes,
+//! panics, or is aborted before it starts; an already-running job stays charged
+//! until it returns. A split whose total share bytes are close to the 64 MiB
+//! limit can be accepted synchronously but rejected asynchronously because the
+//! pending budget also includes the secret copy, header, index bytes, and
+//! noise.
 //!
 //! As with the other asynchronous crypto calls, deno_core hosts async ops on a
 //! Tokio current-thread runtime on the isolate thread. `run_file` provides one;
@@ -106,20 +115,25 @@
 //! Cancellation is best effort, not a guarantee that work stops, and it is not
 //! triggered by abandoning the returned JavaScript `Promise`. The wrapper
 //! starts the join op immediately, so an unawaited promise still drives the job
-//! to completion. Dropping the runtime aborts a job that has not started on a
-//! blocking thread; a job that has already started cannot be stopped, keeps
-//! its owned buffers and reservation until it returns, and its result is
-//! discarded.
+//! to completion. The worker returns a `Zeroizing` result; the join stores it in
+//! a resource until the synchronous take op transfers it to a zeroizing V8
+//! backing store. Dropping the runtime before that transfer aborts a job that
+//! has not started on a blocking thread and clears any completed result. A job
+//! that has already started cannot be stopped, keeps its owned buffers and
+//! reservation until it returns, and its result is still cleared on drop.
 //!
 //! # Memory and side channels
 //!
-//! Rust buffers holding the secret, random coefficients, and share values are
-//! wrapped in `zeroize::Zeroizing` or zeroized on drop. The packed worker
-//! result is wiped by the JavaScript wrapper after it has been unpacked. This
-//! is best-effort clearing: V8's typed-array backing stores, the JavaScript
-//! heap, the returned share values, the returned secret, and copies made by
-//! the caller are outside that guarantee. The module does not promise complete
-//! memory erasure.
+//! Rust buffers holding the secret, random coefficients, share values, and the
+//! packed worker result are wrapped in `zeroize::Zeroizing` or zeroized on
+//! drop. Every share value and recovered secret returned to JavaScript is
+//! placed in a V8 backing store whose deleter clears the allocation before V8
+//! frees it. The join result stays in a `Zeroizing` resource until that
+//! transfer, so a discarded or abandoned result is cleared on runtime teardown.
+//! This is still best-effort clearing: JavaScript can copy the bytes into
+//! ordinary V8 memory (for example with `slice` or `structuredClone`), and the
+//! JavaScript heap, V8 string storage, and caller-held copies are outside this
+//! guarantee. The module does not promise complete memory erasure.
 //!
 //! GF(256) multiplication is a fixed eight-round branchless mask loop, and
 //! inversion uses a fixed seven-step exponentiation. Secret bytes are not used
@@ -139,6 +153,7 @@
 //! to mean any of those schemes.
 
 use std::cell::RefCell;
+use std::ffi::c_void;
 use std::rc::Rc;
 
 use deno_core::OpState;
@@ -183,7 +198,7 @@ const NOISE_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Largest packed worker result accepted by the unpack ops: the share bytes,
 /// one index byte per share, and the nine-byte split header.
-const MAX_SHAMIR_PACKED_BYTES: usize = MAX_SHAMIR_TOTAL_BYTES + MAX_SHAMIR_SHARES + 9;
+const MAX_SHAMIR_PACKED_BYTES: usize = MAX_SHAMIR_TOTAL_BYTES + MAX_SHAMIR_SHARES + 8;
 
 /// Stable machine-readable Shamir failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -198,6 +213,8 @@ enum ShamirErrorCode {
     LengthMismatch,
     /// The view's buffer was detached.
     Detached,
+    /// The view is backed by a `SharedArrayBuffer`.
+    Shared,
     /// An argument has the wrong JavaScript type.
     Type,
     /// A numeric argument is not an integer in its documented range.
@@ -223,6 +240,7 @@ impl ShamirErrorCode {
             Self::DuplicateIndex => "NEO_CRYPTO_SHAMIR_DUPLICATE",
             Self::LengthMismatch => "NEO_CRYPTO_SHAMIR_LENGTH",
             Self::Detached => "NEO_CRYPTO_DETACHED",
+            Self::Shared => "NEO_CRYPTO_SHAMIR_SHARED",
             Self::Busy => "NEO_CRYPTO_BUSY",
             Self::NoExecutor => "NEO_CRYPTO_NO_EXECUTOR",
             Self::Internal => "NEO_CRYPTO_INTERNAL",
@@ -250,6 +268,7 @@ impl ShamirErrorCode {
             Self::Type => 6,
             Self::Range => 7,
             Self::Busy | Self::NoExecutor | Self::Internal => 8,
+            Self::Shared => 9,
         }
     }
 
@@ -263,6 +282,7 @@ impl ShamirErrorCode {
             5 => Self::Detached,
             6 => Self::Type,
             7 => Self::Range,
+            9 => Self::Shared,
             _ => Self::Internal,
         }
     }
@@ -291,6 +311,7 @@ impl ShamirError {
             ShamirErrorCode::DuplicateIndex => "duplicate share index",
             ShamirErrorCode::LengthMismatch => "all shares must have the same length",
             ShamirErrorCode::Detached => "input is detached or out of bounds",
+            ShamirErrorCode::Shared => "SharedArrayBuffer-backed input cannot be copied coherently",
             ShamirErrorCode::Type => "expected a Uint8Array, number, or share object",
             ShamirErrorCode::Range => "numeric argument is outside its documented range",
             ShamirErrorCode::Busy => "too much asynchronous crypto work is pending",
@@ -299,10 +320,6 @@ impl ShamirError {
             }
             ShamirErrorCode::Internal => "the Shamir worker failed",
         }
-    }
-
-    fn worker_buffer(self) -> Vec<u8> {
-        vec![self.code.tag()]
     }
 }
 
@@ -402,6 +419,26 @@ fn copied_slice(source: &[u8]) -> Result<Vec<u8>, ShamirError> {
     Ok(bytes)
 }
 
+/// Validate a `Uint8Array` and reject a `SharedArrayBuffer` backing store.
+///
+/// Copying a view backed by shared memory is not an atomic snapshot: another
+/// agent can change bytes during the copy, so the split or combine would use an
+/// incoherent value. The caller must copy the bytes into a non-shared buffer
+/// first if it needs its own synchronization.
+fn checked_shamir_view<'s>(
+    scope: &v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> Result<View<'s>, ShamirError> {
+    let view = checked_view(scope, value)?;
+    let Some(buffer) = view.view.buffer(scope) else {
+        return Err(ShamirError::new(ShamirErrorCode::Detached));
+    };
+    if buffer.get_backing_store().is_shared() {
+        return Err(ShamirError::new(ShamirErrorCode::Shared));
+    }
+    Ok(view)
+}
+
 /// Multiply a value length by a share count and enforce the total bound.
 fn check_total(length: usize, count: usize) -> Result<usize, ShamirError> {
     let total = length
@@ -411,6 +448,60 @@ fn check_total(length: usize, count: usize) -> Result<usize, ShamirError> {
         return Err(ShamirError::new(ShamirErrorCode::Limit));
     }
     Ok(total)
+}
+
+/// Bytes of random noise one split needs for its temporary buffer.
+///
+/// The chunk width also returned is how many secret bytes are processed per
+/// CSPRNG fill.
+fn noise_size(secret_length: usize, threshold: usize) -> Result<(usize, usize), ShamirError> {
+    let stride = threshold - 1;
+    let chunk_bytes = (NOISE_BUFFER_BYTES / stride).max(1).min(secret_length);
+    let noise_length = chunk_bytes
+        .checked_mul(stride)
+        .ok_or_else(|| ShamirError::new(ShamirErrorCode::Limit))?;
+    Ok((chunk_bytes, noise_length))
+}
+
+/// Exact bytes an asynchronous split worker will own at one time.
+///
+/// This counts the secret copy, the single packed output (header, index bytes,
+/// and share values), and the temporary noise buffer. It does not count a
+/// second full share set, because the worker writes the packed representation
+/// directly.
+fn split_pending_bytes(
+    secret_length: usize,
+    threshold: usize,
+    share_count: usize,
+) -> Result<usize, ShamirError> {
+    let total = secret_length
+        .checked_mul(share_count)
+        .ok_or_else(|| ShamirError::new(ShamirErrorCode::Busy))?;
+    let (_, noise_length) = noise_size(secret_length, threshold)?;
+    let packed = 8usize
+        .checked_add(share_count)
+        .and_then(|bytes| bytes.checked_add(total))
+        .ok_or_else(|| ShamirError::new(ShamirErrorCode::Busy))?;
+    secret_length
+        .checked_add(packed)
+        .and_then(|bytes| bytes.checked_add(noise_length))
+        .ok_or_else(|| ShamirError::new(ShamirErrorCode::Busy))
+}
+
+/// Exact bytes an asynchronous combine worker will own at one time.
+///
+/// This counts the copied share values, the recovered secret output, and the
+/// public interpolation basis. The worker no longer builds a second packed copy
+/// of the secret.
+fn combine_pending_bytes(
+    total_share_bytes: usize,
+    secret_length: usize,
+    share_count: usize,
+) -> Result<usize, ShamirError> {
+    total_share_bytes
+        .checked_add(secret_length)
+        .and_then(|bytes| bytes.checked_add(share_count))
+        .ok_or_else(|| ShamirError::new(ShamirErrorCode::Busy))
 }
 
 /// Validate split parameters and return the total share bytes.
@@ -542,10 +633,7 @@ where
     }
 
     let stride = threshold - 1;
-    let chunk_bytes = (NOISE_BUFFER_BYTES / stride).max(1).min(secret.len());
-    let noise_length = chunk_bytes
-        .checked_mul(stride)
-        .ok_or_else(|| ShamirError::new(ShamirErrorCode::Limit))?;
+    let (chunk_bytes, noise_length) = noise_size(secret.len(), threshold)?;
     let mut noise = Zeroizing::new(zeroed_vec(noise_length)?);
 
     for start in (0..secret.len()).step_by(chunk_bytes) {
@@ -782,7 +870,7 @@ fn read_share_plan<'s>(
         let index = read_integer(scope, index_value, 1, MAX_SHAMIR_SHARES as u32)?;
         let index = u8::try_from(index).map_err(|_| ShamirError::new(ShamirErrorCode::Range))?;
         let value_property = own_data_property(scope, object, "value", "value")?;
-        let view = checked_view(scope, value_property)?;
+        let view = checked_shamir_view(scope, value_property)?;
         plans.push(SharePlan { index, view });
     }
     validate_plan(&plans)?;
@@ -811,46 +899,76 @@ struct SplitPayload<'a> {
     body: &'a [u8],
 }
 
-/// Encode a successful split for the join buffer.
-fn pack_split(shares: &[ShamirShare]) -> Result<Vec<u8>, ShamirError> {
-    let Some(first) = shares.first() else {
-        return Err(ShamirError::new(ShamirErrorCode::Internal));
-    };
-    let length = first.value.len();
-    let body = shares
+/// Split directly into the packed worker representation.
+///
+/// This writes one packed allocation and never builds a second full share set.
+/// The header is `count` as a little-endian `u32`, `value length` as a
+/// little-endian `u32`, then one index byte and one value per share. The
+/// caller's `Zeroizing` wrapper owns the result until it is stored in a
+/// [`WorkerResult`].
+fn split_packed(
+    secret: &[u8],
+    threshold: usize,
+    share_count: usize,
+) -> Result<Zeroizing<Vec<u8>>, ShamirError> {
+    let total = validate_split(secret.len(), threshold, share_count)?;
+    #[cfg(feature = "test-support")]
+    record_shamir_placement();
+
+    let stride = secret
         .len()
-        .checked_mul(length)
-        .and_then(|bytes| bytes.checked_add(shares.len()))
+        .checked_add(1)
         .ok_or_else(|| ShamirError::new(ShamirErrorCode::Limit))?;
-    let capacity = body
-        .checked_add(9)
+    let capacity = 8usize
+        .checked_add(share_count)
+        .and_then(|bytes| bytes.checked_add(total))
         .ok_or_else(|| ShamirError::new(ShamirErrorCode::Limit))?;
-    let mut packed = Vec::new();
-    packed
-        .try_reserve_exact(capacity)
-        .map_err(|_| ShamirError::new(ShamirErrorCode::Limit))?;
-    packed.push(0);
-    packed.extend_from_slice(&(shares.len() as u32).to_le_bytes());
-    packed.extend_from_slice(&(length as u32).to_le_bytes());
-    for share in shares {
-        packed.push(share.index);
-        packed.extend_from_slice(&share.value);
+    let mut packed = Zeroizing::new(zeroed_vec(capacity)?);
+
+    let count = u32::try_from(share_count).map_err(|_| ShamirError::new(ShamirErrorCode::Range))?;
+    let length =
+        u32::try_from(secret.len()).map_err(|_| ShamirError::new(ShamirErrorCode::Limit))?;
+    packed[0..4].copy_from_slice(&count.to_le_bytes());
+    packed[4..8].copy_from_slice(&length.to_le_bytes());
+    for position in 0..share_count {
+        let index =
+            u8::try_from(position + 1).map_err(|_| ShamirError::new(ShamirErrorCode::Range))?;
+        packed[8 + position * stride] = index;
+    }
+
+    let stride = threshold - 1;
+    let (chunk_bytes, noise_length) = noise_size(secret.len(), threshold)?;
+    let mut noise = Zeroizing::new(zeroed_vec(noise_length)?);
+    for start in (0..secret.len()).step_by(chunk_bytes) {
+        let width = chunk_bytes.min(secret.len() - start);
+        let used = width * stride;
+        fill_random(&mut noise[..used])?;
+        for offset in 0..width {
+            let constant = secret[start + offset];
+            let coefficients = &noise[offset * stride..(offset + 1) * stride];
+            for position in 0..share_count {
+                let base = 8 + position * (secret.len() + 1);
+                let index = packed[base];
+                let value = evaluate(constant, coefficients, index);
+                packed[base + 1 + start + offset] = value;
+            }
+        }
     }
     Ok(packed)
 }
 
-/// Parse the body of a successful split payload.
+/// Parse the header and body of a packed split payload.
 fn parse_split_payload(bytes: &[u8]) -> Result<SplitPayload<'_>, ShamirError> {
-    if bytes.len() < 9 || bytes[0] != 0 {
+    if bytes.len() < 8 {
         return Err(ShamirError::new(ShamirErrorCode::Internal));
     }
     let count = u32::from_le_bytes(
-        bytes[1..5]
+        bytes[0..4]
             .try_into()
             .map_err(|_| ShamirError::new(ShamirErrorCode::Internal))?,
     ) as usize;
     let length = u32::from_le_bytes(
-        bytes[5..9]
+        bytes[4..8]
             .try_into()
             .map_err(|_| ShamirError::new(ShamirErrorCode::Internal))?,
     ) as usize;
@@ -867,25 +985,130 @@ fn parse_split_payload(bytes: &[u8]) -> Result<SplitPayload<'_>, ShamirError> {
         .checked_mul(length)
         .and_then(|body| body.checked_add(count))
         .ok_or_else(|| ShamirError::new(ShamirErrorCode::Internal))?;
-    if bytes.len() != 9 + expected {
+    if bytes.len() != 8 + expected {
         return Err(ShamirError::new(ShamirErrorCode::Internal));
     }
     Ok(SplitPayload {
         count,
         length,
-        body: &bytes[9..],
+        body: &bytes[8..],
     })
 }
 
+#[cfg(feature = "test-support")]
+static ZEROIZED_V8_BUFFERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "test-support")]
+static DROPPED_WORKER_RESULTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Test-only count of Shamir V8 backing stores released through the zeroizing
+/// deleter. Compiled only with the off-by-default `test-support` feature.
+#[cfg(feature = "test-support")]
+pub(crate) fn zeroized_v8_buffers() -> usize {
+    ZEROIZED_V8_BUFFERS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Test-only count of dropped [`WorkerResult`] owners.
+#[cfg(feature = "test-support")]
+pub(crate) fn dropped_worker_results() -> usize {
+    DROPPED_WORKER_RESULTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// V8 backing-store deleter that clears the allocation before freeing it.
+///
+/// The pointer and length came from [`zeroizing_bytes_to_v8`]'s boxed slice, so
+/// reconstructing that box here is the matching release.
+unsafe extern "C" fn wipe_backing_store(
+    data: *mut c_void,
+    byte_length: usize,
+    _deleter_data: *mut c_void,
+) {
+    if data.is_null() || byte_length == 0 {
+        return;
+    }
+    // SAFETY: `data` and `byte_length` are the boxed slice handed to V8 by
+    // `zeroizing_bytes_to_v8`; V8 calls this deleter exactly once.
+    let slice = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), byte_length) };
+    slice.zeroize();
+    // SAFETY: reconstruct the same boxed slice that was leaked into V8.
+    unsafe {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            data.cast::<u8>(),
+            byte_length,
+        )));
+    }
+    #[cfg(feature = "test-support")]
+    ZEROIZED_V8_BUFFERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Move bytes into a V8 `Uint8Array` whose backing store is zeroized when V8
+/// releases it.
+///
+/// The owner is `Zeroizing` until the boxed slice is handed to V8. If the
+/// transfer fails, the `Zeroizing`/backing-store drop path clears it. A JS
+/// caller can still copy the bytes into ordinary JavaScript memory, which this
+/// module cannot clear.
+fn zeroizing_bytes_to_v8<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    mut bytes: Zeroizing<Vec<u8>>,
+) -> Option<v8::Local<'s, v8::Uint8Array>> {
+    let length = bytes.len();
+    if length == 0 {
+        return bytes_to_v8(scope, Vec::new());
+    }
+    let boxed = std::mem::take(&mut *bytes).into_boxed_slice();
+    debug_assert_eq!(boxed.len(), length);
+    let raw = Box::into_raw(boxed) as *mut u8;
+    // SAFETY: `raw` and `length` describe the boxed slice, and the deleter
+    // reconstructs that exact box. V8 takes ownership of the allocation.
+    let store = unsafe {
+        v8::ArrayBuffer::new_backing_store_from_ptr(
+            raw.cast::<c_void>(),
+            length,
+            wipe_backing_store,
+            std::ptr::null_mut(),
+        )
+    };
+    let store = store.make_shared();
+    let buffer = v8::ArrayBuffer::with_backing_store(scope, &store);
+    v8::Uint8Array::new(scope, buffer, 0, length)
+}
+
+/// Define an own array index without consulting a prototype setter.
+fn define_array_index<'s>(
+    scope: &v8::PinScope<'s, '_>,
+    array: v8::Local<'s, v8::Array>,
+    position: u32,
+    value: v8::Local<'s, v8::Value>,
+) -> Result<(), ShamirError> {
+    let number = v8::Integer::new_from_unsigned(scope, position);
+    let Some(key) = number.to_string(scope) else {
+        return Err(ShamirError::new(ShamirErrorCode::Type));
+    };
+    if array
+        .create_data_property(scope, key.into(), value)
+        .ok_or_else(|| ShamirError::new(ShamirErrorCode::Internal))?
+    {
+        Ok(())
+    } else {
+        Err(ShamirError::new(ShamirErrorCode::Internal))
+    }
+}
+
 /// Build a JavaScript array of frozen `{ index, value }` share objects.
+///
+/// Each value is transferred to a zeroizing V8 backing store.
 fn shares_to_v8<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     shares: Vec<ShamirShare>,
-) -> Option<v8::Local<'s, v8::Array>> {
-    let count = i32::try_from(shares.len()).ok()?;
+) -> Result<v8::Local<'s, v8::Array>, ShamirError> {
+    let count =
+        i32::try_from(shares.len()).map_err(|_| ShamirError::new(ShamirErrorCode::Limit))?;
     let array = v8::Array::new(scope, count);
     for (position, mut share) in shares.into_iter().enumerate() {
-        let value = bytes_to_v8(scope, std::mem::take(&mut share.value))?;
+        let value = zeroizing_bytes_to_v8(scope, Zeroizing::new(std::mem::take(&mut share.value)))
+            .ok_or_else(|| ShamirError::new(ShamirErrorCode::Limit))?;
         let object = v8::Object::new(scope);
         set(
             scope,
@@ -894,9 +1117,73 @@ fn shares_to_v8<'s>(
             v8::Integer::new_from_unsigned(scope, u32::from(share.index)).into(),
         );
         set(scope, object, "value", value.into());
-        array.set_index(scope, position as u32, object.into())?;
+        define_array_index(scope, array, position as u32, object.into())?;
     }
-    Some(array)
+    Ok(array)
+}
+
+/// Build a JavaScript share array directly from a packed split payload.
+fn packed_shares_to_v8<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    packed: &[u8],
+) -> Result<v8::Local<'s, v8::Array>, ShamirError> {
+    let payload = parse_split_payload(packed)?;
+    let count =
+        i32::try_from(payload.count).map_err(|_| ShamirError::new(ShamirErrorCode::Limit))?;
+    let array = v8::Array::new(scope, count);
+    let mut offset = 0usize;
+    for position in 0..payload.count {
+        let index = *payload
+            .body
+            .get(offset)
+            .ok_or_else(|| ShamirError::new(ShamirErrorCode::Internal))?;
+        if index == 0 {
+            return Err(ShamirError::new(ShamirErrorCode::Internal));
+        }
+        let end = offset + 1 + payload.length;
+        let value = payload
+            .body
+            .get(offset + 1..end)
+            .ok_or_else(|| ShamirError::new(ShamirErrorCode::Internal))?;
+        let value = zeroizing_bytes_to_v8(scope, Zeroizing::new(copied_slice(value)?))
+            .ok_or_else(|| ShamirError::new(ShamirErrorCode::Limit))?;
+        let object = v8::Object::new(scope);
+        set(
+            scope,
+            object,
+            "index",
+            v8::Integer::new_from_unsigned(scope, u32::from(index)).into(),
+        );
+        set(scope, object, "value", value.into());
+        define_array_index(scope, array, position as u32, object.into())?;
+        offset = end;
+    }
+    if offset != payload.body.len() {
+        return Err(ShamirError::new(ShamirErrorCode::Internal));
+    }
+    Ok(array)
+}
+
+/// Unpack a split worker result into a JavaScript share array.
+fn unpack_split_result<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    packed: Zeroizing<Vec<u8>>,
+) -> Result<v8::Local<'s, v8::Array>, ShamirError> {
+    if packed.len() > MAX_SHAMIR_PACKED_BYTES {
+        return Err(ShamirError::new(ShamirErrorCode::Limit));
+    }
+    packed_shares_to_v8(scope, &packed)
+}
+
+/// Unpack a combine worker result into a zeroizing JavaScript secret.
+fn unpack_combine_result<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    secret: Zeroizing<Vec<u8>>,
+) -> Result<v8::Local<'s, v8::Uint8Array>, ShamirError> {
+    if secret.is_empty() || secret.len() > MAX_SHAMIR_SECRET_BYTES {
+        return Err(ShamirError::new(ShamirErrorCode::Internal));
+    }
+    zeroizing_bytes_to_v8(scope, secret).ok_or_else(|| ShamirError::new(ShamirErrorCode::Limit))
 }
 
 /// Build a failure response object.
@@ -912,40 +1199,41 @@ fn failure<'s>(scope: &mut v8::PinScope<'s, '_>, error: ShamirError) -> v8::Loca
     object.into()
 }
 
+/// Build a successful response object around one value.
+fn success<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Value> {
+    let object = response(scope);
+    set(scope, object, "ok", v8::Boolean::new(scope, true).into());
+    set(scope, object, "value", value);
+    object.into()
+}
+
 /// Turn a Rust split result into a JavaScript response.
 fn outcome_shares<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     result: Result<Vec<ShamirShare>, ShamirError>,
 ) -> v8::Local<'s, v8::Value> {
     match result {
-        Ok(shares) => {
-            let Some(value) = shares_to_v8(scope, shares) else {
-                return failure(scope, ShamirError::new(ShamirErrorCode::Limit));
-            };
-            let object = response(scope);
-            set(scope, object, "ok", v8::Boolean::new(scope, true).into());
-            set(scope, object, "value", value.into());
-            object.into()
-        }
+        Ok(shares) => match shares_to_v8(scope, shares) {
+            Ok(value) => success(scope, value.into()),
+            Err(error) => failure(scope, error),
+        },
         Err(error) => failure(scope, error),
     }
 }
 
-/// Turn a Rust combine result into a JavaScript response.
-fn outcome_bytes<'s>(
+/// Turn a Rust combine result into a zeroizing JavaScript response.
+fn outcome_secret<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     result: Result<Vec<u8>, ShamirError>,
 ) -> v8::Local<'s, v8::Value> {
     match result {
-        Ok(bytes) => {
-            let Some(value) = bytes_to_v8(scope, bytes) else {
-                return failure(scope, ShamirError::new(ShamirErrorCode::Limit));
-            };
-            let object = response(scope);
-            set(scope, object, "ok", v8::Boolean::new(scope, true).into());
-            set(scope, object, "value", value.into());
-            object.into()
-        }
+        Ok(bytes) => match zeroizing_bytes_to_v8(scope, Zeroizing::new(bytes)) {
+            Some(value) => success(scope, value.into()),
+            None => failure(scope, ShamirError::new(ShamirErrorCode::Limit)),
+        },
         Err(error) => failure(scope, error),
     }
 }
@@ -982,7 +1270,7 @@ fn op_neo_crypto_shamir_split<'s, 'i>(
     let result = (|| {
         let threshold = read_integer(scope, threshold, 2, MAX_SHAMIR_SHARES as u32)?;
         let share_count = read_integer(scope, share_count, 2, MAX_SHAMIR_SHARES as u32)?;
-        let view = checked_view(scope, secret)?;
+        let view = checked_shamir_view(scope, secret)?;
         validate_split(view.length, threshold, share_count)?;
         let secret = Zeroizing::new(copy_view(&view)?);
         split(&secret, threshold, share_count)
@@ -1008,14 +1296,9 @@ fn op_neo_crypto_shamir_split_async_submit<'s, 'i>(
         }
         let threshold = read_integer(scope, threshold, 2, MAX_SHAMIR_SHARES as u32)?;
         let share_count = read_integer(scope, share_count, 2, MAX_SHAMIR_SHARES as u32)?;
-        let view = checked_view(scope, secret)?;
-        let total = validate_split(view.length, threshold, share_count)?;
-        let pending = view
-            .length
-            .checked_add(total)
-            .and_then(|bytes| bytes.checked_add(share_count))
-            .and_then(|bytes| bytes.checked_add(9))
-            .ok_or_else(|| ShamirError::new(ShamirErrorCode::Busy))?;
+        let view = checked_shamir_view(scope, secret)?;
+        validate_split(view.length, threshold, share_count)?;
+        let pending = split_pending_bytes(view.length, threshold, share_count)?;
         let executor = state
             .try_borrow::<CryptoExecutor>()
             .ok_or_else(|| ShamirError::new(ShamirErrorCode::Internal))?;
@@ -1037,6 +1320,7 @@ fn op_neo_crypto_shamir_split_async_submit<'s, 'i>(
             .spawn_blocking(move || job.run());
         Ok(state.resource_table.add(AsyncShamirJob {
             handle: RefCell::new(Some(join)),
+            result: RefCell::new(None),
         }))
     })();
     outcome_id(scope, result)
@@ -1060,7 +1344,7 @@ fn op_neo_crypto_shamir_combine<'s, 'i>(
         let shares = copy_shares(&plans)?;
         combine(&shares)
     })();
-    outcome_bytes(scope, result)
+    outcome_secret(scope, result)
 }
 
 /// Combine shares on the blocking pool.
@@ -1090,10 +1374,7 @@ fn op_neo_crypto_shamir_combine_async_submit<'s, 'i>(
             .first()
             .map(|plan| plan.view.length)
             .ok_or_else(|| ShamirError::new(ShamirErrorCode::Internal))?;
-        let pending = total
-            .checked_add(secret_length)
-            .and_then(|bytes| bytes.checked_add(1))
-            .ok_or_else(|| ShamirError::new(ShamirErrorCode::Busy))?;
+        let pending = combine_pending_bytes(total, secret_length, plans.len())?;
         let executor = state
             .try_borrow::<CryptoExecutor>()
             .ok_or_else(|| ShamirError::new(ShamirErrorCode::Internal))?;
@@ -1113,6 +1394,7 @@ fn op_neo_crypto_shamir_combine_async_submit<'s, 'i>(
             .spawn_blocking(move || job.run());
         Ok(state.resource_table.add(AsyncShamirJob {
             handle: RefCell::new(Some(join)),
+            result: RefCell::new(None),
         }))
     })();
     outcome_id(scope, result)
@@ -1126,6 +1408,33 @@ fn validate_plan_total(plans: &[SharePlan<'_>]) -> Result<usize, ShamirError> {
         .ok_or_else(|| ShamirError::new(ShamirErrorCode::Limit))
 }
 
+/// The result a blocking worker hands back, owned by `Zeroizing` until V8 or
+/// runtime teardown releases it.
+struct WorkerResult {
+    status: u8,
+    data: Zeroizing<Vec<u8>>,
+}
+
+impl WorkerResult {
+    fn success(data: Zeroizing<Vec<u8>>) -> Self {
+        Self { status: 0, data }
+    }
+
+    fn error(error: ShamirError) -> Self {
+        Self {
+            status: error.code().tag(),
+            data: Zeroizing::new(Vec::new()),
+        }
+    }
+}
+
+impl Drop for WorkerResult {
+    fn drop(&mut self) {
+        #[cfg(feature = "test-support")]
+        DROPPED_WORKER_RESULTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// The worker-owned state for one asynchronous split.
 struct SplitJob {
     secret: Zeroizing<Vec<u8>>,
@@ -1135,13 +1444,10 @@ struct SplitJob {
 }
 
 impl SplitJob {
-    fn run(self) -> Vec<u8> {
-        match split(&self.secret, self.threshold, self.share_count) {
-            Ok(shares) => match pack_split(&shares) {
-                Ok(packed) => packed,
-                Err(error) => error.worker_buffer(),
-            },
-            Err(error) => error.worker_buffer(),
+    fn run(self) -> WorkerResult {
+        match split_packed(&self.secret, self.threshold, self.share_count) {
+            Ok(packed) => WorkerResult::success(packed),
+            Err(error) => WorkerResult::error(error),
         }
     }
 }
@@ -1153,26 +1459,19 @@ struct CombineJob {
 }
 
 impl CombineJob {
-    fn run(self) -> Vec<u8> {
+    fn run(self) -> WorkerResult {
         match combine(&self.shares) {
-            Ok(secret) => {
-                let secret = Zeroizing::new(secret);
-                let mut packed = Vec::new();
-                if packed.try_reserve_exact(secret.len() + 1).is_err() {
-                    return ShamirError::new(ShamirErrorCode::Limit).worker_buffer();
-                }
-                packed.push(0);
-                packed.extend_from_slice(&secret);
-                packed
-            }
-            Err(error) => error.worker_buffer(),
+            Ok(secret) => WorkerResult::success(Zeroizing::new(secret)),
+            Err(error) => WorkerResult::error(error),
         }
     }
 }
 
-/// One pending split or combine job. The join op takes the handle once.
+/// One pending split or combine job. The join op takes the handle once and
+/// stores the zeroizing result here; the take op removes it.
 struct AsyncShamirJob {
-    handle: RefCell<Option<JoinHandle<Vec<u8>>>>,
+    handle: RefCell<Option<JoinHandle<WorkerResult>>>,
+    result: RefCell<Option<WorkerResult>>,
 }
 
 impl Drop for AsyncShamirJob {
@@ -1203,7 +1502,12 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Wait for one asynchronous split or combine.
+/// Wait for one asynchronous split or combine and store its zeroizing result.
+///
+/// The returned bytes are only a status tag, never a secret or share value.
+/// The result stays in the resource until `op_neo_crypto_shamir_take_result`
+/// transfers it to a zeroizing V8 backing store. If the runtime is torn down
+/// first, dropping the resource drops the `WorkerResult` and clears its data.
 #[op2]
 #[buffer]
 async fn op_neo_crypto_shamir_async_join(
@@ -1211,86 +1515,72 @@ async fn op_neo_crypto_shamir_async_join(
     #[smi] id: ResourceId,
 ) -> Vec<u8> {
     let handle = {
-        let mut state = state.borrow_mut();
-        let Ok(job) = state.resource_table.take::<AsyncShamirJob>(id) else {
-            return Vec::new();
+        let state = state.borrow_mut();
+        let Ok(job) = state.resource_table.get::<AsyncShamirJob>(id) else {
+            return vec![ShamirErrorCode::Internal.tag()];
         };
         job.handle.borrow_mut().take()
     };
     let Some(handle) = handle else {
-        return Vec::new();
+        return vec![ShamirErrorCode::Internal.tag()];
     };
     let _abort = AbortOnDrop(handle.abort_handle());
-    handle.await.unwrap_or_default()
+    let output = match handle.await {
+        Ok(output) => output,
+        Err(_) => WorkerResult::error(ShamirError::new(ShamirErrorCode::Internal)),
+    };
+    let status = output.status;
+    {
+        let state = state.borrow_mut();
+        if let Ok(job) = state.resource_table.get::<AsyncShamirJob>(id) {
+            *job.result.borrow_mut() = Some(output);
+        }
+        // If the resource vanished, `output` drops here and its `Zeroizing`
+        // data is cleared.
+    }
+    if status == 0 {
+        Vec::new()
+    } else {
+        vec![status]
+    }
 }
 
-/// Unpack a worker result into a JavaScript array of shares.
+/// Take one finished worker result and transfer it to JavaScript.
+///
+/// `kind` is 1 for a split (share array) or 2 for a combine (secret bytes).
+/// The resource is removed before transfer. Any error drops the
+/// `WorkerResult`, which clears its `Zeroizing` data.
 #[op2]
-fn op_neo_crypto_shamir_unpack_split<'s, 'i>(
+fn op_neo_crypto_shamir_take_result<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i>,
-    packed: v8::Local<'s, v8::Value>,
+    state: &mut OpState,
+    #[smi] id: ResourceId,
+    kind: v8::Local<'s, v8::Value>,
 ) -> v8::Local<'s, v8::Value> {
     let result = (|| {
-        let view = checked_view(scope, packed)?;
-        if view.length > MAX_SHAMIR_PACKED_BYTES {
-            return Err(ShamirError::new(ShamirErrorCode::Limit));
-        }
-        let bytes = Zeroizing::new(copy_view(&view)?);
-        if bytes.is_empty() {
+        let kind = read_integer(scope, kind, 1, 2)?;
+        let Ok(job) = state.resource_table.take::<AsyncShamirJob>(id) else {
             return Err(ShamirError::new(ShamirErrorCode::Internal));
+        };
+        let Some(result) = job.result.borrow_mut().take() else {
+            return Err(ShamirError::new(ShamirErrorCode::Internal));
+        };
+        let mut result = result;
+        let status = result.status;
+        let data = std::mem::replace(&mut result.data, Zeroizing::new(Vec::new()));
+        if status != 0 {
+            return Err(ShamirError::new(ShamirErrorCode::from_tag(status)));
         }
-        if bytes[0] != 0 {
-            return Err(ShamirError::new(ShamirErrorCode::from_tag(bytes[0])));
+        match kind {
+            1 => unpack_split_result(scope, data).map(Into::into),
+            2 => unpack_combine_result(scope, data).map(Into::into),
+            _ => Err(ShamirError::new(ShamirErrorCode::Range)),
         }
-        let payload = parse_split_payload(&bytes)?;
-        let mut shares = Vec::new();
-        shares
-            .try_reserve_exact(payload.count)
-            .map_err(|_| ShamirError::new(ShamirErrorCode::Limit))?;
-        let mut offset = 0usize;
-        for _ in 0..payload.count {
-            let Some((&index, _)) = payload.body[offset..].split_first() else {
-                return Err(ShamirError::new(ShamirErrorCode::Internal));
-            };
-            let end = offset + 1 + payload.length;
-            let Some(value) = payload.body.get(offset + 1..end) else {
-                return Err(ShamirError::new(ShamirErrorCode::Internal));
-            };
-            shares.push(ShamirShare {
-                index,
-                value: copied_slice(value)?,
-            });
-            offset = end;
-        }
-        Ok(shares)
     })();
-    outcome_shares(scope, result)
-}
-
-/// Unpack a worker result into a JavaScript secret.
-#[op2]
-fn op_neo_crypto_shamir_unpack_combine<'s, 'i>(
-    scope: &mut v8::PinScope<'s, 'i>,
-    packed: v8::Local<'s, v8::Value>,
-) -> v8::Local<'s, v8::Value> {
-    let result = (|| {
-        let view = checked_view(scope, packed)?;
-        if view.length > MAX_SHAMIR_TOTAL_BYTES + 1 {
-            return Err(ShamirError::new(ShamirErrorCode::Limit));
-        }
-        let bytes = Zeroizing::new(copy_view(&view)?);
-        if bytes.is_empty() {
-            return Err(ShamirError::new(ShamirErrorCode::Internal));
-        }
-        if bytes[0] != 0 {
-            return Err(ShamirError::new(ShamirErrorCode::from_tag(bytes[0])));
-        }
-        if bytes.len() == 1 {
-            return Err(ShamirError::new(ShamirErrorCode::Internal));
-        }
-        copied_slice(&bytes[1..])
-    })();
-    outcome_bytes(scope, result)
+    match result {
+        Ok(value) => success(scope, value),
+        Err(error) => failure(scope, error),
+    }
 }
 
 deno_core::extension!(
@@ -1301,8 +1591,7 @@ deno_core::extension!(
         op_neo_crypto_shamir_combine,
         op_neo_crypto_shamir_combine_async_submit,
         op_neo_crypto_shamir_async_join,
-        op_neo_crypto_shamir_unpack_split,
-        op_neo_crypto_shamir_unpack_combine
+        op_neo_crypto_shamir_take_result
     ],
     docs = "GF(256) Shamir secret sharing ops behind `Neo.getBuiltInModule(\"crypto\")`."
 );
@@ -1406,6 +1695,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn async_pending_bytes_match_worker_peak() {
+        // 1000 secret bytes, 3-of-5: 5000 share bytes, 2000 noise bytes, and a
+        // 5013-byte packed output, plus the 1000-byte secret copy.
+        assert_eq!(split_pending_bytes(1000, 3, 5).unwrap(), 8013);
+        // 100 secret bytes, 255-of-255: 25400 noise bytes, 25763 packed bytes.
+        assert_eq!(split_pending_bytes(100, 255, 255).unwrap(), 51263);
+        // 5000 share bytes, 1000-byte secret, five basis bytes.
+        assert_eq!(combine_pending_bytes(5000, 1000, 5).unwrap(), 6005);
     }
 
     #[test]

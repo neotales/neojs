@@ -2,12 +2,12 @@
 //
 // This script is evaluated once per realm before the entry module. It installs
 // the global `Neo` object and the module objects that object caches. `chars` and
-// `console` are plain ECMAScript; `crypto` calls thirty-three private host ops:
+// `console` are plain ECMAScript; `crypto` calls thirty-two private host ops:
 // four use the operating system CSPRNG and AES-256-GCM in
 // `neojs-core/src/crypto.rs`; eight implement bounded AES-256-CBC/AES-256-GCM
 // ciphers in `neojs-core/src/crypto_cipher.rs`; seven implement SHA-2 hashing and HMAC in
 // `neojs-core/src/crypto_hash.rs`; seven implement PBKDF2 and bcrypt in
-// `neojs-core/src/crypto_hash/password.rs`; and seven implement GF(256) Shamir
+// `neojs-core/src/crypto_hash/password.rs`; and six implement GF(256) Shamir
 // secret sharing in `neojs-core/src/crypto_shamir.rs`. The hash-family and
 // Shamir ops include bounded asynchronous calls on the runtime's Tokio blocking
 // pool; the hash and cipher families also have explicit incremental-object
@@ -76,7 +76,6 @@
     // snapshot buffer to user JavaScript and re-enter the module. Range copies
     // go through the native slice op instead.
     const typedArraySet = Function.prototype.call.bind(Uint8Array.prototype.set);
-    const typedArrayFill = Function.prototype.call.bind(Uint8Array.prototype.fill);
 
     // A Unicode scalar value: an integer code point that is not a surrogate.
     // Surrogates cannot be encoded by `String.fromCodePoint`, and treating
@@ -780,8 +779,7 @@
     const opShamirCombine = cryptoOps.op_neo_crypto_shamir_combine;
     const opShamirCombineAsync = cryptoOps.op_neo_crypto_shamir_combine_async_submit;
     const opShamirJoin = cryptoOps.op_neo_crypto_shamir_async_join;
-    const opShamirUnpackSplit = cryptoOps.op_neo_crypto_shamir_unpack_split;
-    const opShamirUnpackCombine = cryptoOps.op_neo_crypto_shamir_unpack_combine;
+    const opShamirTake = cryptoOps.op_neo_crypto_shamir_take_result;
 
     // The age host ops are captured here for the same reason: replacing
     // `Deno.core.ops` later does not change what the age module calls. The ops
@@ -1926,7 +1924,15 @@
     function freezeShares(shares) {
         const out = [];
         for (let position = 0; position < shares.length; position += 1) {
-            out[position] = freezeShare(shares[position]);
+            // Define an own data property. Assigning `out[position]` would walk
+            // Array.prototype and could invoke a poisoned numeric setter.
+            defineProperty(out, position, {
+                __proto__: null,
+                value: freezeShare(shares[position]),
+                writable: true,
+                enumerable: true,
+                configurable: true,
+            });
         }
         return out;
     }
@@ -1964,8 +1970,8 @@
      * secret, or a non-number threshold or share count.
      * @throws {RangeError} for an empty secret or a threshold or share count
      * outside its documented range.
-     * @throws {Error} with `code` `NEO_CRYPTO_LIMIT`, `NEO_CRYPTO_RANDOM`, or
-     * `NEO_CRYPTO_DETACHED`.
+     * @throws {Error} with `code` `NEO_CRYPTO_LIMIT`, `NEO_CRYPTO_RANDOM`,
+     * `NEO_CRYPTO_DETACHED`, or `NEO_CRYPTO_SHAMIR_SHARED`.
      */
     function shamirSplit(secret, threshold, shareCount) {
         if (arguments.length !== 3) {
@@ -1986,10 +1992,14 @@
      * change the result. The join starts immediately, so ignoring the Promise
      * does not cancel the work; only runtime teardown aborts a queued job.
      *
-     * The same limits, share encoding, randomness source, and authenticity
-     * limitations as `shamirSplit` apply. Pending work shares the `hashAsync`
-     * budget of at most 64 jobs and 64 MiB of copied input plus intended
-     * output; a submission over either bound rejects with `NEO_CRYPTO_BUSY`.
+     * The same limits, share encoding, randomness source, authenticity, and
+     * shared-buffer limitations as `shamirSplit` apply. Pending work shares the
+     * `hashAsync` budget of at most 64 jobs and 64 MiB of the worker's exact
+     * owned peak: the secret copy, one packed output, and the temporary noise
+     * buffer. A submission over either bound rejects with `NEO_CRYPTO_BUSY`.
+     * The finished result is held in a zeroizing resource until it is
+     * transferred to a zeroizing V8 backing store; if the runtime is dropped
+     * first, the resource drop clears it.
      *
      * @param {Uint8Array} secret
      * @param {number} threshold
@@ -2003,15 +2013,15 @@
             throw new makeTypeError("shamirSplitAsync takes exactly three arguments");
         }
         const id = unwrapId(opShamirSplitAsync(secret, threshold, shareCount));
-        const packed = await opShamirJoin(id);
-        if (packed.length === 0) {
-            throw shamirError("NEO_CRYPTO_INTERNAL", "the Shamir worker failed");
-        }
-        let response;
-        try {
-            response = opShamirUnpackSplit(packed);
-        } finally {
-            typedArrayFill(packed, 0);
+        const status = await opShamirJoin(id);
+        const response = opShamirTake(id, 1);
+        if (status.length !== 0) {
+            // The worker reported a stable category; `take` also releases the
+            // resource and returns the matching failure object.
+            if (response.ok) {
+                throw shamirError("NEO_CRYPTO_INTERNAL", "the Shamir worker failed");
+            }
+            throwCrypto(response);
         }
         return freezeShares(unwrapCrypto(response));
     }
@@ -2046,8 +2056,8 @@
      * an empty or unequal share value, or a supplied threshold that is invalid
      * or larger than the share count.
      * @throws {Error} with `code` `NEO_CRYPTO_SHAMIR_DUPLICATE`,
-     * `NEO_CRYPTO_SHAMIR_LENGTH`, `NEO_CRYPTO_LIMIT`, or
-     * `NEO_CRYPTO_DETACHED`.
+     * `NEO_CRYPTO_SHAMIR_LENGTH`, `NEO_CRYPTO_SHAMIR_SHARED`,
+     * `NEO_CRYPTO_LIMIT`, or `NEO_CRYPTO_DETACHED`.
      */
     function shamirCombine(shares, threshold) {
         if (arguments.length < 1 || arguments.length > 2) {
@@ -2069,8 +2079,11 @@
      * limitations as `shamirCombine` apply.
      *
      * Pending work shares the `hashAsync` budget of at most 64 jobs and 64 MiB
-     * of copied input; a submission over either bound rejects with
-     * `NEO_CRYPTO_BUSY`.
+     * of the worker's exact owned peak: the copied shares, the recovered
+     * secret, and the public interpolation basis. A submission over either
+     * bound rejects with `NEO_CRYPTO_BUSY`. The finished result is held in a
+     * zeroizing resource until it is transferred to a zeroizing V8 backing
+     * store; if the runtime is dropped first, the resource drop clears it.
      *
      * @param {Array<{index: number, value: Uint8Array}>} shares
      * @param {number} [threshold]
@@ -2083,15 +2096,13 @@
             throw new makeTypeError("shamirCombineAsync takes one or two arguments");
         }
         const id = unwrapId(opShamirCombineAsync(shares, threshold));
-        const packed = await opShamirJoin(id);
-        if (packed.length === 0) {
-            throw shamirError("NEO_CRYPTO_INTERNAL", "the Shamir worker failed");
-        }
-        let response;
-        try {
-            response = opShamirUnpackCombine(packed);
-        } finally {
-            typedArrayFill(packed, 0);
+        const status = await opShamirJoin(id);
+        const response = opShamirTake(id, 2);
+        if (status.length !== 0) {
+            if (response.ok) {
+                throw shamirError("NEO_CRYPTO_INTERNAL", "the Shamir worker failed");
+            }
+            throwCrypto(response);
         }
         return unwrapCrypto(response);
     }
