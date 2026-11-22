@@ -4,9 +4,9 @@
 //! built-in specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`,
 //! `neo:chars`, `console`, `neo:console`, `crypto`, `neo:crypto`, `os`,
 //! `neo:os`, `path`, `neo:path`, `slices`, `neo:slices`, `ssh`, `neo:ssh`,
-//! `stdio`, `neo:stdio`, `strings`, and `neo:strings` ([`crate::builtins`]).
-//! Every other scheme is rejected with a reason that names the missing feature
-//! instead of failing later inside V8.
+//! `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`, and `neo:test`
+//! ([`crate::builtins`]). Every other scheme is rejected with a reason that
+//! names the missing feature instead of failing later inside V8.
 //!
 //! Built-in specifiers resolve to one canonical `neo:` URL, so the engine caches
 //! a single module instance however many spellings or importers use. They are

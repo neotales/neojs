@@ -23,6 +23,7 @@ use deno_core::JsRuntime;
 use deno_core::PollEventLoopOptions;
 use deno_core::RuntimeOptions;
 use deno_core::url::Url;
+use deno_core::v8;
 
 use crate::Error;
 use crate::age::neojs_age;
@@ -115,18 +116,55 @@ pub struct Runtime {
     ops: Option<tokio::runtime::Runtime>,
 }
 
+/// Cumulative counts from the `test` built-in in one runtime.
+///
+/// `total` counts executed tests, including pending ones. `passed`, `failed`,
+/// and `pending` partition it. `unhandled` is separate: it counts unhandled
+/// Promise rejections observed while the test module was active. A run is
+/// successful only when [`TestReport::all_passed`] is true, which requires no
+/// failure, no pending test, and no unhandled rejection.
+///
+/// The counts are cumulative across explicit `run()` calls and the host's
+/// final call, so catching a failure from `run()` cannot hide it from the host.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TestReport {
+    /// Tests executed so far, including pending tests.
+    pub total: u32,
+    /// Tests that returned without throwing or rejecting.
+    pub passed: u32,
+    /// Tests that threw, rejected, timed out, or returned an unsupported value.
+    pub failed: u32,
+    /// Tests registered without a callback.
+    pub pending: u32,
+    /// Unhandled Promise rejections observed while the test module was active.
+    pub unhandled: u32,
+    /// 1 when the event loop still reported pending work after the bounded
+    /// settle window, otherwise 0. An unsettled verdict is a failure.
+    pub unsettled: u32,
+    /// One summary line per failure, in execution order.
+    pub failures: Vec<String>,
+}
+
+impl TestReport {
+    /// True when no test failed, none is pending, no rejection was unhandled,
+    /// and no event-loop work was left unsettled.
+    pub fn all_passed(&self) -> bool {
+        self.failed == 0 && self.pending == 0 && self.unhandled == 0 && self.unsettled == 0
+    }
+}
+
 impl Runtime {
     /// Creates a runtime and installs the console and built-in module shims.
     ///
     /// The runtime has one realm. The `age`, `assert`, `chars`, `console`,
-    /// `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, and `strings`
+    /// `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, and `test`
     /// built-in modules are cached in that realm, and both bare and
     /// `neo:`-prefixed import specifiers resolve to them; a new `Runtime`
     /// creates a new realm, new functions, and new module instances. The
     /// `age`, `crypto`, `path`, `ssh`, and `stdio` modules register their
     /// private host ops in that realm before user code runs; `chars`, `os`,
-    /// `slices`, and `strings` are plain ECMAScript, and `assert` calls one
-    /// private Promise-observation host op. The `console`
+    /// `slices`, `strings`, and `test` are plain ECMAScript, and `assert` calls
+    /// one private Promise-observation host op. The `console`
     /// module's object is the console object the runtime installed: its default
     /// export's value is that object, and its
     /// named exports are that object's method values when the module is
@@ -300,6 +338,66 @@ impl Runtime {
         let js = self.js.as_mut().expect("the isolate is present until Drop");
         run_entry(js, &mut self.consumed, path.as_ref()).await
     }
+
+    /// Runs the tests registered through the `test` built-in and returns their
+    /// cumulative report.
+    ///
+    /// Call this after [`Runtime::run_file`] so tests registered after a
+    /// top-level await are included. It can also be called on a fresh runtime;
+    /// the report is then empty. The method blocks on this runtime's own
+    /// current-thread executor, so it must not be called from inside a Tokio
+    /// runtime; use [`Runtime::run_tests_async`] there.
+    ///
+    /// A failing test, a pending test, an unhandled rejection, or a bounded
+    /// settle window that still reports event-loop work is recorded in the
+    /// returned [`TestReport`], not as an `Err`. `Err` means the runner itself
+    /// failed or its counts were inconsistent. The test module prints
+    /// `ok`/`not ok` lines and a summary to the process's standard output; a
+    /// test can replace `Deno.core`, so that output is observable but not a
+    /// security boundary. The runtime is not a sandbox and a synchronous
+    /// callback that never returns still hangs the process.
+    ///
+    /// The runner waits up to about 100 ms of event-loop turns after the tests.
+    /// If the runtime still reports pending timers, async ops, imports, or
+    /// rejection events, the verdict is marked unsettled and fails. Unrefed
+    /// work that the event loop does not report is outside this check. The
+    /// report does not cancel outstanding work; dropping the runtime discards
+    /// it.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use neojs_core::Runtime;
+    ///
+    /// # fn main() -> Result<(), neojs_core::Error> {
+    /// let mut runtime = Runtime::new()?;
+    /// runtime.run_file("example.test.js")?;
+    /// let report = runtime.run_tests()?;
+    /// assert!(report.all_passed(), "{:?}", report.failures);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn run_tests(&mut self) -> Result<TestReport, Error> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(Error::BlockingInAsyncContext);
+        }
+        let Self { js, ops, .. } = self;
+        let js = js.as_mut().expect("the isolate is present until Drop");
+        let ops = ops.as_ref().expect("the ops runtime is present until Drop");
+        ops.block_on(run_tests(js))
+    }
+
+    /// Runs the registered tests on the caller's executor.
+    ///
+    /// This is the asynchronous form of [`Runtime::run_tests`]. It has the same
+    /// reporting contract and can be polled on any executor; the runtime's own
+    /// driver thread services V8's delayed foreground tasks. A callback that
+    /// never settles is bounded by its per-test timeout (30 seconds by default),
+    /// but a callback that blocks the isolate synchronously is not interruptible.
+    pub async fn run_tests_async(&mut self) -> Result<TestReport, Error> {
+        let js = self.js.as_mut().expect("the isolate is present until Drop");
+        run_tests(js).await
+    }
 }
 
 impl Drop for Runtime {
@@ -338,6 +436,119 @@ async fn run_entry(js: &mut JsRuntime, consumed: &mut bool, path: &Path) -> Resu
     let evaluation = js.mod_evaluate(module);
     js.run_event_loop(PollEventLoopOptions::default()).await?;
     Ok(evaluation.await?)
+}
+
+/// The JavaScript expression the host evaluates to run the queued tests.
+///
+/// `throwOnFailure: false` makes the runner return its report even when tests
+/// failed; the host decides the exit status. `Neo` and its module registry are
+/// installed as non-writable globals before user code runs.
+const TEST_RUN_SCRIPT: &str =
+    r#"Neo.getBuiltInModule("test").run({ throwOnFailure: false, settle: true })"#;
+
+/// Runs the `test` built-in and reads its cumulative report.
+async fn run_tests(js: &mut JsRuntime) -> Result<TestReport, Error> {
+    let value = js
+        .execute_script("<neojs:test>", TEST_RUN_SCRIPT)
+        .map_err(|error| Error::Core(deno_core::error::CoreErrorKind::Js(error).into_box()))?;
+    // `resolve` watches the promise but does not advance the event loop by
+    // itself; a timer or async op inside the runner would never settle. Drive
+    // both until the report resolves.
+    let resolution = js.resolve(value);
+    let value = js
+        .with_event_loop_promise(resolution, PollEventLoopOptions::default())
+        .await
+        .map_err(Error::Core)?;
+    read_test_report(js, value)
+}
+
+/// Reads the primitives from the null-prototype summary object.
+///
+/// The object is created by the runner, so every field is an own data property.
+/// A missing or non-numeric field means the runner did not finish correctly and
+/// its counts cannot be trusted; that is a runner failure, never a pass.
+fn read_test_report(js: &mut JsRuntime, value: v8::Global<v8::Value>) -> Result<TestReport, Error> {
+    deno_core::scope!(scope, js);
+    let value = v8::Local::new(scope, value);
+    let object = value
+        .to_object(scope)
+        .ok_or_else(|| Error::TestRunner("the test report is not an object".to_string()))?;
+
+    let number = |name: &str| -> Result<u32, Error> {
+        let key = v8::String::new(scope, name)
+            .ok_or_else(|| Error::TestRunner(format!("the field `{name}` is too large")))?;
+        let value = object
+            .get(scope, key.into())
+            .ok_or_else(|| Error::TestRunner(format!("the test report has no `{name}` field")))?;
+        value
+            .uint32_value(scope)
+            .ok_or_else(|| Error::TestRunner(format!("the `{name}` field is not a u32")))
+    };
+
+    let total = number("total")?;
+    let passed = number("passed")?;
+    let failed = number("failed")?;
+    let pending = number("pending")?;
+    let unhandled = number("unhandled")?;
+    let unsettled = number("unsettled")?;
+    if passed
+        .checked_add(failed)
+        .and_then(|count| count.checked_add(pending))
+        != Some(total)
+    {
+        return Err(Error::TestRunner(
+            "the test counts do not add up".to_string(),
+        ));
+    }
+    if unsettled > 1 {
+        return Err(Error::TestRunner(
+            "the `unsettled` field must be 0 or 1".to_string(),
+        ));
+    }
+
+    let key = v8::String::new(scope, "failures")
+        .ok_or_else(|| Error::TestRunner("the `failures` field is too large".to_string()))?;
+    let failures = object
+        .get(scope, key.into())
+        .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok())
+        .ok_or_else(|| Error::TestRunner("the test report has no `failures` array".to_string()))?;
+    let mut lines = Vec::with_capacity(failures.length() as usize);
+    for index in 0..failures.length() {
+        let Some(value) = failures.get_index(scope, index) else {
+            return Err(Error::TestRunner(
+                "a test failure entry is missing".to_string(),
+            ));
+        };
+        if !value.is_string() {
+            return Err(Error::TestRunner(
+                "a test failure entry is not a string".to_string(),
+            ));
+        }
+        lines.push(value.to_rust_string_lossy(scope));
+    }
+
+    let expected_failures = failed
+        .checked_add(pending)
+        .and_then(|count| count.checked_add(unhandled))
+        .and_then(|count| count.checked_add(unsettled))
+        .ok_or_else(|| Error::TestRunner("the test failure count overflowed".to_string()))?;
+    if lines.len() as u64 != u64::from(expected_failures) {
+        return Err(Error::TestRunner(format!(
+            "the test report has {} failure line(s) for {} failed, pending, unhandled, or unsettled result(s)",
+            lines.len(),
+            expected_failures
+        )));
+    }
+
+    Ok(TestReport {
+        total,
+        passed,
+        failed,
+        pending,
+        unhandled,
+        unsettled,
+        failures: lines,
+    })
 }
 
 fn prepare_entry(path: &Path) -> Result<(Url, String), Error> {

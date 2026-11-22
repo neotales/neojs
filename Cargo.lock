@@ -1914,6 +1914,7 @@ dependencies = [
 name = "neojs"
 version = "0.1.0"
 dependencies = [
+ "glob",
  "neojs-core",
  "neotales-ssh",
  "tempfile",

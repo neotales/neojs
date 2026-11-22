@@ -130,8 +130,28 @@ fn run_args(args: &[&str]) -> Output {
         .expect("spawn neojs")
 }
 
+/// Runs the command and fails the test if it is still alive at `timeout`.
+///
+/// Used by the test-runner lifecycle cases: a leaked refed timer must not keep
+/// the test command alive after the runner has returned its verdict.
+fn run_args_with_timeout(args: &[&str], timeout: Duration) -> Output {
+    let child = Command::new(env!("CARGO_BIN_EXE_neojs"))
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn neojs");
+    run_child(child, timeout)
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// True only when the complete output line matches, so `ok ...` cannot be
+/// satisfied by a `not ok ...` line.
+fn contains_line(output: &str, expected: &str) -> bool {
+    output.lines().any(|line| line == expected)
 }
 
 fn stderr(output: &Output) -> String {
@@ -1500,12 +1520,12 @@ fn help_describes_the_exit_codes_the_cli_uses() {
     assert_eq!(help.status.code(), Some(0));
     let text = stdout(&help);
     assert!(
-        text.contains("1  the module failed to compile, resolve imports, link, or run"),
+        text.contains("1  the module failed to compile, resolve imports, link, or run; or a test"),
         "{text}"
     );
     assert!(
         text.contains(
-            "2  neojs could not start (bad arguments, unreadable or unsupported entry file)"
+            "2  neojs could not start (bad arguments, unreadable or unsupported entry file,"
         ),
         "{text}"
     );
@@ -1546,8 +1566,11 @@ fn prints_help_and_version() {
     assert_eq!(help.status.code(), Some(0));
     assert!(stdout(&help).contains("Usage:"));
     assert!(stdout(&help).contains("age, assert, chars, console, crypto, os, path, slices"));
-    assert!(stdout(&help).contains("ssh, stdio, and strings"));
-    assert!(stdout(&help).contains("built-in modules are implemented"));
+    assert!(
+        stdout(&help).contains("ssh, stdio, strings, and test built-in modules are implemented")
+    );
+    assert!(stdout(&help).contains("Neo.getBuiltInModule(\"test\")"));
+    assert!(stdout(&help).contains("Node-module opt-in"));
 
     let version = run_args(&["--version"]);
     assert_eq!(version.status.code(), Some(0));
@@ -1555,6 +1578,10 @@ fn prints_help_and_version() {
         stdout(&version),
         format!("neojs {}\n", env!("CARGO_PKG_VERSION"))
     );
+
+    let test_help = run_args(&["test", "--help"]);
+    assert_eq!(test_help.status.code(), Some(0));
+    assert!(stdout(&test_help).contains("neojs test <file-or-glob>..."));
 }
 
 #[test]
@@ -2512,4 +2539,581 @@ console.log("agent bounded");
     let (connections, signs) = agent.finish();
     assert!(connections >= 1);
     assert_eq!(signs, 0);
+}
+
+/// `neojs test` must expand files and globs deterministically and run an
+/// overlapping selection once. The order is canonical-path order, so the
+/// three file headers are the only stable way to count the selection.
+#[test]
+fn test_command_expands_files_and_globs_without_duplicates() {
+    let project = Project::new();
+    project.write(
+        "a.test.js",
+        "import test from \"test\";\ntest(\"a\", () => {});\n",
+    );
+    project.write(
+        "b.test.js",
+        "import test from \"neo:test\";\ntest(\"b\", () => {});\n",
+    );
+    project.write(
+        "sub/c.test.js",
+        "import test from \"test\";\ntest(\"c\", () => {});\n",
+    );
+    let dir = project.dir.path().to_str().expect("utf-8 path");
+    let literal = format!("{dir}/a.test.js");
+    let glob = format!("{dir}/**/*.test.js");
+
+    let output = run_args(&["test", &literal, &glob]);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert_eq!(
+        printed
+            .lines()
+            .filter(|line| line.starts_with("test "))
+            .count(),
+        3,
+        "{printed}"
+    );
+    assert_eq!(
+        printed
+            .lines()
+            .filter(|line| line.ends_with("a.test.js:"))
+            .count(),
+        1,
+        "the literal and the glob overlap; a.test.js ran twice\n{printed}"
+    );
+    assert!(
+        printed.contains("# 3 selected file(s): 3 test(s): 3 passed"),
+        "{printed}"
+    );
+}
+
+/// A failure in one file must not stop the next file, and the next file must
+/// not see the failing file's globals.
+#[test]
+fn test_command_continues_after_a_failure_and_isolates_files() {
+    let project = Project::new();
+    project.write(
+        "a-fail.test.js",
+        r#"
+import test from "test";
+globalThis.leaked = "a-fail";
+test("fails", () => { throw new Error("first file failed"); });
+"#,
+    );
+    project.write(
+        "b-pass.test.js",
+        r#"
+import test from "test";
+test("isolated", () => {
+    if (globalThis.leaked !== undefined) throw new Error("state leaked from a-fail");
+});
+"#,
+    );
+    let dir = project.dir.path().to_str().expect("utf-8 path");
+    let glob = format!("{dir}/*.test.js");
+
+    let output = run_args(&["test", &glob]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(printed.contains("not ok 1 - fails"), "{printed}");
+    assert!(printed.contains("b-pass.test.js:"), "{printed}");
+    assert!(printed.contains("ok 1 - isolated"), "{printed}");
+    assert!(
+        printed.contains("# 2 selected file(s): 2 test(s): 1 passed, 1 failed"),
+        "{printed}"
+    );
+}
+
+/// A pending test and an unhandled rejection are both failures. A run that
+/// printed only "ok" lines for other tests must still be non-zero.
+#[test]
+fn test_command_fails_for_pending_and_unhandled_cases() {
+    let project = Project::new();
+    let file = project.write(
+        "problems.test.js",
+        r#"
+import test from "test";
+test("pending case");
+test("unhandled case", () => { Promise.reject(new Error("boom")); });
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(
+        printed.contains("not ok 1 - pending case # PENDING"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("unhandled rejection: Error: boom"),
+        "{printed}"
+    );
+    assert!(printed.contains("1 pending, 1 unhandled"), "{printed}");
+}
+
+/// A callback that returns a Promise which never settles is failed by the
+/// per-test timeout rather than blocking the command forever.
+#[test]
+fn test_command_fails_a_pending_promise_at_its_timeout() {
+    let project = Project::new();
+    let file = project.write(
+        "timeout.test.js",
+        r#"
+import test from "test";
+test("never settles", () => new Promise(() => {}), { timeout: 10 });
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("did not settle within 10 ms"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+/// Registration after a top-level await must still be found by the host.
+#[test]
+fn test_command_runs_tests_registered_after_top_level_await() {
+    let project = Project::new();
+    let file = project.write(
+        "await.test.js",
+        r#"
+import test from "test";
+const value = await Promise.resolve(41);
+test("after await", () => {
+    if (value + 1 !== 42) throw new Error("wrong value");
+});
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("ok 1 - after await"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+/// A file that imports the runner but registers nothing is not a pass.
+#[test]
+fn test_command_fails_a_file_with_no_tests() {
+    let project = Project::new();
+    let file = project.write("empty.test.js", "console.log(\"nothing registered\");\n");
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no tests registered"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// Literal misses, malformed globs, and globs with no file are startup errors,
+/// not a clean run with zero tests.
+#[test]
+fn test_command_reports_unmatched_and_malformed_selections() {
+    let project = Project::new();
+    let dir = project.dir.path().to_str().expect("utf-8 path");
+
+    let unmatched = run_args(&["test", &format!("{dir}/missing*.test.js")]);
+    assert_eq!(unmatched.status.code(), Some(2));
+    assert!(
+        stderr(&unmatched).contains("matched no files"),
+        "{}",
+        stderr(&unmatched)
+    );
+
+    let malformed = run_args(&["test", "["]);
+    assert_eq!(malformed.status.code(), Some(2));
+    assert!(
+        stderr(&malformed).contains("invalid test glob"),
+        "{}",
+        stderr(&malformed)
+    );
+
+    let missing = run_args(&["test", &format!("{dir}/missing.test.js")]);
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(
+        stderr(&missing).contains("does not exist or is not a regular file"),
+        "{}",
+        stderr(&missing)
+    );
+
+    let no_args = run_args(&["test"]);
+    assert_eq!(no_args.status.code(), Some(2));
+    assert!(
+        stderr(&no_args).contains("no test files or globs"),
+        "{}",
+        stderr(&no_args)
+    );
+}
+
+/// An async rejection is a failure, and a later test in the same file runs.
+#[test]
+fn test_command_reports_an_async_rejection_and_continues_in_the_file() {
+    let project = Project::new();
+    let file = project.write(
+        "async.test.js",
+        r#"
+import test from "test";
+test("rejects", async () => {
+    await Promise.resolve();
+    throw new Error("async failure");
+});
+test("later", () => {});
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(printed.contains("not ok 1 - rejects"), "{printed}");
+    assert!(printed.contains("async failure"), "{printed}");
+    assert!(printed.contains("ok 2 - later"), "{printed}");
+}
+
+/// Calling `run()` yourself and catching its `TestFailureError` must not hide
+/// the failure from the host's final report.
+#[test]
+fn test_command_does_not_let_a_caught_run_failure_pass() {
+    let project = Project::new();
+    let file = project.write(
+        "caught.test.js",
+        r#"
+import test, { run, TestFailureError } from "test";
+test("fails once", () => { throw new Error("caught failure"); });
+try {
+    await run();
+} catch (error) {
+    if (!(error instanceof TestFailureError)) throw error;
+    if (error.code !== "NEO_TEST_FAILURES") throw error;
+}
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(printed.contains("not ok 1 - fails once"), "{printed}");
+    assert!(printed.contains("1 failed"), "{printed}");
+}
+
+/// `node:test` is not an alias. Node modules need an explicit opt-in, which
+/// this build does not have.
+#[test]
+fn test_command_rejects_node_test_without_an_opt_in() {
+    let project = Project::new();
+    let file = project.write(
+        "node.test.js",
+        "import test from \"node:test\";\ntest(\"x\", () => {});\n",
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let message = stderr(&output);
+    assert!(
+        message.contains("Node.js built-in modules are not implemented"),
+        "{message}"
+    );
+    assert!(message.contains("node:test"), "{message}");
+}
+
+/// Replacing Promise.resolve or Promise.prototype.then after the shim runs
+/// must not make a never-settling test look settled.
+#[test]
+fn test_command_timeout_survives_replaced_promise_intrinsics() {
+    let project = Project::new();
+    let file = project.write(
+        "promise-ops.test.js",
+        r#"
+import test from "test";
+Promise.resolve = () => ({ then: (fulfilled) => fulfilled() });
+Promise.prototype.then = function (fulfilled) { fulfilled(); return this; };
+test("never settles", () => new Promise(() => {}), { timeout: 20 });
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(printed.contains("not ok 1 - never settles"), "{printed}");
+    assert!(printed.contains("did not settle within 20 ms"), "{printed}");
+}
+
+/// A refed timer left by a test is discoverable event-loop work. The settle
+/// window is bounded, the run is reported unsettled, and the runtime is
+/// dropped without waiting for the timer.
+#[test]
+fn test_command_fails_unsettled_detached_timer_without_hanging() {
+    let project = Project::new();
+    let file = project.write(
+        "detached.test.js",
+        r#"
+import test from "test";
+test("leaves a long timer", () => {
+    Deno.core.createTimer(() => {}, 60_000, undefined, false, true, false);
+});
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args_with_timeout(&["test", path], Duration::from_secs(10));
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(printed.contains("unsettled work"), "{printed}");
+    assert!(printed.contains("1 unsettled"), "{printed}");
+}
+
+/// A thenable that resolves to a never-settling native Promise must not be
+/// handed to native resolution, where a replaced `Promise.prototype.then`
+/// could make the pending Promise look fulfilled.
+#[test]
+fn test_command_nested_pending_thenable_uses_internal_promise_state() {
+    let project = Project::new();
+    let file = project.write(
+        "nested-pending.test.js",
+        r#"
+import test from "test";
+Promise.prototype.then = function (fulfilled) { fulfilled("fake"); return this; };
+test("nested pending", () => ({
+    then(resolve) {
+        resolve(new Promise(() => {}));
+    },
+}), { timeout: 20 });
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("did not settle within 20 ms"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+/// Native Promise subclasses with throwing `then`, `constructor`, and
+/// `Symbol.species` are observed by their real state, not by a prototype
+/// getter. Fulfilled, rejected, and pending states all behave normally.
+#[test]
+fn test_command_native_promise_subclass_ignores_throwing_prototype_getters() {
+    let project = Project::new();
+    let file = project.write(
+        "subclass.test.js",
+        r#"
+import test from "test";
+class EvilPromise extends Promise {}
+Object.defineProperty(EvilPromise, Symbol.species, {
+    get() { throw new Error("species touched"); },
+});
+Object.defineProperty(EvilPromise.prototype, "constructor", {
+    get() { throw new Error("constructor touched"); },
+});
+Object.defineProperty(EvilPromise.prototype, "then", {
+    get() { throw new Error("then touched"); },
+});
+test("fulfilled subclass", () => new EvilPromise((resolve) => resolve("ok")));
+test("rejected subclass", () => new EvilPromise((resolve, reject) => {
+    reject(new Error("real rejection"));
+}));
+test("pending subclass", () => new EvilPromise(() => {}), { timeout: 20 });
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(printed.contains("ok 1 - fulfilled subclass"), "{printed}");
+    assert!(
+        printed.contains("not ok 2 - rejected subclass"),
+        "{printed}"
+    );
+    assert!(printed.contains("real rejection"), "{printed}");
+    assert!(printed.contains("not ok 3 - pending subclass"), "{printed}");
+    assert!(printed.contains("did not settle within 20 ms"), "{printed}");
+    assert!(
+        !printed.contains("touched"),
+        "a prototype getter ran:\n{printed}"
+    );
+}
+
+/// Thenable behavior is first-settlement, cycle-guarded, and error-safe.
+#[test]
+fn test_command_thenable_settlement_cycles_and_errors() {
+    let project = Project::new();
+    let file = project.write(
+        "thenables.test.js",
+        r#"
+import test from "test";
+test("first resolution wins", () => ({
+    then(resolve, reject) {
+        resolve("first");
+        reject(new Error("second"));
+        resolve("third");
+    },
+}));
+const cycle = { then(resolve) { resolve(cycle); } };
+test("cycle", () => cycle);
+test("then throws", () => ({ then() { throw new Error("then exploded"); } }));
+test("then getter throws", () => ({
+    get then() { throw new Error("getter exploded"); },
+}));
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(
+        printed.contains("ok 1 - first resolution wins"),
+        "{printed}"
+    );
+    assert!(printed.contains("not ok 2 - cycle"), "{printed}");
+    assert!(printed.contains("cyclic thenable chain"), "{printed}");
+    assert!(printed.contains("not ok 3 - then throws"), "{printed}");
+    assert!(printed.contains("then exploded"), "{printed}");
+    assert!(
+        printed.contains("not ok 4 - then getter throws"),
+        "{printed}"
+    );
+    assert!(printed.contains("getter exploded"), "{printed}");
+}
+
+/// A chain longer than the assimilation limit fails quickly rather than
+/// starving the timeout with an unbounded microtask walk.
+#[test]
+fn test_command_bounds_a_long_thenable_chain_without_hanging() {
+    let project = Project::new();
+    let file = project.write(
+        "chain.test.js",
+        r#"
+import test from "test";
+test("deep chain", () => {
+    let value = 1;
+    for (let index = 0; index < 1001; index += 1) {
+        const next = value;
+        value = { then(resolve) { resolve(next); } };
+    }
+    return value;
+});
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args_with_timeout(&["test", path], Duration::from_secs(10));
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("thenable chain limit"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+/// A stateful `then` getter must not be read a second time to discover a
+/// cycle. The first read makes the object a thenable; resolving to itself is
+/// a cycle, whether a second read would return undefined or throw.
+#[test]
+fn test_command_stateful_then_getter_cycle_is_not_reread() {
+    let project = Project::new();
+    let file = project.write(
+        "stateful.test.js",
+        r#"
+import test from "test";
+let undefinedReads = 0;
+const undefinedCycle = {
+    get then() {
+        undefinedReads += 1;
+        if (undefinedReads === 1) {
+            return function (resolve) { resolve(undefinedCycle); };
+        }
+        if (undefinedReads === 2) return undefined;
+        throw new Error("undefined cycle read more than twice");
+    },
+};
+let throwingReads = 0;
+const throwingCycle = {
+    get then() {
+        throwingReads += 1;
+        if (throwingReads === 1) {
+            return function (resolve) { resolve(throwingCycle); };
+        }
+        throw new Error("throwing cycle reread");
+    },
+};
+const plain = { ok: true };
+test("stateful undefined cycle", () => undefinedCycle);
+test("stateful throwing cycle", () => throwingCycle);
+test("getters read once", () => {
+    if (undefinedReads !== 1) throw new Error(`undefined getter read ${undefinedReads}`);
+    if (throwingReads !== 1) throw new Error(`throwing getter read ${throwingReads}`);
+});
+test("plain object", () => plain);
+test("plain through thenable", () => ({ then(resolve) { resolve(plain); } }));
+test("nested native", () => ({
+    then(resolve) { resolve(Promise.resolve("ok")); },
+}));
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(
+        contains_line(&printed, "not ok 1 - stateful undefined cycle"),
+        "{printed}"
+    );
+    assert!(
+        contains_line(&printed, "not ok 2 - stateful throwing cycle"),
+        "{printed}"
+    );
+    assert_eq!(printed.matches("NEO_TEST_CYCLE").count(), 2, "{printed}");
+    assert!(
+        contains_line(&printed, "ok 3 - getters read once"),
+        "{printed}"
+    );
+    assert!(contains_line(&printed, "ok 4 - plain object"), "{printed}");
+    assert!(
+        contains_line(&printed, "ok 5 - plain through thenable"),
+        "{printed}"
+    );
+    assert!(contains_line(&printed, "ok 6 - nested native"), "{printed}");
+    assert!(
+        !printed.contains("undefined cycle read more than twice"),
+        "{printed}"
+    );
+    assert!(!printed.contains("throwing cycle reread"), "{printed}");
 }

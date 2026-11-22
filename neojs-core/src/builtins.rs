@@ -3,10 +3,10 @@
 //!
 //! The scripts here install globals that neojs supplies: currently
 //! [`neo_shim`], which defines the `Neo` object and its cached built-in
-//! modules. `chars`, `console`, `os`, `slices`, and `strings` are plain
-//! ECMAScript (the `os` module contains two build-target constants substituted
-//! by [`neo_shim`]); `assert` calls one private host op registered by
-//! [`crate::assert`] to observe a genuine native Promise.
+//! modules. `chars`, `console`, `os`, `slices`, `strings`, and `test` are
+//! plain ECMAScript (the `os` module contains two build-target constants
+//! substituted by [`neo_shim`]); `assert` calls one private host op registered
+//! by [`crate::assert`] to observe a genuine native Promise.
 //! `crypto` calls private host ops registered by [`crate::crypto`],
 //! [`crate::crypto_cipher`], [`crate::crypto_hash`], and
 //! [`crate::crypto_shamir`]; it
@@ -63,19 +63,20 @@
 //!
 //! [`AGE_MODULE`], [`ASSERT_MODULE`], [`CHARS_MODULE`], [`CONSOLE_MODULE`],
 //! [`CRYPTO_MODULE`], [`OS_MODULE`], [`PATH_MODULE`], [`SLICES_MODULE`],
-//! [`SSH_MODULE`], [`STDIO_MODULE`], and [`STRINGS_MODULE`] are not evaluated
-//! as scripts. They are the sources returned by the module loader for the
-//! built-in specifiers [`AGE_SPECIFIER`], [`ASSERT_SPECIFIER`],
+//! [`SSH_MODULE`], [`STDIO_MODULE`], [`STRINGS_MODULE`], and [`TEST_MODULE`]
+//! are not evaluated as scripts. They are the sources returned by the module
+//! loader for the built-in specifiers [`AGE_SPECIFIER`], [`ASSERT_SPECIFIER`],
 //! [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`], [`CRYPTO_SPECIFIER`],
 //! [`OS_SPECIFIER`], [`PATH_SPECIFIER`], [`SLICES_SPECIFIER`],
-//! [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], and [`STRINGS_SPECIFIER`], and for
-//! their bare names.
+//! [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], [`STRINGS_SPECIFIER`], and
+//! [`TEST_SPECIFIER`], and for their bare names.
 //! All read the public module objects installed by [`neo_shim`], so the registry
 //! and the module bindings share identity. `assert` is the frozen callable
 //! `assert` function itself, with its named assertions as properties; it also
-//! has a default export in its module namespace. `age`, `chars`, `slices`, and
-//! `strings` are frozen module objects whose named exports are their function or
-//! class objects. `console` is the console object the runtime installed: the
+//! has a default export in its module namespace. `age`, `chars`, `slices`,
+//! `strings`, and `test` are frozen module objects whose named exports are their
+//! function or class objects, plus `test`'s constants. `console` is the console
+//! object the runtime installed: the
 //! default export's value is that object, and the named exports are its method
 //! values when the module is evaluated. `crypto`, `path`, `ssh`, and `stdio` are
 //! frozen module objects whose named exports are their synchronous classes,
@@ -88,8 +89,8 @@ use deno_core::url::Url;
 /// Installs the global `Neo` object and the built-in module registry.
 ///
 /// Evaluation happens once per realm. The `age`, `assert`, `chars`, `crypto`,
-/// `os`, `path`, `slices`, `ssh`, `stdio`, and `strings` module objects are
-/// frozen and
+/// `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, and `test` module objects
+/// are frozen and
 /// cached, so repeated `Neo.getBuiltInModule` calls return the same object for
 /// each. The `console` module object is the console object the runtime
 /// installed, captured after the console shim runs. At installation time the
@@ -289,7 +290,7 @@ pub(crate) const SLICES_SPECIFIER: &str = "neo:slices";
 ///
 /// It re-exports the view classes and factories from the public `slices` module
 /// object, so the module and `Neo.getBuiltInModule("slices")` share identity.
-/// The implementations are plain ECMAScript in [`NEO_SHIM`]; no host op is
+/// The implementations are plain ECMAScript in [`neo_shim`]; no host op is
 /// called. Views alias the caller's Array or typed array; they are not copies,
 /// a sandbox, or a cross-realm/cross-thread zero-copy mechanism.
 const SLICES_MODULE: &str = include_str!("builtins/slices.esm.js");
@@ -308,6 +309,22 @@ pub(crate) const STRINGS_SPECIFIER: &str = "neo:strings";
 /// implementations are plain ECMAScript in [`neo_shim`]; no host op is called.
 const STRINGS_MODULE: &str = include_str!("builtins/strings.esm.js");
 
+/// The canonical module specifier for the `test` built-in.
+///
+/// Both `"test"` and `"neo:test"` resolve to this URL, so the engine caches one
+/// module instance for both spellings. It is not a `file:` URL and is never
+/// read from disk. `node:test` is deliberately not an alias while neojs has no
+/// explicit Node-module opt-in.
+pub(crate) const TEST_SPECIFIER: &str = "neo:test";
+
+/// The ECMAScript module source served for [`TEST_SPECIFIER`].
+///
+/// It re-exports the callable `test` function and the runner helpers from the
+/// public `test` module object, so the module and
+/// `Neo.getBuiltInModule("test")` share identity. The implementation is in
+/// [`neo_shim`]; it calls no host op.
+const TEST_MODULE: &str = include_str!("builtins/test.esm.js");
+
 /// Registry name and canonical specifier for each implemented built-in module.
 ///
 /// The loader serves one module instance per canonical specifier, and the error
@@ -324,6 +341,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("ssh", SSH_SPECIFIER),
     ("stdio", STDIO_SPECIFIER),
     ("strings", STRINGS_SPECIFIER),
+    ("test", TEST_SPECIFIER),
 ];
 
 /// Returns the canonical specifier for a built-in module name, or `None`.
@@ -360,6 +378,7 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         SSH_SPECIFIER => Some(SSH_MODULE),
         STDIO_SPECIFIER => Some(STDIO_MODULE),
         STRINGS_SPECIFIER => Some(STRINGS_MODULE),
+        TEST_SPECIFIER => Some(TEST_MODULE),
         _ => None,
     }
 }
