@@ -253,11 +253,12 @@ pub mod test_support {
         crate::crypto_shamir::zeroized_v8_buffers()
     }
 
-    /// Count dropped Shamir worker-result owners.
+    /// Count sensitive Shamir worker buffers cleared at the wipe boundary.
     ///
-    /// Used to prove that a finished worker result is dropped, and therefore
-    /// its zeroizing data is cleared, when the runtime is torn down.
-    pub fn dropped_shamir_worker_results() -> usize {
-        crate::crypto_shamir::dropped_worker_results()
+    /// The counter increments only after the full-capacity zeroization, so it
+    /// proves an abandoned worker result reached the actual clearing code when
+    /// the runtime was torn down.
+    pub fn zeroized_shamir_worker_results() -> usize {
+        crate::crypto_shamir::zeroized_worker_results()
     }
 }

@@ -73,7 +73,7 @@ await shamirSplitAsync(Uint8Array.of(1, 2, 3, 4), 2, 3);
     )
     .expect("write source");
 
-    let results_baseline = neojs_core::test_support::dropped_shamir_worker_results();
+    let results_baseline = neojs_core::test_support::zeroized_shamir_worker_results();
     let v8_baseline = neojs_core::test_support::zeroized_shamir_buffers();
     let gate = CancellationGate::new();
     let _release_on_exit = GateRelease(Some(gate.clone()));
@@ -131,9 +131,9 @@ await shamirSplitAsync(Uint8Array.of(1, 2, 3, 4), 2, 3);
 
     assert!(
         wait_until(|| {
-            neojs_core::test_support::dropped_shamir_worker_results() > results_baseline
+            neojs_core::test_support::zeroized_shamir_worker_results() > results_baseline
         }),
-        "the abandoned running worker result was not dropped"
+        "the abandoned running worker result was not cleared"
     );
     assert_eq!(
         neojs_core::test_support::zeroized_shamir_buffers(),

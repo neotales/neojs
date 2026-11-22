@@ -128,15 +128,20 @@
 //! # Memory and side channels
 //!
 //! Rust buffers holding the secret, random coefficients, share values, and the
-//! packed worker result are wrapped in `zeroize::Zeroizing` or zeroized on
-//! drop. Every share value and recovered secret returned to JavaScript is
+//! packed worker result are wrapped in `zeroize::Zeroizing` or cleared with the
+//! vetted `zeroize::Zeroize` implementation for `Vec`, which volatile-writes
+//! the elements and full spare capacity and then applies its optimization
+//! barrier. Every share value and recovered secret returned to JavaScript is
 //! placed in a V8 backing store whose deleter clears the allocation before V8
 //! frees it. The join result stays in a `Zeroizing` resource until that
 //! transfer, so a discarded or abandoned result is cleared on runtime teardown.
 //! This is still best-effort clearing: JavaScript can copy the bytes into
 //! ordinary V8 memory (for example with `slice` or `structuredClone`), and the
 //! JavaScript heap, V8 string storage, and caller-held copies are outside this
-//! guarantee. The module does not promise complete memory erasure.
+//! guarantee. The tests prove that the clear path is reached and that live
+//! capacity is zero before the allocation is freed; they are not a
+//! compiler-level proof that every copy is erased. The module does not promise
+//! complete memory erasure.
 //!
 //! GF(256) multiplication is a fixed eight-round branchless mask loop, and
 //! inversion uses a fixed seven-step exponentiation. Secret bytes are not used
@@ -919,7 +924,7 @@ fn split_packed(
     secret: &[u8],
     threshold: usize,
     share_count: usize,
-) -> Result<Zeroizing<Vec<u8>>, ShamirError> {
+) -> Result<SensitiveVec, ShamirError> {
     let total = validate_split(secret.len(), threshold, share_count)?;
     #[cfg(feature = "test-support")]
     record_shamir_placement();
@@ -963,7 +968,7 @@ fn split_packed(
             }
         }
     }
-    Ok(packed)
+    Ok(SensitiveVec::new(std::mem::take(&mut *packed)))
 }
 
 /// Parse the header and body of a packed split payload.
@@ -1008,7 +1013,7 @@ fn parse_split_payload(bytes: &[u8]) -> Result<SplitPayload<'_>, ShamirError> {
 static ZEROIZED_V8_BUFFERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "test-support")]
-static DROPPED_WORKER_RESULTS: std::sync::atomic::AtomicUsize =
+static ZEROIZED_WORKER_RESULTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 /// Test-only count of Shamir V8 backing stores released through the zeroizing
@@ -1018,25 +1023,11 @@ pub(crate) fn zeroized_v8_buffers() -> usize {
     ZEROIZED_V8_BUFFERS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Test-only count of dropped [`WorkerResult`] owners.
+/// Test-only count of sensitive worker buffers cleared at the actual wipe
+/// boundary.
 #[cfg(feature = "test-support")]
-pub(crate) fn dropped_worker_results() -> usize {
-    DROPPED_WORKER_RESULTS.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Clear every byte in a vector's allocation, including unused capacity.
-///
-/// # Safety
-///
-/// Writing zeros over allocated-but-uninitialized capacity is safe and does not
-/// read it. The caller still owns the allocation.
-unsafe fn zeroize_vec_capacity(bytes: &mut Vec<u8>) {
-    if bytes.capacity() > 0 {
-        // SAFETY: `capacity` bytes are allocated from `as_mut_ptr()`.
-        unsafe {
-            std::ptr::write_bytes(bytes.as_mut_ptr(), 0, bytes.capacity());
-        }
-    }
+pub(crate) fn zeroized_worker_results() -> usize {
+    ZEROIZED_WORKER_RESULTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// V8 backing-store deleter for the original `Vec` allocation.
@@ -1056,15 +1047,17 @@ unsafe extern "C" fn wipe_vec_backing_store(
     // SAFETY: `deleter_data` is the `Box<Vec<u8>>` handed to V8, and V8 calls
     // this deleter exactly once.
     let mut owner = unsafe { Box::from_raw(deleter_data.cast::<Vec<u8>>()) };
-    // SAFETY: `owner` still owns the allocation.
-    unsafe {
-        zeroize_vec_capacity(&mut owner);
-    }
-    #[cfg(debug_assertions)]
+    // `Zeroize for Vec` uses volatile writes over the elements and then over
+    // the full spare capacity, followed by its optimization barrier. This
+    // covers the original allocation including capacity without reallocating.
+    owner.zeroize();
+    #[cfg(any(debug_assertions, feature = "test-support"))]
     {
-        // SAFETY: the preceding write initialized every capacity byte to zero.
+        // SAFETY: `Zeroize for Vec` has just written zero to every capacity
+        // byte, so the memory is initialized and can be inspected safely. This
+        // fails a test if the wipe is removed.
         let all = unsafe { std::slice::from_raw_parts(owner.as_ptr(), owner.capacity()) };
-        debug_assert!(
+        assert!(
             all.iter().all(|byte| *byte == 0),
             "the full vector allocation was not zeroized"
         );
@@ -1091,10 +1084,9 @@ fn zeroizing_bytes_to_v8<'s>(
     if length == 0 {
         // A zero-length vector can still have capacity holding old bytes.
         let mut empty = std::mem::take(&mut *bytes);
-        // SAFETY: the vector still owns its allocation.
-        unsafe {
-            zeroize_vec_capacity(&mut empty);
-        }
+        // `Zeroize for Vec` clears the logical length and then volatile-writes
+        // zero over the full spare capacity, with its optimization barrier.
+        empty.zeroize();
         drop(empty);
         return bytes_to_v8(scope, Vec::new());
     }
@@ -1208,23 +1200,29 @@ fn packed_shares_to_v8<'s>(
 /// Unpack a split worker result into a JavaScript share array.
 fn unpack_split_result<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    packed: Zeroizing<Vec<u8>>,
+    packed: Vec<u8>,
 ) -> Result<v8::Local<'s, v8::Array>, ShamirError> {
+    let packed = SensitiveVec::new(packed);
     if packed.len() > MAX_SHAMIR_PACKED_BYTES {
         return Err(ShamirError::new(ShamirErrorCode::Limit));
     }
-    packed_shares_to_v8(scope, &packed)
+    packed_shares_to_v8(scope, packed.as_slice())
 }
 
 /// Unpack a combine worker result into a zeroizing JavaScript secret.
 fn unpack_combine_result<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    secret: Zeroizing<Vec<u8>>,
+    secret: Vec<u8>,
 ) -> Result<v8::Local<'s, v8::Uint8Array>, ShamirError> {
+    let mut secret = SensitiveVec::new(secret);
     if secret.is_empty() {
         return Err(ShamirError::new(ShamirErrorCode::Internal));
     }
-    zeroizing_bytes_to_v8(scope, secret).ok_or_else(|| ShamirError::new(ShamirErrorCode::Limit))
+    let bytes = secret
+        .take()
+        .ok_or_else(|| ShamirError::new(ShamirErrorCode::Internal))?;
+    zeroizing_bytes_to_v8(scope, Zeroizing::new(bytes))
+        .ok_or_else(|| ShamirError::new(ShamirErrorCode::Limit))
 }
 
 /// Build a failure response object.
@@ -1449,30 +1447,77 @@ fn validate_plan_total(plans: &[SharePlan<'_>]) -> Result<usize, ShamirError> {
         .ok_or_else(|| ShamirError::new(ShamirErrorCode::Limit))
 }
 
-/// The result a blocking worker hands back, owned by `Zeroizing` until V8 or
-/// runtime teardown releases it.
+/// Bytes owned by a worker or take path that are cleared when dropped.
+///
+/// `None` means the bytes were handed to V8 or there were none. A `Some` vector
+/// is cleared with the vetted [`Zeroize for Vec`] implementation, which
+/// volatile-writes the elements and full spare capacity and then applies its
+/// optimization barrier. The drop instrumentation runs only after that clear.
+struct SensitiveVec(Option<Vec<u8>>);
+
+impl SensitiveVec {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self(Some(bytes))
+    }
+
+    fn empty() -> Self {
+        Self(None)
+    }
+
+    fn take(&mut self) -> Option<Vec<u8>> {
+        self.0.take()
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.0.as_deref().unwrap_or(&[])
+    }
+
+    fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, Vec::len)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Drop for SensitiveVec {
+    fn drop(&mut self) {
+        if let Some(mut bytes) = self.0.take() {
+            bytes.zeroize();
+            #[cfg(debug_assertions)]
+            {
+                // SAFETY: `Zeroize for Vec` has just written zero to every
+                // capacity byte. Reading it is initialized and catches a
+                // removed wipe in tests without reading freed memory.
+                let all = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.capacity()) };
+                debug_assert!(
+                    all.iter().all(|byte| *byte == 0),
+                    "sensitive bytes were not cleared before drop"
+                );
+            }
+            #[cfg(feature = "test-support")]
+            ZEROIZED_WORKER_RESULTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// The result a blocking worker hands back.
 struct WorkerResult {
     status: u8,
-    data: Zeroizing<Vec<u8>>,
+    data: SensitiveVec,
 }
 
 impl WorkerResult {
-    fn success(data: Zeroizing<Vec<u8>>) -> Self {
+    fn success(data: SensitiveVec) -> Self {
         Self { status: 0, data }
     }
 
     fn error(error: ShamirError) -> Self {
         Self {
             status: error.code().tag(),
-            data: Zeroizing::new(Vec::new()),
+            data: SensitiveVec::empty(),
         }
-    }
-}
-
-impl Drop for WorkerResult {
-    fn drop(&mut self) {
-        #[cfg(feature = "test-support")]
-        DROPPED_WORKER_RESULTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1502,7 +1547,7 @@ struct CombineJob {
 impl CombineJob {
     fn run(self) -> WorkerResult {
         match combine(&self.shares) {
-            Ok(secret) => WorkerResult::success(Zeroizing::new(secret)),
+            Ok(secret) => WorkerResult::success(SensitiveVec::new(secret)),
             Err(error) => WorkerResult::error(error),
         }
     }
@@ -1612,10 +1657,14 @@ fn op_neo_crypto_shamir_take_result<'s, 'i>(
         };
         let mut result = result;
         let status = result.status;
-        let data = std::mem::replace(&mut result.data, Zeroizing::new(Vec::new()));
         if status != 0 {
+            // Dropping `WorkerResult` clears any sensitive data it still holds.
             return Err(ShamirError::new(ShamirErrorCode::from_tag(status)));
         }
+        let data = result
+            .data
+            .take()
+            .ok_or_else(|| ShamirError::new(ShamirErrorCode::Internal))?;
         match kind {
             1 => unpack_split_result(scope, data).map(Into::into),
             2 => unpack_combine_result(scope, data).map(Into::into),
@@ -1743,6 +1792,28 @@ mod tests {
     }
 
     #[test]
+    fn sensitive_vec_drop_clears_full_capacity_at_the_boundary() {
+        let mut vec = Vec::with_capacity(32);
+        vec.extend_from_slice(b"secret");
+        let capacity = vec.capacity();
+        assert!(capacity > vec.len());
+        unsafe {
+            std::ptr::write_bytes(vec.as_mut_ptr().add(vec.len()), 0xaa, capacity - vec.len());
+        }
+        #[cfg(feature = "test-support")]
+        let before = zeroized_worker_results();
+        // The Drop implementation's debug assertion fails if the full-capacity
+        // wipe is removed. It inspects the live allocation before it is freed.
+        drop(SensitiveVec::new(vec));
+        #[cfg(feature = "test-support")]
+        assert_eq!(
+            zeroized_worker_results(),
+            before + 1,
+            "the clear-boundary counter did not advance after a wiped drop"
+        );
+    }
+
+    #[test]
     fn deleter_wipes_excess_capacity_from_the_original_vec_context() {
         let mut vec = Vec::with_capacity(32);
         vec.extend_from_slice(b"secret");
@@ -1778,10 +1849,7 @@ mod tests {
         let mut owner = Box::new(vec);
         assert_eq!(owner.as_ptr(), pointer);
         assert_eq!(owner.capacity(), capacity);
-        // SAFETY: the test owns the vector and initialized all capacity bytes.
-        unsafe {
-            zeroize_vec_capacity(&mut owner);
-        }
+        owner.zeroize();
         // SAFETY: all `capacity` bytes were initialized and are now zeroed.
         let all = unsafe { std::slice::from_raw_parts(owner.as_ptr(), owner.capacity()) };
         assert!(all.iter().all(|byte| *byte == 0));

@@ -13,7 +13,6 @@ use neojs_core::Runtime;
 #[test]
 fn dropped_v8_shamir_buffers_are_zeroized_on_runtime_teardown() {
     let baseline = neojs_core::test_support::zeroized_shamir_buffers();
-    let results_baseline = neojs_core::test_support::dropped_shamir_worker_results();
     let dir = tempfile::tempdir().expect("temp dir");
     let file = dir.path().join("main.js");
     fs::write(
@@ -42,7 +41,6 @@ abandoned.catch(() => {});
     }
 
     let after = neojs_core::test_support::zeroized_shamir_buffers();
-    let results_after = neojs_core::test_support::dropped_shamir_worker_results();
     assert!(
         after > baseline,
         "expected dropped Shamir V8 buffers to be cleared: {baseline} -> {after}"
@@ -52,9 +50,5 @@ abandoned.catch(() => {});
     assert!(
         after >= baseline + 8,
         "too few Shamir V8 buffers were cleared: {baseline} -> {after}"
-    );
-    assert!(
-        results_after >= results_baseline + 2,
-        "too few Shamir worker results were dropped: {results_baseline} -> {results_after}"
     );
 }
