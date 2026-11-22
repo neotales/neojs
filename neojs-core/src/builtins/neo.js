@@ -3996,7 +3996,7 @@
     // does not read a property, consult the prototype chain, or run a proxy
     // trap, so `Object.create(Promise.prototype)` is not a Promise.
     function isNativePromise(value) {
-        return typeof coreIsPromise === "function" && coreIsPromise(value);
+        return coreIsPromise(value);
     }
 
     /**
