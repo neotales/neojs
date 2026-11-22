@@ -432,7 +432,7 @@ impl Transaction<'_> {
     /// Fetches one bounded batch with an explicit limit.
     ///
     /// A limit overflow can follow a dispatched `INSERT ... RETURNING` write.
-    /// See [`Connection::query`] for the post-dispatch error rules.
+    /// See [`Transaction::query`] for the post-dispatch error rules.
     ///
     /// # Errors
     /// Returns a SQL, parameter, limit, or provider error.
