@@ -2810,3 +2810,155 @@ test("leaves a long timer", () => {
     assert!(printed.contains("unsettled work"), "{printed}");
     assert!(printed.contains("1 unsettled"), "{printed}");
 }
+
+/// A thenable that resolves to a never-settling native Promise must not be
+/// handed to native resolution, where a replaced `Promise.prototype.then`
+/// could make the pending Promise look fulfilled.
+#[test]
+fn test_command_nested_pending_thenable_uses_internal_promise_state() {
+    let project = Project::new();
+    let file = project.write(
+        "nested-pending.test.js",
+        r#"
+import test from "test";
+Promise.prototype.then = function (fulfilled) { fulfilled("fake"); return this; };
+test("nested pending", () => ({
+    then(resolve) {
+        resolve(new Promise(() => {}));
+    },
+}), { timeout: 20 });
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("did not settle within 20 ms"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+/// Native Promise subclasses with throwing `then`, `constructor`, and
+/// `Symbol.species` are observed by their real state, not by a prototype
+/// getter. Fulfilled, rejected, and pending states all behave normally.
+#[test]
+fn test_command_native_promise_subclass_ignores_throwing_prototype_getters() {
+    let project = Project::new();
+    let file = project.write(
+        "subclass.test.js",
+        r#"
+import test from "test";
+class EvilPromise extends Promise {}
+Object.defineProperty(EvilPromise, Symbol.species, {
+    get() { throw new Error("species touched"); },
+});
+Object.defineProperty(EvilPromise.prototype, "constructor", {
+    get() { throw new Error("constructor touched"); },
+});
+Object.defineProperty(EvilPromise.prototype, "then", {
+    get() { throw new Error("then touched"); },
+});
+test("fulfilled subclass", () => new EvilPromise((resolve) => resolve("ok")));
+test("rejected subclass", () => new EvilPromise((resolve, reject) => {
+    reject(new Error("real rejection"));
+}));
+test("pending subclass", () => new EvilPromise(() => {}), { timeout: 20 });
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(printed.contains("ok 1 - fulfilled subclass"), "{printed}");
+    assert!(
+        printed.contains("not ok 2 - rejected subclass"),
+        "{printed}"
+    );
+    assert!(printed.contains("real rejection"), "{printed}");
+    assert!(printed.contains("not ok 3 - pending subclass"), "{printed}");
+    assert!(printed.contains("did not settle within 20 ms"), "{printed}");
+    assert!(
+        !printed.contains("touched"),
+        "a prototype getter ran:\n{printed}"
+    );
+}
+
+/// Thenable behavior is first-settlement, cycle-guarded, and error-safe.
+#[test]
+fn test_command_thenable_settlement_cycles_and_errors() {
+    let project = Project::new();
+    let file = project.write(
+        "thenables.test.js",
+        r#"
+import test from "test";
+test("first resolution wins", () => ({
+    then(resolve, reject) {
+        resolve("first");
+        reject(new Error("second"));
+        resolve("third");
+    },
+}));
+const cycle = { then(resolve) { resolve(cycle); } };
+test("cycle", () => cycle);
+test("then throws", () => ({ then() { throw new Error("then exploded"); } }));
+test("then getter throws", () => ({
+    get then() { throw new Error("getter exploded"); },
+}));
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(
+        printed.contains("ok 1 - first resolution wins"),
+        "{printed}"
+    );
+    assert!(printed.contains("not ok 2 - cycle"), "{printed}");
+    assert!(printed.contains("cyclic thenable chain"), "{printed}");
+    assert!(printed.contains("not ok 3 - then throws"), "{printed}");
+    assert!(printed.contains("then exploded"), "{printed}");
+    assert!(
+        printed.contains("not ok 4 - then getter throws"),
+        "{printed}"
+    );
+    assert!(printed.contains("getter exploded"), "{printed}");
+}
+
+/// A chain longer than the assimilation limit fails quickly rather than
+/// starving the timeout with an unbounded microtask walk.
+#[test]
+fn test_command_bounds_a_long_thenable_chain_without_hanging() {
+    let project = Project::new();
+    let file = project.write(
+        "chain.test.js",
+        r#"
+import test from "test";
+test("deep chain", () => {
+    let value = 1;
+    for (let index = 0; index < 1001; index += 1) {
+        const next = value;
+        value = { then(resolve) { resolve(next); } };
+    }
+    return value;
+});
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args_with_timeout(&["test", path], Duration::from_secs(10));
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("thenable chain limit"),
+        "{}",
+        stdout(&output)
+    );
+}

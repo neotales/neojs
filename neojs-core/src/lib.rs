@@ -49,7 +49,12 @@
 //! rejected Promise, a rejected thenable, a timeout, a generator object, an
 //! unhandled rejection, and event-loop work that remains after a bounded settle
 //! window are failures. The default per-test timeout is 30 seconds and can be
-//! set with `{ timeout }`. The module is available as `test` and `neo:test`;
+//! set with `{ timeout }`. A native Promise, including a subclass with throwing
+//! `then`, `constructor`, or `Symbol.species` getters, is observed through V8's
+//! internal Promise state rather than those properties. A non-native thenable
+//! is read once, called once, and its first settlement wins; nested promises and
+//! thenables are assimilated recursively, with cycle and chain-length guards.
+//! The module is available as `test` and `neo:test`;
 //! `node:` modules, including `node:test`, remain rejected while no explicit
 //! Node-module opt-in exists. It is not Node's `node:test`: there are no
 //! subtests, hooks, mocks, snapshots, tags, filters, retries, or parallel

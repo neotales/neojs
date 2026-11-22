@@ -84,8 +84,9 @@ Revision `bafa9bc14cfbdbc50d64b3c68d63d1fceb2b8afa`; file SHA-256
 bookkeeping, report shape, and prototype-independent append helpers from this
 MIT-licensed source for the `test` built-in. The adaptation adds asynchronous
 callbacks with per-test timeouts, pending tests, unhandled-rejection capture,
-top-level-await registration, a bounded event-loop settle check, and the host
-report used by `neojs test`; it
+top-level-await registration, a bounded event-loop settle check, recursive
+thenable assimilation with V8 Promise observation, cycle and chain guards, and
+the host report used by `neojs test`; it
 removes the synchronous-only restriction and does not implement Node's
 `node:test`. The API is not Node compatible beyond the `test(name, fn)` call
 shape.

@@ -5477,23 +5477,24 @@
     //
     // The bookkeeping below avoids mutable prototypes for the queue and the
     // failure list, so replacing array methods after this shim runs cannot drop
-    // a registration. Promise operations are captured at bootstrap too, so a
-    // test that replaces `Promise.resolve` or `Promise.prototype.then` cannot
-    // turn a never-settling test into a pass. A test can still replace
-    // `Deno.core`, mutate the test module object, or interfere with console
-    // output; this is not isolation.
+    // a registration. Native Promises are observed through the assert module's
+    // private V8 op, and non-native thenables are assimilated recursively with
+    // first-settlement, cycle, and depth guards. Replacing Promise.resolve,
+    // Promise.prototype.then, constructor, or Symbol.species does not turn a
+    // pending test into a pass. A test can still replace `Deno.core`, mutate the
+    // test module object, or interfere with console output; this is not
+    // isolation.
     const testObjectToString = Object.prototype.toString;
     const testCore = Deno.core;
     const testCreateTimer = testCore.createTimer;
     const testCancelTimer = testCore.cancelTimer;
     const testSetUnhandledRejectionHandler = testCore.setUnhandledPromiseRejectionHandler;
     const testEventLoopHasMoreWork = testCore.eventLoopHasMoreWork;
-    const testPromiseResolve = NativePromise.resolve;
-    const testPromiseThen = NativePromise.prototype.then;
     const TEST_MAX = 10000;
     const TEST_DEFAULT_TIMEOUT_MS = 30000;
     const TEST_MAX_TEXT = 2000;
     const TEST_SETTLE_ROUNDS = 100;
+    const TEST_MAX_CHAIN = 1000;
 
     let testQueueLength = 0;
     const testQueue = [];
@@ -5660,23 +5661,112 @@
         if (value === null || (typeof value !== "object" && typeof value !== "function")) {
             return null;
         }
-        // A genuine native Promise is observed with the captured intrinsic.
-        // Reading `value.then` here would consult a replaced
-        // `Promise.prototype.then`, which could make a pending Promise look
-        // settled or discard its rejection.
-        if (coreIsPromise(value)) return testPromiseThen;
         const then = value.then;
         return typeof then === "function" ? then : null;
     }
 
-    function testAssimilate(value, then) {
-        return new NativePromise(function (resolve, reject) {
+    function testSettledWrapper(status, value) {
+        const wrapper = { __proto__: null };
+        defineField(wrapper, "status", status);
+        defineField(wrapper, "value", value);
+        return wrapper;
+    }
+
+    /**
+     * Call a non-native thenable's `then` once and capture its first settlement.
+     *
+     * The wrapper is a non-thenable object, so native Promise resolution never
+     * assimilates the payload. A nested native Promise is left for
+     * `testResolveValue`, which observes it through V8 instead of mutable
+     * `Promise.prototype.then`. A second resolve/reject or a throw after the
+     * first settlement is ignored.
+     */
+    function testCallThenable(value, then) {
+        return new NativePromise(function (resolve) {
+            let settled = false;
+            const settle = function (status, payload) {
+                if (settled) return;
+                settled = true;
+                resolve(testSettledWrapper(status, payload));
+            };
             try {
-                uncurry(then, value, resolve, reject);
+                uncurry(
+                    then,
+                    value,
+                    function (fulfilled) {
+                        settle("fulfilled", fulfilled);
+                    },
+                    function (rejected) {
+                        settle("rejected", rejected);
+                    },
+                );
             } catch (error) {
-                reject(error);
+                settle("rejected", error);
             }
         });
+    }
+
+    function testCycleError(name) {
+        return testError(
+            "NEO_TEST_CYCLE",
+            `test "${name}" produced a cyclic thenable chain`,
+            "Error",
+        );
+    }
+
+    function testChainError(name) {
+        return testError(
+            "NEO_TEST_CHAIN",
+            `test "${name}" exceeded the ${TEST_MAX_CHAIN}-step thenable chain limit`,
+            "Error",
+        );
+    }
+
+    function testObserveError(name, error) {
+        let detail = "";
+        try {
+            detail = `: ${testDescribeError(error)}`;
+        } catch {
+            // The class name is still useful without a detail.
+        }
+        return testError(
+            "NEO_TEST_OBSERVE",
+            `could not inspect the Promise returned by "${name}"${detail}`,
+            "Error",
+        );
+    }
+
+    /**
+     * Recursively reduce a test result to a non-thenable wrapper.
+     *
+     * A genuine native Promise is observed through the `assert` module's
+     * private V8 op, which attaches settlement handlers without reading
+     * `then`, `constructor`, or `Symbol.species`. A non-native thenable has
+     * its `then` read once, is called once, and its first settlement is
+     * captured without letting native resolution assimilate the payload.
+     * Cycles and chains longer than `TEST_MAX_CHAIN` fail rather than
+     * starving the timeout.
+     */
+    async function testResolveValue(value, seen, depth, name) {
+        if (depth > TEST_MAX_CHAIN) throw testChainError(name);
+        if (coreIsPromise(value)) {
+            if (contains(seen, value)) throw testCycleError(name);
+            append(seen, value);
+            const observation = observePromise(value);
+            await observation.promise;
+            if (observation.status === OBSERVE_REJECTED) throw observation.value;
+            if (observation.status !== OBSERVE_FULFILLED) {
+                throw testObserveError(name, observation.error);
+            }
+            return await testResolveValue(observation.value, seen, depth + 1, name);
+        }
+        const then = testThen(value);
+        if (then === null) return testSettledWrapper("fulfilled", value);
+        if (contains(seen, value)) throw testCycleError(name);
+        append(seen, value);
+        const outcome = await testCallThenable(value, then);
+        if (outcome.status === "rejected") throw outcome.value;
+        return await testResolveValue(outcome.value, seen, depth + 1, name);
     }
 
     function testTimeoutError(name, milliseconds) {
@@ -5695,22 +5785,21 @@
         );
     }
 
-    function testWithTimeout(value, milliseconds, name) {
-        let promise;
-        try {
-            // Captured at bootstrap: a later `Promise.resolve` replacement
-            // must not make a never-settling Promise resolve.
-            promise = uncurry(testPromiseResolve, NativePromise, value);
-        } catch (error) {
-            return new NativePromise(function (resolve, reject) {
-                reject(error);
-            });
-        }
+    /**
+     * Bound one assimilation chain by one timeout.
+     *
+     * `promise` is the native Promise returned by `testResolveValue`; it
+     * fulfills with a non-thenable wrapper or rejects with the failure reason.
+     * The observation attaches handlers through the V8 op, so a subclass with
+     * a throwing `then`, `constructor`, or `Symbol.species` is observed by its
+     * real state instead of tripping a prototype getter.
+     */
+    function testWithTimeout(promise, milliseconds, name) {
         if (typeof testCreateTimer !== "function" || typeof testCancelTimer !== "function") {
-            // Never return an unbounded Promise: without a timer the timeout
-            // cannot be enforced, so fail instead of hanging the runner.
+            // Attach handlers so the abandoned assimilation cannot become an
+            // unhandled rejection, then fail instead of waiting forever.
             try {
-                uncurry(testPromiseThen, promise, function () {}, function () {});
+                observePromise(promise);
             } catch {
                 // The timer failure is the useful result.
             }
@@ -5736,47 +5825,50 @@
                 );
             } catch {
                 try {
-                    uncurry(testPromiseThen, promise, function () {}, function () {});
+                    observePromise(promise);
                 } catch {
                     // The timer failure is the useful result.
                 }
                 reject(testTimeoutUnavailable(name));
                 return;
             }
+            let observation;
             try {
-                uncurry(
-                    testPromiseThen,
-                    promise,
-                    function (fulfilled) {
-                        if (settled) return;
-                        settled = true;
-                        try {
-                            testCancelTimer(timer);
-                        } catch {
-                            // The timer already fired or was cleaned up.
-                        }
-                        resolve(fulfilled);
-                    },
-                    function (rejected) {
-                        if (settled) return;
-                        settled = true;
-                        try {
-                            testCancelTimer(timer);
-                        } catch {
-                            // The timer already fired or was cleaned up.
-                        }
-                        reject(rejected);
-                    },
-                );
+                observation = observePromise(promise);
             } catch (error) {
-                settled = true;
                 try {
                     testCancelTimer(timer);
                 } catch {
                     // The timer already fired or was cleaned up.
                 }
                 reject(error);
+                return;
             }
+            (async function () {
+                try {
+                    await observation.promise;
+                    if (settled) return;
+                    settled = true;
+                    try {
+                        testCancelTimer(timer);
+                    } catch {
+                        // The timer already fired or was cleaned up.
+                    }
+                    if (observation.status === OBSERVE_FULFILLED) {
+                        // The wrapper is non-thenable; native resolution cannot
+                        // assimilate it through a mutable `then`.
+                        resolve(observation.value);
+                    } else if (observation.status === OBSERVE_REJECTED) {
+                        reject(observation.value);
+                    } else {
+                        reject(testObserveError(name, observation.error));
+                    }
+                } catch (error) {
+                    if (settled) return;
+                    settled = true;
+                    reject(error);
+                }
+            })();
         });
     }
 
@@ -6052,10 +6144,7 @@
                             "TypeError",
                         );
                     }
-                    const then = testThen(result);
-                    if (then !== null) {
-                        await testWithTimeout(testAssimilate(result, then), entry.timeout, name);
-                    }
+                    await testWithTimeout(testResolveValue(result, [], 0, name), entry.timeout, name);
                     testPassed += 1;
                     testPrintLine(`ok ${runIndex} - ${name}`);
                 } catch (error) {

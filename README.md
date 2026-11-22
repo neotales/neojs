@@ -582,6 +582,17 @@ cumulative report has a failure, including a failure from an earlier call. The h
 `{ settle: true }` for its bounded event-loop check; a user call inside a top-level `await` must
 leave `settle` false because it would see its own pending module evaluation.
 
+Native Promises are observed through the `assert` module's V8 Promise observation op, which uses
+their real internal state rather than `then`, `constructor`, or `Symbol.species`; a subclass with
+throwing prototype getters therefore fulfils, rejects, or stays pending according to what actually
+happened. A non-native thenable is read once, called once, and its first settlement wins.
+Nested promises and thenables are assimilated recursively, cycles fail with `NEO_TEST_CYCLE`, and a
+chain longer than 1000 steps fails with `NEO_TEST_CHAIN`. The per-test timeout covers the whole
+chain. `NEO_TEST_OBSERVE` means the V8 observer could not inspect a native Promise, and
+`NEO_TEST_NO_TIMER` means timer support was unavailable and the runner failed closed rather than
+hang. A synchronous loop or a thenable that blocks or starves the isolate is still not
+interruptible, and a timeout fails the test without cancelling work that is already running.
+
 After the queue, the runner waits up to about 100 ms of event-loop turns for detached timers, async
 ops, dynamic imports, and rejection events. If deno_core still reports pending work, the report is
 marked unsettled and fails; an unrefed task that the event loop does not report is outside this
