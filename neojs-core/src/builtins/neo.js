@@ -248,6 +248,7 @@
     // that replaced them before this script ran, and it is not a sandbox.
     const makeRegExp = RegExp;
     const makeSet = Set;
+    const makeUint32Array = Uint32Array;
     const charCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
     const stringSlice = Function.prototype.call.bind(String.prototype.slice);
     const stringTrim = Function.prototype.call.bind(String.prototype.trim);
@@ -465,8 +466,68 @@
         return true;
     }
 
+    /** Count the code points in `text`. */
+    function codePointCount(text) {
+        let count = 0;
+        for (let index = 0; index < text.length; ) {
+            index += codepointWidth(codePointAt(text, index));
+            count += 1;
+        }
+        return count;
+    }
+
+    /**
+     * Copy the code points of `text` into a `Uint32Array`.
+     *
+     * KMP needs random access to the pattern, so the search string is
+     * materialized once and the text is streamed. Extra memory is O(search).
+     */
+    function codePointsOf(text) {
+        const count = codePointCount(text);
+        const points = new makeUint32Array(count);
+        let index = 0;
+        for (let position = 0; position < count; position += 1) {
+            const point = codePointAt(text, index);
+            points[position] = point;
+            index += codepointWidth(point);
+        }
+        return points;
+    }
+
+    /**
+     * Compute the KMP prefix function under simple-fold equivalence.
+     *
+     * `foldEqual` is an equivalence relation: ECMAScript canonicalization is
+     * applied to both code points, so equality of canonical forms is
+     * reflexive, symmetric, and transitive. The usual prefix-function
+     * recurrence is therefore valid even when the pattern contains different
+     * code points from one fold class, such as `"K"` and U+212A.
+     */
+    function foldPrefix(pattern) {
+        const length = pattern.length;
+        const prefix = new makeUint32Array(length);
+        let matched = 0;
+        for (let index = 1; index < length; index += 1) {
+            const point = pattern[index];
+            while (matched > 0 && !foldEqual(point, pattern[matched])) {
+                matched = prefix[matched - 1];
+            }
+            if (foldEqual(point, pattern[matched])) matched += 1;
+            prefix[index] = matched;
+        }
+        return prefix;
+    }
+
     /**
      * Find the first occurrence of `search` in `text`, ignoring case.
+     *
+     * Linear in the text and the search string. The scan is KMP over code
+     * points with `foldEqual` as the equivalence, so a long repeated prefix
+     * cannot make the search retry the whole needle at every position. The
+     * text is streamed; only the needle, its prefix function, and a ring of
+     * UTF-16 start offsets are materialized, so extra memory is O(search).
+     * Matches start and end on code point boundaries, and indices are UTF-16
+     * code unit offsets.
      *
      * @param {string} text
      * @param {string} search
@@ -481,10 +542,28 @@
         requireString(search, "search");
         const from = toIndex(fromIndex, text.length, 0);
         if (search.length === 0) return from;
-        let index = codepointStart(text, from);
-        while (index < text.length) {
-            if (foldMatchAt(text, index, search)) return index;
-            index += codepointWidth(codePointAt(text, index));
+        let offset = codepointStart(text, from);
+        if (offset >= text.length) return -1;
+        const pattern = codePointsOf(search);
+        const length = pattern.length;
+        const prefix = foldPrefix(pattern);
+        const starts = new makeUint32Array(length);
+        let matched = 0;
+        let slot = 0;
+        while (offset < text.length) {
+            const point = codePointAt(text, offset);
+            starts[slot] = offset;
+            slot += 1;
+            if (slot === length) slot = 0;
+            while (matched > 0 && !foldEqual(pattern[matched], point)) {
+                matched = prefix[matched - 1];
+            }
+            if (foldEqual(pattern[matched], point)) matched += 1;
+            // The ring holds the last `length` start offsets. After the
+            // increment above, `starts[slot]` is the oldest of them, which is
+            // the start of the match that has just completed.
+            if (matched === length) return starts[slot];
+            offset += codepointWidth(point);
         }
         return -1;
     }
@@ -495,6 +574,11 @@
      * Overlapping occurrences are found, like `String.prototype.lastIndexOf`:
      * `lastIndexOfFold("aaa", "aa")` is `1`. A match must start at or before
      * `fromIndex`; the default is the end of the string.
+     *
+     * Linear in the text and the search string, with the same KMP scan as
+     * `indexOfFold`, so a repeated prefix cannot make it quadratic. It scans
+     * from the start and stops at the first completed match that starts after
+     * `fromIndex`; extra memory is O(search).
      *
      * @param {string} text
      * @param {string} search
@@ -510,11 +594,32 @@
         requireString(search, "search");
         const limit = toIndex(fromIndex, text.length, text.length);
         if (search.length === 0) return limit;
+        const pattern = codePointsOf(search);
+        const length = pattern.length;
+        const prefix = foldPrefix(pattern);
+        const starts = new makeUint32Array(length);
         let last = -1;
-        let index = 0;
-        while (index <= limit && index < text.length) {
-            if (foldMatchAt(text, index, search)) last = index;
-            index += codepointWidth(codePointAt(text, index));
+        let matched = 0;
+        let offset = 0;
+        let slot = 0;
+        while (offset < text.length) {
+            const point = codePointAt(text, offset);
+            starts[slot] = offset;
+            slot += 1;
+            if (slot === length) slot = 0;
+            while (matched > 0 && !foldEqual(pattern[matched], point)) {
+                matched = prefix[matched - 1];
+            }
+            if (foldEqual(pattern[matched], point)) matched += 1;
+            if (matched === length) {
+                const start = starts[slot];
+                // Starts only increase as the scan advances, so no later
+                // match can satisfy the limit once this one does not.
+                if (start > limit) break;
+                last = start;
+                matched = prefix[matched - 1];
+            }
+            offset += codepointWidth(point);
         }
         return last;
     }

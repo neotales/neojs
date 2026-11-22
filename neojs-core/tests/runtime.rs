@@ -1919,3 +1919,102 @@ if (strings.trim("...x...", ".") !== "x") throw new Error("trim was replaced");
 "#,
     );
 }
+
+#[test]
+fn strings_folded_search_stays_linear_on_repeated_prefixes() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+// A per-position retry of the whole needle performs about 10^10 comparisons
+// for the ASCII case and about 2.5 * 10^9 for the astral case at these sizes,
+// so restoring that implementation fails this test by not completing. KMP
+// finishes in milliseconds.
+const asciiPrefix = "a".repeat(100000);
+if (strings.indexOfFold(asciiPrefix + "c", asciiPrefix + "b") !== -1) {
+    throw new Error("ASCII repeated-prefix miss was found");
+}
+if (strings.lastIndexOfFold(asciiPrefix + "c", asciiPrefix + "b") !== -1) {
+    throw new Error("lastIndexOfFold ASCII repeated-prefix miss was found");
+}
+const asciiHit = asciiPrefix + asciiPrefix + "b";
+if (strings.indexOfFold(asciiHit, asciiPrefix + "b") !== 100000) {
+    throw new Error("ASCII repeated-prefix hit was missed");
+}
+if (strings.lastIndexOfFold(asciiHit, asciiPrefix + "b") !== 100000) {
+    throw new Error("lastIndexOfFold ASCII repeated-prefix hit was missed");
+}
+
+const astralBlock = "\u{1F600}".repeat(50000);
+if (strings.indexOfFold(astralBlock + "x", astralBlock + "y") !== -1) {
+    throw new Error("astral repeated-prefix miss was found");
+}
+if (strings.lastIndexOfFold(astralBlock + "x", astralBlock + "y") !== -1) {
+    throw new Error("lastIndexOfFold astral repeated-prefix miss was found");
+}
+
+const foldedBlock = "\u03C3".repeat(50000);
+const foldedNeedle = "\u03A3".repeat(50000) + "y";
+const foldedHit = foldedBlock + "\u03A3".repeat(50000) + "y";
+if (strings.indexOfFold(foldedHit, foldedNeedle) !== 50000) {
+    throw new Error("folded repeated-prefix hit was missed");
+}
+if (strings.lastIndexOfFold(foldedHit, foldedNeedle) !== 50000) {
+    throw new Error("lastIndexOfFold folded repeated-prefix hit was missed");
+}
+"#,
+    );
+}
+
+#[test]
+fn strings_folded_search_keeps_unicode_and_overlap_semantics() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+const indexCases = [
+    ["aaaa", "aa", 0, "overlapping first match"],
+    ["aaab", "aab", 1, "KMP fallback after a failed prefix"],
+    ["xabab", "abA", 1, "folded needle"],
+    ["kK", "K\u212A", 0, "fold-equivalent code points in the prefix"],
+    ["\u03A3\u03A3x\u03A3\u03A3y", "\u03A3\u03A3y", 3, "folded repeated prefix"],
+    ["\u{1F600}a\u{1F600}a", "A\u{1F600}", 2, "astral match starts on a boundary"],
+    ["\u{1F600}", "\uDE00", -1, "a lone surrogate never matches half a pair"],
+];
+for (const [text, search, expected, description] of indexCases) {
+    const actual = strings.indexOfFold(text, search);
+    if (actual !== expected) {
+        throw new Error(`indexOfFold(${JSON.stringify(text)}, ${JSON.stringify(search)}) is ${actual}, expected ${expected}: ${description}`);
+    }
+}
+if (strings.indexOfFold("\u{1F600}a", "a", 1) !== 2) {
+    throw new Error("fromIndex inside a pair did not move to the next boundary");
+}
+
+const lastCases = [
+    ["aaaa", "aa", 2, "overlapping last match"],
+    ["aaa", "aa", 1, "single overlap"],
+    ["xababA", "abA", 3, "folded needle at the end"],
+    ["\u03C3".repeat(1000), "\u03C3\u03C3", 998, "long overlapping block"],
+    ["\u{1F600}\u{1F600}", "\u{1F600}", 2, "astral last match"],
+];
+for (const [text, search, expected, description] of lastCases) {
+    const actual = strings.lastIndexOfFold(text, search);
+    if (actual !== expected) {
+        throw new Error(`lastIndexOfFold(${JSON.stringify(text)}, ${JSON.stringify(search)}) is ${actual}, expected ${expected}: ${description}`);
+    }
+}
+
+// KMP must report the same last index as String.prototype.lastIndexOf on an
+// ASCII haystack for every limit, including limits inside a match.
+const overlapText = "abababab";
+for (let limit = -1; limit <= overlapText.length + 1; limit += 1) {
+    const actual = strings.lastIndexOfFold(overlapText, "abab", limit);
+    const expected = overlapText.lastIndexOf("abab", limit);
+    if (actual !== expected) {
+        throw new Error(`overlap parity failed at ${limit}: ${actual} !== ${expected}`);
+    }
+}
+"#,
+    );
+}

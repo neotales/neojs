@@ -341,8 +341,10 @@ Folded matching uses ECMAScript's simple case folding, decided per code point by
 while `equalFold("I", "\u0131")` is `false` (dotless i) and `equalFold("ss", "ß")` is `false` (that
 is full folding). Indices are UTF-16 code unit offsets, like `String.prototype.indexOf`, not code
 point offsets; `indexOfFold` and `lastIndexOfFold` find overlapping occurrences, and an empty search
-returns the clamped start index or the string length. A lone surrogate is compared as itself and
-never matches half of a surrogate pair. Argument values are not coerced: a non-string throws
+returns the clamped start index or the string length. Searching is linear in the text plus the
+search string and uses O(search) extra memory: a repeated prefix cannot make it quadratic. A lone
+surrogate is compared as itself and never matches half of a surrogate pair. Argument values are not
+coerced: a non-string throws
 `TypeError`, and a non-integer `fromIndex` throws `RangeError` (apart from `Infinity`, which clamps
 to the length).
 

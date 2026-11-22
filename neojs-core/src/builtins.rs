@@ -21,8 +21,10 @@
 //! no filesystem or permission capability and never forwards an agent.
 //! `strings` is plain ECMAScript: case-insensitive folded matching
 //! (`equalFold`, `startsWithFold`, `endsWithFold`, `indexOfFold`,
-//! `lastIndexOfFold`) and trimming of a caller-supplied code point set. It
-//! returns UTF-16 code unit indices like `String.prototype`, calls no host op,
+//! `lastIndexOfFold`) and trimming of a caller-supplied code point set. The
+//! search functions are linear in the text plus the needle and use O(needle)
+//! extra memory. It returns UTF-16 code unit indices like
+//! `String.prototype`, calls no host op,
 //! and adds no capability. Its folding is ECMAScript simple case folding,
 //! decided by the engine's own RegExp `/iu` canonicalization, so it is
 //! locale-independent and follows the Unicode data in the V8 build.

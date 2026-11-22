@@ -77,8 +77,11 @@
 //! It is not `toLowerCase()` comparison: `"K"` equals U+212A KELVIN SIGN,
 //! `"s"` equals U+017F LONG S, `"I"` does not equal U+0131 DOTLESS I, and
 //! `"ss"` does not equal `"ß"`. Indices are UTF-16 code unit offsets like
-//! `String.prototype.indexOf`, and overlapping occurrences are found. A lone
-//! surrogate is compared as itself and never matches half of a pair. With no
+//! `String.prototype.indexOf`, and overlapping occurrences are found. Searching
+//! is linear in the text plus the search string (KMP over simple-fold
+//! equivalence) and uses O(search) extra memory, so a repeated prefix cannot
+//! make it quadratic. A lone surrogate is compared as itself and never matches
+//! half of a pair. With no
 //! `chars`, trimming is exactly `String.prototype.trim`, so it uses
 //! JavaScript's whitespace set rather than `neo:chars`' Go-derived
 //! `isSpace`. The module does not coerce arguments and calls no host op; it
