@@ -5002,8 +5002,11 @@
      * meaning as in `throws`. The returned Promise rejects for invalid
      * arguments. The callback's return value must be a genuine native Promise
      * or a thenable. A thenable is assimilated by reading `then` once and
-     * calling it once; a throwing `then` accessor or call rejects the returned
-     * Promise. A plain value is an `AssertionError`.
+     * calling it once. A throwing `then` accessor or a throwing `then` call is
+     * treated as the target's rejection and checked against `expected`; it
+     * therefore normally resolves with that error when `expected` is omitted
+     * or matches, and throws `AssertionError` only when the check fails. A
+     * non-thenable return is an `AssertionError`.
      *
      * A non-thenable rejection reason is returned as the Promise value. Because
      * this is an async function, a thenable or Promise reason is assimilated by

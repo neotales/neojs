@@ -505,8 +505,9 @@ when `callback` fulfils, and otherwise records a rejection. A synchronous throw 
 rejection. The callback's return value must be a genuine native Promise or a thenable. A genuine
 native Promise is observed through a private host op that attaches settlement handlers without
 reading an overridden `then` and without consulting `Symbol.species`. A thenable is assimilated by
-reading `then` once and calling it once; a throwing `then` accessor or call is treated as a
-rejection.
+reading `then` once and calling it once. For `rejects`, a throwing `then` accessor or call is
+checked against `expected` as the target's rejection, so it normally passes when `expected` is
+omitted or matches; for `doesNotReject`, it fails the assertion as a rejection.
 
 For a non-thenable rejection reason, the returned Promise resolves with that reason. Because
 `rejects` is an async function, a thenable or Promise reason is assimilated by native Promise
