@@ -148,6 +148,12 @@ fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// True only when the complete output line matches, so `ok ...` cannot be
+/// satisfied by a `not ok ...` line.
+fn contains_line(output: &str, expected: &str) -> bool {
+    output.lines().any(|line| line == expected)
+}
+
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
@@ -3015,21 +3021,24 @@ test("nested native", () => ({
     assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
     let printed = stdout(&output);
     assert!(
-        printed.contains("not ok 1 - stateful undefined cycle"),
+        contains_line(&printed, "not ok 1 - stateful undefined cycle"),
         "{printed}"
     );
     assert!(
-        printed.contains("not ok 2 - stateful throwing cycle"),
+        contains_line(&printed, "not ok 2 - stateful throwing cycle"),
         "{printed}"
     );
     assert_eq!(printed.matches("NEO_TEST_CYCLE").count(), 2, "{printed}");
-    assert!(printed.contains("ok 3 - getters read once"), "{printed}");
-    assert!(printed.contains("ok 4 - plain object"), "{printed}");
     assert!(
-        printed.contains("ok 5 - plain through thenable"),
+        contains_line(&printed, "ok 3 - getters read once"),
         "{printed}"
     );
-    assert!(printed.contains("ok 6 - nested native"), "{printed}");
+    assert!(contains_line(&printed, "ok 4 - plain object"), "{printed}");
+    assert!(
+        contains_line(&printed, "ok 5 - plain through thenable"),
+        "{printed}"
+    );
+    assert!(contains_line(&printed, "ok 6 - nested native"), "{printed}");
     assert!(
         !printed.contains("undefined cycle read more than twice"),
         "{printed}"
