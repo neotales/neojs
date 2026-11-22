@@ -58,9 +58,9 @@
 //! `no-store` publishes an absent-entry tombstone.
 //! Thus an older `200` cannot resurrect an entry after a newer `no-store`, and a
 //! `304` cannot outrank a later-started `200` or `no-store`. Lock acquisition for
-//! revision allocation and publication is bounded by the same fetch deadline; a
-//! held or stale lock causes the cache operation to be skipped rather than
-//! blocking past the deadline.
+//! revision allocation and publication is capped at 250 ms and at the remaining
+//! fetch deadline. A held or stale lock therefore skips the cache operation and
+//! the fetch continues to the network; it never consumes the whole deadline.
 //! This detects corruption, torn writes, and lost-update races, not an adversary
 //! who can write both the metadata and the body in the user's cache directory.
 //! There is no signature or content-addressed store, so the cache does not pin a
@@ -147,6 +147,8 @@ const DEFAULT_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 /// Default maximum HTTP requests one runtime may make, including retries and
 /// redirects.
 const DEFAULT_MAX_REQUESTS: usize = 512;
+/// Longest a cache lock may delay one fetch, independent of the fetch deadline.
+const CACHE_LOCK_BUDGET: Duration = Duration::from_millis(250);
 /// The first line of a cache entry.
 const CACHE_MAGIC: &str = "neojs-remote-cache 5";
 /// The first line of an absent-entry tombstone.
@@ -732,12 +734,13 @@ impl RemoteClient {
             let response_delay = duration_secs_ceil(request_started.elapsed());
 
             if response.status == 304 {
-                let Some(mut cached) = cached else {
+                let Some(cached) = cached else {
                     return Err(format!(
                         "HTTP 304 from {} without a cached module",
                         display_url(&current)
                     ));
                 };
+                let cache_control_present = response.cache_control.is_some();
                 let directives = CacheDirectives::parse(response.cache_control.as_deref());
                 let previous_age = cached
                     .initial_age
@@ -748,42 +751,48 @@ impl RemoteClient {
                     received_at,
                     response_delay,
                 );
-                // A successful revalidation replaces the age with usable `304`
-                // headers. A missing or malformed `Date` and `Age` keep the
-                // previous age, which cannot make a stale entry fresh.
-                cached.initial_age =
+                let initial_age =
                     if usable_age_headers(response.date.as_deref(), response.age.as_deref()) {
                         upstream_age
                     } else {
                         previous_age
                     };
-                cached.stored_at = received_at;
-                if directives.no_cache {
-                    cached.max_age = Some(0);
-                } else if let Some(max_age) = directives.max_age {
-                    cached.max_age = Some(max_age);
-                }
-                if response.etag.is_some() {
-                    cached.etag = response.etag;
-                }
-                if response.last_modified.is_some() {
-                    cached.last_modified = response.last_modified;
-                }
+                let update = RevalidationUpdate {
+                    stored_at: received_at,
+                    initial_age,
+                    max_age: if cache_control_present {
+                        Some(if directives.no_cache {
+                            Some(0)
+                        } else {
+                            directives.max_age
+                        })
+                    } else {
+                        None
+                    },
+                    etag: response.etag,
+                    last_modified: response.last_modified,
+                };
                 self.record_url(&current)?;
                 admission.commit(cached.body.len())?;
-                let previous_representation = cached.representation.clone();
+                let expected_representation = cached.representation.clone();
                 if let (Some(generation), Some(cache)) =
                     (request_generation.as_deref(), &self.cache)
                 {
                     if directives.no_store {
-                        let _ = cache.tombstone_if_newer(&current, generation, deadline);
-                    } else {
-                        cached.generation = generation.to_string();
-                        let _ = cache.store_revalidated(
+                        let _ = cache.tombstone_revalidated(
                             &current,
-                            &cached,
-                            &previous_representation,
+                            &expected_representation,
+                            generation,
                             deadline,
+                        );
+                    } else {
+                        let _ = cache.merge_revalidated(
+                            &current,
+                            &update,
+                            &expected_representation,
+                            generation,
+                            deadline,
+                            self.options.max_module_bytes,
                         );
                     }
                 }
@@ -1249,6 +1258,18 @@ impl CacheDirectives {
     }
 }
 
+/// Headers supplied by a `304`, with absent values distinguishable from
+/// explicit values.
+struct RevalidationUpdate {
+    stored_at: u64,
+    initial_age: u64,
+    /// Outer `None`: no Cache-Control header; `Some(None)`: header without a
+    /// max-age; `Some(Some(n))`: max-age supplied.
+    max_age: Option<Option<u64>>,
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+
 /// A cached module body and the metadata needed to reuse or revalidate it.
 #[derive(Clone)]
 struct CachedModule {
@@ -1556,6 +1577,7 @@ impl Cache {
     /// Acquires the per-key publication lock.
     fn lock(&self, url: &Url, deadline: Instant) -> std::io::Result<CacheLock> {
         std::fs::create_dir_all(&self.dir)?;
+        let deadline = deadline.min(Instant::now() + CACHE_LOCK_BUDGET);
         let mut lock_path = self.path(url).into_os_string();
         lock_path.push(".lock");
         let lock_path = PathBuf::from(lock_path);
@@ -1686,14 +1708,83 @@ impl Cache {
         Ok(true)
     }
 
-    /// Publishes a revalidated entry only when the current representation is
-    /// still the one this `304` revalidated and its request token is not older
-    /// than the current publication.
+    /// Merges a `304`'s supplied metadata into the current matching
+    /// representation under the publication lock.
+    ///
+    /// Fields absent from the `304` keep the current entry's value, so a newer
+    /// `304` built from an old snapshot cannot undo a directive supplied by an
+    /// earlier revalidation.
+    fn merge_revalidated(
+        &self,
+        url: &Url,
+        update: &RevalidationUpdate,
+        expected_representation: &str,
+        generation: &str,
+        deadline: Instant,
+        max_body: usize,
+    ) -> std::io::Result<bool> {
+        let _lock = self.lock(url, deadline)?;
+        if self.read_tombstone(url).is_some() {
+            return Ok(false);
+        }
+        let Some(mut current) = self.load(url, max_body) else {
+            return Ok(false);
+        };
+        if current.representation != expected_representation
+            || current.generation.as_str() > generation
+        {
+            return Ok(false);
+        }
+        current.stored_at = update.stored_at;
+        current.initial_age = update.initial_age;
+        if let Some(max_age) = update.max_age {
+            current.max_age = max_age;
+        }
+        if let Some(etag) = &update.etag {
+            current.etag = Some(etag.clone());
+        }
+        if let Some(last_modified) = &update.last_modified {
+            current.last_modified = Some(last_modified.clone());
+        }
+        current.generation = generation.to_string();
+        self.write_entry(url, &current)?;
+        let _ = std::fs::remove_file(self.tombstone_path(url));
+        Ok(true)
+    }
+
+    /// Test-facing wrapper that treats every field of `entry` as supplied.
+    #[cfg(test)]
     fn store_revalidated(
         &self,
         url: &Url,
         entry: &CachedModule,
         expected_representation: &str,
+        deadline: Instant,
+    ) -> std::io::Result<bool> {
+        let update = RevalidationUpdate {
+            stored_at: entry.stored_at,
+            initial_age: entry.initial_age,
+            max_age: Some(entry.max_age),
+            etag: entry.etag.clone(),
+            last_modified: entry.last_modified.clone(),
+        };
+        self.merge_revalidated(
+            url,
+            &update,
+            expected_representation,
+            &entry.generation,
+            deadline,
+            DEFAULT_MAX_MODULE_BYTES,
+        )
+    }
+
+    /// Publishes a `304` `no-store` tombstone only when the current
+    /// representation still matches and its request is not older.
+    fn tombstone_revalidated(
+        &self,
+        url: &Url,
+        expected_representation: &str,
+        generation: &str,
         deadline: Instant,
     ) -> std::io::Result<bool> {
         let _lock = self.lock(url, deadline)?;
@@ -1704,12 +1795,12 @@ impl Cache {
             return Ok(false);
         };
         if current.representation != expected_representation
-            || current.generation.as_str() > entry.generation.as_str()
+            || current.generation.as_str() > generation
         {
             return Ok(false);
         }
-        self.write_entry(url, entry)?;
-        let _ = std::fs::remove_file(self.tombstone_path(url));
+        self.write_tombstone(url, generation)?;
+        let _ = std::fs::remove_file(self.path(url));
         Ok(true)
     }
 
@@ -2845,6 +2936,33 @@ mod tests {
     }
 
     #[test]
+    fn a_held_lock_does_not_block_the_fetch_for_the_whole_deadline() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let _held = cache
+            .lock(&url, Instant::now() + Duration::from_secs(5))
+            .expect("held lock");
+        let transport = ScriptedTransport::new(vec![RemoteResponse {
+            status: 200,
+            location: None,
+            declared_length: None,
+            etag: None,
+            last_modified: None,
+            cache_control: Some("max-age=60".to_string()),
+            date: None,
+            age: None,
+            body: Box::new(std::io::Cursor::new(b"body".to_vec())),
+        }]);
+        let client = client(RemoteOptions::new().with_cache_dir(dir.path()), transport);
+        let started = Instant::now();
+        let fetched = client.fetch(&url).expect("network fallback");
+        assert_eq!(fetched.body, b"body");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(cache.load(&url, 1024).is_none());
+    }
+
+    #[test]
     fn a_held_cache_lock_is_bounded_by_the_fetch_deadline() {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache = super::Cache::new(dir.path().to_path_buf());
@@ -3852,6 +3970,142 @@ mod tests {
                 .expect("conditional store")
         );
         assert_eq!(cache.load(&url, 1024).expect("entry").max_age, Some(60));
+    }
+
+    #[test]
+    fn a_newer_304_keeps_directives_supplied_by_an_earlier_304() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let cached = super::CachedModule {
+            body: b"body".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: Some("\"v1\"".to_string()),
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: "test".to_string(),
+        };
+        let no_cache = super::RevalidationUpdate {
+            stored_at: 2,
+            initial_age: 0,
+            max_age: Some(Some(0)),
+            etag: None,
+            last_modified: None,
+        };
+        let omit_cache_control = super::RevalidationUpdate {
+            stored_at: 3,
+            initial_age: 0,
+            max_age: None,
+            etag: None,
+            last_modified: None,
+        };
+
+        // Older 304 supplies no-cache, then newer 304 omits Cache-Control.
+        cache.store(&url, &cached).expect("cached");
+        assert!(
+            cache
+                .merge_revalidated(
+                    &url,
+                    &no_cache,
+                    &cached.representation,
+                    "0002",
+                    test_deadline(),
+                    1024,
+                )
+                .expect("older 304")
+        );
+        assert!(
+            cache
+                .merge_revalidated(
+                    &url,
+                    &omit_cache_control,
+                    &cached.representation,
+                    "0003",
+                    test_deadline(),
+                    1024,
+                )
+                .expect("newer 304")
+        );
+        let current = cache.load(&url, 1024).expect("current");
+        assert_eq!(current.max_age, Some(0), "no-cache must be retained");
+        assert_eq!(current.generation, "0003");
+        assert_eq!(current.etag.as_deref(), Some("\"v1\""));
+
+        // Newer 304 omits Cache-Control first; the older no-cache 304 loses.
+        cache.store(&url, &cached).expect("cached again");
+        assert!(
+            cache
+                .merge_revalidated(
+                    &url,
+                    &omit_cache_control,
+                    &cached.representation,
+                    "0003",
+                    test_deadline(),
+                    1024,
+                )
+                .expect("newer 304")
+        );
+        assert!(
+            !cache
+                .merge_revalidated(
+                    &url,
+                    &no_cache,
+                    &cached.representation,
+                    "0002",
+                    test_deadline(),
+                    1024,
+                )
+                .expect("older 304")
+        );
+        assert_eq!(cache.load(&url, 1024).expect("current").max_age, Some(60));
+
+        // A newer 200 with a different representation wins over a 304.
+        let mut changed = cached.clone();
+        changed.body = b"changed".to_vec();
+        changed.representation = "changed".to_string();
+        changed.generation = "0004".to_string();
+        cache.store(&url, &cached).expect("cached third time");
+        assert!(
+            cache
+                .store_if_newer(&url, &changed, test_deadline())
+                .expect("200")
+        );
+        assert!(
+            !cache
+                .merge_revalidated(
+                    &url,
+                    &omit_cache_control,
+                    &cached.representation,
+                    "0005",
+                    test_deadline(),
+                    1024,
+                )
+                .expect("304 against changed representation")
+        );
+        assert_eq!(cache.load(&url, 1024).expect("current").body, b"changed");
+
+        // A newer no-store tombstone also blocks the old representation.
+        cache.store(&url, &cached).expect("cached fourth time");
+        assert!(
+            cache
+                .tombstone_if_newer(&url, "0006", test_deadline())
+                .expect("no-store")
+        );
+        assert!(
+            !cache
+                .merge_revalidated(
+                    &url,
+                    &omit_cache_control,
+                    &cached.representation,
+                    "0007",
+                    test_deadline(),
+                    1024,
+                )
+                .expect("304 against tombstone")
+        );
+        assert!(cache.load(&url, 1024).is_none());
     }
 
     #[test]

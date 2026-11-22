@@ -212,10 +212,12 @@ impl Runtime {
     /// completion token, and compare a representation (validator plus actual
     /// body digest) separately from publication revisions, so a newer `304` for
     /// the same bytes can supersede an older one while a weak ETag shared by
-    /// different bytes cannot. Ordering is independent of the wall clock. Lock
-    /// waits are bounded by the fetch deadline; an unavailable lock skips the
-    /// cache operation instead of blocking loading indefinitely. There is no
-    /// signature or content-addressed store: the
+    /// different bytes cannot. A newer `304` merges only headers it actually
+    /// supplied into the current representation, so it cannot undo an earlier
+    /// `no-cache` by omitting Cache-Control. Ordering is independent of the wall
+    /// clock. Lock waits are capped at 250 ms and the remaining fetch deadline;
+    /// an unavailable lock skips the cache operation and the fetch continues to
+    /// the network. There is no signature or content-addressed store: the
     /// cache is not integrity protection against someone who can write it and
     /// pins no version. See [`RemoteOptions`] to change the directory or disable
     /// it.
