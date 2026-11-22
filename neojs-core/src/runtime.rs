@@ -214,10 +214,13 @@ impl Runtime {
     /// the same bytes can supersede an older one while a weak ETag shared by
     /// different bytes cannot. A newer `304` merges only headers it actually
     /// supplied into the current representation, so it cannot undo an earlier
-    /// `no-cache` by omitting Cache-Control. Ordering is independent of the wall
-    /// clock. Lock waits are capped at 250 ms and the remaining fetch deadline;
-    /// an unavailable lock skips the cache operation and the fetch continues to
-    /// the network. There is no signature or content-addressed store: the
+    /// `no-cache` by omitting Cache-Control. A `304` without usable Date/Age
+    /// derives age from the current entry under the lock. Ordering is independent of the wall
+    /// clock. Lock waits are capped at 250 ms and the remaining fetch deadline.
+    /// With a longer deadline an unavailable lock skips the cache operation and
+    /// the fetch continues to the network; with a deadline at or below the cap,
+    /// the lock may consume it and the fetch times out before transport. There is
+    /// no signature or content-addressed store: the
     /// cache is not integrity protection against someone who can write it and
     /// pins no version. See [`RemoteOptions`] to change the directory or disable
     /// it.

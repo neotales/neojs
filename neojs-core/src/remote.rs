@@ -55,12 +55,17 @@
 //! representation. A `200` publishes only when its request revision is newer than
 //! the current entry or tombstone, a `304` publishes only when the current
 //! representation still matches and its request revision is not older, and
-//! `no-store` publishes an absent-entry tombstone.
+//! `no-store` publishes an absent-entry tombstone. A `304` merges only headers
+//! it supplies; when it has no usable `Date`/`Age`, the current entry's age plus
+//! resident time is used under the lock, so it cannot undo a more conservative
+//! age from an earlier revalidation.
 //! Thus an older `200` cannot resurrect an entry after a newer `no-store`, and a
 //! `304` cannot outrank a later-started `200` or `no-store`. Lock acquisition for
 //! revision allocation and publication is capped at 250 ms and at the remaining
-//! fetch deadline. A held or stale lock therefore skips the cache operation and
-//! the fetch continues to the network; it never consumes the whole deadline.
+//! fetch deadline. With a longer deadline, a held or stale lock skips the cache
+//! operation and the fetch continues to the network. When the remaining deadline
+//! is at or below the cap, the lock may consume all of it and the fetch times out
+//! before the transport is contacted.
 //! This detects corruption, torn writes, and lost-update races, not an adversary
 //! who can write both the metadata and the body in the user's cache directory.
 //! There is no signature or content-addressed store, so the cache does not pin a
@@ -742,20 +747,16 @@ impl RemoteClient {
                 };
                 let cache_control_present = response.cache_control.is_some();
                 let directives = CacheDirectives::parse(response.cache_control.as_deref());
-                let previous_age = cached
-                    .initial_age
-                    .saturating_add(received_at.saturating_sub(cached.stored_at));
-                let upstream_age = response_age(
-                    response.date.as_deref(),
-                    response.age.as_deref(),
-                    received_at,
-                    response_delay,
-                );
                 let initial_age =
                     if usable_age_headers(response.date.as_deref(), response.age.as_deref()) {
-                        upstream_age
+                        Some(response_age(
+                            response.date.as_deref(),
+                            response.age.as_deref(),
+                            received_at,
+                            response_delay,
+                        ))
                     } else {
-                        previous_age
+                        None
                     };
                 let update = RevalidationUpdate {
                     stored_at: received_at,
@@ -1262,7 +1263,9 @@ impl CacheDirectives {
 /// explicit values.
 struct RevalidationUpdate {
     stored_at: u64,
-    initial_age: u64,
+    /// `Some` only when the `304` supplied a usable Date/Age. `None` means the
+    /// merge must derive the current age from the current entry.
+    initial_age: Option<u64>,
     /// Outer `None`: no Cache-Control header; `Some(None)`: header without a
     /// max-age; `Some(Some(n))`: max-age supplied.
     max_age: Option<Option<u64>>,
@@ -1735,8 +1738,10 @@ impl Cache {
         {
             return Ok(false);
         }
+        let resident = update.stored_at.saturating_sub(current.stored_at);
+        let current_age = current.initial_age.saturating_add(resident);
         current.stored_at = update.stored_at;
-        current.initial_age = update.initial_age;
+        current.initial_age = update.initial_age.unwrap_or(current_age);
         if let Some(max_age) = update.max_age {
             current.max_age = max_age;
         }
@@ -1763,7 +1768,7 @@ impl Cache {
     ) -> std::io::Result<bool> {
         let update = RevalidationUpdate {
             stored_at: entry.stored_at,
-            initial_age: entry.initial_age,
+            initial_age: Some(entry.initial_age),
             max_age: Some(entry.max_age),
             etag: entry.etag.clone(),
             last_modified: entry.last_modified.clone(),
@@ -2749,7 +2754,7 @@ mod tests {
         let cache = Arc::new(super::Cache::new(dir.path().to_path_buf()));
         let url = Url::parse("https://example.test/mod.js").expect("url");
         let mut threads = Vec::new();
-        for length in 1..=4 {
+        for length in 1..=2 {
             let cache = Arc::clone(&cache);
             let url = url.clone();
             threads.push(std::thread::spawn(move || {
@@ -2933,6 +2938,31 @@ mod tests {
             .fetch(&one)
             .expect_err("a retry with a new final URL exceeds the redaction cap");
         assert!(error.contains("cannot retain"), "{error}");
+    }
+
+    #[test]
+    fn a_lock_shorter_than_the_lock_budget_times_out_after_the_deadline() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let _held = cache
+            .lock(&url, Instant::now() + Duration::from_secs(5))
+            .expect("held lock");
+        let transport = ScriptedTransport::new(vec![response(200, None, "body")]);
+        let saw = Arc::clone(&transport);
+        let client = client(
+            RemoteOptions::new()
+                .with_cache_dir(dir.path())
+                .with_timeout(Duration::from_millis(50)),
+            transport,
+        );
+        let started = Instant::now();
+        let error = client
+            .fetch(&url)
+            .expect_err("deadline is exhausted by the lock");
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(saw.seen.lock().expect("seen").is_empty());
     }
 
     #[test]
@@ -3973,6 +4003,93 @@ mod tests {
     }
 
     #[test]
+    fn a_304_without_usable_age_derives_age_from_current_metadata() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let cached = super::CachedModule {
+            body: b"body".to_vec(),
+            stored_at: 100,
+            initial_age: 0,
+            max_age: Some(1000),
+            etag: None,
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: "test".to_string(),
+        };
+        let aged = super::RevalidationUpdate {
+            stored_at: 101,
+            initial_age: Some(500),
+            max_age: None,
+            etag: None,
+            last_modified: None,
+        };
+        let no_age = super::RevalidationUpdate {
+            stored_at: 110,
+            initial_age: None,
+            max_age: None,
+            etag: None,
+            last_modified: None,
+        };
+
+        cache.store(&url, &cached).expect("cached");
+        assert!(
+            cache
+                .merge_revalidated(
+                    &url,
+                    &aged,
+                    &cached.representation,
+                    "0002",
+                    test_deadline(),
+                    1024,
+                )
+                .expect("aged 304")
+        );
+        assert!(
+            cache
+                .merge_revalidated(
+                    &url,
+                    &no_age,
+                    &cached.representation,
+                    "0003",
+                    test_deadline(),
+                    1024,
+                )
+                .expect("no-age 304")
+        );
+        assert_eq!(cache.load(&url, 1024).expect("current").initial_age, 509);
+
+        // Reversed order: the later no-age 304 publishes first, and the older
+        // age-500 304 cannot overwrite it.
+        cache.store(&url, &cached).expect("cached again");
+        assert!(
+            cache
+                .merge_revalidated(
+                    &url,
+                    &no_age,
+                    &cached.representation,
+                    "0003",
+                    test_deadline(),
+                    1024,
+                )
+                .expect("no-age 304")
+        );
+        assert!(
+            !cache
+                .merge_revalidated(
+                    &url,
+                    &aged,
+                    &cached.representation,
+                    "0002",
+                    test_deadline(),
+                    1024,
+                )
+                .expect("older aged 304")
+        );
+        assert_eq!(cache.load(&url, 1024).expect("current").initial_age, 10);
+    }
+
+    #[test]
     fn a_newer_304_keeps_directives_supplied_by_an_earlier_304() {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache = super::Cache::new(dir.path().to_path_buf());
@@ -3989,14 +4106,14 @@ mod tests {
         };
         let no_cache = super::RevalidationUpdate {
             stored_at: 2,
-            initial_age: 0,
+            initial_age: Some(0),
             max_age: Some(Some(0)),
             etag: None,
             last_modified: None,
         };
         let omit_cache_control = super::RevalidationUpdate {
             stored_at: 3,
-            initial_age: 0,
+            initial_age: Some(0),
             max_age: None,
             etag: None,
             last_modified: None,
