@@ -133,12 +133,21 @@ Downloaded modules are cached automatically in one user-profile package cache:
 `$XDG_CACHE_HOME/neojs/packages`, or `$HOME/.cache/neojs/packages` when `XDG_CACHE_HOME` is unset.
 The cache key is a hash of the canonical URL including its query, so secrets in a query do not
 appear as file names, and two inputs that differ by query are separate entries. Entries are written
-atomically, so concurrent processes cannot publish a half-written module. A fresh
-`Cache-Control: max-age` response is reused without a request; a stale entry is revalidated with
-`If-None-Match`/`If-Modified-Since` and a `304` reuses the cached body. `no-store` is not cached, and
-a response without a freshness lifetime is revalidated on the next run. There is no lockfile and no
-content hash, so the cache is not integrity protection and does not pin a version;
-`RemoteOptions::with_cache_dir` and `without_cache` control the directory.
+atomically, so concurrent processes cannot publish a half-written module, and each entry records and
+verifies its body length and SHA-256 digest. A fresh `Cache-Control: max-age` response is reused
+without a request; freshness includes the upstream `Age` and `Date`, so a response that was already
+old when it arrived is stale immediately. A stale entry is revalidated with
+`If-None-Match`/`If-Modified-Since`, and a `304` reuses the cached body. `no-store` is not cached, and
+a response without a freshness lifetime is revalidated on the next run. There is no lockfile,
+signature, or content-addressed store, so the cache is not integrity protection against someone who
+can write it and does not pin a version; `RemoteOptions::with_cache_dir` and `without_cache` control
+the directory.
+
+A remote module's format follows its final URL after redirects, so `.js` to `.ts` is type-stripped
+and `.ts` to `.js` is run as JavaScript. The runtime also enforces a per-module body limit, an
+aggregate byte limit, and a remote module count limit. The deadline is per module, not a wall-clock
+bound on the whole program: running code can keep importing modules until the aggregate limits are
+reached. These are resource bounds, not a sandbox or a CPU or V8 heap bound.
 
 Remote loading is a capability switch, not a permission system. It is **not SSRF protection**: there
 is no host allowlist, private-address rejection, or DNS pinning, and neojs fetches whatever HTTPS URL
