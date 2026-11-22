@@ -16,6 +16,7 @@ test-support = []
 
 [dependencies]
 aes.workspace = true
+httpdate.workspace = true
 aes-gcm.workspace = true
 bcrypt.workspace = true
 cbc.workspace = true
@@ -35,5 +36,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 ed25519-dalek = { version = "3.0.0", features = ["pkcs8"] }
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros"] }

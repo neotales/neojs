@@ -30,6 +30,8 @@ deno_ast = { version = "0.53.3", default-features = false, features = ["type_str
 deno_core = "0.413.0"
 deno_error = "0.7"
 getrandom = "0.4"
+# HTTP date parsing for cache freshness and `Age` handling. Small, MIT/Apache-2.0.
+httpdate = "1"
 # SHA-2 and HMAC are the RustCrypto crates already linked transitively by the
 # neotales age and SSH backends. The `neo:crypto` hash surface uses the same
 # reviewed versions directly.

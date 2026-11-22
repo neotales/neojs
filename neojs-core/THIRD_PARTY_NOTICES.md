@@ -1,8 +1,8 @@
 # Third-party notices
 
 `neojs-core` contains code adapted from the NeoLiteJS project and uses the
-`neotales-age`, `neotales-ssh`, `ureq`, `rustls`, `rustls-webpki`, and
-`webpki-roots` crates at runtime.
+`neotales-age`, `neotales-ssh`, `ureq`, `rustls`, `rustls-webpki`,
+`webpki-roots`, and `httpdate` crates at runtime.
 
 ## NeoLiteJS `neo:crypto` and `neo:age`
 
@@ -420,6 +420,8 @@ Rust APIs. It does not modify or vendor them.
 - `webpki-roots` 0.26.11, <https://github.com/rustls/webpki-roots>,
   CDLA-Permissive-2.0. This crate supplies the bundled Mozilla root
   certificates as data.
+- `httpdate` 1.0.3, <https://github.com/pyfisch/httpdate>, MIT OR Apache-2.0.
+  It parses HTTP `Date`/`Last-Modified` values for cache freshness.
 
 The neojs code decides redirect policy, request headers, size limits,
 deadlines, cache layout, and error messages; those decisions are not upstream
