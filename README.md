@@ -145,9 +145,11 @@ persistent monotonic revision files: a `200` loses to a newer entry or `no-store
 later-started `200` or `no-store`. Representation identity combines the validator, when present, with
 the actual body digest, so a weak ETag shared by different bytes is not treated as the same
 representation. It is tracked separately from the publication revision, so a newer `304` for the
-same bytes can supersede an older `304` without letting an older representation win. Ordering does
-not depend on the wall clock. Lock waits are bounded by the fetch deadline; a held or stale lock
-skips the cache operation rather than blocking past the deadline. Header and metadata lines are
+same bytes can supersede an older `304` without letting an older representation win. A newer `304`
+merges only headers it actually supplied, so omitting Cache-Control cannot undo an earlier
+`no-cache`. Ordering does not depend on the wall clock. Lock waits are capped at 250 ms and the
+remaining fetch deadline; a held or stale lock skips the cache operation and the fetch continues to
+the network. Header and metadata lines are
 bounded, one file handle is used per read, the body length is checked before allocation, and
 appended bytes are rejected as a cache miss. There is no signature or content-addressed store, so the cache is not integrity
 protection against someone who can write it and does not pin a version;
