@@ -4,11 +4,12 @@
 //! and drains V8's event loop. A runtime is single-use; a second entry module
 //! returns [`Error::RuntimeConsumed`].
 //!
-//! It provides the `age`, `chars`, `console`, `crypto`, `path`, `ssh`, `stdio`,
-//! and `strings` built-in modules through `Neo.getBuiltInModule(name)` and
-//! through the module specifiers `age`, `neo:age`, `chars`, `neo:chars`,
-//! `console`, `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`,
-//! `neo:ssh`, `stdio`, `neo:stdio`, `strings`, and `neo:strings`.
+//! It provides the `age`, `chars`, `console`, `crypto`, `path`, `slices`, `ssh`,
+//! `stdio`, and `strings` built-in modules through `Neo.getBuiltInModule(name)`
+//! and through the module specifiers `age`, `neo:age`, `chars`, `neo:chars`,
+//! `console`, `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`,
+//! `slices`, `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`,
+//! and `neo:strings`.
 //!
 //! `age` is synchronous binary age v1 encryption for X25519 recipients. It
 //! exposes `generateIdentity`, `identityToRecipient`, `encrypt`, and `decrypt`.

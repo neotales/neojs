@@ -2,10 +2,10 @@
 //!
 //! Resolution accepts relative paths, absolute paths, `file:` URLs, and the
 //! built-in specifiers `age`, `neo:age`, `chars`, `neo:chars`, `console`,
-//! `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`,
-//! `stdio`, `neo:stdio`, `strings`, and `neo:strings`
-//! ([`crate::builtins`]). Every other scheme is rejected with a reason that
-//! names the missing feature instead of failing later inside V8.
+//! `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `slices`,
+//! `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`, and
+//! `neo:strings` ([`crate::builtins`]). Every other scheme is rejected with a
+//! reason that names the missing feature instead of failing later inside V8.
 //!
 //! Built-in specifiers resolve to one canonical `neo:` URL, so the engine caches
 //! a single module instance however many spellings or importers use. They are

@@ -117,9 +117,10 @@ impl Runtime {
     /// Creates a runtime and installs the console and built-in module shims.
     ///
     /// The runtime has one realm. The `age`, `chars`, `console`, `crypto`,
-    /// `path`, `ssh`, and `stdio` built-in modules are cached in that realm, and
-    /// both bare and `neo:`-prefixed import specifiers resolve to them; a new
-    /// `Runtime` creates a new realm, new functions, and new module instances.
+    /// `path`, `slices`, `ssh`, `stdio`, and `strings` built-in modules are
+    /// cached in that realm, and both bare and `neo:`-prefixed import
+    /// specifiers resolve to them; a new `Runtime` creates a new realm, new
+    /// functions, and new module instances.
     /// The `age`, `crypto`, `path`, `ssh`, and `stdio` modules register their
     /// private host ops in that realm before user code runs. The `console`
     /// module's object is the console object the runtime installed: its default
