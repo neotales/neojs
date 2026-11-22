@@ -37,10 +37,12 @@ use crate::loader::ModuleFormat;
 use crate::loader::PreparedEntry;
 use crate::loader::module_format;
 use crate::path::neojs_path;
+use crate::remote::Redactions;
 use crate::remote::RemoteClient;
 use crate::remote::RemoteOptions;
 use crate::remote::diagnostic_url;
 use crate::remote::display_url;
+use crate::remote::redact_core_error;
 use crate::remote::validate_url;
 use crate::ssh::neojs_ssh;
 use crate::stdio::neojs_stdio;
@@ -105,6 +107,9 @@ pub struct Runtime {
     /// The loader holds a clone; entry loading uses this copy so both paths
     /// apply the same limits.
     remote: Option<RemoteClient>,
+    /// Module URLs whose queries must be redacted from generated V8
+    /// diagnostics. It is shared with the loader's remote client.
+    redactions: Option<Redactions>,
     /// The module loader, kept so a remote entry can be handed to it before
     /// loading starts.
     loader: Rc<FileModuleLoader>,
@@ -198,15 +203,26 @@ impl Runtime {
     /// revalidated with `If-None-Match` and `If-Modified-Since`; `no-store` is
     /// not cached. Writes are atomic and concurrent processes cannot publish a
     /// partial body. Each entry records and verifies the body length and SHA-256
-    /// digest, so corruption is a cache miss. There is no lockfile, signature,
-    /// or content-addressed store: the cache is not integrity protection
-    /// against someone who can write it and pins no version. See
-    /// [`RemoteOptions`] to change the directory or disable it.
+    /// digest, so corruption is a cache miss. A per-key lock and exact
+    /// generation make an older `304` lose to a newer `200`; a stale lock only
+    /// delays a cache write and never blocks loading. There is no signature or
+    /// content-addressed store: the cache is not integrity protection against
+    /// someone who can write it and pins no version. See [`RemoteOptions`] to
+    /// change the directory or disable it.
     ///
     /// One runtime's remote graph is bounded by per-module body, aggregate
-    /// byte, and module-count limits. The deadline is per module, not for the
-    /// whole wall-clock execution of a program. These are resource bounds, not
-    /// a sandbox or a CPU or V8 heap bound.
+    /// byte, and module-count limits. A module and its bytes are admitted before
+    /// the network or cache is consulted, a body is read only up to the
+    /// remaining aggregate allowance, and a rejected module is neither fetched
+    /// nor published to the cache. The deadline is per module, not for the whole
+    /// wall-clock execution of a program. These are resource bounds, not a
+    /// sandbox or a CPU or V8 heap bound.
+    ///
+    /// Generated V8 errors redact known remote module URLs from frame locations
+    /// and generated diagnostic locations. Module identity and `import.meta.url`
+    /// are unchanged, and a script-supplied exception message or custom stack is
+    /// preserved, so a program can still expose a URL it puts in its own error.
+    /// Do not treat a module specifier as secret storage.
     ///
     /// Remote loading is not SSRF protection: there is no host allowlist,
     /// private-address rejection, or DNS pinning, so the program can fetch any
@@ -310,6 +326,7 @@ impl Runtime {
         ];
         #[cfg(feature = "test-support")]
         extensions.push(crate::crypto_hash::test_support_extension());
+        let redactions = remote.as_ref().map(RemoteClient::redactions);
         let loader = Rc::new(FileModuleLoader::new(remote.clone()));
         let js = {
             let _guard = driver.enter();
@@ -323,6 +340,7 @@ impl Runtime {
             js: Some(js),
             consumed: false,
             remote,
+            redactions,
             loader,
             driver: Some(driver),
             ops: Some(ops),
@@ -366,10 +384,12 @@ impl Runtime {
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(Error::BlockingInAsyncContext);
         }
+        let redactions = self.redactions.clone();
         let Self {
             js,
             consumed,
             remote: _,
+            redactions: _,
             loader: _,
             driver: _,
             ops,
@@ -377,6 +397,7 @@ impl Runtime {
         let js = js.as_mut().expect("the isolate is present until Drop");
         let ops = ops.as_ref().expect("the ops runtime is present until Drop");
         ops.block_on(run_entry(js, consumed, path.as_ref()))
+            .map_err(|error| redact_error(error, redactions.as_ref()))
     }
 
     /// Runs one remote entry module to completion and blocks until it finishes.
@@ -407,10 +428,12 @@ impl Runtime {
             return Err(Error::BlockingInAsyncContext);
         }
         let remote = self.remote.clone().ok_or(Error::RemoteDisabled)?;
+        let redactions = self.redactions.clone();
         let Self {
             js,
             consumed,
             remote: _,
+            redactions: _,
             loader,
             driver: _,
             ops,
@@ -424,6 +447,7 @@ impl Runtime {
             &remote,
             url,
         ))
+        .map_err(|error| redact_error(error, redactions.as_ref()))
     }
 
     /// Runs one remote entry module to completion on the caller's executor.
@@ -440,8 +464,11 @@ impl Runtime {
     /// may already have run.
     pub async fn run_url_async(&mut self, url: &str) -> Result<(), Error> {
         let remote = self.remote.clone().ok_or(Error::RemoteDisabled)?;
+        let redactions = self.redactions.clone();
         let js = self.js.as_mut().expect("the isolate is present until Drop");
-        run_remote_entry(js, &mut self.consumed, self.loader.as_ref(), &remote, url).await
+        run_remote_entry(js, &mut self.consumed, self.loader.as_ref(), &remote, url)
+            .await
+            .map_err(|error| redact_error(error, redactions.as_ref()))
     }
 
     /// Runs one entry module to completion on the caller's executor.
@@ -478,8 +505,19 @@ impl Runtime {
     /// a queued `crypto` job is aborted only when the [`Runtime`] is dropped,
     /// and a job already running on the blocking pool cannot be stopped.
     pub async fn run_file_async(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
+        let redactions = self.redactions.clone();
         let js = self.js.as_mut().expect("the isolate is present until Drop");
-        run_entry(js, &mut self.consumed, path.as_ref()).await
+        run_entry(js, &mut self.consumed, path.as_ref())
+            .await
+            .map_err(|error| redact_error(error, redactions.as_ref()))
+    }
+}
+
+/// Redacts remote module URLs from a V8 error when remote loading is enabled.
+fn redact_error(error: Error, redactions: Option<&Redactions>) -> Error {
+    match (error, redactions) {
+        (Error::Core(error), Some(redactions)) => Error::Core(redact_core_error(error, redactions)),
+        (other, _) => other,
     }
 }
 
@@ -610,25 +648,43 @@ fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, 
             url: display_url(&requested),
             reason,
         })?;
+    let body_len = fetched.body.len();
     // A redirect can change the extension. The format follows the final URL,
     // just as the module identity and relative-import base do.
-    let format = module_format(Path::new(fetched.final_url.path())).map_err(|reason| {
-        Error::RemoteEntry {
-            url: display_url(&requested),
-            reason,
-        }
-    })?;
-    let code = String::from_utf8(fetched.body).map_err(|_| Error::RemoteEntry {
-        url: display_url(&requested),
-        reason: "the module is not valid UTF-8".to_string(),
-    })?;
-    let source = match format {
-        ModuleFormat::JavaScript => code,
-        ModuleFormat::TypeScript => typescript::strip(&diagnostic_url(&fetched.final_url), code)
-            .map_err(|reason| Error::RemoteTypeScript {
+    let format = match module_format(Path::new(fetched.final_url.path())) {
+        Ok(format) => format,
+        Err(reason) => {
+            remote.refund(body_len);
+            return Err(Error::RemoteEntry {
                 url: display_url(&requested),
                 reason,
-            })?,
+            });
+        }
+    };
+    let code = match String::from_utf8(fetched.body) {
+        Ok(code) => code,
+        Err(_) => {
+            remote.refund(body_len);
+            return Err(Error::RemoteEntry {
+                url: display_url(&requested),
+                reason: "the module is not valid UTF-8".to_string(),
+            });
+        }
+    };
+    let source = match format {
+        ModuleFormat::JavaScript => code,
+        ModuleFormat::TypeScript => {
+            match typescript::strip(&diagnostic_url(&fetched.final_url), code) {
+                Ok(source) => source,
+                Err(reason) => {
+                    remote.refund(body_len);
+                    return Err(Error::RemoteTypeScript {
+                        url: display_url(&requested),
+                        reason,
+                    });
+                }
+            }
+        }
     };
     Ok(PreparedEntry {
         requested,

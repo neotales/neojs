@@ -557,6 +557,125 @@ if (dynamic.value !== 7) throw new Error("async remote graph failed");
 }
 
 #[test]
+fn v8_errors_do_not_echo_a_redirected_final_query() {
+    let server = Server::new(&[
+        (
+            "https://mods.test/entry.js",
+            Reply::redirect("https://cdn.test/real.js?token=secret"),
+        ),
+        (
+            "https://cdn.test/real.js?token=secret",
+            Reply::ok("throw new Error(\"entry boom\");\n"),
+        ),
+    ]);
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/entry.js")
+        .expect_err("entry throws");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let message = error.to_string();
+    assert!(message.contains("entry boom"), "{message}");
+    assert!(!message.contains("token"), "{message}");
+    assert!(!message.contains("secret"), "{message}");
+}
+
+#[test]
+fn imported_v8_errors_do_not_echo_a_redirected_final_query() {
+    let server = Server::new(&[
+        (
+            "https://mods.test/main.js",
+            Reply::ok("import \"./child.js\";\n"),
+        ),
+        (
+            "https://mods.test/child.js",
+            Reply::redirect("https://cdn.test/child.js?token=secret"),
+        ),
+        (
+            "https://cdn.test/child.js?token=secret",
+            Reply::ok("throw new Error(\"import boom\");\n"),
+        ),
+    ]);
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/main.js")
+        .expect_err("import throws");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let message = error.to_string();
+    assert!(message.contains("import boom"), "{message}");
+    assert!(!message.contains("token"), "{message}");
+    assert!(!message.contains("secret"), "{message}");
+}
+
+#[test]
+fn link_errors_do_not_echo_a_module_query() {
+    let server = Server::new(&[
+        (
+            "https://mods.test/main.js",
+            Reply::ok("import { missing } from \"./module.js?token=secret\";\n"),
+        ),
+        (
+            "https://mods.test/module.js?token=secret",
+            Reply::ok("export const present = 1;\n"),
+        ),
+    ]);
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/main.js")
+        .expect_err("a missing export fails to link");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let message = error.to_string();
+    assert!(message.contains("does not provide"), "{message}");
+    assert!(!message.contains("token"), "{message}");
+    assert!(!message.contains("secret"), "{message}");
+}
+
+#[test]
+fn v8_redaction_preserves_an_unrelated_url_in_the_exception_value() {
+    let server = Server::new(&[(
+        "https://mods.test/value.js",
+        Reply::ok("throw new Error(\"keep https://value.test/a?x=1\");\n"),
+    )]);
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/value.js")
+        .expect_err("throws");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("keep https://value.test/a?x=1"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_script_supplied_exception_value_is_not_rewritten() {
+    let server = Server::new(&[(
+        "https://mods.test/value.js?token=secret",
+        Reply::ok("throw new Error(\"value https://mods.test/value.js?token=secret\");\n"),
+    )]);
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/value.js?token=secret")
+        .expect_err("throws");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("value https://mods.test/value.js?token=secret"),
+        "{message}"
+    );
+}
+
+#[test]
 fn typescript_diagnostics_do_not_echo_a_query_token() {
     let server = Server::new(&[(
         "https://mods.test/bad.ts?token=secret",
@@ -697,7 +816,124 @@ fn the_aggregate_module_and_byte_limits_bound_the_graph() {
     let Error::Core(error) = error else {
         panic!("unexpected error: {error:?}");
     };
-    assert!(error.to_string().contains("byte total limit"), "{error}");
+    assert!(
+        error.to_string().contains("remaining graph budget")
+            || error.to_string().contains("byte total limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn caught_imports_cannot_bypass_the_graph_budget_or_publish_rejected_entries() {
+    let cache = tempfile::tempdir().expect("cache dir");
+    let server = Server::new(&[
+        (
+            "https://mods.test/main.js",
+            Reply {
+                status: 200,
+                cache_control: Some("max-age=60"),
+                body: r#"
+for (let index = 0; index < 6; index += 1) {
+    try {
+        await import(`./module.js?${index}`);
+    } catch {
+        // The runtime budget rejects all but the first distinct import.
+    }
+}
+"#,
+                ..Reply::default()
+            },
+        ),
+        (
+            "https://mods.test/module.js?0",
+            Reply {
+                status: 200,
+                cache_control: Some("max-age=60"),
+                body: "export const value = 0;\n",
+                ..Reply::default()
+            },
+        ),
+    ]);
+    let options = RemoteOptions::new()
+        .with_max_remote_modules(2)
+        .with_cache_dir(cache.path());
+
+    remote_runtime_with_options(options, &server)
+        .run_url("https://mods.test/main.js")
+        .expect("the caught errors are handled");
+
+    assert_eq!(
+        server.seen(),
+        ["https://mods.test/main.js", "https://mods.test/module.js?0",]
+    );
+    let entries = fs::read_dir(cache.path())
+        .expect("cache dir")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        })
+        .count();
+    assert_eq!(entries, 2, "rejected imports must not be cached");
+}
+
+#[test]
+fn a_preflight_rejection_refunds_the_entry_budget() {
+    let server = Server::new(&[
+        (
+            "https://mods.test/bad.json",
+            Reply {
+                status: 200,
+                body: "{}",
+                ..Reply::default()
+            },
+        ),
+        (
+            "https://mods.test/good.js",
+            Reply::ok("globalThis.__good = true;\n"),
+        ),
+    ]);
+    let options = RemoteOptions::new()
+        .with_max_remote_modules(1)
+        .without_cache();
+    let mut runtime = remote_runtime_with_options(options, &server);
+
+    let error = runtime
+        .run_url("https://mods.test/bad.json")
+        .expect_err("an unsupported format fails preflight");
+    assert!(matches!(error, Error::RemoteEntry { .. }), "{error:?}");
+    runtime
+        .run_url("https://mods.test/good.js")
+        .expect("a failed preflight must refund the module slot");
+}
+
+#[test]
+fn a_typescript_preflight_rejection_refunds_the_entry_budget() {
+    let server = Server::new(&[
+        (
+            "https://mods.test/bad.ts",
+            Reply::ok("enum Color { Red }\n"),
+        ),
+        (
+            "https://mods.test/good.js",
+            Reply::ok("globalThis.__good = true;\n"),
+        ),
+    ]);
+    let options = RemoteOptions::new()
+        .with_max_remote_modules(1)
+        .without_cache();
+    let mut runtime = remote_runtime_with_options(options, &server);
+
+    let error = runtime
+        .run_url("https://mods.test/bad.ts")
+        .expect_err("a transform-required module fails preflight");
+    assert!(matches!(error, Error::RemoteTypeScript { .. }), "{error:?}");
+    runtime
+        .run_url("https://mods.test/good.js")
+        .expect("a failed preflight must refund the module slot");
 }
 
 #[test]

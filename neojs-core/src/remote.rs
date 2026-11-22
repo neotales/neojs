@@ -40,21 +40,38 @@
 //! forces revalidation.
 //!
 //! Each entry records the body length and SHA-256 digest; a mismatch or a
-//! truncation is a cache miss, not an executable body. This detects corruption
-//! and a torn write, not an adversary who can write both the metadata and the
-//! body in the user's cache directory. There is no lockfile, signature, or
-//! content-addressed store, so the cache does not pin a version or provide
-//! integrity beyond transport TLS and those consistency checks. A cache read or
-//! write failure is ignored: the module is fetched and the program continues.
-//! Openness of the cache directory is the user's responsibility.
+//! truncation is a cache miss, not an executable body. Publications are
+//! serialized by a per-key lock file, and every entry carries an exact
+//! generation. A `304` may only publish when that generation is still current,
+//! so an older revalidation cannot replace a newer `200` or undo its
+//! `no-store`. A stale lock left by a crash can delay a cache write until the
+//! lock times out; it never blocks loading, which falls back to the network.
+//! This detects corruption, torn writes, and lost-update races, not an adversary
+//! who can write both the metadata and the body in the user's cache directory.
+//! There is no signature or content-addressed store, so the cache does not pin a
+//! version or provide integrity beyond transport TLS and those consistency
+//! checks. A cache read or write failure is ignored: the module is fetched and
+//! the program continues. Openness of the cache directory is the user's
+//! responsibility.
 //!
 //! One runtime's remote graph is bounded by a per-module body limit, an
-//! aggregate byte limit, and a maximum number of remote modules. The deadline
-//! is per module, not a wall-clock bound on the whole graph: JavaScript can
-//! keep running and dynamically import more modules, each with its own
-//! deadline, until the aggregate module or byte limit is reached. Module
-//! execution and compilation are trusted; these are resource bounds, not a
-//! sandbox or a bound on CPU or V8 heap used by a program.
+//! aggregate byte limit, and a maximum number of remote modules. A module and
+//! its bytes are admitted before the network or cache is consulted, a body is
+//! read only up to the remaining aggregate allowance, and a rejected module is
+//! neither fetched nor published to the cache. The deadline is per module, not
+//! a wall-clock bound on the whole graph: JavaScript can keep running and
+//! dynamically import more modules, each with its own deadline, until the
+//! aggregate module or byte limit is reached. Module execution and compilation
+//! are trusted; these are resource bounds, not a sandbox or a bound on CPU or
+//! V8 heap used by a program.
+//!
+//! Generated V8 errors are redacted as they leave the runtime: known remote
+//! module URLs are removed from stack-frame locations and from the generated
+//! ` at <URL>:line:column` suffix, without changing the module identity or
+//! `import.meta.url`, which remain the final URL. Script-supplied exception
+//! messages and custom stacks are preserved, so code that puts a URL (or any
+//! other value) in its own error still exposes it. Module specifiers are not
+//! secret storage.
 //!
 //! This is not SSRF protection. There is no host allowlist, no private-address
 //! rejection, and no DNS pinning: neojs fetches whatever HTTPS URL the program
@@ -63,6 +80,7 @@
 //! internal part of module loading; neojs exposes no `fetch`-style API and no
 //! way for JavaScript to read the cache.
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::BufRead;
@@ -72,6 +90,7 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -80,7 +99,11 @@ use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use deno_core::error::CoreError;
+use deno_core::error::CoreErrorKind;
+use deno_core::error::JsError;
 use deno_core::url::Url;
+use deno_error::JsErrorBox;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -95,7 +118,7 @@ const DEFAULT_MAX_REMOTE_MODULES: usize = 256;
 /// Default maximum aggregate remote body bytes loaded by one runtime.
 const DEFAULT_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 /// The first line of a cache entry.
-const CACHE_MAGIC: &str = "neojs-remote-cache 2";
+const CACHE_MAGIC: &str = "neojs-remote-cache 3";
 /// Largest metadata block accepted from a cache entry.
 const MAX_META_BYTES: usize = 64 * 1024;
 
@@ -328,29 +351,73 @@ struct RemoteBudget {
 }
 
 impl RemoteBudget {
-    /// Charges one loaded module, returning a reason when the graph is over its
-    /// limits.
-    fn charge(&self, bytes: usize, options: &RemoteOptions) -> Result<(), String> {
+    /// Admits one module before any network or cache work.
+    ///
+    /// The module slot is held by the returned [`Admission`] and is released if
+    /// the fetch fails or the admission is dropped without a commit. Bytes are
+    /// only charged by `commit`, after the body is known.
+    fn begin<'a>(&'a self, options: &'a RemoteOptions) -> Result<Admission<'a>, String> {
         let modules = self.modules.fetch_add(1, Ordering::SeqCst) + 1;
         if modules > options.max_remote_modules {
+            self.modules.fetch_sub(1, Ordering::SeqCst);
             return Err(format!(
                 "the remote module graph exceeds the {} module limit",
                 options.max_remote_modules
             ));
         }
+        Ok(Admission {
+            budget: self,
+            options,
+            committed: false,
+        })
+    }
+}
+
+/// A module admitted into the graph but not yet charged for its body.
+struct Admission<'a> {
+    budget: &'a RemoteBudget,
+    options: &'a RemoteOptions,
+    committed: bool,
+}
+
+impl Admission<'_> {
+    /// Returns how many more body bytes the graph may accept.
+    fn remaining_bytes(&self) -> usize {
+        self.options
+            .max_total_bytes
+            .saturating_sub(self.budget.bytes.load(Ordering::SeqCst))
+    }
+
+    /// Charges the body bytes. On failure the admission is rolled back and the
+    /// caller must not publish the cache entry.
+    fn commit(&mut self, bytes: usize) -> Result<(), String> {
         let total = self
+            .budget
             .bytes
             .fetch_add(bytes, Ordering::SeqCst)
             .saturating_add(bytes);
-        if total > options.max_total_bytes {
+        if total > self.options.max_total_bytes {
+            self.budget.bytes.fetch_sub(bytes, Ordering::SeqCst);
             return Err(format!(
                 "the remote module graph exceeds the {} byte total limit",
-                options.max_total_bytes
+                self.options.max_total_bytes
             ));
         }
+        self.committed = true;
         Ok(())
     }
 }
+
+impl Drop for Admission<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.budget.modules.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Remote module URLs that may appear in generated V8 diagnostics.
+pub(crate) type Redactions = Arc<Mutex<BTreeSet<String>>>;
 
 /// A configured remote module client.
 #[derive(Clone)]
@@ -359,6 +426,7 @@ pub(crate) struct RemoteClient {
     transport: Arc<dyn RemoteTransport>,
     cache: Option<Arc<Cache>>,
     budget: Arc<RemoteBudget>,
+    redactions: Redactions,
 }
 
 impl RemoteClient {
@@ -373,6 +441,7 @@ impl RemoteClient {
             transport: Arc::new(UreqTransport::new()),
             cache,
             budget: Arc::new(RemoteBudget::default()),
+            redactions: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
 
@@ -391,7 +460,31 @@ impl RemoteClient {
             transport,
             cache,
             budget: Arc::new(RemoteBudget::default()),
+            redactions: Arc::new(Mutex::new(BTreeSet::new())),
         }
+    }
+
+    /// Refunds one committed module after a preflight failure.
+    ///
+    /// The runtime is still unused, so an entry that was fetched but rejected
+    /// for its format, UTF-8, or TypeScript must not spend a module slot or
+    /// bytes from a later retry.
+    pub(crate) fn refund(&self, bytes: usize) {
+        self.budget.modules.fetch_sub(1, Ordering::SeqCst);
+        self.budget.bytes.fetch_sub(bytes, Ordering::SeqCst);
+    }
+
+    /// Returns the shared set of module URLs to redact from V8 diagnostics.
+    pub(crate) fn redactions(&self) -> Redactions {
+        Arc::clone(&self.redactions)
+    }
+
+    /// Records a URL whose query must not appear in a generated diagnostic.
+    fn record_url(&self, url: &Url) {
+        self.redactions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(url.to_string());
     }
 
     /// Fetches a module body, following checked redirects and using the cache.
@@ -401,16 +494,19 @@ impl RemoteClient {
     /// requested URL to.
     pub(crate) fn fetch(&self, requested: &Url) -> Result<FetchedModule, String> {
         validate_url(requested)?;
+        self.record_url(requested);
         if self.options.timeout.is_zero() {
             return Err("the remote timeout is zero".to_string());
         }
         let deadline = Instant::now()
             .checked_add(self.options.timeout)
             .ok_or_else(|| "the remote timeout is too large".to_string())?;
+        let mut admission = self.budget.begin(&self.options)?;
 
         let mut current = request_url(requested);
         let mut redirects = 0;
         loop {
+            self.record_url(&current);
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(format!("timed out fetching {}", display_url(&current)));
@@ -424,7 +520,7 @@ impl RemoteClient {
             if let Some(cached) = &cached
                 && cached.is_fresh(now)
             {
-                self.budget.charge(cached.body.len(), &self.options)?;
+                admission.commit(cached.body.len())?;
                 return Ok(FetchedModule {
                     body: cached.body.clone(),
                     final_url: current,
@@ -466,7 +562,14 @@ impl RemoteClient {
                     received_at,
                     response_delay,
                 );
-                cached.initial_age = previous_age.max(upstream_age);
+                // A successful revalidation replaces the age with the `304`
+                // headers. When the `304` omits both `Date` and `Age`, keeping
+                // the previous age is the conservative choice.
+                cached.initial_age = if response.date.is_some() || response.age.is_some() {
+                    upstream_age
+                } else {
+                    previous_age
+                };
                 cached.stored_at = received_at;
                 if directives.no_cache {
                     cached.max_age = Some(0);
@@ -479,14 +582,15 @@ impl RemoteClient {
                 if response.last_modified.is_some() {
                     cached.last_modified = response.last_modified;
                 }
+                admission.commit(cached.body.len())?;
                 if let Some(cache) = &self.cache {
                     if directives.no_store {
-                        cache.remove(&current);
+                        let _ = cache.remove_if_generation(&current, Some(&cached.generation));
                     } else {
-                        let _ = cache.store(&current, &cached);
+                        let _ =
+                            cache.store_if_generation(&current, &cached, Some(&cached.generation));
                     }
                 }
-                self.budget.charge(cached.body.len(), &self.options)?;
                 return Ok(FetchedModule {
                     body: cached.body,
                     final_url: current,
@@ -527,25 +631,30 @@ impl RemoteClient {
                     display_url(&current)
                 ));
             }
+            let remaining_bytes = admission.remaining_bytes();
+            let limit = self.options.max_module_bytes.min(remaining_bytes);
+            let budget_label = if remaining_bytes < self.options.max_module_bytes {
+                "remaining graph budget"
+            } else {
+                "limit"
+            };
             if let Some(length) = response.declared_length
-                && length > self.options.max_module_bytes as u64
+                && length > limit as u64
             {
                 return Err(format!(
-                    "module body from {} declares {length} bytes, above the {} byte limit",
-                    display_url(&current),
-                    self.options.max_module_bytes
+                    "module body from {} declares {length} bytes, above the {limit} byte {budget_label}",
+                    display_url(&current)
                 ));
             }
-            let body = read_bounded(
-                response.body,
-                self.options.max_module_bytes,
-                deadline,
-                &current,
-            )?;
+            let body = read_bounded(response.body, limit, deadline, &current, budget_label)?;
+            admission.commit(body.len())?;
             let directives = CacheDirectives::parse(response.cache_control.as_deref());
+            let expected_generation = cached.as_ref().map(|entry| entry.generation.clone());
             if let Some(cache) = &self.cache {
                 if directives.no_store {
-                    cache.remove(&current);
+                    if let Some(expected) = expected_generation.as_deref() {
+                        let _ = cache.remove_if_generation(&current, Some(expected));
+                    }
                 } else {
                     let entry = CachedModule {
                         body: body.clone(),
@@ -563,11 +672,15 @@ impl RemoteClient {
                         },
                         etag: response.etag,
                         last_modified: response.last_modified,
+                        generation: new_generation(),
                     };
-                    let _ = cache.store(&current, &entry);
+                    if let Some(expected) = expected_generation.as_deref() {
+                        let _ = cache.store_if_generation(&current, &entry, Some(expected));
+                    } else {
+                        let _ = cache.store(&current, &entry);
+                    }
                 }
             }
-            self.budget.charge(body.len(), &self.options)?;
             return Ok(FetchedModule {
                 body,
                 final_url: current,
@@ -643,12 +756,170 @@ pub(crate) fn diagnostic_url(url: &Url) -> Url {
     clean
 }
 
+/// Redacts known remote module URLs from a V8 diagnostic without touching the
+/// script's exception value.
+///
+/// Only URLs recorded by this client are replaced, and only in generated
+/// locations: stack-frame file names, frame lines after the first, and the
+/// generated ` at <URL>:line:column` suffix. `exception_message` and
+/// `source_line` are otherwise preserved, and a custom stack supplied by the
+/// script is kept as-is.
+pub(crate) fn redact_core_error(error: CoreError, redactions: &Redactions) -> CoreError {
+    let urls = redactions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if urls.is_empty() {
+        return error;
+    }
+    let CoreError(kind) = error;
+    let kind = match *kind {
+        CoreErrorKind::Js(js) => CoreErrorKind::Js(Box::new(redact_js_error(*js, &urls))),
+        other => {
+            let original = CoreError(Box::new(other));
+            let text = original.to_string();
+            let redacted = redact_generated_mentions(&text, &urls);
+            if redacted == text {
+                return original;
+            }
+            CoreErrorKind::JsBox(JsErrorBox::generic(redacted))
+        }
+    };
+    CoreError(Box::new(kind))
+}
+
+fn redact_js_error(mut error: JsError, urls: &BTreeSet<String>) -> JsError {
+    for frame in &mut error.frames {
+        if let Some(file_name) = frame.file_name.take() {
+            frame.file_name = Some(redact_known_urls(&file_name, urls));
+        }
+        if let Some(eval_origin) = frame.eval_origin.take() {
+            frame.eval_origin = Some(redact_known_urls(&eval_origin, urls));
+        }
+    }
+    if !error.stack_is_custom {
+        if let Some(stack) = error.stack.take() {
+            error.stack = Some(redact_stack(&stack, urls));
+        }
+        // V8 puts generated locations in syntax, link, and resolution errors.
+        // Only known module URLs in those generated positions are replaced, so
+        // an ordinary thrown value that merely contains a URL is preserved.
+        error.exception_message = redact_generated_mentions(&error.exception_message, urls);
+        error.message = error
+            .message
+            .take()
+            .map(|message| redact_generated_mentions(&message, urls));
+    }
+    error.cause = error
+        .cause
+        .take()
+        .map(|cause| Box::new(redact_js_error(*cause, urls)));
+    error.aggregated = error.aggregated.take().map(|aggregated| {
+        aggregated
+            .into_iter()
+            .map(|error| redact_js_error(error, urls))
+            .collect()
+    });
+    error
+}
+
+/// Redacts generated frame lines but leaves the first stack line (the
+/// exception value) untouched.
+fn redact_stack(stack: &str, urls: &BTreeSet<String>) -> String {
+    let mut lines = stack.lines();
+    let Some(first) = lines.next() else {
+        return String::new();
+    };
+    let mut redacted = String::from(first);
+    for line in lines {
+        redacted.push('\n');
+        redacted.push_str(&redact_known_urls(line, urls));
+    }
+    redacted
+}
+
+/// Replaces known module URLs in generated diagnostic positions.
+///
+/// It handles ` at <URL>:line:column` and a URL quoted as a module specifier in
+/// a link or resolution error. Other mentions, including an exception value that
+/// carries an unrelated URL, are preserved.
+fn redact_generated_mentions(message: &str, urls: &BTreeSet<String>) -> String {
+    let mut redacted = message.to_string();
+    for url in urls {
+        let replacement = redact_url_string(url);
+        redacted = redacted.replace(&format!(" at {url}:"), &format!(" at {replacement}:"));
+        redacted = redacted.replace(&format!("'{url}'"), &format!("'{replacement}'"));
+        redacted = redacted.replace(&format!("\"{url}\""), &format!("\"{replacement}\""));
+    }
+    redact_quoted_specifier_queries(&redacted)
+}
+
+/// Removes the query from a quoted relative module specifier in a generated
+/// message, such as `'./module.js?token=secret'` in a link error. Other quoted
+/// text is preserved.
+fn redact_quoted_specifier_queries(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let quote = bytes[index];
+        if (quote == b'\'' || quote == b'"')
+            && let Some(offset) = bytes[index + 1..].iter().position(|byte| *byte == quote)
+        {
+            let end = index + 1 + offset;
+            let inner = &text[index + 1..end];
+            if is_relative_specifier_with_query(inner) {
+                output.push(quote);
+                output
+                    .extend_from_slice(inner.split(['?', '#']).next().unwrap_or(inner).as_bytes());
+                output.push(quote);
+                index = end + 1;
+                continue;
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(output).unwrap_or_else(|_| text.to_string())
+}
+
+fn is_relative_specifier_with_query(specifier: &str) -> bool {
+    let looks_relative = specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || specifier.starts_with('/')
+        || specifier.starts_with("https://")
+        || specifier.starts_with("http://");
+    looks_relative && specifier.contains('?') && !specifier.chars().any(char::is_whitespace)
+}
+
+/// Replaces exact known module URLs, longest first so one URL cannot corrupt a
+/// longer one that shares its prefix.
+fn redact_known_urls(text: &str, urls: &BTreeSet<String>) -> String {
+    let mut urls = urls.iter().collect::<Vec<_>>();
+    urls.sort_by_key(|url| std::cmp::Reverse(url.len()));
+    let mut redacted = text.to_string();
+    for url in urls {
+        if redacted.contains(url) {
+            redacted = redacted.replace(url, &redact_url_string(url));
+        }
+    }
+    redacted
+}
+
+fn redact_url_string(url: &str) -> String {
+    match Url::parse(url) {
+        Ok(url) => diagnostic_url(&url).to_string(),
+        Err(_) => url.to_string(),
+    }
+}
+
 /// Reads at most `limit` bytes, checking the deadline between reads.
 fn read_bounded(
     mut body: Box<dyn Read + Send>,
     limit: usize,
     deadline: Instant,
     url: &Url,
+    budget_label: &str,
 ) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 8192];
@@ -670,7 +941,7 @@ fn read_bounded(
         }
         if bytes.len() + read > limit {
             return Err(format!(
-                "module body from {} is larger than the {limit} byte limit",
+                "module body from {} is larger than the {limit} byte {budget_label}",
                 display_url(url)
             ));
         }
@@ -715,6 +986,7 @@ impl CacheDirectives {
 }
 
 /// A cached module body and the metadata needed to reuse or revalidate it.
+#[derive(Clone)]
 struct CachedModule {
     body: Vec<u8>,
     stored_at: u64,
@@ -724,6 +996,8 @@ struct CachedModule {
     max_age: Option<u64>,
     etag: Option<String>,
     last_modified: Option<String>,
+    /// Exact publication generation. A `304` may only replace this generation.
+    generation: String,
 }
 
 impl CachedModule {
@@ -742,11 +1016,12 @@ impl CachedModule {
     /// Serializes metadata without a URL or any other request-derived secret.
     fn metadata(&self) -> String {
         let mut metadata = format!(
-            "stored={}\ninitial-age={}\nbody-length={}\nbody-sha256={}\n",
+            "stored={}\ninitial-age={}\nbody-length={}\nbody-sha256={}\ngeneration={}\n",
             self.stored_at,
             self.initial_age,
             self.body.len(),
-            hex_encode(&Sha256::digest(&self.body))
+            hex_encode(&Sha256::digest(&self.body)),
+            self.generation
         );
         if let Some(max_age) = self.max_age {
             metadata.push_str(&format!("max-age={max_age}\n"));
@@ -773,6 +1048,7 @@ fn parse_metadata(metadata: &str) -> Option<(CachedModule, usize, String)> {
     let mut initial_age = None;
     let mut body_length = None;
     let mut body_sha256 = None;
+    let mut generation = None;
     let mut max_age = None;
     let mut etag = None;
     let mut last_modified = None;
@@ -785,6 +1061,7 @@ fn parse_metadata(metadata: &str) -> Option<(CachedModule, usize, String)> {
             "initial-age" => initial_age = value.parse().ok(),
             "body-length" => body_length = value.parse().ok(),
             "body-sha256" => body_sha256 = Some(value.to_string()),
+            "generation" => generation = Some(value.to_string()),
             "max-age" => max_age = value.parse().ok(),
             "etag" => etag = hex_decode(value),
             "last-modified" => last_modified = hex_decode(value),
@@ -799,6 +1076,7 @@ fn parse_metadata(metadata: &str) -> Option<(CachedModule, usize, String)> {
             max_age,
             etag,
             last_modified,
+            generation: generation?,
         },
         body_length?,
         body_sha256?,
@@ -871,11 +1149,29 @@ fn response_age(date: Option<&str>, age: Option<&str>, now: u64, response_delay:
     apparent.max(age_value.saturating_add(response_delay))
 }
 
+/// Makes cache generations unique within and across processes.
+static GENERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Returns a new opaque cache generation.
+fn new_generation() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    format!(
+        "{:x}-{:x}-{:x}",
+        std::process::id(),
+        nanos,
+        GENERATION_COUNTER.fetch_add(1, Ordering::SeqCst)
+    )
+}
+
 /// The user-profile module cache.
 ///
 /// One file per URL holds a short metadata block and the body. Writes go to a
 /// unique temporary file in the same directory and are renamed into place, so a
-/// reader sees either the old entry or the new one, never a partial file.
+/// reader sees either the old entry or the new one, never a partial file. A
+/// per-key lock file serializes publication across processes so an older `304`
+/// cannot replace a newer `200`.
 struct Cache {
     dir: PathBuf,
 }
@@ -903,16 +1199,9 @@ impl Cache {
         self.dir.join(hex_encode(&digest))
     }
 
-    /// Loads an entry, returning `None` when it is absent or malformed.
-    fn load(&self, url: &Url, max_body: usize) -> Option<CachedModule> {
+    /// Returns the metadata for an entry, without reading the body.
+    fn read_metadata(&self, url: &Url) -> Option<(CachedModule, usize, String)> {
         let path = self.path(url);
-        let metadata = std::fs::metadata(&path).ok()?;
-        let max_file = (max_body as u64)
-            .saturating_add(MAX_META_BYTES as u64)
-            .saturating_add(128);
-        if metadata.len() > max_file {
-            return None;
-        }
         let file = File::open(path).ok()?;
         let mut reader = BufReader::new(file);
         let mut magic = String::new();
@@ -928,15 +1217,32 @@ impl Cache {
         }
         let mut metadata = vec![0u8; metadata_length];
         reader.read_exact(&mut metadata).ok()?;
-        let (mut entry, expected_length, expected_digest) =
-            parse_metadata(std::str::from_utf8(&metadata).ok()?)?;
+        parse_metadata(std::str::from_utf8(&metadata).ok()?)
+    }
+
+    /// Loads an entry, returning `None` when it is absent or malformed.
+    fn load(&self, url: &Url, max_body: usize) -> Option<CachedModule> {
+        let (mut entry, expected_length, expected_digest) = self.read_metadata(url)?;
+        if expected_length > max_body {
+            return None;
+        }
+        let path = self.path(url);
+        let file = File::open(path).ok()?;
+        let mut reader = BufReader::new(file);
+        // Skip the already-validated header and metadata block.
+        let mut magic = String::new();
+        reader.read_line(&mut magic).ok()?;
+        let mut length_line = String::new();
+        reader.read_line(&mut length_line).ok()?;
+        let metadata_length: usize = length_line.trim().parse().ok()?;
+        let mut metadata = vec![0u8; metadata_length];
+        reader.read_exact(&mut metadata).ok()?;
         let mut body = Vec::new();
         reader
             .take(max_body.saturating_add(1) as u64)
             .read_to_end(&mut body)
             .ok()?;
-        if body.len() > max_body
-            || body.len() != expected_length
+        if body.len() != expected_length
             || !expected_digest.eq_ignore_ascii_case(&hex_encode(&Sha256::digest(&body)))
         {
             return None;
@@ -945,14 +1251,75 @@ impl Cache {
         Some(entry)
     }
 
-    /// Removes an entry after a `no-store` response.
-    fn remove(&self, url: &Url) {
-        let _ = std::fs::remove_file(self.path(url));
+    /// Acquires the per-key publication lock.
+    fn lock(&self, url: &Url) -> std::io::Result<CacheLock> {
+        std::fs::create_dir_all(&self.dir)?;
+        let mut lock_path = self.path(url).into_os_string();
+        lock_path.push(".lock");
+        let lock_path = PathBuf::from(lock_path);
+        for _ in 0..400 {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(_file) => return Ok(CacheLock { path: lock_path }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "cache publication lock timed out",
+        ))
+    }
+
+    /// Removes an entry only when it still has `expected` generation.
+    fn remove_if_generation(&self, url: &Url, expected: Option<&str>) -> std::io::Result<bool> {
+        let _lock = self.lock(url)?;
+        if let Some(expected) = expected {
+            match self.read_metadata(url) {
+                Some((entry, _, _)) if entry.generation == expected => {}
+                _ => return Ok(false),
+            }
+        }
+        match std::fs::remove_file(self.path(url)) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Writes an entry atomically, returning a filesystem error on failure.
     fn store(&self, url: &Url, entry: &CachedModule) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
+        let _lock = self.lock(url)?;
+        self.write_entry(url, entry)
+    }
+
+    /// Writes an entry only when the current generation matches `expected`.
+    ///
+    /// A `None` expected generation is an unconditional publication for a new
+    /// `200`. Returns `false` when a newer generation won the race.
+    fn store_if_generation(
+        &self,
+        url: &Url,
+        entry: &CachedModule,
+        expected: Option<&str>,
+    ) -> std::io::Result<bool> {
+        let _lock = self.lock(url)?;
+        if let Some(expected) = expected {
+            match self.read_metadata(url) {
+                Some((current, _, _)) if current.generation == expected => {}
+                _ => return Ok(false),
+            }
+        }
+        self.write_entry(url, entry)?;
+        Ok(true)
+    }
+
+    fn write_entry(&self, url: &Url, entry: &CachedModule) -> std::io::Result<()> {
         let metadata = entry.metadata();
         let path = self.path(url);
         let temporary = self.dir.join(format!(
@@ -980,6 +1347,17 @@ impl Cache {
             let _ = std::fs::remove_file(&temporary);
         }
         result
+    }
+}
+
+/// Holds a per-key cache publication lock until dropped.
+struct CacheLock {
+    path: PathBuf,
+}
+
+impl Drop for CacheLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -1158,6 +1536,7 @@ mod tests {
     use std::io::Read;
     use std::io::Write;
     use std::net::TcpListener;
+    use std::path::PathBuf;
     use std::process::Command;
     use std::process::Stdio;
     use std::sync::Arc;
@@ -1632,6 +2011,50 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_304_metadata_update_allows_reuse() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transport = ScriptedTransport::new(vec![
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: Some("\"v1\"".to_string()),
+                last_modified: None,
+                cache_control: Some("max-age=0".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"body".to_vec())),
+            },
+            RemoteResponse {
+                status: 304,
+                location: None,
+                declared_length: None,
+                etag: Some("\"v1\"".to_string()),
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: Some(httpdate::fmt_http_date(SystemTime::now())),
+                age: Some("0".to_string()),
+                body: Box::new(std::io::Cursor::new(Vec::new())),
+            },
+        ]);
+        let saw = Arc::clone(&transport);
+        let options = RemoteOptions::new().with_cache_dir(dir.path());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+
+        client(options.clone(), Arc::clone(&transport))
+            .fetch(&url)
+            .expect("first");
+        client(options.clone(), Arc::clone(&transport))
+            .fetch(&url)
+            .expect("revalidate");
+        let third = client(options, Arc::clone(&transport))
+            .fetch(&url)
+            .expect("a fresh 304 must make the entry reusable");
+        assert_eq!(third.body, b"body");
+        assert_eq!(saw.seen.lock().expect("seen").len(), 2);
+    }
+
+    #[test]
     fn no_store_is_not_written() {
         let dir = tempfile::tempdir().expect("temp dir");
         let transport = ScriptedTransport::new(vec![response(200, None, "body")]);
@@ -1713,6 +2136,7 @@ mod tests {
                     max_age: Some(60),
                     etag: None,
                     last_modified: None,
+                    generation: "test".to_string(),
                 };
                 cache.store(&url, &entry).expect("store");
             }));
@@ -1767,7 +2191,67 @@ mod tests {
         let byte_limited = client(options().with_max_total_bytes(7), Arc::clone(&transport));
         byte_limited.fetch(&one).expect("first bytes");
         let error = byte_limited.fetch(&two).expect_err("byte limit");
-        assert!(error.contains("7 byte total limit"), "{error}");
+        assert!(
+            error.contains("remaining graph budget") || error.contains("byte total limit"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_rejected_graph_admission_does_not_publish_a_cache_entry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transport = ScriptedTransport::new(vec![
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: None,
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"aa".to_vec())),
+            },
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: None,
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"bb".to_vec())),
+            },
+        ]);
+        let client = client(
+            RemoteOptions::new()
+                .with_max_total_bytes(3)
+                .with_cache_dir(dir.path()),
+            transport,
+        );
+        let one = Url::parse("https://example.test/one.js").expect("url");
+        let two = Url::parse("https://example.test/two.js").expect("url");
+        client.fetch(&one).expect("first body fits");
+        let error = client
+            .fetch(&two)
+            .expect_err("remaining budget is one byte");
+        assert!(error.contains("remaining graph budget"), "{error}");
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("cache dir")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .chars()
+                        .all(|character| character.is_ascii_hexdigit())
+                })
+                .count(),
+            1,
+            "the rejected module must not be cached"
+        );
     }
 
     #[test]
@@ -1782,6 +2266,7 @@ mod tests {
             max_age: Some(60),
             etag: None,
             last_modified: None,
+            generation: "test".to_string(),
         };
         cache.store(&url, &entry).expect("store");
         assert!(cache.load(&url, 1024).is_some());
@@ -1898,6 +2383,7 @@ mod tests {
                         max_age: Some(60),
                         etag: None,
                         last_modified: None,
+                        generation: "test".to_string(),
                     };
                     cache.store(&url, &entry).expect("store");
                 }
@@ -2040,10 +2526,17 @@ mod tests {
     /// Child half of [`production_transport_does_not_use_an_ambient_proxy`].
     #[test]
     fn ambient_proxy_child() {
-        if std::env::var_os("NEOJS_PROXY_CHILD").is_none() {
+        let Some(destination) = std::env::var_os("NEOJS_DIRECT_DEST") else {
             return;
-        }
-        let url = Url::parse("https://127.0.0.1:1/mod.js?token=sentinel").expect("url");
+        };
+        let Some(marker) = std::env::var_os("NEOJS_PROXY_MARKER") else {
+            return;
+        };
+        let url = Url::parse(&format!(
+            "https://127.0.0.1:{}/mod.js?token=sentinel",
+            destination.to_string_lossy()
+        ))
+        .expect("url");
         let transport = super::UreqTransport::new();
         let _ = transport.get(&super::RemoteRequest {
             url: &url,
@@ -2051,6 +2544,7 @@ mod tests {
             if_none_match: None,
             if_modified_since: None,
         });
+        std::fs::write(marker, "completed").expect("completion marker");
     }
 
     #[test]
@@ -2058,12 +2552,19 @@ mod tests {
         if std::env::var_os("NEOJS_PROXY_CHILD").is_some() {
             return;
         }
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind proxy observer");
-        listener
+        let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind proxy observer");
+        proxy_listener
             .set_nonblocking(true)
-            .expect("nonblocking listener");
-        let port = listener.local_addr().expect("addr").port();
-        let proxy = format!("http://user:secret@127.0.0.1:{port}");
+            .expect("nonblocking proxy listener");
+        let proxy_port = proxy_listener.local_addr().expect("proxy addr").port();
+        let direct_listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind direct observer");
+        direct_listener
+            .set_nonblocking(true)
+            .expect("nonblocking direct listener");
+        let direct_port = direct_listener.local_addr().expect("direct addr").port();
+        let dir = tempfile::tempdir().expect("marker dir");
+        let marker = dir.path().join("completed");
+        let proxy = format!("http://user:secret@127.0.0.1:{proxy_port}");
         let mut child = Command::new(std::env::current_exe().expect("test binary"))
             .args([
                 "remote::tests::ambient_proxy_child",
@@ -2075,19 +2576,45 @@ mod tests {
             .env("HTTP_PROXY", &proxy)
             .env("ALL_PROXY", &proxy)
             .env("NEOJS_PROXY_CHILD", "1")
+            .env("NEOJS_DIRECT_DEST", direct_port.to_string())
+            .env("NEOJS_PROXY_MARKER", &marker)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn child test");
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut direct_reached = false;
         loop {
-            if let Ok((_stream, _)) = listener.accept() {
+            if let Ok((_stream, _)) = proxy_listener.accept() {
                 let _ = child.kill();
                 let _ = child.wait();
                 panic!("production transport contacted an ambient proxy");
             }
-            if let Some(status) = child.try_wait().expect("child status") {
+            if let Ok((_stream, _)) = direct_listener.accept() {
+                direct_reached = true;
+            }
+            if marker.exists() {
+                assert!(
+                    direct_reached,
+                    "the direct synthetic destination was not reached"
+                );
+                let status = child.wait().expect("child status");
                 assert!(status.success(), "child test failed: {status}");
+                return;
+            }
+            if let Some(status) = child.try_wait().expect("child status") {
+                if !direct_reached {
+                    direct_reached = direct_listener.accept().is_ok();
+                }
+                assert!(status.success(), "child test failed: {status}");
+                assert!(
+                    direct_reached,
+                    "the direct synthetic destination was not reached"
+                );
+                assert!(
+                    marker.exists(),
+                    "the child did not write its completion marker"
+                );
                 return;
             }
             if std::time::Instant::now() >= deadline {
@@ -2100,6 +2627,245 @@ mod tests {
     }
 
     #[test]
+    fn an_older_304_cannot_replace_a_newer_200() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let old = super::CachedModule {
+            body: b"old".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: Some("\"old\"".to_string()),
+            last_modified: None,
+            generation: "old-generation".to_string(),
+        };
+        cache.store(&url, &old).expect("old store");
+        let loaded = cache.load(&url, 1024).expect("old entry");
+        let new = super::CachedModule {
+            body: b"new".to_vec(),
+            stored_at: 2,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: Some("\"new\"".to_string()),
+            last_modified: None,
+            generation: "new-generation".to_string(),
+        };
+        cache.store(&url, &new).expect("new store");
+
+        let published = cache
+            .store_if_generation(&url, &loaded, Some(&loaded.generation))
+            .expect("conditional store");
+        assert!(!published, "the old generation must lose");
+        assert_eq!(cache.load(&url, 1024).expect("current").body, b"new");
+    }
+
+    #[test]
+    fn an_older_no_store_304_cannot_remove_a_newer_200() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let old = super::CachedModule {
+            body: b"old".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "old".to_string(),
+        };
+        cache.store(&url, &old).expect("old store");
+        let new = super::CachedModule {
+            body: b"new".to_vec(),
+            stored_at: 2,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "new".to_string(),
+        };
+        cache.store(&url, &new).expect("new store");
+        assert!(
+            !cache
+                .remove_if_generation(&url, Some("old"))
+                .expect("conditional remove")
+        );
+        assert_eq!(cache.load(&url, 1024).expect("current").body, b"new");
+    }
+
+    #[test]
+    fn a_304_publishes_when_its_generation_is_current() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let entry = super::CachedModule {
+            body: b"body".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(0),
+            etag: Some("\"v1\"".to_string()),
+            last_modified: None,
+            generation: "generation-1".to_string(),
+        };
+        cache.store(&url, &entry).expect("store");
+        let mut revalidated = cache.load(&url, 1024).expect("entry");
+        revalidated.max_age = Some(60);
+        revalidated.stored_at = 2;
+        assert!(
+            cache
+                .store_if_generation(&url, &revalidated, Some(&revalidated.generation))
+                .expect("conditional store")
+        );
+        assert_eq!(cache.load(&url, 1024).expect("entry").max_age, Some(60));
+    }
+
+    #[test]
+    fn concurrent_generations_settle_on_the_newer_publication() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let old_cache = Arc::new(super::Cache::new(dir.path().to_path_buf()));
+        let old = super::CachedModule {
+            body: b"old".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "old".to_string(),
+        };
+        old_cache.store(&url, &old).expect("old store");
+        let loaded = old_cache.load(&url, 1024).expect("old entry");
+
+        for _ in 0..20 {
+            let new_cache = Arc::new(super::Cache::new(dir.path().to_path_buf()));
+            let right_cache = Arc::clone(&old_cache);
+            let url_for_old = url.clone();
+            let old_entry = loaded.clone();
+            let new = super::CachedModule {
+                body: b"new".to_vec(),
+                stored_at: 2,
+                initial_age: 0,
+                max_age: Some(60),
+                etag: None,
+                last_modified: None,
+                generation: super::new_generation(),
+            };
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let left = {
+                let barrier = Arc::clone(&barrier);
+                let cache = Arc::clone(&new_cache);
+                let url = url.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    cache.store(&url, &new).expect("new store");
+                })
+            };
+            let right = {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    right_cache
+                        .store_if_generation(&url_for_old, &old_entry, Some(&old_entry.generation))
+                        .expect("old conditional store");
+                })
+            };
+            left.join().expect("new writer");
+            right.join().expect("old writer");
+            assert_eq!(
+                old_cache.load(&url, 1024).expect("current").body,
+                b"new",
+                "an older generation replaced the newer body"
+            );
+        }
+    }
+
+    /// Child half of [`an_older_304_loses_to_a_newer_200_across_processes`].
+    #[test]
+    fn cache_generation_child() {
+        let Some(role) = std::env::var_os("NEOJS_CACHE_CHILD") else {
+            return;
+        };
+        let dir = std::env::var_os("NEOJS_CACHE_DIR").expect("cache dir");
+        let url = Url::parse(&std::env::var("NEOJS_CACHE_URL").expect("cache url")).expect("url");
+        let cache = super::Cache::new(PathBuf::from(dir));
+        let entry = super::CachedModule {
+            body: if role == "new" {
+                b"new".to_vec()
+            } else {
+                b"old".to_vec()
+            },
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: if role == "new" {
+                "new-generation".to_string()
+            } else {
+                std::env::var("NEOJS_CACHE_OLD_GENERATION").expect("old generation")
+            },
+        };
+        if role == "new" {
+            cache.store(&url, &entry).expect("new store");
+        } else {
+            let expected = std::env::var("NEOJS_CACHE_OLD_GENERATION").expect("old generation");
+            cache
+                .store_if_generation(&url, &entry, Some(&expected))
+                .expect("old conditional store");
+        }
+    }
+
+    #[test]
+    fn an_older_304_loses_to_a_newer_200_across_processes() {
+        if std::env::var_os("NEOJS_CACHE_CHILD").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("temp dir");
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let old = super::CachedModule {
+            body: b"old".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "old-generation".to_string(),
+        };
+        cache.store(&url, &old).expect("old store");
+
+        let mut children = Vec::new();
+        for role in ["new", "old"] {
+            children.push(
+                Command::new(std::env::current_exe().expect("test binary"))
+                    .args([
+                        "remote::tests::cache_generation_child",
+                        "--exact",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env("NEOJS_CACHE_CHILD", role)
+                    .env("NEOJS_CACHE_DIR", dir.path())
+                    .env("NEOJS_CACHE_URL", url.as_str())
+                    .env("NEOJS_CACHE_OLD_GENERATION", "old-generation")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn cache child"),
+            );
+        }
+        for mut child in children {
+            let status = child.wait().expect("cache child status");
+            assert!(status.success(), "cache child failed: {status}");
+        }
+        assert_eq!(
+            cache.load(&url, 1024).expect("current entry").body,
+            b"new",
+            "an older 304 replaced a newer 200 across processes"
+        );
+    }
+
+    #[test]
     fn cache_metadata_never_contains_the_url() {
         let entry = super::CachedModule {
             body: Vec::new(),
@@ -2108,6 +2874,7 @@ mod tests {
             max_age: Some(60),
             etag: Some("\"v1\"".to_string()),
             last_modified: None,
+            generation: "test".to_string(),
         };
         assert!(!entry.metadata().contains("https://"));
         assert!(!entry.metadata().contains("example"));
