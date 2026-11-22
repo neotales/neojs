@@ -1,0 +1,2212 @@
+//! End-to-end tests for the `neojs` command.
+
+use std::fs;
+use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
+use std::net::TcpListener;
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command;
+use std::process::Output;
+use std::process::Stdio;
+#[cfg(unix)]
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::atomic::AtomicBool;
+#[cfg(unix)]
+use std::sync::atomic::AtomicUsize;
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
+
+use tempfile::TempDir;
+
+struct Project {
+    dir: TempDir,
+}
+
+impl Project {
+    fn new() -> Self {
+        Self {
+            dir: tempfile::tempdir().expect("temp dir"),
+        }
+    }
+
+    fn path(&self, relative: &str) -> PathBuf {
+        self.dir.path().join(relative)
+    }
+
+    fn write(&self, relative: &str, source: &str) -> PathBuf {
+        let path = self.path(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent");
+        }
+        fs::write(&path, source).expect("write source");
+        path
+    }
+}
+
+fn run_file(path: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_neojs"))
+        .arg(path)
+        .output()
+        .expect("spawn neojs")
+}
+
+/// Runs the command and fails the test if it is still alive at `timeout`.
+///
+/// A regression in the V8/Tokio lifecycle aborts the process, which `output`
+/// would report as a signal status. A hang would block the test suite, so the
+/// child is killed at the deadline instead.
+fn run_file_with_timeout(path: &Path, timeout: Duration) -> Output {
+    let child = Command::new(env!("CARGO_BIN_EXE_neojs"))
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn neojs");
+    run_child(child, timeout)
+}
+
+/// Runs `neojs` with an isolated `SSH_AUTH_SOCK`, for agent tests.
+#[cfg(unix)]
+fn run_file_with_agent(path: &Path, socket: &Path, timeout: Duration) -> Output {
+    let child = Command::new(env!("CARGO_BIN_EXE_neojs"))
+        .arg(path)
+        .env("SSH_AUTH_SOCK", socket)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn neojs");
+    run_child(child, timeout)
+}
+
+fn run_child(mut child: std::process::Child, timeout: Duration) -> Output {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait().expect("wait for neojs") {
+            Some(status) => {
+                let mut output = Output {
+                    status,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                };
+                child
+                    .stdout
+                    .take()
+                    .expect("stdout")
+                    .read_to_end(&mut output.stdout)
+                    .expect("read stdout");
+                child
+                    .stderr
+                    .take()
+                    .expect("stderr")
+                    .read_to_end(&mut output.stderr)
+                    .expect("read stderr");
+                return output;
+            }
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("neojs did not finish within {timeout:?}");
+            }
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+fn run_args(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_neojs"))
+        .args(args)
+        .output()
+        .expect("spawn neojs")
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn runs_a_module_and_prints_to_stdout() {
+    let project = Project::new();
+    let file = project.write("hello.js", "console.log(\"hello from neojs\");\n");
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "hello from neojs\n");
+    assert_eq!(stderr(&output), "");
+}
+
+/// The stdio writers must reach the real process descriptors, preserve binary
+/// bytes, and stay writable through `console` after their wrapper is closed.
+#[test]
+fn stdio_built_in_writes_binary_streams_to_the_process() {
+    let project = Project::new();
+    let file = project.write(
+        "main.js",
+        r#"
+import { stdout, stderr } from "stdio";
+
+if (Neo.getBuiltInModule("stdio").stdout !== stdout) {
+    throw new Error("the registry and the import disagree");
+}
+const payload = Uint8Array.from([0x00, 0xff, 0x80, 0x0a]);
+if (stdout.writeSync(payload) !== 4) throw new Error("binary stdout count");
+if (stdout.writeSync("out-é\n") !== 7) throw new Error("text stdout count");
+if (stderr.writeSync(Uint8Array.from([0x65, 0x00, 0xff, 0x0a])) !== 4) {
+    throw new Error("binary stderr count");
+}
+
+stdout.close();
+stderr.close();
+console.log("after-close");
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let mut expected = vec![0x00, 0xff, 0x80, 0x0a];
+    expected.extend_from_slice("out-é\nafter-close\n".as_bytes());
+    assert_eq!(output.stdout, expected);
+    assert_eq!(output.stderr, vec![0x65, 0x00, 0xff, 0x0a]);
+}
+
+#[test]
+fn resolves_relative_imports_from_each_module() {
+    let project = Project::new();
+    project.write(
+        "main.js",
+        "import { area } from \"./lib/math.js\";\nconsole.log(area(3));\n",
+    );
+    project.write(
+        "lib/math.js",
+        "import { square } from \"./square.js\";\nexport function area(n) { return square(n); }\n",
+    );
+    project.write(
+        "lib/square.js",
+        "export function square(n) { return n * n; }\n",
+    );
+
+    let output = run_file(&project.path("main.js"));
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "9\n");
+}
+
+#[test]
+fn resolves_a_file_url_import() {
+    let project = Project::new();
+    let target = project.write("target.js", "export const value = 8;\n");
+    let url = url::Url::from_file_path(&target).expect("file URL");
+    let file = project.write(
+        "main.js",
+        &format!("import {{ value }} from \"{url}\";\nconsole.log(value);\n"),
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "8\n");
+}
+
+#[test]
+fn waits_for_top_level_await() {
+    let project = Project::new();
+    let file = project.write(
+        "await.js",
+        "const value = await Promise.resolve(42);\nconsole.log(value);\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "42\n");
+}
+
+#[test]
+fn resolves_dynamic_imports() {
+    let project = Project::new();
+    project.write("greet.js", "export function greet() { return \"hi\"; }\n");
+    let file = project.write(
+        "main.js",
+        "const module = await import(\"./greet.js\");\nconsole.log(module.greet());\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "hi\n");
+}
+
+#[test]
+fn console_errors_write_to_stderr() {
+    let project = Project::new();
+    let file = project.write(
+        "console.js",
+        "console.log(\"out\");\nconsole.warn(\"warn\");\nconsole.error(\"err\");\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "out\n");
+    assert_eq!(stderr(&output), "warn\nerr\n");
+}
+
+#[test]
+fn formats_console_arguments() {
+    let project = Project::new();
+    let file = project.write(
+        "format.js",
+        "console.log(\"number\", 1, true, null, undefined);\nconsole.log(new Uint8Array([1, 2, 3]));\nconsole.log({ a: 1 });\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stdout(&output),
+        "number 1 true null undefined\nUint8Array(3) [1, 2, 3]\n{\n  \"a\": 1\n}\n"
+    );
+}
+
+#[test]
+fn console_module_writes_to_the_same_streams() {
+    let project = Project::new();
+    let file = project.write(
+        "console-module.js",
+        r#"
+import defaultConsole, { log, debug, info, warn, error } from "neo:console";
+log("log");
+info("info");
+debug("debug");
+warn("warn");
+error("error");
+defaultConsole.log("default-out");
+defaultConsole.error("default-err");
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "log\ninfo\ndebug\ndefault-out\n");
+    assert_eq!(stderr(&output), "warn\nerror\ndefault-err\n");
+}
+
+#[test]
+fn console_module_shares_identity_with_the_global_console() {
+    let project = Project::new();
+    let file = project.write(
+        "console-identity.js",
+        r#"
+import defaultConsole from "console";
+import * as namespace from "neo:console";
+const registry = Neo.getBuiltInModule("console");
+const dynamic = await import("console");
+const uppercase = await import("NEO:console");
+console.log(registry === globalThis.console);
+console.log(defaultConsole === registry);
+console.log(namespace.default === registry);
+console.log(dynamic === namespace);
+console.log(uppercase === namespace);
+console.log(namespace.log === globalThis.console.log);
+console.log(Neo.getBuiltInModule("neo:console") === undefined);
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stdout(&output),
+        "true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn console_module_keeps_the_live_console_and_captures_named_exports() {
+    let project = Project::new();
+    let file = project.write(
+        "console-mutation.js",
+        r#"
+import defaultConsole, { log } from "console";
+const original = globalThis.console.log;
+const replacement = () => {};
+defaultConsole.log = replacement;
+try {
+    if (globalThis.console.log !== replacement) throw new Error("global did not change");
+    if (defaultConsole.log !== replacement) throw new Error("default export did not change");
+    if (log !== original) throw new Error("named export followed the replacement");
+} finally {
+    defaultConsole.log = original;
+}
+if (log !== globalThis.console.log) throw new Error("restore failed");
+console.log("console mutation ok");
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "console mutation ok\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn console_module_ignores_a_global_replacement_before_dynamic_import() {
+    let project = Project::new();
+    let file = project.write(
+        "console-wholesale.js",
+        r#"
+const installed = Neo.getBuiltInModule("console");
+const print = installed.log;
+const installedLog = installed.log;
+globalThis.console = { log() {}, error() {} };
+
+const dynamic = await import("console");
+print(Neo.getBuiltInModule("console") === installed);
+print(dynamic.default === installed);
+print(dynamic.log === installedLog);
+print(dynamic.default === globalThis.console);
+print(dynamic.log === globalThis.console.log);
+
+globalThis.console = installed;
+print(dynamic.log === globalThis.console.log);
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "true\ntrue\ntrue\nfalse\nfalse\ntrue\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn console_module_captures_a_method_replacement_before_dynamic_import() {
+    let project = Project::new();
+    let file = project.write(
+        "console-pre-evaluation.js",
+        r#"
+const installed = Neo.getBuiltInModule("console");
+const print = installed.log;
+const original = installed.log;
+const replacement = () => {};
+
+installed.log = replacement;
+const dynamic = await import("neo:console");
+print(dynamic.log === replacement);
+print(dynamic.default === installed);
+print(dynamic.default.log === replacement);
+
+installed.log = original;
+print(dynamic.log === original);
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "true\ntrue\ntrue\nfalse\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn console_module_runs_from_typescript() {
+    let project = Project::new();
+    let file = project.write(
+        "console-module.ts",
+        r#"
+import defaultConsole, { log, warn } from "console";
+
+const name: string = "typescript";
+log(`console ${name}`);
+defaultConsole.warn(`warned by ${name}`);
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "console typescript\n");
+    assert_eq!(stderr(&output), "warned by typescript\n");
+}
+
+#[test]
+fn crypto_builtin_roundtrips_and_rejects_a_wrong_key() {
+    let project = Project::new();
+    let file = project.write(
+        "crypto.js",
+        r#"
+import { decrypt, encrypt, generateEnvelopeKey, randomBytes } from "crypto";
+const key = generateEnvelopeKey();
+const plaintext = Uint8Array.from([0, 1, 2, 255, 128]);
+const envelope = encrypt(key, plaintext);
+const out = decrypt(key, envelope);
+let hex = "";
+for (const byte of out) hex += byte.toString(16).padStart(2, "0");
+console.log(hex, randomBytes(4).length, typeof Neo.getBuiltInModule("crypto").generateKey);
+try {
+    randomBytes(1.5);
+} catch (error) {
+    console.log(error.constructor.name);
+}
+let callbackCalled = false;
+try {
+    randomBytes(4, () => { callbackCalled = true; });
+} catch (error) {
+    console.log(error.constructor.name, callbackCalled);
+}
+try {
+    decrypt(new Uint8Array(32), envelope);
+} catch (error) {
+    console.log(error.constructor.name, error.code);
+}
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stdout(&output),
+        "000102ff80 4 undefined\nRangeError\nTypeError false\nError NEO_CRYPTO_AUTH\n"
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn crypto_stateful_cbc_and_gcm_work_from_the_cli() {
+    let project = Project::new();
+    let file = project.write(
+        "cipher.js",
+        r#"
+import { createDecryptor, createEncryptor } from "crypto";
+
+function fromHex(text) {
+    const bytes = new Uint8Array(text.length / 2);
+    for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = parseInt(text.slice(i * 2, i * 2 + 2), 16);
+    }
+    return bytes;
+}
+function hex(bytes) {
+    let text = "";
+    for (const byte of bytes) text += byte.toString(16).padStart(2, "0");
+    return text;
+}
+
+const cbcKey = fromHex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+const cbcIv = fromHex("101112131415161718191a1b1c1d1e1f");
+const cbcPlaintext = fromHex("6e656f6a73206369706865722063626320696e7465726f70");
+const cbc = createEncryptor("aes-256-cbc", cbcKey, cbcIv);
+if (cbc.update(cbcPlaintext).length !== 0) throw Error("update returned bytes");
+console.log(hex(cbc.final()));
+
+const gcmKey = fromHex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+const gcmIv = fromHex("a1b2c3d4e5f60718293a4b5c");
+const gcmAad = fromHex("6e656f6a732d6369706865722d636f6e74657874");
+const gcmPlaintext = fromHex("6e656f6a73206369706865722067636d20696e7465726f70");
+const gcm = createEncryptor("aes-256-gcm", gcmKey, gcmIv);
+gcm.setAAD(gcmAad);
+gcm.update(gcmPlaintext);
+const ciphertext = gcm.final();
+const tag = gcm.getAuthTag();
+console.log(hex(ciphertext), hex(tag));
+
+const decryptor = createDecryptor("aes-256-gcm", gcmKey, gcmIv);
+decryptor.setAAD(gcmAad);
+decryptor.setAuthTag(tag);
+decryptor.update(ciphertext);
+console.log(hex(decryptor.final()));
+
+try {
+    const bad = createDecryptor("aes-256-gcm", gcmKey, gcmIv);
+    bad.setAAD(gcmAad);
+    const wrong = tag.slice();
+    wrong[0] ^= 1;
+    bad.setAuthTag(wrong);
+    bad.update(ciphertext);
+    bad.final();
+} catch (error) {
+    console.log(error.code);
+}
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "5226084e220371598b38cb20eaa1b85c2ff1b252517261b6f0054232236daa85\n",
+            "6c430e93ec1204a1c46d5cf416133f6de7b2cdaa473a24a1 9ea6507bfbc87455b1f24edc000cc662\n",
+            "6e656f6a73206369706865722067636d20696e7465726f70\n",
+            "NEO_CRYPTO_AUTH\n",
+        )
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn crypto_hash_hmac_and_async_hash_work_from_the_cli() {
+    let project = Project::new();
+    let file = project.write(
+        "hash.js",
+        r#"
+import { createHash, createHmac, hashAsync, hmacAsync } from "crypto";
+
+console.log(createHash("sha256").update("abc").digest("hex"));
+console.log(createHash("sha384").update("abc").digest("hex"));
+console.log(createHmac("sha256", "Jefe").update("what do ya want for nothing?").digest("hex"));
+console.log(await hashAsync("sha256", "abc", "hex"));
+console.log(await hmacAsync("sha512", "Jefe", "what do ya want for nothing?", "hex"));
+try {
+    createHash("sha1");
+} catch (error) {
+    console.log(error.code);
+}
+"#,
+    );
+
+    let output = run_file_with_timeout(&file, Duration::from_secs(30));
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n",
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7\n",
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843\n",
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n",
+            "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737\n",
+            "NEO_CRYPTO_ALGORITHM\n",
+        )
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn crypto_pbkdf2_and_bcrypt_work_from_the_cli() {
+    let project = Project::new();
+    let file = project.write(
+        "password.js",
+        r#"
+import {
+    bcryptHash,
+    bcryptVerify,
+    bcryptVerifyAsync,
+    pbkdf2,
+    pbkdf2Async,
+} from "crypto";
+
+function hex(bytes) {
+    let text = "";
+    for (const byte of bytes) text += byte.toString(16).padStart(2, "0");
+    return text;
+}
+
+console.log(hex(pbkdf2("sha256", "passwd", "salt", 1, 16)));
+console.log(hex(await pbkdf2Async("sha256", "passwd", "salt", 1, 16)));
+
+const hash = bcryptHash("pässwörd", 4);
+console.log(hash.length, hash.startsWith("$2b$04$"));
+console.log(bcryptVerify("pässwörd", hash), bcryptVerify("wrong", hash));
+
+const fixed = "$2y$04$10NU4r76Q4nBoXH7Sw4RKu9LjsXUslmRavZFzvlPUCYI3Hkl4xX/W";
+console.log(bcryptVerify("password", fixed));
+console.log(await bcryptVerifyAsync("password", fixed));
+"#,
+    );
+
+    let output = run_file_with_timeout(&file, Duration::from_secs(30));
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "55ac046e56e3089fec1691c22544b605\n",
+            "55ac046e56e3089fec1691c22544b605\n",
+            "60 true\n",
+            "true false\n",
+            "true\n",
+            "true\n",
+        )
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn age_builtin_roundtrips_and_rejects_a_wrong_file() {
+    let project = Project::new();
+    let file = project.write(
+        "age.js",
+        r#"
+import { decrypt, encrypt, generateIdentity, identityToRecipient } from "age";
+const pair = generateIdentity();
+const plaintext = Uint8Array.from([0, 1, 2, 255, 128]);
+const ciphertext = encrypt(pair.recipient, plaintext);
+const out = decrypt(pair.identity, ciphertext);
+let hex = "";
+for (const byte of out) hex += byte.toString(16).padStart(2, "0");
+console.log(
+    pair.identity.startsWith("AGE-SECRET-KEY-1"),
+    pair.recipient.startsWith("age1"),
+    identityToRecipient(pair.identity) === pair.recipient,
+    hex,
+    ciphertext[0] === 0x61,
+    typeof Neo.getBuiltInModule("age").generateKey,
+);
+let callbackCalled = false;
+try {
+    encrypt(pair.recipient, plaintext, () => { callbackCalled = true; });
+} catch (error) {
+    console.log(error.constructor.name, callbackCalled);
+}
+try {
+    decrypt(pair.identity, new Uint8Array(0));
+} catch (error) {
+    console.log(error.constructor.name, error.code);
+}
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stdout(&output),
+        "true true true 000102ff80 true undefined\nTypeError false\nError NEO_AGE_FORMAT\n"
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn a_local_module_named_age_is_not_shadowed() {
+    let project = Project::new();
+    project.write("age.js", "export const value = 7;\n");
+    let file = project.write(
+        "main.js",
+        "import { value } from \"./age.js\";\nimport { generateIdentity } from \"age\";\nconsole.log(value, generateIdentity().identity.startsWith(\"AGE-SECRET-KEY-1\"));\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "7 true\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn a_local_module_named_crypto_is_not_shadowed() {
+    let project = Project::new();
+    project.write("crypto.js", "export const value = 7;\n");
+    let file = project.write(
+        "main.js",
+        "import { value } from \"./crypto.js\";\nimport { generateEnvelopeKey } from \"crypto\";\nconsole.log(value, generateEnvelopeKey().length);\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "7 32\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn a_local_module_named_console_is_not_shadowed() {
+    let project = Project::new();
+    project.write("console.js", "export const value = 7;\n");
+    let file = project.write(
+        "main.js",
+        "import { value } from \"./console.js\";\nimport * as builtin from \"console\";\nconsole.log(value, builtin.default === globalThis.console);\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "7 true\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn reports_an_unknown_console_export_and_exits_1() {
+    let project = Project::new();
+    let file = project.write(
+        "bad-console-export.js",
+        "import { nope } from \"neo:console\";\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(
+        message.contains("does not provide an export named 'nope'"),
+        "{message}"
+    );
+    assert!(message.contains("neo:console"), "{message}");
+}
+
+#[test]
+fn exposes_the_cached_chars_builtin_to_a_module() {
+    let project = Project::new();
+    let file = project.write(
+        "chars.js",
+        r#"
+const first = Neo.getBuiltInModule("chars");
+const second = Neo.getBuiltInModule("chars");
+console.log(first === second);
+console.log(Neo.getBuiltInModule("missing") === undefined);
+console.log(first.isLetter("λ".codePointAt(0)));
+console.log(first.isDigit("٣".codePointAt(0)));
+console.log(first.isSpace("\u3000".codePointAt(0)));
+console.log(first.toUpper("a".codePointAt(0)));
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "true\ntrue\ntrue\ntrue\ntrue\n65\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn reports_bad_built_in_module_names_and_exits_1() {
+    let project = Project::new();
+    let file = project.write("bad-name.js", "Neo.getBuiltInModule(42);\n");
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("TypeError"), "{message}");
+    assert!(
+        message.contains("module name must be a string"),
+        "{message}"
+    );
+}
+
+#[test]
+fn imports_a_built_in_module_by_bare_name() {
+    let project = Project::new();
+    let file = project.write(
+        "chars-import.js",
+        r#"
+import { isLetter, isDigit, toUpper } from "chars";
+console.log(isLetter("λ".codePointAt(0)));
+console.log(isDigit("٣".codePointAt(0)));
+console.log(toUpper("a".codePointAt(0)));
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "true\ntrue\n65\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn imports_a_built_in_module_by_neo_specifier() {
+    let project = Project::new();
+    let file = project.write(
+        "chars-neo-import.js",
+        r#"
+import { isLetter } from "neo:chars";
+const registry = Neo.getBuiltInModule("chars");
+const dynamic = await import("chars");
+console.log(isLetter === registry.isLetter);
+console.log(dynamic.isLetter === isLetter);
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "true\ntrue\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn reports_an_unknown_built_in_export_and_exits_1() {
+    let project = Project::new();
+    let file = project.write("bad-export.js", "import { nope } from \"chars\";\n");
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(
+        message.contains("does not provide an export named 'nope'"),
+        "{message}"
+    );
+    assert!(message.contains("chars"), "{message}");
+}
+
+#[test]
+fn reports_an_unknown_neo_module_and_lists_the_implemented_ones() {
+    let project = Project::new();
+    let file = project.write("bad-neo.js", "import \"neo:nope\";\n");
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("neo:nope"), "{message}");
+    assert!(message.contains("not implemented"), "{message}");
+    assert!(
+        message.contains(
+            "neojs implements age, neo:age, chars, neo:chars, console, neo:console, crypto, neo:crypto, ssh, neo:ssh, stdio, neo:stdio"
+        ),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_local_module_named_chars_is_not_shadowed() {
+    let project = Project::new();
+    project.write("chars.js", "export const value = 7;\n");
+    let file = project.write(
+        "main.js",
+        "import { value } from \"./chars.js\";\nconsole.log(value);\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "7\n");
+}
+
+#[test]
+fn reports_an_uncaught_exception_and_exits_1() {
+    let project = Project::new();
+    let file = project.write(
+        "throw.js",
+        "function fail() {\n    throw new Error(\"boom\");\n}\nfail();\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    let message = stderr(&output);
+    assert!(message.contains("boom"), "{message}");
+    assert!(message.contains("throw.js:2"), "{message}");
+}
+
+#[test]
+fn reports_a_syntax_error_and_exits_1() {
+    let project = Project::new();
+    let file = project.write("broken.js", "const = 1;\n");
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("SyntaxError"), "{message}");
+    assert!(message.contains("broken.js:1"), "{message}");
+}
+
+#[test]
+fn reports_a_missing_import_and_exits_1() {
+    let project = Project::new();
+    let file = project.write("main.js", "import \"./missing.js\";\n");
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("cannot load"), "{message}");
+    assert!(message.contains("missing.js"), "{message}");
+}
+
+#[test]
+fn reports_a_missing_entry_file_and_exits_2() {
+    let project = Project::new();
+    let missing = project.path("missing.js");
+
+    let output = run_file(&missing);
+
+    assert_eq!(output.status.code(), Some(2));
+    let message = stderr(&output);
+    assert!(message.contains("cannot read"), "{message}");
+    assert!(message.contains("missing.js"), "{message}");
+}
+
+#[test]
+fn runs_typescript_and_mixed_imports() {
+    let project = Project::new();
+    project.write(
+        "main.ts",
+        r#"
+import type { Named } from "./lib/types.ts";
+import { area } from "./lib/math.ts";
+import { label } from "./lib/label.js";
+
+const shape: Named = { name: "square", width: 3 };
+const text = `${shape.name} ${area(shape)}` as string;
+console.log(text satisfies string);
+console.log(label(text));
+const dynamic = await import("./lib/dynamic.mts");
+console.log(dynamic.twice(21));
+"#,
+    );
+    project.write(
+        "lib/types.ts",
+        "export interface Named {\n    name: string;\n    width: number;\n}\n",
+    );
+    project.write(
+        "lib/math.ts",
+        r#"
+import { square } from "./square.mts";
+export function area(shape: { width: number }): number {
+    return square(shape.width);
+}
+"#,
+    );
+    project.write(
+        "lib/square.mts",
+        "export const square = (n: number): number => n * n;\n",
+    );
+    project.write(
+        "lib/label.js",
+        "export const label = (value) => `[${value}]`;\n",
+    );
+    project.write(
+        "lib/dynamic.mts",
+        "export const twice = (n: number): number => n * 2;\n",
+    );
+
+    let mut file = project.path("main.ts");
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "square 9\n[square 9]\n42\n");
+    assert_eq!(stderr(&output), "");
+
+    // A JavaScript entry reaches TypeScript modules too.
+    file = project.write(
+        "main.js",
+        "import { area } from \"./lib/math.ts\";\nconsole.log(area({ width: 4 }));\n",
+    );
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "16\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn does_not_type_check_typescript() {
+    let project = Project::new();
+    let file = project.write(
+        "unchecked.ts",
+        "const value: number = \"text\";\nconsole.log(value, typeof value);\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "text string\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn reports_a_typescript_syntax_error_with_its_position_and_exits_1() {
+    let project = Project::new();
+    let file = project.write("invalid.ts", "const x: = 1;\n");
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    let message = stderr(&output);
+    assert!(message.contains("cannot compile"), "{message}");
+    assert!(message.contains("SyntaxError"), "{message}");
+    assert!(message.contains("invalid.ts:1:"), "{message}");
+}
+
+#[test]
+fn reports_an_unsupported_typescript_construct_and_exits_1() {
+    let project = Project::new();
+    let file = project.write("enum.ts", "enum Color { Red }\nconsole.log(Color.Red);\n");
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    let message = stderr(&output);
+    assert!(message.contains("cannot compile"), "{message}");
+    assert!(message.contains("enum.ts"), "{message}");
+    assert!(
+        message.contains("enum is not supported in strip-only mode"),
+        "{message}"
+    );
+}
+
+#[test]
+fn reports_typescript_stack_traces_at_the_source_line() {
+    let project = Project::new();
+    let file = project.write(
+        "throws.ts",
+        r#"
+interface Marker {
+    label: string;
+}
+const marker: Marker = { label: "boom" };
+throw new Error(marker.label);
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("boom"), "{message}");
+    assert!(message.contains("throws.ts:6"), "{message}");
+}
+
+#[test]
+fn refuses_tsx_cts_and_declaration_entries_and_exits_2() {
+    let project = Project::new();
+    let cases = [
+        ("view.tsx", "export const x = <div />;\n", "JSX and TSX"),
+        (
+            "old.cts",
+            "export = 1;\n",
+            "CommonJS TypeScript (.cts) is not supported",
+        ),
+        (
+            "types.d.ts",
+            "export declare const x: number;\n",
+            "declaration files",
+        ),
+    ];
+
+    for (name, source, expected) in cases {
+        let file = project.write(name, source);
+        let output = run_file(&file);
+        assert_eq!(output.status.code(), Some(2), "{name}");
+        let message = stderr(&output);
+        assert!(message.contains(expected), "{name}: {message}");
+    }
+}
+
+#[test]
+fn refuses_a_tsx_import_and_exits_1() {
+    let project = Project::new();
+    project.write("view.tsx", "export const x = <div />;\n");
+    let file = project.write(
+        "main.ts",
+        "import { x } from \"./view.tsx\";\nconsole.log(x);\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("view.tsx"), "{message}");
+    assert!(message.contains("JSX and TSX"), "{message}");
+}
+
+#[test]
+fn reports_a_typescript_import_that_cannot_be_stripped_and_exits_1() {
+    let project = Project::new();
+    project.write("bad.ts", "export enum Color { Red }\n");
+    let file = project.write(
+        "main.js",
+        "import { Color } from \"./bad.ts\";\nconsole.log(Color.Red);\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("bad.ts"), "{message}");
+    assert!(
+        message.contains("enum is not supported in strip-only mode"),
+        "{message}"
+    );
+}
+
+#[test]
+fn refuses_commonjs_by_extension_only() {
+    let project = Project::new();
+    let commonjs = project.write("old.cjs", "module.exports = 1;\n");
+
+    let output = run_file(&commonjs);
+
+    assert_eq!(output.status.code(), Some(2));
+    let message = stderr(&output);
+    assert!(
+        message.contains(".cjs extension is not supported"),
+        "{message}"
+    );
+
+    // A .js file is not rejected for its contents. It fails as ECMAScript when
+    // module-level CommonJS bindings are used.
+    let mislabelled = project.write("old.js", "module.exports = 1;\n");
+    let output = run_file(&mislabelled);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("module is not defined"), "{message}");
+    assert!(!message.contains("CommonJS"), "{message}");
+}
+
+#[test]
+fn truncates_large_typed_arrays_to_ten_elements() {
+    let project = Project::new();
+    let file = project.write(
+        "big.js",
+        "const big = new Uint8Array(1000000);\nbig[0] = 7;\nbig[9] = 9;\nbig[10] = 11;\nconsole.log(big);\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    let printed = stdout(&output);
+    assert_eq!(
+        printed,
+        "Uint8Array(1000000) [7, 0, 0, 0, 0, 0, 0, 0, 0, 9]\n"
+    );
+    assert!(printed.len() < 100, "{printed}");
+}
+
+#[test]
+fn help_describes_the_exit_codes_the_cli_uses() {
+    let help = run_args(&["--help"]);
+
+    assert_eq!(help.status.code(), Some(0));
+    let text = stdout(&help);
+    assert!(
+        text.contains("1  the module failed to compile, resolve imports, link, or run"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "2  neojs could not start (bad arguments, unreadable or unsupported entry file)"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn refuses_a_bare_import_and_exits_1() {
+    let project = Project::new();
+    let file = project.write(
+        "main.js",
+        "import value from \"lodash\";\nconsole.log(value);\n",
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("bare module specifiers"), "{message}");
+    assert!(message.contains("lodash"), "{message}");
+}
+
+#[test]
+fn refuses_a_neo_import_and_exits_1() {
+    let project = Project::new();
+    let file = project.write("main.js", "import fs from \"neo:fs\";\nconsole.log(fs);\n");
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("neo:fs"), "{message}");
+    assert!(message.contains("not implemented"), "{message}");
+}
+
+#[test]
+fn prints_help_and_version() {
+    let help = run_args(&["--help"]);
+    assert_eq!(help.status.code(), Some(0));
+    assert!(stdout(&help).contains("Usage:"));
+    assert!(stdout(&help).contains("age, chars, console, crypto, ssh, and stdio built-in"));
+
+    let version = run_args(&["--version"]);
+    assert_eq!(version.status.code(), Some(0));
+    assert_eq!(
+        stdout(&version),
+        format!("neojs {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn reports_bad_arguments_and_exits_2() {
+    let no_args = run_args(&[]);
+    assert_eq!(no_args.status.code(), Some(2));
+    assert!(stderr(&no_args).contains("no input file"));
+
+    let unknown = run_args(&["--unknown"]);
+    assert_eq!(unknown.status.code(), Some(2));
+    assert!(stderr(&unknown).contains("unknown option"));
+
+    let two_files = run_args(&["a.js", "b.js"]);
+    assert_eq!(two_files.status.code(), Some(2));
+    assert!(stderr(&two_files).contains("expected one input file"));
+}
+
+#[test]
+fn accepts_a_path_after_a_double_dash() {
+    let project = Project::new();
+    let file = project.write("dash.js", "console.log(\"after dash\");\n");
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["--", path]);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "after dash\n");
+}
+
+/// The original lifecycle regression: enough heap activity to make V8 post a
+/// delayed GC task. An isolate created outside a Tokio context aborts the
+/// process when one arrives, so this runs in a child process.
+const HEAP_PRESSURE_SOURCE: &str = r#"
+const strings: string[] = [];
+let s = "abc";
+for (let i = 0; i < 22; i += 1) {
+    s += s;
+    strings.push(s.slice(0, 4096));
+    if (/abc/.test(strings[strings.length - 1] ?? "")) {
+        continue;
+    }
+}
+const numbers: number[] = [];
+for (let i = 0; i < 2_000_000; i += 1) numbers.push(i);
+console.log(strings.length, numbers.length);
+"#;
+
+#[test]
+fn survives_delayed_v8_gc_tasks_under_heap_pressure() {
+    let project = Project::new();
+    let file = project.write("pressure.ts", HEAP_PRESSURE_SOURCE);
+
+    // The abort is deterministic in the unfixed build. Two rounds also exercise
+    // starting and stopping the runtime's driver more than once.
+    for round in 0..2 {
+        let output = run_file_with_timeout(&file, Duration::from_secs(120));
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "round {round} exited abnormally; stderr: {}",
+            stderr(&output)
+        );
+        assert_eq!(stdout(&output), "22 2000000\n", "round {round}");
+        assert_eq!(stderr(&output), "", "round {round}");
+    }
+}
+
+#[test]
+fn rejects_import_attributes_and_exits_1() {
+    let project = Project::new();
+    project.write("data.js", "export const value = 1;\n");
+    let cases = [
+        (
+            "static.js",
+            "import value from \"./data.js\" with { type: \"json\" };\nconsole.log(value);\n",
+            "type: \"json\"",
+        ),
+        (
+            "dynamic.js",
+            "const data = await import(\"./data.js\", { with: { type: \"json\" } });\nconsole.log(data.value);\n",
+            "type: \"json\"",
+        ),
+        (
+            "builtin.js",
+            "const chars = await import(\"chars\", { with: { type: \"text\" } });\nconsole.log(chars.isLetter(65));\n",
+            "type: \"text\"",
+        ),
+    ];
+
+    for (name, source, expected) in cases {
+        let file = project.write(name, source);
+        let output = run_file(&file);
+        assert_eq!(output.status.code(), Some(1), "{name}");
+        let message = stderr(&output);
+        assert!(
+            message.contains("module type attributes are not implemented"),
+            "{name}: {message}"
+        );
+        assert!(message.contains(expected), "{name}: {message}");
+    }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        text.push_str(&format!("{byte:02x}"));
+    }
+    text
+}
+
+fn decode_hex(text: &str) -> Vec<u8> {
+    assert_eq!(text.len() % 2, 0, "hex length");
+    (0..text.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&text[index..index + 2], 16).expect("hex byte"))
+        .collect()
+}
+
+/// Locates the reference `age` or `rage` binary, or fails with instructions.
+///
+/// `AGE_BIN` wins when set. Otherwise `age` and `rage` are tried in that order,
+/// matching the README and the test's ignore reason. A configured binary that
+/// does not run is a failure, not a reason to try another one silently.
+fn reference_age() -> PathBuf {
+    let candidates: Vec<PathBuf> = match std::env::var_os("AGE_BIN") {
+        Some(bin) => vec![PathBuf::from(bin)],
+        None => vec![PathBuf::from("age"), PathBuf::from("rage")],
+    };
+    let mut tried = Vec::with_capacity(candidates.len());
+    for bin in &candidates {
+        tried.push(bin.display().to_string());
+        if let Ok(output) = Command::new(bin).arg("--version").output()
+            && output.status.success()
+        {
+            return bin.clone();
+        }
+    }
+    panic!(
+        "this interop test needs a reference age CLI; install age or rage, or set AGE_BIN (tried {})",
+        tried.join(", ")
+    );
+}
+
+/// Two-way binary age v1 interoperation with a real `age` executable.
+///
+/// Ignored by default because it depends on a tool outside the workspace. Run
+/// it with:
+///
+/// ```text
+/// cargo test -p neojs --test cli -- --ignored age_cli_interop
+/// ```
+///
+/// It fails, rather than skipping, when the tool is missing. The identity and
+/// recipient are the public X25519 test vector, never a credential.
+#[test]
+#[ignore = "requires age or rage on PATH (or AGE_BIN)"]
+fn age_cli_interop_with_external_age() {
+    const IDENTITY: &str =
+        "AGE-SECRET-KEY-1GQ9778VQXMMJVE8SK7J6VT8UJ4HDQAJUVSFCWCM02D8GEWQ72PVQ2Y5J33";
+    const RECIPIENT: &str = "age1t7rxyev2z3rw82stdlrrepyc39nvn86l5078zqkf5uasdy86jp6svpy7pa";
+
+    let age = reference_age();
+    let project = Project::new();
+
+    // Our encryption, the reference tool's decryption. The payload crosses
+    // several 64 KiB STREAM chunks.
+    let plaintext: Vec<u8> = (0..150_000).map(|index| (index * 37 + 11) as u8).collect();
+    let encrypt_file = project.write(
+        "encrypt.js",
+        &format!(
+            r#"
+import {{ encrypt }} from "age";
+const plaintext = new Uint8Array({});
+for (let i = 0; i < plaintext.length; i++) plaintext[i] = (i * 37 + 11) & 255;
+const ciphertext = encrypt("{RECIPIENT}", plaintext);
+let hex = "";
+for (const byte of ciphertext) hex += byte.toString(16).padStart(2, "0");
+console.log(hex);
+"#,
+            plaintext.len()
+        ),
+    );
+    let emitted = run_file(&encrypt_file);
+    assert_eq!(emitted.status.code(), Some(0), "{}", stderr(&emitted));
+    let ciphertext = decode_hex(stdout(&emitted).trim());
+    let ciphertext_path = project.path("ours.age");
+    fs::write(&ciphertext_path, &ciphertext).expect("write ciphertext");
+    let identity_path = project.path("identity.txt");
+    fs::write(&identity_path, format!("{IDENTITY}\n")).expect("write identity");
+
+    let decrypted = Command::new(&age)
+        .args(["--decrypt", "--identity"])
+        .arg(&identity_path)
+        .stdin(fs::File::open(&ciphertext_path).expect("open ciphertext"))
+        .output()
+        .expect("run reference age");
+    assert!(
+        decrypted.status.success(),
+        "reference age failed: {}",
+        String::from_utf8_lossy(&decrypted.stderr)
+    );
+    assert_eq!(decrypted.stdout, plaintext);
+
+    // The reference tool's encryption, our decryption. This payload also
+    // crosses several 64 KiB STREAM chunks.
+    let reverse_plaintext: Vec<u8> = (0..120_000).map(|index| (index * 13 + 5) as u8).collect();
+    let reverse_plain_path = project.path("reverse.bin");
+    fs::write(&reverse_plain_path, &reverse_plaintext).expect("write reverse plaintext");
+    let reverse = project.path("theirs.age");
+    let reverse_status = Command::new(&age)
+        .args(["--encrypt", "--recipient", RECIPIENT])
+        .stdin(fs::File::open(&reverse_plain_path).expect("open reverse plaintext"))
+        .stdout(fs::File::create(&reverse).expect("create reference output"))
+        .status()
+        .expect("run reference age encrypt");
+    assert!(reverse_status.success());
+    let reverse_ciphertext = fs::read(&reverse).expect("read reference output");
+    let decrypt_file = project.write(
+        "decrypt.js",
+        &format!(
+            r#"
+import {{ decrypt }} from "age";
+const hex = "{}";
+const ciphertext = new Uint8Array(hex.length / 2);
+for (let i = 0; i < ciphertext.length; i++) {{
+    ciphertext[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+}}
+const plaintext = decrypt("{IDENTITY}", ciphertext);
+let sum = 0;
+for (const byte of plaintext) sum = (sum + byte) % 1000003;
+console.log(plaintext.length, sum);
+"#,
+            encode_hex(&reverse_ciphertext)
+        ),
+    );
+    let decrypted_by_us = run_file(&decrypt_file);
+    assert_eq!(
+        decrypted_by_us.status.code(),
+        Some(0),
+        "{}",
+        stderr(&decrypted_by_us)
+    );
+    let expected_sum = reverse_plaintext
+        .iter()
+        .fold(0u32, |sum, byte| (sum + u32::from(*byte)) % 1_000_003);
+    assert_eq!(
+        stdout(&decrypted_by_us),
+        format!("{} {expected_sum}\n", reverse_plaintext.len())
+    );
+
+    // The empty file also interoperates in both directions.
+    let empty = project.path("empty.age");
+    let empty_status = Command::new(&age)
+        .args(["--encrypt", "--recipient", RECIPIENT])
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(&empty).expect("create empty output"))
+        .status()
+        .expect("run reference age encrypt");
+    assert!(empty_status.success());
+    let empty_ciphertext = fs::read(&empty).expect("read empty output");
+    let empty_decrypt = project.write(
+        "empty-decrypt.js",
+        &format!(
+            r#"
+import {{ decrypt }} from "age";
+const hex = "{}";
+const ciphertext = new Uint8Array(hex.length / 2);
+for (let i = 0; i < ciphertext.length; i++) {{
+    ciphertext[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+}}
+console.log(decrypt("{IDENTITY}", ciphertext).length);
+"#,
+            encode_hex(&empty_ciphertext)
+        ),
+    );
+    let empty_output = run_file(&empty_decrypt);
+    assert_eq!(
+        empty_output.status.code(),
+        Some(0),
+        "{}",
+        stderr(&empty_output)
+    );
+    assert_eq!(stdout(&empty_output), "0\n");
+}
+
+/// A deterministic loopback SSH server for the CLI smoke test.
+///
+/// The host key and password are fixed test values. No external host, key
+/// file, agent, or real credential is used.
+struct CliFinished {
+    commands: Vec<Vec<u8>>,
+    attempts: usize,
+}
+
+struct SshFixture {
+    port: u16,
+    host_key: Vec<u8>,
+    observed: mpsc::Receiver<Vec<u8>>,
+    attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    handle: thread::JoinHandle<()>,
+}
+
+enum CliAuth {
+    Password,
+    PublicKey(Vec<u8>),
+}
+
+impl SshFixture {
+    fn start() -> Self {
+        Self::start_with(CliAuth::Password)
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn start_public_key(blob: Vec<u8>) -> Self {
+        Self::start_with(CliAuth::PublicKey(blob))
+    }
+
+    fn start_with(auth: CliAuth) -> Self {
+        use neotales_ssh::ServerAuthPolicy;
+        use neotales_ssh::ServerConfig;
+        use neotales_ssh::ServerSessions;
+        use neotales_ssh::authenticate_server;
+        use neotales_ssh::hostkey::Ed25519Signer;
+        use neotales_ssh::session::SessionDecision;
+        use neotales_ssh::session::SessionEvent;
+        use neotales_ssh::session::SessionRequest;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+        let port = listener.local_addr().expect("address").port();
+        let mut seed = [21; 32];
+        let host_key = Ed25519Signer::from_seed(&mut seed)
+            .public_key_blob()
+            .expect("host key blob");
+        let (observed, observed_rx) = mpsc::channel();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_auth = Arc::clone(&attempts);
+        let handle = thread::spawn(move || {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
+            let mut seed = [21; 32];
+            let config = ServerConfig::new(Ed25519Signer::from_seed(&mut seed));
+            let Ok(mut transport) = config.accept(stream) else {
+                return;
+            };
+            let policy = match auth {
+                CliAuth::Password => ServerAuthPolicy::new(4).map(|policy| {
+                    policy.with_password_verifier(move |candidate: &str| {
+                        attempts_for_auth.fetch_add(1, Ordering::SeqCst);
+                        candidate == "cli-password"
+                    })
+                }),
+                CliAuth::PublicKey(authorized) => {
+                    let expected = authorized.clone();
+                    ServerAuthPolicy::new(4)
+                        .and_then(|policy| policy.with_authorized_key(&authorized))
+                        .map(|policy| {
+                            policy.with_public_key_verifier(
+                                move |_algorithm, key, _signed, _proof| {
+                                    attempts_for_auth.fetch_add(1, Ordering::SeqCst);
+                                    key == expected.as_slice()
+                                },
+                            )
+                        })
+                }
+            };
+            let Ok(policy) = policy else {
+                return;
+            };
+            if authenticate_server(&mut transport, &policy).is_err() {
+                return;
+            }
+            let mut sessions = ServerSessions::with_policy(transport, move |request| {
+                if let SessionRequest::Exec { command } = request {
+                    let _ = observed.send(command.to_vec());
+                    SessionDecision::accept(0)
+                } else {
+                    SessionDecision::reject()
+                }
+            });
+            loop {
+                match sessions.dispatch_one() {
+                    Ok(SessionEvent::Request {
+                        session,
+                        accepted: true,
+                        ..
+                    }) => {
+                        if sessions.send_data(session, b"cli fixture\n").is_ok() {
+                            let _ = sessions.send_exit_status(session);
+                            let _ = sessions.send_eof(session);
+                            let _ = sessions.send_close(session);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            port,
+            host_key,
+            observed: observed_rx,
+            attempts,
+            handle,
+        }
+    }
+
+    fn finish(self) -> CliFinished {
+        self.handle.join().expect("server thread");
+        CliFinished {
+            commands: self.observed.try_iter().collect(),
+            attempts: self.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+}
+
+/// A deterministic synthetic SSH agent over a private Unix socket.
+///
+/// It uses no real agent, environment, or credential. The signing key is
+/// derived from a fixed test seed and exists only in this process.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum AgentMode {
+    Sign,
+    Empty,
+    RefuseSign,
+    /// Advertise more identities than the client's documented bound.
+    ManyIdentities,
+}
+
+#[cfg(unix)]
+struct AgentFixture {
+    _dir: TempDir,
+    path: PathBuf,
+    connects: Arc<AtomicUsize>,
+    signs: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+    public_blob: Vec<u8>,
+}
+
+#[cfg(unix)]
+impl AgentFixture {
+    fn start(mode: AgentMode, seed: u8) -> Self {
+        use neotales_ssh::hostkey::Ed25519Signer;
+
+        let dir = tempfile::tempdir().expect("agent temp dir");
+        let path = dir.path().join("agent.sock");
+        let listener = UnixListener::bind(&path).expect("bind agent socket");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking agent socket");
+        let mut key_seed = [seed; 32];
+        let public_blob = Ed25519Signer::from_seed(&mut key_seed)
+            .public_key_blob()
+            .expect("agent public key");
+        let connects = Arc::new(AtomicUsize::new(0));
+        let signs = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let connects_for_thread = Arc::clone(&connects);
+        let signs_for_thread = Arc::clone(&signs);
+        let stop_for_thread = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            while !stop_for_thread.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        connects_for_thread.fetch_add(1, Ordering::SeqCst);
+                        serve_agent(stream, mode, seed, &signs_for_thread);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            _dir: dir,
+            path,
+            connects,
+            signs,
+            stop,
+            handle: Some(handle),
+            public_blob,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn public_blob(&self) -> &[u8] {
+        &self.public_blob
+    }
+
+    /// Stop the agent and return `(connections, sign requests)`.
+    fn finish(mut self) -> (usize, usize) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("agent thread");
+        }
+        (
+            self.connects.load(Ordering::SeqCst),
+            self.signs.load(Ordering::SeqCst),
+        )
+    }
+}
+
+#[cfg(unix)]
+fn serve_agent(mut stream: UnixStream, mode: AgentMode, seed: u8, signs: &AtomicUsize) {
+    use neotales_ssh::agent_server::AgentServer;
+    use neotales_ssh::auth::PublicKeySigner;
+    use neotales_ssh::hostkey::Ed25519Signer;
+
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let mut server = match mode {
+        AgentMode::Sign => {
+            let mut key_seed = [seed; 32];
+            let signer = PublicKeySigner::ed25519(Ed25519Signer::from_seed(&mut key_seed));
+            Some(AgentServer::from_signer(signer).expect("synthetic agent signer"))
+        }
+        AgentMode::Empty => Some(AgentServer::default()),
+        AgentMode::RefuseSign => None,
+        AgentMode::ManyIdentities => {
+            let signers = (0..17_u8)
+                .map(|offset| {
+                    let mut key_seed = [seed.wrapping_add(offset); 32];
+                    PublicKeySigner::ed25519(Ed25519Signer::from_seed(&mut key_seed))
+                })
+                .collect();
+            Some(AgentServer::from_signers(signers).expect("many-identity agent"))
+        }
+    };
+    let mut refuse_blob = Vec::new();
+    if matches!(mode, AgentMode::RefuseSign) {
+        let mut key_seed = [seed; 32];
+        refuse_blob = Ed25519Signer::from_seed(&mut key_seed)
+            .public_key_blob()
+            .expect("refusal public key");
+    }
+    while let Some(request) = read_agent_frame(&mut stream) {
+        if request.first() == Some(&13) {
+            signs.fetch_add(1, Ordering::SeqCst);
+        }
+        let response = match mode {
+            AgentMode::Sign | AgentMode::Empty | AgentMode::ManyIdentities => server
+                .as_mut()
+                .expect("agent server")
+                .answer_read_only(&request),
+            AgentMode::RefuseSign => match request.first() {
+                Some(11) => agent_identities_answer(&refuse_blob),
+                _ => vec![5],
+            },
+        };
+        if !write_agent_frame(&mut stream, &response) {
+            break;
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_agent_frame(stream: &mut UnixStream) -> Option<Vec<u8>> {
+    let mut length = [0_u8; 4];
+    stream.read_exact(&mut length).ok()?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length == 0 || length > 1_048_576 {
+        return None;
+    }
+    let mut body = vec![0_u8; length];
+    stream.read_exact(&mut body).ok()?;
+    Some(body)
+}
+
+#[cfg(unix)]
+fn write_agent_frame(stream: &mut UnixStream, body: &[u8]) -> bool {
+    let Ok(length) = u32::try_from(body.len()) else {
+        return false;
+    };
+    stream.write_all(&length.to_be_bytes()).is_ok() && stream.write_all(body).is_ok()
+}
+
+#[cfg(unix)]
+fn agent_identities_answer(blob: &[u8]) -> Vec<u8> {
+    let mut body = vec![12];
+    body.extend_from_slice(&1_u32.to_be_bytes());
+    write_ssh_string(&mut body, blob);
+    write_ssh_string(&mut body, b"");
+    body
+}
+
+#[cfg(unix)]
+fn write_ssh_string(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(0).to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn ssh_bytes(bytes: &[u8]) -> String {
+    let items = bytes
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("Uint8Array.from([{items}])")
+}
+
+#[test]
+fn ssh_builtin_connects_to_a_loopback_fixture_through_the_cli() {
+    let fixture = SshFixture::start();
+    let project = Project::new();
+    let script = r#"
+import { connect } from "neo:ssh";
+
+const registry = Neo.getBuiltInModule("ssh");
+if (typeof registry !== "object" || registry === null) throw Error("missing ssh registry module");
+if (registry.connect !== connect) throw Error("registry and import identity");
+
+let refused = false;
+try {
+    connect({ host: "127.0.0.1", port: 1, username: "fixture", password: "fixture" });
+} catch (error) {
+    if (error.name !== "SshError" || error.code !== "NEO_SSH_HOST_KEY_REQUIRED") throw error;
+    refused = true;
+}
+if (!refused) throw Error("a connection without host trust was accepted");
+
+const connection = connect({
+    host: "127.0.0.1",
+    port: __PORT__,
+    username: "fixture",
+    password: "cli-password",
+    hostKey: __HOST_KEY__,
+    connectTimeoutMs: 5000,
+    execTimeoutMs: 5000,
+});
+const result = connection.exec("cli-smoke");
+if (result.status !== 0) throw Error("status " + result.status);
+let text = "";
+for (let index = 0; index < result.stdout.length; index += 1) {
+    text += String.fromCharCode(result.stdout[index]);
+}
+if (text !== "cli fixture\n") throw Error("stdout " + JSON.stringify(text));
+connection.close();
+console.log("ssh ok");
+"#
+    .replace("__PORT__", &fixture.port.to_string())
+    .replace("__HOST_KEY__", &ssh_bytes(&fixture.host_key));
+    let file = project.write("ssh-cli.js", &script);
+
+    let output = run_file_with_timeout(&file, Duration::from_secs(30));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "ssh ok\n");
+    assert_eq!(stderr(&output), "");
+    let finished = fixture.finish();
+    assert_eq!(finished.commands, vec![b"cli-smoke".to_vec()]);
+    assert_eq!(finished.attempts, 1);
+}
+
+/// The deterministic host key used by `SshFixture`.
+#[cfg(unix)]
+fn cli_host_key(seed: u8) -> Vec<u8> {
+    use neotales_ssh::hostkey::Ed25519Signer;
+    let mut seed = [seed; 32];
+    Ed25519Signer::from_seed(&mut seed)
+        .public_key_blob()
+        .expect("host key blob")
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_agent_auth_uses_the_synthetic_agent_and_runs_the_command() {
+    let agent = AgentFixture::start(AgentMode::Sign, 31);
+    let fixture = SshFixture::start_public_key(agent.public_blob().to_vec());
+    let project = Project::new();
+    let script = r#"
+import { connect } from "neo:ssh";
+const connection = connect({
+    host: "127.0.0.1",
+    port: __PORT__,
+    username: "fixture",
+    agent: true,
+    hostKey: __HOST_KEY__,
+    connectTimeoutMs: 5000,
+    execTimeoutMs: 5000,
+});
+const result = connection.exec("agent-smoke");
+if (result.status !== 0) throw Error("status " + result.status);
+let text = "";
+for (let index = 0; index < result.stdout.length; index += 1) {
+    text += String.fromCharCode(result.stdout[index]);
+}
+if (text !== "cli fixture\n") throw Error("stdout " + JSON.stringify(text));
+connection.close();
+console.log("agent ok");
+"#
+    .replace("__PORT__", &fixture.port.to_string())
+    .replace("__HOST_KEY__", &ssh_bytes(&fixture.host_key));
+    let file = project.write("ssh-agent.js", &script);
+
+    let output = run_file_with_agent(&file, agent.path(), Duration::from_secs(30));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "agent ok\n");
+    assert_eq!(stderr(&output), "");
+
+    let finished = fixture.finish();
+    assert_eq!(finished.commands, vec![b"agent-smoke".to_vec()]);
+    assert_eq!(finished.attempts, 1);
+    let (connections, signs) = agent.finish();
+    assert!(connections >= 1, "the agent was not contacted");
+    assert!(signs >= 1, "the agent was not asked to sign");
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_agent_is_not_contacted_when_the_host_key_is_rejected() {
+    let agent = AgentFixture::start(AgentMode::Sign, 31);
+    let fixture = SshFixture::start_public_key(agent.public_blob().to_vec());
+    let wrong_host_key = cli_host_key(7);
+    let project = Project::new();
+    let script = r#"
+import { connect } from "neo:ssh";
+let failed = false;
+try {
+    connect({
+        host: "127.0.0.1",
+        port: __PORT__,
+        username: "fixture",
+        agent: true,
+        hostKey: __WRONG_HOST_KEY__,
+        connectTimeoutMs: 5000,
+        execTimeoutMs: 5000,
+    });
+} catch (error) {
+    if (error.name !== "SshError" || error.code !== "NEO_SSH_HOST_KEY") throw error;
+    failed = true;
+}
+if (!failed) throw Error("the untrusted host key was accepted");
+console.log("host rejected");
+"#
+    .replace("__PORT__", &fixture.port.to_string())
+    .replace("__WRONG_HOST_KEY__", &ssh_bytes(&wrong_host_key));
+    let file = project.write("ssh-agent-host-reject.js", &script);
+
+    let output = run_file_with_agent(&file, agent.path(), Duration::from_secs(30));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "host rejected\n");
+    let finished = fixture.finish();
+    assert!(finished.commands.is_empty());
+    assert_eq!(
+        finished.attempts, 0,
+        "SSH authentication ran before host-key verification"
+    );
+    let (connections, signs) = agent.finish();
+    assert_eq!(connections, 0, "the agent was contacted before host trust");
+    assert_eq!(signs, 0, "the agent was asked to sign before host trust");
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_agent_without_identities_is_a_fixed_error() {
+    let agent = AgentFixture::start(AgentMode::Empty, 31);
+    let fixture = SshFixture::start_public_key(agent.public_blob().to_vec());
+    let project = Project::new();
+    let script = r#"
+import { connect } from "neo:ssh";
+let failed = false;
+try {
+    connect({
+        host: "127.0.0.1",
+        port: __PORT__,
+        username: "fixture",
+        agent: true,
+        hostKey: __HOST_KEY__,
+        connectTimeoutMs: 5000,
+        execTimeoutMs: 5000,
+    });
+} catch (error) {
+    if (error.name !== "SshError" || error.code !== "NEO_SSH_AGENT") throw error;
+    failed = true;
+}
+if (!failed) throw Error("an empty agent was accepted");
+console.log("empty agent");
+"#
+    .replace("__PORT__", &fixture.port.to_string())
+    .replace("__HOST_KEY__", &ssh_bytes(&fixture.host_key));
+    let file = project.write("ssh-agent-empty.js", &script);
+
+    let output = run_file_with_agent(&file, agent.path(), Duration::from_secs(30));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "empty agent\n");
+    let finished = fixture.finish();
+    assert!(finished.commands.is_empty());
+    assert_eq!(finished.attempts, 0);
+    let (connections, signs) = agent.finish();
+    assert!(connections >= 1);
+    assert_eq!(signs, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_agent_sign_refusal_is_a_fixed_error() {
+    let agent = AgentFixture::start(AgentMode::RefuseSign, 31);
+    let fixture = SshFixture::start_public_key(agent.public_blob().to_vec());
+    let project = Project::new();
+    let script = r#"
+import { connect } from "neo:ssh";
+let failed = false;
+try {
+    connect({
+        host: "127.0.0.1",
+        port: __PORT__,
+        username: "fixture",
+        agent: true,
+        hostKey: __HOST_KEY__,
+        connectTimeoutMs: 5000,
+        execTimeoutMs: 5000,
+    });
+} catch (error) {
+    if (error.name !== "SshError" || error.code !== "NEO_SSH_AGENT") throw error;
+    failed = true;
+}
+if (!failed) throw Error("the refusing agent was accepted");
+console.log("agent refused");
+"#
+    .replace("__PORT__", &fixture.port.to_string())
+    .replace("__HOST_KEY__", &ssh_bytes(&fixture.host_key));
+    let file = project.write("ssh-agent-refuse.js", &script);
+
+    let output = run_file_with_agent(&file, agent.path(), Duration::from_secs(30));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "agent refused\n");
+    let finished = fixture.finish();
+    assert!(finished.commands.is_empty());
+    assert_eq!(finished.attempts, 0);
+    let (connections, signs) = agent.finish();
+    assert!(connections >= 1);
+    assert_eq!(signs, 1, "the agent was not asked to sign exactly once");
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_password_mode_never_contacts_the_agent() {
+    let agent = AgentFixture::start(AgentMode::Sign, 31);
+    let fixture = SshFixture::start();
+    let project = Project::new();
+    let script = r#"
+import { connect } from "neo:ssh";
+const connection = connect({
+    host: "127.0.0.1",
+    port: __PORT__,
+    username: "fixture",
+    password: "cli-password",
+    agent: false,
+    hostKey: __HOST_KEY__,
+    connectTimeoutMs: 5000,
+    execTimeoutMs: 5000,
+});
+const result = connection.exec("password-mode");
+if (result.status !== 0) throw Error("status");
+connection.close();
+console.log("password ok");
+"#
+    .replace("__PORT__", &fixture.port.to_string())
+    .replace("__HOST_KEY__", &ssh_bytes(&fixture.host_key));
+    let file = project.write("ssh-password-no-agent.js", &script);
+
+    let output = run_file_with_agent(&file, agent.path(), Duration::from_secs(30));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "password ok\n");
+    let finished = fixture.finish();
+    assert_eq!(finished.commands, vec![b"password-mode".to_vec()]);
+    assert_eq!(finished.attempts, 1);
+    let (connections, signs) = agent.finish();
+    assert_eq!(connections, 0, "password mode touched SSH_AUTH_SOCK");
+    assert_eq!(signs, 0);
+}
+
+#[cfg(not(unix))]
+#[test]
+fn ssh_agent_is_rejected_on_non_unix_platforms() {
+    let fixture = SshFixture::start();
+    let project = Project::new();
+    let script = r#"
+import { connect } from "neo:ssh";
+let failed = false;
+try {
+    connect({
+        host: "127.0.0.1",
+        port: __PORT__,
+        username: "fixture",
+        agent: true,
+        hostKey: __HOST_KEY__,
+        connectTimeoutMs: 5000,
+        execTimeoutMs: 5000,
+    });
+} catch (error) {
+    if (error.name !== "SshError" || error.code !== "NEO_SSH_AGENT") throw error;
+    failed = true;
+}
+if (!failed) throw Error("agent authentication is not rejected on this platform");
+console.log("agent unsupported");
+"#
+    .replace("__PORT__", &fixture.port.to_string())
+    .replace("__HOST_KEY__", &ssh_bytes(&fixture.host_key));
+    let file = project.write("ssh-agent-unsupported.js", &script);
+
+    let output = run_file_with_timeout(&file, Duration::from_secs(30));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "agent unsupported\n");
+    let finished = fixture.finish();
+    assert!(finished.commands.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_agent_identity_bound_is_a_fixed_error() {
+    let agent = AgentFixture::start(AgentMode::ManyIdentities, 31);
+    let fixture = SshFixture::start_public_key(agent.public_blob().to_vec());
+    let project = Project::new();
+    let script = r#"
+import { connect } from "neo:ssh";
+let failed = false;
+try {
+    connect({
+        host: "127.0.0.1",
+        port: __PORT__,
+        username: "fixture",
+        agent: true,
+        hostKey: __HOST_KEY__,
+        connectTimeoutMs: 5000,
+        execTimeoutMs: 5000,
+    });
+} catch (error) {
+    if (error.name !== "SshError" || error.code !== "NEO_SSH_AGENT") throw error;
+    failed = true;
+}
+if (!failed) throw Error("an oversized agent identity set was accepted");
+console.log("agent bounded");
+"#
+    .replace("__PORT__", &fixture.port.to_string())
+    .replace("__HOST_KEY__", &ssh_bytes(&fixture.host_key));
+    let file = project.write("ssh-agent-many.js", &script);
+
+    let output = run_file_with_agent(&file, agent.path(), Duration::from_secs(30));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "agent bounded\n");
+    let finished = fixture.finish();
+    assert!(finished.commands.is_empty());
+    assert_eq!(finished.attempts, 0);
+    let (connections, signs) = agent.finish();
+    assert!(connections >= 1);
+    assert_eq!(signs, 0);
+}

@@ -1,0 +1,53 @@
+[workspace]
+resolver = "3"
+members = ["neojs-core", "neojs"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/neotales/neojs"
+# Verified with rustc 1.100.0. The `neotales-age` dependency requires 1.100.
+# Dependencies can raise this floor; lower it only after a successful build
+# with the lower toolchain.
+rust-version = "1.100.0"
+authors = ["NeoTales", "x0craft"]
+
+[workspace.dependencies]
+aes = { version = "0.9.4", default-features = false }
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc", "zeroize"] }
+# CBC mode for the `createEncryptor`/`createDecryptor` surface. The crate is
+# already present in the graph through `neotales-age`; this direct dependency
+# reuses the reviewed 0.2.1 version. `block-padding` supplies PKCS#7 and the
+# no-padding check. It is a RustCrypto crate, MIT OR Apache-2.0.
+cbc = { version = "0.2.1", default-features = false, features = ["block-padding"] }
+# Password hashing. `bcrypt` supplies the bcrypt primitive, modular-crypt
+# parsing/formatting, and constant-time verification. `pbkdf2` is already in
+# the graph through `neotales-age`; the SHA-2 feature reuses this workspace's
+# reviewed `sha2` version.
+bcrypt = { version = "0.19.3" }
+deno_ast = { version = "0.53.3", default-features = false, features = ["type_strip"] }
+deno_core = "0.413.0"
+deno_error = "0.7"
+getrandom = "0.4"
+# SHA-2 and HMAC are the RustCrypto crates already linked transitively by the
+# neotales age and SSH backends. The `neo:crypto` hash surface uses the same
+# reviewed versions directly.
+hmac = { version = "0.13.0", default-features = false }
+pbkdf2 = { version = "0.13.0", default-features = false, features = ["sha2"] }
+sha2 = { version = "0.11.1", default-features = false, features = ["alloc"] }
+# Best-effort clearing of password and salt copies made by the password
+# hashing module. It is not a complete zeroization guarantee; see the module
+# documentation.
+zeroize = "1.9.0"
+# Pinned to the reviewed alpha. The age v1 wire format is stable; the Rust API
+# is not, so a version bump is a deliberate review, not an automatic update.
+neotales-age = "=0.0.0-alpha.1"
+# Pinned for the same reason: SSH wire formats are stable, but this crate is an
+# alpha and its Rust API can change. It declares rust-version 1.100, the same
+# floor as this workspace.
+neotales-ssh = "=0.0.0-alpha.1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
+tempfile = "3"
+url = "2"
