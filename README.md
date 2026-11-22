@@ -784,6 +784,21 @@ ok 2 - adds asynchronously
 # 1 selected file(s): 2 test(s): 2 passed, 0 failed, 0 pending, 0 unhandled, 0 unsettled; 0 file(s) failed
 ```
 
+Remote loading is disabled for test files too. Give `--allow-remote` before or after `test` to let
+every selected file import absolute `https:` modules:
+
+```sh
+neojs --allow-remote test "tests/**/*.test.js"
+neojs test --allow-remote "tests/**/*.test.js"
+```
+
+Each file still gets a fresh runtime, so each has its own default remote request, module, byte, and
+redirect limits. The user-profile package cache is shared across those fresh runtimes and with
+`neojs --allow-remote <file>`, because it is keyed by URL rather than by runtime. `--` ends option
+parsing, so a file literally named `--allow-remote` can still be selected after it. The remote rules
+are the same as for a run: only credential-free `https:` is accepted, relative imports inside a
+remote module stay remote, and the cache behavior described above applies.
+
 The runner is registration-based, not Node's `node:test`. The CLI runs it after the entry module
 settles, so a test registered after a top-level `await` is included. A file that registers no tests
 fails. A rejected Promise, a rejected thenable, a returned generator object, a pending test, an

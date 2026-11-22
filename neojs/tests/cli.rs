@@ -27,6 +27,9 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use neojs_core::RemoteOptions;
+use neojs_core::Runtime;
+use neojs_core::test_support::TestRemoteResponse;
 use tempfile::TempDir;
 
 struct Project {
@@ -2657,12 +2660,30 @@ fn test_command_expands_files_and_globs_without_duplicates() {
     );
 }
 
-/// A loopback port that was bound and released, so a connection is refused
-/// immediately. This keeps the CLI remote tests off any external network while
-/// still proving a selected test file's runtime was allowed to try the fetch.
-fn unused_loopback_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    listener.local_addr().expect("local addr").port()
+/// A loopback address held for the lifetime of a test.
+///
+/// The listener keeps the port from being reused by another process, so the
+/// URL is stable for the whole test. The cache fixture below means a passing run
+/// never opens a connection; if a regression misses the cache, the request
+/// reaches this loopback socket rather than an external network.
+struct HeldLoopback {
+    url: String,
+    _listener: TcpListener,
+}
+
+impl HeldLoopback {
+    fn new() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        Self {
+            url: format!("https://127.0.0.1:{port}/dep.js"),
+            _listener: listener,
+        }
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
 }
 
 fn write_remote_importing_test(project: &Project, name: &str, url: &str) -> PathBuf {
@@ -2676,15 +2697,59 @@ fn write_remote_importing_test(project: &Project, name: &str, url: &str) -> Path
     )
 }
 
+/// Runs the CLI with a private cache home and a deadline.
+///
+/// Setting `XDG_CACHE_HOME` keeps the spawned process away from the real
+/// user-profile cache, and the deadline fails a cache miss or hang without
+/// waiting for the remote timeout.
+fn run_args_with_cache_home(args: &[&str], cache_home: &Path, timeout: Duration) -> Output {
+    let child = Command::new(env!("CARGO_BIN_EXE_neojs"))
+        .args(args)
+        .env("XDG_CACHE_HOME", cache_home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn neojs");
+    run_child(child, timeout)
+}
+
+/// Publishes one deterministic module into `cache_home`'s package cache.
+///
+/// The scripted transport is used only to seed the fixture; the spawned CLI
+/// then exercises the production cache path. No connection is made, so the test
+/// is deterministic and needs no local TLS certificate or external network.
+fn seed_remote_cache(cache_home: &Path, url: &str) {
+    let cache_dir = cache_home.join("neojs").join("packages");
+    let expected = url.to_string();
+    let mut runtime = Runtime::with_remote_transport(
+        RemoteOptions::new().with_cache_dir(&cache_dir),
+        move |requested, _timeout, _if_none_match, _if_modified_since| {
+            if requested != expected {
+                return Err("unexpected remote URL".to_string());
+            }
+            Ok(TestRemoteResponse {
+                status: 200,
+                cache_control: Some("max-age=3600".to_string()),
+                body: b"export const value = 1;\n".to_vec(),
+                ..TestRemoteResponse::default()
+            })
+        },
+    )
+    .expect("seed runtime");
+    runtime.run_url(url).expect("seed remote cache");
+    assert!(cache_dir.is_dir(), "cache directory was not created");
+}
+
 /// `--allow-remote` must reach every fresh test runtime, whether it is written
-/// before or after `test`. The fetch itself fails against a closed loopback
-/// port, but it must get far enough to attempt it instead of reporting that
-/// remote loading is disabled.
+/// before or after `test`, and a selected test must be able to import and use a
+/// remote module end to end.
 #[test]
 fn test_command_accepts_allow_remote_for_remote_imports() {
     let project = Project::new();
-    let url = format!("https://127.0.0.1:{}/dep.js", unused_loopback_port());
-    let file = write_remote_importing_test(&project, "remote.test.js", &url);
+    let cache_home = project.path("cache-home");
+    let loopback = HeldLoopback::new();
+    let file = write_remote_importing_test(&project, "remote.test.js", loopback.url());
+    seed_remote_cache(&cache_home, loopback.url());
     let path = file.to_str().expect("utf-8 path");
 
     for prefix in [
@@ -2693,32 +2758,38 @@ fn test_command_accepts_allow_remote_for_remote_imports() {
     ] {
         let mut args = prefix.to_vec();
         args.push(path);
-        let output = run_args(&args);
+        let output = run_args_with_cache_home(&args, &cache_home, Duration::from_secs(10));
         assert_eq!(
             output.status.code(),
-            Some(1),
+            Some(0),
             "args: {args:?}, stderr: {}",
             stderr(&output)
         );
-        let message = stderr(&output);
+        let printed = stdout(&output);
         assert!(
-            !message.contains("remote module loading is disabled"),
-            "args: {args:?}, stderr: {message}"
+            contains_line(&printed, "ok 1 - remote import"),
+            "args: {args:?}, stdout: {printed}"
         );
-        assert!(message.contains("cannot load"), "stderr: {message}");
+        assert!(
+            printed.contains("# 1 selected file(s): 1 test(s): 1 passed"),
+            "args: {args:?}, stdout: {printed}"
+        );
     }
 }
 
 /// Without the flag the same selected test file must fail with remote loading
-/// disabled, not silently ignore the import or attempt a fetch.
+/// disabled even when the remote module is already in the shared package cache,
+/// so the cache cannot mask a missing opt-in.
 #[test]
 fn test_command_refuses_remote_imports_without_allow_remote() {
     let project = Project::new();
-    let url = format!("https://127.0.0.1:{}/dep.js", unused_loopback_port());
-    let file = write_remote_importing_test(&project, "remote.test.js", &url);
+    let cache_home = project.path("cache-home");
+    let loopback = HeldLoopback::new();
+    let file = write_remote_importing_test(&project, "remote.test.js", loopback.url());
+    seed_remote_cache(&cache_home, loopback.url());
     let path = file.to_str().expect("utf-8 path");
 
-    let output = run_args(&["test", path]);
+    let output = run_args_with_cache_home(&["test", path], &cache_home, Duration::from_secs(10));
 
     assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
     let message = stderr(&output);
