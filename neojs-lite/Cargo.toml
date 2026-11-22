@@ -1,6 +1,6 @@
 [package]
-name = "neoltjs"
-description = "Command-line ECMAScript runtime for NeoLTJS, built on QuickJS"
+name = "neojs-lite"
+description = "Command-line ECMAScript runtime for NeoJS Lite, built on QuickJS"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,11 +10,11 @@ authors.workspace = true
 readme = "README.md"
 
 [[bin]]
-name = "neoltjs"
+name = "neojs-lite"
 path = "src/main.rs"
 
 [dependencies]
-neoltjs-core = { version = "0.1.0", path = "../neoltjs-core" }
+neojs-lite-core = { version = "0.1.0", path = "../neojs-lite-core" }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use neoltjs_core::{Error, Runtime};
+use neojs_lite_core::{Error, Runtime};
 
 fn write(dir: &tempfile::TempDir, name: &str, source: &str) -> std::path::PathBuf {
     let path = dir.path().join(name);

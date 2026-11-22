@@ -1,6 +1,6 @@
 # Third-party notices
 
-`neoltjs-core` links two MIT-licensed third-party components. This file records
+`neojs-lite-core` links two MIT-licensed third-party components. This file records
 their copyright and permission notices. It is not a complete dependency-license
 inventory for the workspace.
 

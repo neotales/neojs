@@ -1,4 +1,4 @@
-//! End-to-end tests for the `neoltjs` executable.
+//! End-to-end tests for the `neojs-lite` executable.
 
 use std::fs;
 use std::process::Command;
@@ -12,10 +12,10 @@ fn write(dir: &tempfile::TempDir, name: &str, source: &str) {
 }
 
 fn run(args: &[&std::ffi::OsStr]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_neoltjs"))
+    Command::new(env!("CARGO_BIN_EXE_neojs-lite"))
         .args(args)
         .output()
-        .expect("run neoltjs")
+        .expect("run neojs-lite")
 }
 
 fn stdout(output: &std::process::Output) -> String {
@@ -127,7 +127,7 @@ fn a_failing_module_exits_one() {
     let output = run(&[file.as_os_str()]);
     assert_eq!(output.status.code(), Some(1));
     let error = stderr(&output);
-    assert!(error.starts_with("neoltjs: cannot evaluate"), "{error}");
+    assert!(error.starts_with("neojs-lite: cannot evaluate"), "{error}");
     assert!(error.contains("boom"), "{error}");
 }
 
@@ -180,7 +180,7 @@ fn help_and_version_succeed() {
     let version = run(&[std::ffi::OsStr::new("--version")]);
     assert!(version.status.success());
     assert!(
-        stdout(&version).starts_with("neoltjs "),
+        stdout(&version).starts_with("neojs-lite "),
         "{}",
         stdout(&version)
     );

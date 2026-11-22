@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["neojs-core", "neojs", "neojs-module-policy", "neoltjs-core", "neoltjs"]
+members = ["neojs-core", "neojs", "neojs-module-policy", "neojs-lite-core", "neojs-lite"]
 # The V8 runtime is the default build. QuickJS crates are opt-in with `-p`, so
 # `cargo build`, `cargo test`, and `cargo clippy` without a package selection do
 # not compile QuickJS or put `rquickjs` in the default dependency graph.

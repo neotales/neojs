@@ -1,6 +1,9 @@
-//! A small embeddable QuickJS runtime for NeoLTJS.
+//! A small embeddable QuickJS runtime for NeoJS Lite.
 //!
-//! `neoltjs-core` executes ECMAScript module files with [rquickjs] and
+//! This is the primary NeoJS Lite interface: embed [`Runtime`] and run a module
+//! file. The `neojs-lite` executable is a secondary command-line wrapper.
+//!
+//! `neojs-lite-core` executes ECMAScript module files with [rquickjs] and
 //! QuickJS-NG. It is a separate crate from the V8-based `neojs-core`; the
 //! default `cargo build` in this workspace does not compile it and does not put
 //! QuickJS or `rquickjs` in the V8 graph. Both runtimes share the engine-neutral
@@ -40,7 +43,7 @@
 //!   implemented.
 //!
 //! These are current limitations, not planned API contracts. Check the tests
-//! and the CLI help for the surface that exists today.
+//! and the crate-level documentation for the surface that exists today.
 
 mod loader;
 mod runtime;

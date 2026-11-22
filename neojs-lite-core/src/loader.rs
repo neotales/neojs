@@ -15,9 +15,9 @@ use rquickjs::{
 };
 use url::Url;
 
-const BARE_SPECIFIER_REASON: &str = "bare module specifiers are not implemented in neoltjs; use a relative path, an absolute path, or a file: URL";
+const BARE_SPECIFIER_REASON: &str = "bare module specifiers are not implemented in neojs-lite; use a relative path, an absolute path, or a file: URL";
 const TYPE_ATTRIBUTE_REASON: &str =
-    "import attributes are not implemented; neoltjs loads ECMAScript modules only";
+    "import attributes are not implemented; neojs-lite loads ECMAScript modules only";
 
 /// Rejects any non-empty import attribute bag.
 ///
@@ -102,7 +102,7 @@ fn candidate_path(base: &str, name: &str) -> Result<PathBuf> {
                 base,
                 name,
                 format!(
-                    "the `{scheme}:` scheme is not implemented in neoltjs; use a relative path, an absolute path, or a file: URL"
+                    "the `{scheme}:` scheme is not implemented in neojs-lite; use a relative path, an absolute path, or a file: URL"
                 ),
             )),
         };
@@ -156,7 +156,7 @@ impl Loader for FileLoader {
             Ok(ModuleFormat::TypeScript) => {
                 return Err(Error::new_loading_message(
                     name,
-                    "TypeScript is not implemented in neoltjs yet; use a .js or .mjs file",
+                    "TypeScript is not implemented in neojs-lite yet; use a .js or .mjs file",
                 ));
             }
             Err(reason) => return Err(Error::new_loading_message(name, reason)),

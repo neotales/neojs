@@ -1956,19 +1956,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "neojs-module-policy"
-version = "0.1.0"
-
-[[package]]
-name = "neoltjs"
+name = "neojs-lite"
 version = "0.1.0"
 dependencies = [
- "neoltjs-core",
+ "neojs-lite-core",
  "tempfile",
 ]
 
 [[package]]
-name = "neoltjs-core"
+name = "neojs-lite-core"
 version = "0.1.0"
 dependencies = [
  "neojs-module-policy",
@@ -1977,6 +1973,10 @@ dependencies = [
  "thiserror",
  "url",
 ]
+
+[[package]]
+name = "neojs-module-policy"
+version = "0.1.0"
 
 [[package]]
 name = "neotales-age"

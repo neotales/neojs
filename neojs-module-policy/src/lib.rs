@@ -4,7 +4,7 @@
 //! other JavaScript engine: which file extensions are executable modules, which
 //! extensions are recognised but unsupported, and which specifiers are file
 //! paths rather than bare module names. Both the V8 runtime (`neojs-core`) and
-//! the QuickJS runtime (`neoltjs-core`) depend on it, so an extension that one
+//! the QuickJS runtime (`neojs-lite-core`) depend on it, so an extension that one
 //! engine rejects is rejected with the same reason by the other.
 //!
 //! The crate has no dependencies and performs no I/O. Engine-specific work —

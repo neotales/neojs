@@ -12,6 +12,12 @@ Runs ECMAScript modules and erasable TypeScript on V8 through Deno's Rust bindin
 cargo add neojs-core
 ```
 
+For the opt-in, embeddable QuickJS runtime:
+
+```sh
+cargo add neojs-lite-core
+```
+
 Build the `neojs` command from a checkout:
 
 ```sh
@@ -1274,12 +1280,28 @@ thread that will use it; it is not `Send`.
 The [ECMAScript npm modules proposal](docs/esm-npm-proposal.md) is a design proposal for review,
 not implemented behavior.
 
-### Separate QuickJS runtime
+### QuickJS runtime: neojs-lite-core
 
-`neoltjs-core` and the `neoltjs` command are a second, opt-in runtime built on QuickJS through
-`rquickjs`. They are separate workspace members and are not part of the default build:
-`cargo build` neither compiles QuickJS nor puts `rquickjs` in the V8 dependency graph. Build them
-explicitly with `cargo build -p neoltjs`.
+`neojs-lite-core` is the primary, embeddable QuickJS runtime, with `neojs-lite` as a secondary
+command-line wrapper. They are separate workspace members and are not part of the default build:
+`cargo build` neither compiles QuickJS nor puts `rquickjs` in the V8 dependency graph.
+
+```rust
+use neojs_lite_core::Runtime;
+
+fn main() -> Result<(), neojs_lite_core::Error> {
+    let mut runtime = Runtime::new()?;
+    runtime.run_file("main.js")
+}
+```
+
+Build the embeddable crate or the command explicitly:
+
+```sh
+cargo build -p neojs-lite-core
+cargo run -p neojs-lite-core --example embed -- examples/hello.js
+cargo build -p neojs-lite
+```
 
 The QuickJS runtime currently runs `.js`, `.mjs`, and extensionless ECMAScript modules, resolves
 relative imports and `file:` URLs, and awaits top-level `await` that settles from QuickJS's job

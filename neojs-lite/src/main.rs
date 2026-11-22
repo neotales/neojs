@@ -1,22 +1,22 @@
-//! Command-line entry point for NeoLTJS on QuickJS.
+//! Command-line entry point for NeoJS Lite on QuickJS.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use neoltjs_core::{Error, Runtime};
+use neojs_lite_core::{Error, Runtime};
 
 /// Exit code for a module that failed while loading or running.
 const EXIT_RUNTIME_FAILURE: u8 = 1;
-/// Exit code for a command neoltjs could not start.
+/// Exit code for a command neojs-lite could not start.
 const EXIT_STARTUP_FAILURE: u8 = 2;
 
 fn main() -> ExitCode {
     let command = match parse_args(std::env::args_os().skip(1).collect()) {
         Ok(command) => command,
         Err(message) => {
-            eprintln!("neoltjs: {message}");
-            eprintln!("Try 'neoltjs --help'.");
+            eprintln!("neojs-lite: {message}");
+            eprintln!("Try 'neojs-lite --help'.");
             return ExitCode::from(EXIT_STARTUP_FAILURE);
         }
     };
@@ -27,7 +27,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Version => {
-            println!("neoltjs {}", env!("CARGO_PKG_VERSION"));
+            println!("neojs-lite {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         Command::Run(path) => run(&path),
@@ -73,7 +73,7 @@ fn run(path: &Path) -> ExitCode {
     let mut runtime = match Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("neoltjs: {error}");
+            eprintln!("neojs-lite: {error}");
             return ExitCode::from(EXIT_STARTUP_FAILURE);
         }
     };
@@ -81,7 +81,7 @@ fn run(path: &Path) -> ExitCode {
     match runtime.run_file(path) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("neoltjs: {error}");
+            eprintln!("neojs-lite: {error}");
             ExitCode::from(exit_code(&error))
         }
     }
@@ -111,8 +111,8 @@ fn help() -> &'static str {
 Run an ECMAScript module on QuickJS.
 
 Usage:
-  neoltjs <file>
-  neoltjs -- <file>
+  neojs-lite <file>
+  neojs-lite -- <file>
 
 Options:
   -h, --help       Print this help

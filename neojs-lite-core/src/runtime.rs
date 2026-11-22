@@ -29,8 +29,8 @@ const JOB_BUDGET: usize = 100_000;
 /// `console.error` to standard error.
 const CONSOLE_SHIM: &str = r#"
 globalThis.console = Object.freeze({
-    log: (...args) => globalThis.__neoltjsWrite("out", args.map((value) => String(value)).join(" ")),
-    error: (...args) => globalThis.__neoltjsWrite("err", args.map((value) => String(value)).join(" ")),
+    log: (...args) => globalThis.__neojsLiteWrite("out", args.map((value) => String(value)).join(" ")),
+    error: (...args) => globalThis.__neojsLiteWrite("err", args.map((value) => String(value)).join(" ")),
 });
 "#;
 
@@ -323,7 +323,7 @@ fn install_test_gc(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         // reachable, and QuickJS allows collection from a host callback.
         unsafe { qjs::JS_RunGC(runtime as *mut qjs::JSRuntime) };
     })?;
-    ctx.globals().set("__neoltjsGc", collect)
+    ctx.globals().set("__neojsLiteGc", collect)
 }
 
 /// An embeddable QuickJS runtime that executes one ECMAScript module entry.
@@ -373,7 +373,7 @@ impl Runtime {
                             _ => println!("{text}"),
                         }
                     })?;
-                ctx.globals().set("__neoltjsWrite", write)?;
+                ctx.globals().set("__neojsLiteWrite", write)?;
                 ctx.eval::<(), _>(CONSOLE_SHIM)?;
                 #[cfg(test)]
                 install_test_gc(&ctx)?;
@@ -429,7 +429,7 @@ impl Runtime {
         if format == ModuleFormat::TypeScript {
             return Err(Error::UnsupportedEntry {
                 path: path.to_path_buf(),
-                reason: "TypeScript is not implemented in neoltjs yet; use a .js or .mjs file"
+                reason: "TypeScript is not implemented in neojs-lite yet; use a .js or .mjs file"
                     .to_string(),
             });
         }
@@ -637,7 +637,7 @@ fn drive_entry(ctx: &Ctx<'_>, module: &str, promise: &rquickjs::Promise<'_>) -> 
         if !is_job_pending(ctx) {
             return Err(Error::Module {
                 module: module.to_owned(),
-                message: "top-level await could not settle; host asynchronous work is not implemented in neoltjs yet".to_string(),
+                message: "top-level await could not settle; host asynchronous work is not implemented in neojs-lite yet".to_string(),
             });
         }
         if jobs >= JOB_BUDGET {
@@ -715,7 +715,7 @@ const count = 32;
 for (let i = 0; i < count; i++) {
     Promise.reject(new Error(`unhandled ${i}`));
 }
-__neoltjsGc();
+__neojsLiteGc();
 for (let i = 0; i < count; i++) {
     Promise.reject(new Error(`handled ${i}`)).catch(() => {});
 }
@@ -882,7 +882,7 @@ Promise.resolve().then(() => {{ globalThis.__extra = 1; }});
         assert_eq!(runtime.rejections.borrow().unhandled.len(), 0);
         runtime
             .context
-            .with(|ctx| ctx.eval::<(), _>("__neoltjsGc()"))
+            .with(|ctx| ctx.eval::<(), _>("__neojsLiteGc()"))
             .expect("collect after terminal error");
     }
 
