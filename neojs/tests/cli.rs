@@ -1561,6 +1561,22 @@ fn refuses_a_neo_import_and_exits_1() {
 }
 
 #[test]
+fn refuses_a_jsr_import_and_exits_1() {
+    let project = Project::new();
+    let file = project.write("main.js", "import \"jsr:@scope/pkg@1\";\n");
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("jsr:@scope/pkg@1"), "{message}");
+    assert!(
+        message.contains("jsr: modules are not implemented"),
+        "{message}"
+    );
+}
+
+#[test]
 fn prints_help_and_version() {
     let help = run_args(&["--help"]);
     assert_eq!(help.status.code(), Some(0));
