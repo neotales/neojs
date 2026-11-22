@@ -1230,6 +1230,76 @@ Tokio runtime gets `NEO_CRYPTO_NO_EXECUTOR` instead. The synchronous API works o
 `Runtime::run_file` drives the async-op driver, so asynchronous hashing works there. There is no
 secure-context or TLS condition: the module is available in every runtime.
 
+**UUID generation.** `Neo.getBuiltInModule("uuid")` returns a frozen module object that is cached for
+the realm. `uuid` is the canonical bare specifier and `neo:uuid` is an alias for the same module
+instance. The named exports are `v4` and `v7`, and each is the same function object as the matching
+registry property. There is no default export on the aggregate module.
+
+The subpath modules `uuid/v4` and `uuid/v7` (aliases `neo:uuid/v4` and `neo:uuid/v7`) each expose one
+generator as both the named export and the default export. Their `v4`/`v7` named value and default
+value are the same function objects as `uuid.v4` and `uuid.v7`, not wrappers:
+
+```js
+import { v4 as aggregateV4, v7 as aggregateV7 } from "uuid";
+import v4 from "neo:uuid/v4";
+import { v7 } from "neo:uuid/v7";
+
+if (v4 !== aggregateV4) throw new Error("v4 identity changed");
+if (v7 !== aggregateV7) throw new Error("v7 identity changed");
+
+console.log(v4()); // 36-character RFC 9562 version 4 text
+console.log(v7()); // 36-character RFC 9562 version 7 text
+```
+
+The modules are available in every runtime; there is no secure-context or TLS gate.
+
+Both functions take no arguments, are synchronous, and return canonical lowercase text: 32
+hexadecimal digits in groups of 8, 4, 4, 4, and 12, separated by hyphens. There is no braces,
+`urn:uuid:` prefix, uppercase, binary, or alternate output form. A non-zero argument count, including
+a trailing `undefined` or a callback, throws `TypeError` before the host op runs. No Promise is
+returned and no callback form is reserved.
+
+`v4()` fills 128 bits from the operating system CSPRNG, then sets the four version bits to `0100` and
+the two variant bits to `10`. The remaining 122 bits are random. A version 4 UUID carries no time,
+node, or sequence information, so its values have no order and must not be used as a sort key.
+
+`v7()` uses the RFC 9562 layout: 48 big-endian bits of Unix time in milliseconds, the version `0111`,
+12 random bits (`rand_a`), the variant `10`, and 62 random bits (`rand_b`). The module uses the
+random-payload method and keeps no per-process counter. Ordering is therefore only what the
+timestamp provides:
+
+- Values generated in different milliseconds sort by the embedded timestamp when the same system
+  clock moves forward.
+- Values generated within one millisecond carry random low bits and have no defined order relative
+  to one another.
+- A backward system clock step produces a value that sorts before earlier ones. Values from
+  different processes or machines are not ordered.
+
+This module does **not** promise monotonicity, uniqueness, or a total order. Use a database sequence,
+a Lamport clock, or an explicit ordering column when the application needs one. The 74 random
+payload bits make a same-millisecond collision unlikely, not impossible.
+
+The 48-bit timestamp is a format limit. A current time before the Unix epoch, or at or beyond 2^48
+milliseconds (roughly the year 10889), fails with `NEO_UUID_CLOCK` instead of wrapping, truncating, or
+clamping. The clock is read before the CSPRNG, so an unrepresentable time consumes no entropy. An
+operating-system CSPRNG failure is `NEO_UUID_RANDOM`; there is no `Math.random`, time-derived, or
+other insecure fallback. Messages are fixed and never include entropy or a clock value.
+
+The RFC 9562 bit layout, version and variant setting, and formatting come from the MIT OR
+Apache-2.0 `uuid` crate's `Builder`. Its convenience constructors `Uuid::new_v4` and `Uuid::now_v7`
+are deliberately not used because they panic when `getrandom` fails; neojs calls `getrandom::fill`
+itself and passes the bytes to the builder, so an entropy failure is a returned error. The Rust unit
+tests reproduce the RFC 9562 Appendix A.4 version 4 example and Appendix A.7 version 7 example byte
+for byte, check the version and variant fields, and cover the epoch and 48-bit overflow boundaries.
+The JavaScript tests cover registry and import identity, canonical output, uniqueness, argument
+strictness, and an injected entropy failure.
+
+This slice implements generation only. It does not parse or validate UUID text, extract a timestamp,
+generate nil or max UUIDs, or implement versions 1, 3, 5, 6, or 8. It reads no file, environment
+variable, network, or process state beyond the system clock, installs no global, and is not a
+sandbox. It is separate from Node's `crypto.randomUUID()`, which has its own API and produces only
+version 4 values.
+
 **Planned, not implemented.** The `@neotales/chars` reference also defines the `...At` string-index
 helpers, the `...Unsafe` variants, `equalFold`, `simpleFold`, and character-code constants. The
 QuickJS `neo:chars` module uses the same broad shape without the `Unsafe` variants. None of those
@@ -1278,7 +1348,7 @@ not implemented behavior.
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
 local module loading, imports of the `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`,
-`slices`, `ssh`, `stdio`, `strings`, and `test` built-ins by their bare or `neo:` specifiers,
+`slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid` built-ins by their bare or `neo:` specifiers,
 console output, `neojs test` over multiple files and globs, bounded in-memory byte streams, live
 mutable and read-only array and typed-array views, mutable and read-only Unicode code point buffers,
 writes to the process's stdout and stderr, lexical POSIX and Windows path operations,
@@ -1296,18 +1366,21 @@ list are not implemented.
 - `node:`, `npm:`, `jsr:`, `http:`, `https:`, `data:`, and `blob:` imports are rejected. In
   particular, `node:test` is not an alias for the `test` built-in; a Node-module opt-in is not
   implemented. The built-in modules are `age`, `assert`, `chars`, `console`, `crypto`, `os`,
-  `path`, `slices`, `ssh`, `stdio`, `strings`, and `test`, reached through
+  `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid`, reached through
   `Neo.getBuiltInModule("age")`,
   `Neo.getBuiltInModule("assert")`, `Neo.getBuiltInModule("chars")`,
   `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("crypto")`,
   `Neo.getBuiltInModule("os")`, `Neo.getBuiltInModule("path")`,
   `Neo.getBuiltInModule("slices")`, `Neo.getBuiltInModule("ssh")`,
-  `Neo.getBuiltInModule("stdio")`, `Neo.getBuiltInModule("strings")`, and
-  `Neo.getBuiltInModule("test")`, or through the import
+  `Neo.getBuiltInModule("stdio")`, `Neo.getBuiltInModule("strings")`,
+  `Neo.getBuiltInModule("test")`, `Neo.getBuiltInModule("uuid")`,
+  `Neo.getBuiltInModule("uuid/v4")`, and `Neo.getBuiltInModule("uuid/v7")`, or
+  through the import
   specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
   `neo:console`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`, `slices`,
-  `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`, and
-  `neo:test`. Other `neo:` modules are rejected by name.
+  `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`,
+  `neo:test`, `uuid`, `neo:uuid`, `uuid/v4`, `neo:uuid/v4`, `uuid/v7`, and `neo:uuid/v7`.
+  Other `neo:` modules are rejected by name.
   Bare module specifiers that are not a built-in, and import maps, are not supported.
 - Module type attributes are rejected. `with { type: "json" }`, `with { type: "text" }`, `with {
   type: "bytes" }`, and custom types fail with a reason on static and dynamic imports, including for
@@ -1331,7 +1404,9 @@ list are not implemented.
   `crypto` calls thirty-two host ops: four for the operating system CSPRNG and AES-256-GCM, eight
   for bounded stateful AES-256-CBC/AES-256-GCM ciphers, seven for SHA-2 hashing and HMAC, seven for
   PBKDF2 and bcrypt, and six for GF(256) Shamir secret sharing, including their bounded
-  asynchronous paths. `ssh` calls three
+  asynchronous paths. `uuid` calls two host ops for RFC 9562 version 4 and version 7 generation;
+  both draw from the operating system CSPRNG, and a failed draw returns an error rather than falling
+  back. `ssh` calls three
   host ops: it performs DNS and outbound TCP, completes the SSH handshake, verifies an explicit
   Ed25519 host-key pin or explicit `known_hosts` text, authenticates with exactly one of a password,
   an in-memory private key, or an explicit Unix `agent: true`, and runs one command at a time. It has
@@ -1372,7 +1447,8 @@ list are not implemented.
 
 Built on `deno_core` 0.413.0, with type stripping by `deno_ast` 0.53.3, test-file expansion by
 `glob` 0.3.4, AES-256-GCM by
-`aes-gcm` 0.10.3, PBKDF2 by `pbkdf2` 0.13.0, bcrypt by `bcrypt` 0.19.3, binary age v1 by
+`aes-gcm` 0.10.3, PBKDF2 by `pbkdf2` 0.13.0, bcrypt by `bcrypt` 0.19.3, UUID layout and formatting by
+`uuid` 1.26.1, binary age v1 by
 `neotales-age` 0.0.0-alpha.1, and SSH-2 by `neotales-ssh` 0.0.0-alpha.1. Verified on Linux x86-64.
 Other platforms are unverified.
 
@@ -1411,8 +1487,12 @@ that crate's notice. The `crypto` hash and HMAC primitives use the RustCrypto `s
 crate and bcrypt uses the MIT-licensed `bcrypt` 0.19.3 crate (with the RustCrypto `blowfish` 0.10.0
 crate), all already linked transitively or added at reviewed versions; `neojs-core/src/crypto_hash.rs`
 and its `password` child module add the JavaScript-facing lifecycle, encodings, bounds, work-factor
-policy, and asynchronous executor, and do not modify the crates. The full upstream MIT copyright and
-permission notices, and the RustCrypto licence references, are reproduced in
+policy, and asynchronous executor, and do not modify the crates. The `uuid` built-in uses the
+`uuid` 1.26.1 crate, dual-licensed MIT OR Apache-2.0, for RFC 9562 bit layout, version and variant
+setting, and canonical formatting; `neojs-core/src/uuid.rs` adds the fallible operating-system
+CSPRNG draw, the 48-bit clock policy, the no-monotonicity contract, the host ops, and the JavaScript
+error mapping, and does not modify the crate. The full upstream MIT copyright and
+permission notices, and the RustCrypto and `uuid` licence references, are reproduced in
 `neojs-core/THIRD_PARTY_NOTICES.md`, which ships with the `neojs-core` package. The project licence remains the MIT licence in `LICENSE.md`,
 Copyright (c) 2026 NeoTales and x0craft; the crate directories carry identical copies so each package
 ships it. No PLAB code is included.

@@ -53,4 +53,11 @@ neotales-ssh = "=0.0.0-alpha.1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 tempfile = "3"
+# RFC 9562 UUID layout, version/variant bit setting, and canonical formatting.
+# The crate's own `new_v4` and `now_v7` helpers panic when the operating system
+# CSPRNG fails, so `neo:uuid` feeds its own fallible `getrandom` bytes to
+# `uuid::Builder` instead and never takes that path. The `v4` and `v7` features
+# are therefore deliberately not enabled. This is the version already present
+# in the lockfile through `deno_ast`, so adding it does not pull a second major.
+uuid = { version = "1.26.1", default-features = false, features = ["std"] }
 url = "2"

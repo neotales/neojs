@@ -401,6 +401,49 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## `uuid`
+
+Source: <https://github.com/uuid-rs/uuid>, crate `uuid` 1.26.1.
+
+`neojs-core` links this crate directly for RFC 9562 UUID bit layout, version
+and variant setting, and canonical hyphenated formatting behind `neo:uuid`. It
+was already present in the dependency graph through `deno_ast`; the UUID
+surface reuses the same reviewed version with default features disabled and the
+`std` feature enabled. `neojs-core/src/uuid.rs` supplies the operating-system
+CSPRNG bytes through a fallible `getrandom` call and adds the clock range
+policy, error mapping, and host ops; it does not modify the crate. The crate's
+`Uuid::new_v4` and `Uuid::now_v7` convenience constructors are deliberately not
+used because they panic when entropy is unavailable.
+
+The crate is dual-licensed under the MIT License or the Apache License, Version
+2.0. `neojs-core` uses it under the MIT option. The copyright lines from its MIT
+licence file are:
+
+- Copyright (c) 2014 The Rust Project Developers
+- Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
+
+The MIT permission notice follows.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## NeoLiteJS `neo:path` and `@neotales/path`
 
 Source: NeoLiteJS `neojs-core/src/js/path.js` and `path.LICENSE.md`, and the

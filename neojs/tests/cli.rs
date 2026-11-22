@@ -1567,9 +1567,11 @@ fn prints_help_and_version() {
     assert!(stdout(&help).contains("Usage:"));
     assert!(stdout(&help).contains("age, assert, chars, console, crypto, os, path, slices"));
     assert!(
-        stdout(&help).contains("ssh, stdio, strings, and test built-in modules are implemented")
+        stdout(&help)
+            .contains("ssh, stdio, strings, test, and uuid built-in modules are implemented")
     );
     assert!(stdout(&help).contains("Neo.getBuiltInModule(\"test\")"));
+    assert!(stdout(&help).contains("Neo.getBuiltInModule(\"uuid\")"));
     assert!(stdout(&help).contains("Node-module opt-in"));
 
     let version = run_args(&["--version"]);

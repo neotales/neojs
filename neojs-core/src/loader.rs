@@ -4,7 +4,8 @@
 //! built-in specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`,
 //! `neo:chars`, `console`, `neo:console`, `crypto`, `neo:crypto`, `os`,
 //! `neo:os`, `path`, `neo:path`, `slices`, `neo:slices`, `ssh`, `neo:ssh`,
-//! `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`, and `neo:test`
+//! `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`, `neo:test`, `uuid`,
+//! `neo:uuid`, `uuid/v4`, `neo:uuid/v4`, `uuid/v7`, and `neo:uuid/v7`
 //! ([`crate::builtins`]). Every other scheme is rejected with a reason that
 //! names the missing feature instead of failing later inside V8.
 //!
