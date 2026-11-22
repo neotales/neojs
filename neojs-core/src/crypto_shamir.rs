@@ -68,8 +68,11 @@
 //!
 //! A secret is at most [`MAX_SHAMIR_SECRET_BYTES`], a threshold and share count
 //! are each between 2 and 255, and the total share bytes
-//! (`secret length * shareCount`) are at most [`MAX_SHAMIR_TOTAL_BYTES`]. The
-//! total bound also caps combine input. Rust allocations are fallible; a
+//! (`secret length * shareCount`) are at most [`MAX_SHAMIR_TOTAL_BYTES`]. Every
+//! share value passed to combine must also be at most
+//! [`MAX_SHAMIR_SECRET_BYTES`]; this bound is checked before any value is
+//! copied and applies identically to the synchronous and asynchronous APIs. The
+//! total bound caps combine input further. Rust allocations are fallible; a
 //! refused reservation is `NEO_CRYPTO_LIMIT`. V8 and the JavaScript heap
 //! allocate too, so recovery from out-of-memory is not guaranteed.
 //!
@@ -534,6 +537,9 @@ fn validate_combine(shares: &[ShamirShare]) -> Result<usize, ShamirError> {
     if length == 0 {
         return Err(ShamirError::new(ShamirErrorCode::Range));
     }
+    if length > MAX_SHAMIR_SECRET_BYTES {
+        return Err(ShamirError::new(ShamirErrorCode::Limit));
+    }
     check_total(length, shares.len())?;
     let mut seen = [false; 256];
     for share in shares {
@@ -566,6 +572,9 @@ fn validate_plan(plans: &[SharePlan<'_>]) -> Result<usize, ShamirError> {
     let length = first.view.length;
     if length == 0 {
         return Err(ShamirError::new(ShamirErrorCode::Range));
+    }
+    if length > MAX_SHAMIR_SECRET_BYTES {
+        return Err(ShamirError::new(ShamirErrorCode::Limit));
     }
     check_total(length, plans.len())?;
     let mut seen = [false; 256];
@@ -1015,38 +1024,63 @@ pub(crate) fn dropped_worker_results() -> usize {
     DROPPED_WORKER_RESULTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// V8 backing-store deleter that clears the allocation before freeing it.
+/// Clear every byte in a vector's allocation, including unused capacity.
 ///
-/// The pointer and length came from [`zeroizing_bytes_to_v8`]'s boxed slice, so
-/// reconstructing that box here is the matching release.
-unsafe extern "C" fn wipe_backing_store(
-    data: *mut c_void,
-    byte_length: usize,
-    _deleter_data: *mut c_void,
+/// # Safety
+///
+/// Writing zeros over allocated-but-uninitialized capacity is safe and does not
+/// read it. The caller still owns the allocation.
+unsafe fn zeroize_vec_capacity(bytes: &mut Vec<u8>) {
+    if bytes.capacity() > 0 {
+        // SAFETY: `capacity` bytes are allocated from `as_mut_ptr()`.
+        unsafe {
+            std::ptr::write_bytes(bytes.as_mut_ptr(), 0, bytes.capacity());
+        }
+    }
+}
+
+/// V8 backing-store deleter for the original `Vec` allocation.
+///
+/// `deleter_data` is a `Box<Vec<u8>>` created by [`zeroizing_bytes_to_v8`].
+/// The vector still owns its original allocation and capacity, so clearing the
+/// full capacity covers bytes past the logical length without reallocating.
+/// Dropping the vector frees that same allocation.
+unsafe extern "C" fn wipe_vec_backing_store(
+    _data: *mut c_void,
+    _byte_length: usize,
+    deleter_data: *mut c_void,
 ) {
-    if data.is_null() || byte_length == 0 {
+    if deleter_data.is_null() {
         return;
     }
-    // SAFETY: `data` and `byte_length` are the boxed slice handed to V8 by
-    // `zeroizing_bytes_to_v8`; V8 calls this deleter exactly once.
-    let slice = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), byte_length) };
-    slice.zeroize();
-    // SAFETY: reconstruct the same boxed slice that was leaked into V8.
+    // SAFETY: `deleter_data` is the `Box<Vec<u8>>` handed to V8, and V8 calls
+    // this deleter exactly once.
+    let mut owner = unsafe { Box::from_raw(deleter_data.cast::<Vec<u8>>()) };
+    // SAFETY: `owner` still owns the allocation.
     unsafe {
-        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-            data.cast::<u8>(),
-            byte_length,
-        )));
+        zeroize_vec_capacity(&mut owner);
+    }
+    #[cfg(debug_assertions)]
+    {
+        // SAFETY: the preceding write initialized every capacity byte to zero.
+        let all = unsafe { std::slice::from_raw_parts(owner.as_ptr(), owner.capacity()) };
+        debug_assert!(
+            all.iter().all(|byte| *byte == 0),
+            "the full vector allocation was not zeroized"
+        );
     }
     #[cfg(feature = "test-support")]
     ZEROIZED_V8_BUFFERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // `owner` drops here and frees the original vector allocation.
 }
 
 /// Move bytes into a V8 `Uint8Array` whose backing store is zeroized when V8
 /// releases it.
 ///
-/// The owner is `Zeroizing` until the boxed slice is handed to V8. If the
-/// transfer fails, the `Zeroizing`/backing-store drop path clears it. A JS
+/// The exact original `Vec` (pointer, length, and capacity) is retained in a
+/// boxed deleter context. The function never shrinks the vector or converts it
+/// to a boxed slice, so no secret-bearing allocation is reallocated and freed
+/// unwiped. If transfer fails, the backing store's context drop clears it. A JS
 /// caller can still copy the bytes into ordinary JavaScript memory, which this
 /// module cannot clear.
 fn zeroizing_bytes_to_v8<'s>(
@@ -1055,20 +1089,27 @@ fn zeroizing_bytes_to_v8<'s>(
 ) -> Option<v8::Local<'s, v8::Uint8Array>> {
     let length = bytes.len();
     if length == 0 {
+        // A zero-length vector can still have capacity holding old bytes.
+        let mut empty = std::mem::take(&mut *bytes);
+        // SAFETY: the vector still owns its allocation.
+        unsafe {
+            zeroize_vec_capacity(&mut empty);
+        }
+        drop(empty);
         return bytes_to_v8(scope, Vec::new());
     }
-    let boxed = std::mem::take(&mut *bytes).into_boxed_slice();
-    debug_assert_eq!(boxed.len(), length);
-    let raw = Box::into_raw(boxed) as *mut u8;
-    // SAFETY: `raw` and `length` describe the boxed slice, and the deleter
-    // reconstructs that exact box. V8 takes ownership of the allocation.
+    let vec = std::mem::take(&mut *bytes);
+    let original_pointer = vec.as_ptr();
+    let mut owner = Box::new(vec);
+    debug_assert_eq!(owner.len(), length);
+    debug_assert_eq!(owner.as_ptr(), original_pointer);
+    let data = owner.as_mut_ptr().cast::<c_void>();
+    let context = Box::into_raw(owner).cast::<c_void>();
+    // SAFETY: `data` points into the vector allocation owned by `context`.
+    // V8 takes both until it calls `wipe_vec_backing_store`, which reconstructs
+    // the box and frees the original vector allocation.
     let store = unsafe {
-        v8::ArrayBuffer::new_backing_store_from_ptr(
-            raw.cast::<c_void>(),
-            length,
-            wipe_backing_store,
-            std::ptr::null_mut(),
-        )
+        v8::ArrayBuffer::new_backing_store_from_ptr(data, length, wipe_vec_backing_store, context)
     };
     let store = store.make_shared();
     let buffer = v8::ArrayBuffer::with_backing_store(scope, &store);
@@ -1180,7 +1221,7 @@ fn unpack_combine_result<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     secret: Zeroizing<Vec<u8>>,
 ) -> Result<v8::Local<'s, v8::Uint8Array>, ShamirError> {
-    if secret.is_empty() || secret.len() > MAX_SHAMIR_SECRET_BYTES {
+    if secret.is_empty() {
         return Err(ShamirError::new(ShamirErrorCode::Internal));
     }
     zeroizing_bytes_to_v8(scope, secret).ok_or_else(|| ShamirError::new(ShamirErrorCode::Limit))
@@ -1524,6 +1565,10 @@ async fn op_neo_crypto_shamir_async_join(
     let Some(handle) = handle else {
         return vec![ShamirErrorCode::Internal.tag()];
     };
+    #[cfg(feature = "test-support")]
+    if let Some(executor) = state.borrow().try_borrow::<CryptoExecutor>() {
+        executor.note_join_started();
+    }
     let _abort = AbortOnDrop(handle.abort_handle());
     let output = match handle.await {
         Ok(output) => output,
@@ -1695,6 +1740,51 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn deleter_wipes_excess_capacity_from_the_original_vec_context() {
+        let mut vec = Vec::with_capacity(32);
+        vec.extend_from_slice(b"secret");
+        let length = vec.len();
+        let capacity = vec.capacity();
+        assert!(capacity > length);
+        // Initialize the unused capacity so the debug assertion in the deleter
+        // can inspect it after zeroization.
+        unsafe {
+            std::ptr::write_bytes(vec.as_mut_ptr().add(length), 0xaa, capacity - length);
+        }
+        let data = vec.as_mut_ptr().cast::<c_void>();
+        let context = Box::into_raw(Box::new(vec)).cast::<c_void>();
+        // SAFETY: `data`/`context` match the layout the deleter expects; this is
+        // the same ownership transfer V8 performs exactly once.
+        unsafe {
+            wipe_vec_backing_store(data, length, context);
+        }
+    }
+
+    #[test]
+    fn vec_owner_preserves_and_wipes_the_original_capacity() {
+        let mut vec = Vec::with_capacity(32);
+        vec.extend_from_slice(b"secret");
+        assert!(vec.capacity() > vec.len());
+        let pointer = vec.as_ptr();
+        let capacity = vec.capacity();
+        // Initialize the unused capacity so the test can inspect it after the
+        // wipe without reading uninitialized memory.
+        unsafe {
+            std::ptr::write_bytes(vec.as_mut_ptr().add(vec.len()), 0xaa, capacity - vec.len());
+        }
+        let mut owner = Box::new(vec);
+        assert_eq!(owner.as_ptr(), pointer);
+        assert_eq!(owner.capacity(), capacity);
+        // SAFETY: the test owns the vector and initialized all capacity bytes.
+        unsafe {
+            zeroize_vec_capacity(&mut owner);
+        }
+        // SAFETY: all `capacity` bytes were initialized and are now zeroed.
+        let all = unsafe { std::slice::from_raw_parts(owner.as_ptr(), owner.capacity()) };
+        assert!(all.iter().all(|byte| *byte == 0));
     }
 
     #[test]

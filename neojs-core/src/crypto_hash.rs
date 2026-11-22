@@ -773,6 +773,14 @@ impl CryptoExecutor {
         self.handle.is_some()
     }
 
+    /// Tell the test-only cancellation gate that a join op started.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn note_join_started(&self) {
+        if let Some(gate) = &self.cancellation_gate {
+            gate.join_started();
+        }
+    }
+
     /// Build a placement probe for one asynchronous job.
     ///
     /// The caller installs it on the isolate thread before copying input. The

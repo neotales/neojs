@@ -302,6 +302,26 @@ expectCode(
     "NEO_CRYPTO_SHAMIR_SHARED",
     "combine shared share",
 );
+
+// Combine accepts share values exactly at the 8 MiB secret limit and rejects a
+// larger value before copying it. The same per-share limit applies to both
+// paths; there is no smaller async-only result limit.
+let maxShares = [
+    { index: 1, value: new Uint8Array(8 * 1024 * 1024) },
+    { index: 2, value: new Uint8Array(8 * 1024 * 1024) },
+];
+const maxResult = shamirCombine(maxShares);
+if (maxResult.length !== 8 * 1024 * 1024) throw new Error("8 MiB combine length");
+maxShares = null;
+const tooBigShares = [
+    { index: 1, value: new Uint8Array(8 * 1024 * 1024 + 1) },
+    { index: 2, value: new Uint8Array(8 * 1024 * 1024 + 1) },
+];
+expectCode(
+    () => shamirCombine(tooBigShares),
+    "NEO_CRYPTO_LIMIT",
+    "combine per-share limit",
+);
 "#,
     );
 }
@@ -380,6 +400,28 @@ try {
     duplicate = error.code === "NEO_CRYPTO_SHAMIR_DUPLICATE";
 }
 if (!duplicate) throw new Error("async combine did not reject duplicate shares");
+
+// The async path accepts an 8 MiB result and rejects a larger per-share value
+// before copying, matching the synchronous limit.
+let maxShares = [
+    { index: 1, value: new Uint8Array(8 * 1024 * 1024) },
+    { index: 2, value: new Uint8Array(8 * 1024 * 1024) },
+];
+const maxResult = await shamirCombineAsync(maxShares);
+if (maxResult.length !== 8 * 1024 * 1024) throw new Error("async 8 MiB combine length");
+maxShares = null;
+let perShareLimit = "none";
+try {
+    await shamirCombineAsync([
+        { index: 1, value: new Uint8Array(8 * 1024 * 1024 + 1) },
+        { index: 2, value: new Uint8Array(8 * 1024 * 1024 + 1) },
+    ]);
+} catch (error) {
+    perShareLimit = error.code;
+}
+if (perShareLimit !== "NEO_CRYPTO_LIMIT") {
+    throw new Error("async per-share limit: " + perShareLimit);
+}
 
 const shared = new SharedArrayBuffer(3);
 const sharedView = new Uint8Array(shared);

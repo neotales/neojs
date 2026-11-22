@@ -1958,6 +1958,12 @@
      * without any error. Use a separate authenticated envelope or out-of-band
      * check if wrong reconstruction must be detected.
      *
+     * A `Uint8Array` backed by a `SharedArrayBuffer` is rejected with
+     * `NEO_CRYPTO_SHAMIR_SHARED`. Copying shared memory is not one coherent
+     * snapshot: another agent can change it mid-copy. If shared memory is the
+     * source, copy a synchronized snapshot into an ordinary non-shared buffer
+     * first.
+     *
      * Limits: `secret` is at most 8 MiB, `threshold` and `shareCount` are
      * integers from 2 through 255 with `shareCount >= threshold`, and
      * `secret.length * shareCount` is at most 64 MiB.
@@ -2042,9 +2048,16 @@
      * Verify the result with a separate authenticated envelope or out-of-band
      * digest if that matters. The returned bytes are a new `Uint8Array`.
      *
+     * A share `value` backed by a `SharedArrayBuffer` is rejected with
+     * `NEO_CRYPTO_SHAMIR_SHARED`. Copying shared memory is not one coherent
+     * snapshot: another agent can change it mid-copy. If shared memory is the
+     * source, copy a synchronized snapshot into an ordinary non-shared buffer
+     * first.
+     *
      * Limits: at least two and at most 255 shares are accepted, every share
-     * value must have the same non-zero length, and the total share bytes are
-     * at most 64 MiB.
+     * value must have the same non-zero length of at most 8 MiB, and the total
+     * share bytes are at most 64 MiB. The per-share limit is checked before
+     * any value is copied and does not depend on the sync or async path.
      *
      * @param {Array<{index: number, value: Uint8Array}>} shares
      * @param {number} [threshold]
