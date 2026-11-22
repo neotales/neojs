@@ -465,6 +465,130 @@ if (typeof SharedArrayBuffer === "function") {
 }
 
 #[test]
+fn char_from_string_uses_the_captured_intrinsic_buffer_getter() {
+    run_js(
+        r#"
+import { CharSlice, ReadOnlyCharSlice } from "slices";
+
+// `Uint32Array.prototype.buffer` is replaceable after the shim runs. The
+// astral string takes the trimming branch, which is the branch that needs the
+// private allocation's backing buffer, so it is the important case here.
+const original = Object.getOwnPropertyDescriptor(Uint32Array.prototype, "buffer");
+let calls = 0;
+Object.defineProperty(Uint32Array.prototype, "buffer", {
+    configurable: true,
+    get() {
+        calls += 1;
+        return null;
+    },
+});
+try {
+    const mutable = CharSlice.fromString("a\u{1F600}b");
+    const readonly = ReadOnlyCharSlice.fromString("a\u{1F600}b");
+    const bmp = CharSlice.fromString("ab");
+    if (calls !== 0) {
+        throw new Error(`fromString consulted the replaced buffer getter ${calls} times`);
+    }
+    if (mutable.toString() !== "a\u{1F600}b") {
+        throw new Error("the mutable astral conversion is wrong");
+    }
+    if (readonly.toString() !== "a\u{1F600}b") {
+        throw new Error("the read-only astral conversion is wrong");
+    }
+    if (bmp.toString() !== "ab") throw new Error("the BMP conversion is wrong");
+    if (mutable.length !== 3 || readonly.length !== 3) {
+        throw new Error("astral conversion did not trim to three code points");
+    }
+} finally {
+    if (original === undefined) {
+        delete Uint32Array.prototype.buffer;
+    } else {
+        Object.defineProperty(Uint32Array.prototype, "buffer", original);
+    }
+}
+
+// The restored intrinsic still works after the replacement is removed.
+if (CharSlice.fromString("a\u{1F600}b").toString() !== "a\u{1F600}b") {
+    throw new Error("the restored buffer getter broke fromString");
+}
+"#,
+    );
+}
+
+#[test]
+fn empty_views_validate_detached_ranges() {
+    run_js(
+        r#"
+import { charSlice, readonlyCharSlice, slice } from "slices";
+
+function detach(buffer) {
+    if (typeof buffer.transfer === "function") {
+        buffer.transfer();
+        return;
+    }
+    if (typeof structuredClone === "function") {
+        structuredClone(buffer, { transfer: [buffer] });
+        return;
+    }
+    throw new Error("this V8 has no way to detach an ArrayBuffer");
+}
+
+function expectRangeError(label, fn) {
+    try {
+        fn();
+    } catch (error) {
+        if (error instanceof RangeError) return;
+        throw new Error(`${label} threw ${error && error.constructor.name}, expected RangeError`);
+    }
+    throw new Error(`${label} did not throw`);
+}
+
+// A typed-array view keeps its fixed range. Copy validates the range even
+// when it is empty: offset 2 no longer fits a detached target, offset 0 does.
+const bytes = new Uint8Array([1, 2, 3]);
+const emptyAtTwo = slice(bytes, 2, 2);
+const emptyAtZero = slice(bytes, 0, 0);
+detach(bytes.buffer);
+if (bytes.length !== 0) throw new Error("the typed target did not detach");
+expectRangeError("typed empty copy at offset 2", () => emptyAtTwo.copy());
+const zeroCopy = emptyAtZero.copy();
+if (!(zeroCopy instanceof Uint8Array) || zeroCopy.length !== 0) {
+    throw new Error("an empty typed copy at offset 0 should be a valid empty view");
+}
+if (slice(bytes, 0, 0).copy().length !== 0) {
+    throw new Error("a new empty view of a detached target should copy as empty");
+}
+
+// The same rule applies to character views and their conversions.
+const codePoints = new Uint32Array([65, 66, 67]);
+const charAtTwo = charSlice(codePoints, 2, 2);
+const charAtZero = charSlice(codePoints, 0, 0);
+const readonlyAtTwo = readonlyCharSlice(codePoints, 2, 2);
+detach(codePoints.buffer);
+if (codePoints.length !== 0) throw new Error("the code point target did not detach");
+expectRangeError("char toArray at offset 2", () => charAtTwo.toArray());
+expectRangeError("char toString at offset 2", () => charAtTwo.toString());
+expectRangeError("char toUpper at offset 2", () => charAtTwo.toUpper());
+expectRangeError("char toLower at offset 2", () => charAtTwo.toLower());
+expectRangeError("read-only char toString at offset 2", () => readonlyAtTwo.toString());
+expectRangeError("read-only char toArray at offset 2", () => readonlyAtTwo.toArray());
+if (charAtZero.toArray().length !== 0) {
+    throw new Error("an empty character view at offset 0 should copy as empty");
+}
+if (charAtZero.toString() !== "") {
+    throw new Error("an empty character view at offset 0 should stringify as empty");
+}
+if (charAtZero.toUpper().length !== 0) {
+    throw new Error("an empty character view at offset 0 should transform as empty");
+}
+if (charSlice(codePoints, 0, 0).toArray().length !== 0) {
+    throw new Error("a new empty character view of a detached target should be empty");
+}
+"#,
+    );
+}
+
+#[test]
 fn char_slices_roundtrip_and_transform_in_place() {
     run_js(
         r#"

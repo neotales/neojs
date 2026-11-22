@@ -492,8 +492,10 @@ view shares the target's buffer, so overlapping views alias each other. `Int8Arr
 `Float64Array`, `BigInt64Array`, and `BigUint64Array` are supported, plus `Float16Array` when the V8
 build provides it. BigInt element types require BigInt values; assigning a number throws the
 engine's `TypeError`. A detached or shrunk typed array leaves reads `undefined` and writes ignored;
-`copy` throws `RangeError` instead of inventing zeros. A resizable `ArrayBuffer` that is grown back
-makes the fixed range readable again. A `SharedArrayBuffer` view aliases other views of the same
+`copy` validates the fixed range and throws `RangeError` instead of inventing zeros. That check
+covers an empty range: an empty view at offset 0 still fits a zero-length target, while an empty
+view at a nonzero offset throws. A resizable `ArrayBuffer` that is grown back makes the fixed range
+readable again. A `SharedArrayBuffer` view aliases other views of the same
 buffer; this module provides no atomics and no synchronization guarantee. A `DataView`, a
 `Symbol.toStringTag` lookalike, and a Proxy of a typed array are rejected with `TypeError`; the brand
 comes from the engine's internal slot, not a replaceable property or `Symbol.hasInstance`. A Proxy of
@@ -506,17 +508,23 @@ not an isolation boundary.
 **Character buffers.** `CharSlice` is a live view over a caller-owned `Uint32Array` of Unicode code
 points, and `ReadOnlyCharSlice` is its read-only form. `CharSlice.fromString(text)` allocates one
 buffer, combining surrogate pairs into one code point and preserving a lone surrogate as one code
-unit. `toString()` allocates one string and builds it in bounded chunks, so a large buffer cannot
-overflow a function argument list. `slice` and the in-place `toUpper`/`toLower` transforms allocate
-nothing. The transforms apply the same simple case mapping as `neo:chars`, so `ß` stays `ß` rather
+unit. `toString()` builds the result in bounded chunks, so a large buffer cannot overflow a function
+argument list; it allocates the result string and chunk temporaries, not a string per code point.
+`slice` allocates only a view/state object and no character buffer. The in-place
+`toUpper`/`toLower` transforms allocate no new character buffer, but their simple case mapping may
+allocate a temporary string per mapped code point; they avoid converting the whole buffer to a
+string. The transforms apply the same simple case mapping as `neo:chars`, so `ß` stays `ß` rather
 than expanding to `SS`; lone surrogates and values outside the Unicode range are left unchanged.
 `set` writes one code point through to the buffer. `toArray()` returns an independent `Uint32Array`
 snapshot. `ReadOnlyCharSlice` has no `set` or in-place transform: make a `CharSlice` over the same
-buffer to mutate it. JS strings are immutable, so no view can alias string storage; the one buffer
-allocation at `fromString` and the one string allocation at `toString` are the deliberate boundary
-conversions, and in-place transforms avoid repeated string allocations. A `CharSlice` constructor
-does not scan its input buffer; writing an invalid value directly into the `Uint32Array` makes
-`toString` throw `RangeError`.
+buffer to mutate it. JS strings are immutable, so no view can alias string storage; the buffer
+allocation at `fromString` and the result string at `toString` are the deliberate boundary
+conversions, and in-place transforms avoid repeated whole-string conversions. A `CharSlice`
+constructor does not scan its input buffer; writing an invalid value directly into the
+`Uint32Array` makes `toString` throw `RangeError`. Like a typed-array view, a character view whose
+buffer was detached or shrunk makes `toArray` and `toString` (and, for the mutable `CharSlice`,
+`toUpper` and `toLower`) throw `RangeError` when the fixed range no longer fits, including an empty
+range at a nonzero offset.
 
 This module is informed by `@neotales/slices` but is not a port and does not claim full or
 byte-for-byte parity with it. In particular, it does not copy that package's `Uint8Array`/`Uint16Array`

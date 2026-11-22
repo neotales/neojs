@@ -37,8 +37,11 @@
 //! the target, so a Proxy's traps and an accessor element run, and it is not a
 //! snapshot, a sandbox, or a cross-realm/cross-thread zero-copy mechanism. JS
 //! strings are immutable: `CharSlice.fromString` allocates one code point
-//! buffer and `toString` allocates one string, while the in-place case
-//! transforms allocate nothing.
+//! buffer and a view over it, `slice` allocates only a view/state object and no
+//! character buffer, `toUpper`/`toLower` allocate no new character buffer but
+//! may allocate a temporary string per mapped code point, and `toString`
+//! allocates the result string and bounded chunk temporaries rather than a
+//! string per code point.
 //! `stdio` is plain
 //! ECMAScript plus host ops registered by [`crate::stdio`]: bounded in-memory
 //! byte streams and writes to the current process's standard output and standard

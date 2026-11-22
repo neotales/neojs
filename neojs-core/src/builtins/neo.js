@@ -3793,7 +3793,10 @@
     // `undefined`, and writing it follows ordinary Array semantics and can
     // extend the Array. A detached or shrunk typed array leaves reads
     // `undefined` and writes ignored; `copy` and the character conversions throw
-    // RangeError instead of inventing zeros. Frozen Arrays make writes throw
+    // RangeError when the fixed range no longer fits, instead of inventing
+    // zeros. The check covers an empty range too: an empty view at offset 0
+    // still fits a zero-length target, while an empty view at a nonzero offset
+    // throws. Frozen Arrays make writes throw
     // TypeError. Accessor elements and Proxy traps run, because a live view is
     // not a snapshot and is not an isolation boundary.
     //
@@ -3810,8 +3813,14 @@
     // `CharSlice` is the character workflow: a caller-owned `Uint32Array` of
     // Unicode code points, converted once from a JS string at the boundary and
     // transformed in place. JS strings are immutable, so no view can alias
-    // string storage; `fromString` allocates one `Uint32Array`, `toString`
-    // allocates one string, and the in-place case transforms allocate nothing.
+    // string storage. `fromString` allocates one code point buffer and a view
+    // over it (a shorter view over the same allocation when surrogate pairs
+    // require trimming). `toString` allocates the result string and bounded
+    // chunk temporaries, not a string per code point. `slice` allocates only a
+    // view/state object and no character buffer. `toUpper`/`toLower` allocate no
+    // new character buffer, but their simple case mapping may allocate a
+    // temporary string per mapped code point; they avoid converting the whole
+    // buffer to a string.
     //
     // This is plain ECMAScript with no host op. It adds no capability, is not a
     // sandbox, and is not a Rust, cross-realm, or cross-thread zero-copy bridge.
@@ -3845,6 +3854,7 @@
         // for anything that is not a genuine typed array and for a Proxy of one.
         const typedArrayPrototype = getPrototypeOf(makeUint8Array.prototype);
         const typedArrayLength = getOwnPropertyDescriptor(typedArrayPrototype, "length").get;
+        const typedArrayBuffer = getOwnPropertyDescriptor(typedArrayPrototype, "buffer").get;
         const typedArrayTag = getOwnPropertyDescriptor(typedArrayPrototype, symbolToStringTag).get;
 
         /** The intrinsic typed-array name, or `undefined` for a non-typed-array. */
@@ -4029,10 +4039,10 @@
                     `slices cannot copy an unsupported typed array: ${state.kind}`,
                 );
             }
-            if (
-                state.length > 0 &&
-                state.start + state.length > typedArrayLength.call(state.target)
-            ) {
+            // Check the fixed range as a whole, including an empty range. An
+            // empty view at offset 0 still fits a detached (zero-length)
+            // target; an empty view at a nonzero offset no longer does.
+            if (state.start + state.length > typedArrayLength.call(state.target)) {
                 throw makeRangeError("slices view no longer fits its typed array");
             }
             const out = new constructor(state.length);
@@ -4262,10 +4272,9 @@
         }
 
         function charRequireBounds(state) {
-            if (
-                state.length > 0 &&
-                state.start + state.length > typedArrayLength.call(state.buffer)
-            ) {
+            // Match `typedArrayCopy`: validate the fixed range even when it is
+            // empty. An empty view at offset 0 still fits a detached buffer.
+            if (state.start + state.length > typedArrayLength.call(state.buffer)) {
                 throw makeRangeError("character slice no longer fits its buffer");
             }
         }
@@ -4360,8 +4369,11 @@
             }
             if (count === length) return buffer;
             // A new view over the same allocation, not `subarray`: `subarray`
-            // consults `Symbol.species`.
-            return new makeUint32Array(buffer.buffer, 0, count);
+            // consults `Symbol.species`. Read the backing buffer through the
+            // captured intrinsic getter, not `buffer.buffer`, whose prototype
+            // getter later code can replace to capture this private allocation.
+            const backing = typedArrayBuffer.call(buffer);
+            return new makeUint32Array(backing, 0, count);
         }
 
         const CHAR_STATE = Symbol("charSliceState");
@@ -4372,10 +4384,14 @@
          * A mutable live view over Unicode code points in a caller-owned
          * `Uint32Array`.
          *
-         * `fromString` allocates the buffer once and `toString` allocates the
-         * result once. `slice` and the in-place `toUpper`/`toLower` transforms
-         * allocate nothing. JS strings are immutable, so no operation aliases
-         * string storage.
+         * `fromString` allocates one code point buffer and a view (plus a
+         * shorter view over the same allocation for astral text). `toString`
+         * allocates the result string and bounded chunk temporaries, not a
+         * string per code point. `slice` allocates only a view/state object and
+         * no character buffer. `toUpper`/`toLower` allocate no new character
+         * buffer, but the simple case mapping may allocate a temporary string
+         * per mapped code point. JS strings are immutable, so no operation
+         * aliases string storage.
          */
         class CharSlice {
             #state;
@@ -4399,8 +4415,9 @@
 
             /**
              * Convert a string to a mutable character view. Allocates one new
-             * `Uint32Array`; surrogate pairs become one code point, while a lone
-             * surrogate stays one code unit.
+             * code point buffer and a view over it; surrogate pairs become one
+             * code point, while a lone surrogate stays one code unit. Astral
+             * text uses a shorter view over the same allocation, not a copy.
              */
             static fromString(text) {
                 return new CharSlice(codePointsFromString(text));
@@ -4446,7 +4463,9 @@
             /**
              * Apply `chars.toUpper` in place to every scalar value. Expanding
              * mappings such as `ß` to `SS` are left unchanged, as are lone
-             * surrogates and values outside the Unicode range.
+             * surrogates and values outside the Unicode range. This allocates
+             * no new character buffer; the simple case mapping may allocate a
+             * temporary string per mapped code point.
              *
              * @returns {this} the view, for chaining
              */
@@ -4466,7 +4485,10 @@
                 return this;
             }
 
-            /** Build a new string; allocates one string and no per-element strings. */
+            /**
+             * Build a new string. Allocates the result and bounded chunk
+             * temporaries, not a string per code point.
+             */
             toString() {
                 return charToString(this.#state);
             }
@@ -4506,7 +4528,10 @@
                 this.#state = new CharState(buffer, start, end);
             }
 
-            /** Convert a string to a read-only character view; allocates the buffer. */
+            /**
+             * Convert a string to a read-only character view; allocates one
+             * code point buffer and a view over it.
+             */
             static fromString(text) {
                 return new ReadOnlyCharSlice(codePointsFromString(text));
             }
@@ -4535,7 +4560,10 @@
                 );
             }
 
-            /** Build a new string; allocates one string. */
+            /**
+             * Build a new string. Allocates the result and bounded chunk
+             * temporaries, not a string per code point.
+             */
             toString() {
                 return charToString(this.#state);
             }
