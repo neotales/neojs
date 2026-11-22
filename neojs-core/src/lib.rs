@@ -15,9 +15,11 @@
 //! with the process's authority. Downloads are cached in one user-profile
 //! package cache, `$XDG_CACHE_HOME/neojs/packages` or
 //! `$HOME/.cache/neojs/packages`, keyed by a hash of the canonical URL
-//! including its query; entries are written atomically and revalidated with
-//! HTTP validators. There is no lockfile or content hash. [`RemoteOptions`] sets
-//! the deadline, body limit, redirect limit, and cache directory.
+//! including its query; entries are written atomically, verify a body length
+//! and SHA-256 digest, and revalidate with HTTP validators and upstream
+//! `Age`/`Date`. There is no lockfile, signature, or content-addressed store.
+//! [`RemoteOptions`] sets the per-module deadline, body, aggregate byte,
+//! module-count, and redirect limits, and the cache directory.
 //!
 //! It provides the `age`, `assert`, `chars`, `console`, `crypto`, `path`, `ssh`,
 //! `stdio`, and `strings` built-in modules through

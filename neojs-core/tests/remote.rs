@@ -33,6 +33,8 @@ struct Reply {
     etag: Option<&'static str>,
     last_modified: Option<&'static str>,
     cache_control: Option<&'static str>,
+    date: Option<&'static str>,
+    age: Option<&'static str>,
     body: &'static str,
 }
 
@@ -105,6 +107,8 @@ impl Server {
                 etag: reply.etag.map(str::to_owned),
                 last_modified: reply.last_modified.map(str::to_owned),
                 cache_control: reply.cache_control.map(str::to_owned),
+                date: reply.date.map(str::to_owned),
+                age: reply.age.map(str::to_owned),
                 body: reply.body.as_bytes().to_vec(),
             })
         }
@@ -550,6 +554,150 @@ if (dynamic.value !== 7) throw new Error("async remote graph failed");
 
     block_on_std(runtime.run_url_async("https://mods.test/main.js"))
         .expect("asynchronous remote entry");
+}
+
+#[test]
+fn typescript_diagnostics_do_not_echo_a_query_token() {
+    let server = Server::new(&[(
+        "https://mods.test/bad.ts?token=secret",
+        Reply::ok("enum Color { Red }\n"),
+    )]);
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/bad.ts?token=secret")
+        .expect_err("entry transform must fail");
+    let message = error.to_string();
+    assert!(!message.contains("token"), "{message}");
+    assert!(!message.contains("secret"), "{message}");
+
+    let server = Server::new(&[
+        (
+            "https://mods.test/main.js",
+            Reply::ok("import \"./bad.ts?token=secret\";\n"),
+        ),
+        (
+            "https://mods.test/bad.ts?token=secret",
+            Reply::ok("enum Color { Red }\n"),
+        ),
+    ]);
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/main.js")
+        .expect_err("import transform must fail");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let message = error.to_string();
+    assert!(!message.contains("token"), "{message}");
+    assert!(!message.contains("secret"), "{message}");
+}
+
+#[test]
+fn the_module_format_follows_the_final_url() {
+    let server = Server::new(&[
+        (
+            "https://mods.test/entry.js",
+            Reply::redirect("https://mods.test/real.ts"),
+        ),
+        (
+            "https://mods.test/real.ts",
+            Reply::ok("export const value: number = 1;\n"),
+        ),
+        (
+            "https://mods.test/typed.ts",
+            Reply::redirect("https://mods.test/plain.js"),
+        ),
+        (
+            "https://mods.test/plain.js",
+            Reply::ok("export const value: number = 1;\n"),
+        ),
+    ]);
+
+    let mut runtime = remote_runtime(&server);
+    runtime
+        .run_url("https://mods.test/entry.js")
+        .expect("a final .ts is stripped");
+
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/typed.ts")
+        .expect_err("a final .js is not stripped");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert!(error.to_string().contains("Missing initializer"), "{error}");
+}
+
+#[test]
+fn an_import_format_follows_the_final_url() {
+    let server = Server::new(&[
+        (
+            "https://mods.test/main.js",
+            Reply::ok(
+                r#"
+const typed = await import("./renamed.js");
+if (typed.value !== 1) throw new Error("final .ts import was not stripped");
+"#,
+            ),
+        ),
+        (
+            "https://mods.test/renamed.js",
+            Reply::redirect("https://mods.test/renamed.ts"),
+        ),
+        (
+            "https://mods.test/renamed.ts",
+            Reply::ok("export const value: number = 1;\n"),
+        ),
+    ]);
+    let mut runtime = remote_runtime(&server);
+    runtime
+        .run_url("https://mods.test/main.js")
+        .expect("import format follows final URL");
+}
+
+#[test]
+fn the_aggregate_module_and_byte_limits_bound_the_graph() {
+    let server = Server::new(&[
+        (
+            "https://mods.test/main.js",
+            Reply::ok("import \"./one.js\";\nimport \"./two.js\";\n"),
+        ),
+        ("https://mods.test/one.js", Reply::ok("")),
+        ("https://mods.test/two.js", Reply::ok("")),
+    ]);
+    let options = RemoteOptions::new()
+        .with_max_remote_modules(2)
+        .without_cache();
+    let mut runtime = remote_runtime_with_options(options, &server);
+    let error = runtime
+        .run_url("https://mods.test/main.js")
+        .expect_err("three modules exceed a two-module budget");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert!(error.to_string().contains("module limit"), "{error}");
+
+    let server = Server::new(&[
+        (
+            "https://mods.test/main.js",
+            Reply::ok("import \"./big.js\";\n"),
+        ),
+        (
+            "https://mods.test/big.js",
+            Reply::ok("export const value = \"0123456789\";\n"),
+        ),
+    ]);
+    let options = RemoteOptions::new()
+        .with_max_total_bytes(30)
+        .without_cache();
+    let mut runtime = remote_runtime_with_options(options, &server);
+    let error = runtime
+        .run_url("https://mods.test/main.js")
+        .expect_err("two bodies exceed a small byte budget");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert!(error.to_string().contains("byte total limit"), "{error}");
 }
 
 #[test]

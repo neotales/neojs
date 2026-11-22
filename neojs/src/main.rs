@@ -184,11 +184,13 @@ and explicit https: imports; relative imports in a remote module resolve against
 that module's URL. Only https: is accepted, remote modules cannot import file:
 URLs, redirects must stay credential-free https and within the limit, and no
 credentials or proxy settings are read. After a redirect the final URL is the
-module's identity and its relative-import base. Downloads are cached in
-$XDG_CACHE_HOME/neojs/packages, or $HOME/.cache/neojs/packages when
-XDG_CACHE_HOME is unset, and revalidated with HTTP validators. This is not SSRF
-or permission protection and it is not a sandbox: remote code runs with the same
-authority as local code.
+module's identity and its relative-import base; the module format follows that
+final URL. Downloads are cached in $XDG_CACHE_HOME/neojs/packages, or
+$HOME/.cache/neojs/packages when XDG_CACHE_HOME is unset, with body length and
+SHA-256 checks and HTTP revalidation. Per-module body, aggregate byte, and
+module-count limits bound a remote graph; the deadline is per module, not a
+wall-clock bound on the program. This is not SSRF or permission protection and
+it is not a sandbox: remote code runs with the same authority as local code.
 The stdio module writes to this process's stdout and stderr and offers bounded
 in-memory byte streams; it adds no filesystem, process, environment, or stdin
 access. The ssh module requires an explicit host-key pin or known-hosts

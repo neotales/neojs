@@ -50,6 +50,7 @@ use deno_error::JsErrorBox;
 
 use crate::builtins;
 use crate::remote::RemoteClient;
+use crate::remote::diagnostic_url;
 use crate::remote::display_url;
 use crate::remote::validate_url;
 use crate::typescript;
@@ -394,17 +395,18 @@ impl FileModuleLoader {
                 "cannot load {display}: {reason}"
             ))));
         }
-        let path = Path::new(module_specifier.path());
-        let format = match module_format(path) {
-            Ok(format) => format,
+        let fetched = match remote.fetch(module_specifier) {
+            Ok(fetched) => fetched,
             Err(reason) => {
                 return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
                     "cannot load {display}: {reason}"
                 ))));
             }
         };
-        let fetched = match remote.fetch(module_specifier) {
-            Ok(fetched) => fetched,
+        // A redirect can change the extension. The format follows the final
+        // URL, just as the module identity and relative-import base do.
+        let format = match module_format(Path::new(fetched.final_url.path())) {
+            Ok(format) => format,
             Err(reason) => {
                 return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
                     "cannot load {display}: {reason}"
@@ -421,14 +423,16 @@ impl FileModuleLoader {
         };
         let source = match format {
             ModuleFormat::JavaScript => ModuleSourceCode::String(code.into()),
-            ModuleFormat::TypeScript => match typescript::strip(module_specifier, code) {
-                Ok(code) => ModuleSourceCode::String(code.into()),
-                Err(reason) => {
-                    return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
-                        "cannot load {display}: {reason}"
-                    ))));
+            ModuleFormat::TypeScript => {
+                match typescript::strip(&diagnostic_url(&fetched.final_url), code) {
+                    Ok(code) => ModuleSourceCode::String(code.into()),
+                    Err(reason) => {
+                        return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                            "cannot load {display}: {reason}"
+                        ))));
+                    }
                 }
-            },
+            }
         };
         ModuleLoadResponse::Sync(Ok(ModuleSource::new_with_redirect(
             ModuleType::JavaScript,

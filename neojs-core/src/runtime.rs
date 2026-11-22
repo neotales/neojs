@@ -39,6 +39,7 @@ use crate::loader::module_format;
 use crate::path::neojs_path;
 use crate::remote::RemoteClient;
 use crate::remote::RemoteOptions;
+use crate::remote::diagnostic_url;
 use crate::remote::display_url;
 use crate::remote::validate_url;
 use crate::ssh::neojs_ssh;
@@ -193,11 +194,19 @@ impl Runtime {
     /// user-profile package cache, `$XDG_CACHE_HOME/neojs/packages` or
     /// `$HOME/.cache/neojs/packages`, keyed by the SHA-256 of the canonical URL
     /// including its query. A fresh `Cache-Control: max-age` entry is reused;
-    /// a stale entry is revalidated with `If-None-Match` and
-    /// `If-Modified-Since`; `no-store` is not cached. Writes are atomic and
-    /// concurrent processes cannot publish a partial body. There is no lockfile
-    /// or content hash, so the cache is not integrity protection and pins no
-    /// version. See [`RemoteOptions`] to change the directory or disable it.
+    /// freshness includes the upstream `Age` and `Date`; a stale entry is
+    /// revalidated with `If-None-Match` and `If-Modified-Since`; `no-store` is
+    /// not cached. Writes are atomic and concurrent processes cannot publish a
+    /// partial body. Each entry records and verifies the body length and SHA-256
+    /// digest, so corruption is a cache miss. There is no lockfile, signature,
+    /// or content-addressed store: the cache is not integrity protection
+    /// against someone who can write it and pins no version. See
+    /// [`RemoteOptions`] to change the directory or disable it.
+    ///
+    /// One runtime's remote graph is bounded by per-module body, aggregate
+    /// byte, and module-count limits. The deadline is per module, not for the
+    /// whole wall-clock execution of a program. These are resource bounds, not
+    /// a sandbox or a CPU or V8 heap bound.
     ///
     /// Remote loading is not SSRF protection: there is no host allowlist,
     /// private-address rejection, or DNS pinning, so the program can fetch any
@@ -595,33 +604,31 @@ fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, 
         reason,
     })?;
 
-    // A remote module's format comes from the requested URL path. The query and
-    // fragment do not name a file, and a fragment is never sent to the server.
-    let format =
-        module_format(Path::new(requested.path())).map_err(|reason| Error::RemoteEntry {
-            url: display_url(&requested),
-            reason,
-        })?;
     let fetched = remote
         .fetch(&requested)
         .map_err(|reason| Error::RemoteEntry {
             url: display_url(&requested),
             reason,
         })?;
+    // A redirect can change the extension. The format follows the final URL,
+    // just as the module identity and relative-import base do.
+    let format = module_format(Path::new(fetched.final_url.path())).map_err(|reason| {
+        Error::RemoteEntry {
+            url: display_url(&requested),
+            reason,
+        }
+    })?;
     let code = String::from_utf8(fetched.body).map_err(|_| Error::RemoteEntry {
         url: display_url(&requested),
         reason: "the module is not valid UTF-8".to_string(),
     })?;
     let source = match format {
         ModuleFormat::JavaScript => code,
-        ModuleFormat::TypeScript => {
-            typescript::strip(&fetched.final_url, code).map_err(|reason| {
-                Error::RemoteTypeScript {
-                    url: display_url(&requested),
-                    reason,
-                }
-            })?
-        }
+        ModuleFormat::TypeScript => typescript::strip(&diagnostic_url(&fetched.final_url), code)
+            .map_err(|reason| Error::RemoteTypeScript {
+                url: display_url(&requested),
+                reason,
+            })?,
     };
     Ok(PreparedEntry {
         requested,

@@ -31,15 +31,30 @@
 //! partial entry.
 //!
 //! Cached responses are reused while `Cache-Control: max-age` says they are
-//! fresh. A stale entry is revalidated with `If-None-Match` and
-//! `If-Modified-Since` when the server supplied validators; a `304` reuses the
-//! cached body and refreshes its metadata. An entry with no freshness lifetime
-//! is always revalidated. `Cache-Control: no-store` is not stored, and
-//! `no-cache` forces revalidation. A cache read or write failure is ignored:
-//! the module is fetched and the program continues. There is no lockfile and no
-//! content hash, so the cache is not integrity protection and does not pin a
-//! module version. Openness of the cache directory is the user's
-//! responsibility.
+//! fresh. Freshness includes the upstream `Age` and `Date` values, so a
+//! response that was already old when it arrived is stale immediately. A stale
+//! entry is revalidated with `If-None-Match` and `If-Modified-Since` when the
+//! server supplied validators; a `304` reuses the cached body and recomputes
+//! its age from the `304` headers. An entry with no freshness lifetime is
+//! always revalidated. `Cache-Control: no-store` is not stored, and `no-cache`
+//! forces revalidation.
+//!
+//! Each entry records the body length and SHA-256 digest; a mismatch or a
+//! truncation is a cache miss, not an executable body. This detects corruption
+//! and a torn write, not an adversary who can write both the metadata and the
+//! body in the user's cache directory. There is no lockfile, signature, or
+//! content-addressed store, so the cache does not pin a version or provide
+//! integrity beyond transport TLS and those consistency checks. A cache read or
+//! write failure is ignored: the module is fetched and the program continues.
+//! Openness of the cache directory is the user's responsibility.
+//!
+//! One runtime's remote graph is bounded by a per-module body limit, an
+//! aggregate byte limit, and a maximum number of remote modules. The deadline
+//! is per module, not a wall-clock bound on the whole graph: JavaScript can
+//! keep running and dynamically import more modules, each with its own
+//! deadline, until the aggregate module or byte limit is reached. Module
+//! execution and compilation are trusted; these are resource bounds, not a
+//! sandbox or a bound on CPU or V8 heap used by a program.
 //!
 //! This is not SSRF protection. There is no host allowlist, no private-address
 //! rejection, and no DNS pinning: neojs fetches whatever HTTPS URL the program
@@ -58,6 +73,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
@@ -74,21 +90,29 @@ const DEFAULT_MAX_MODULE_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_MAX_REDIRECTS: u32 = 5;
 /// Default deadline for one module fetch, including redirects and the body.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default maximum number of distinct modules fetched by one runtime.
+const DEFAULT_MAX_REMOTE_MODULES: usize = 256;
+/// Default maximum aggregate remote body bytes loaded by one runtime.
+const DEFAULT_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 /// The first line of a cache entry.
-const CACHE_MAGIC: &str = "neojs-remote-cache 1";
+const CACHE_MAGIC: &str = "neojs-remote-cache 2";
 /// Largest metadata block accepted from a cache entry.
 const MAX_META_BYTES: usize = 64 * 1024;
 
 /// Limits and cache settings for remote module fetches.
 ///
 /// Create one with [`RemoteOptions::new`] and adjust it with the `with_*`
-/// methods. The defaults are a 30-second deadline, a 16 MiB body limit, five
-/// redirects, and the user-profile package cache. These are resource bounds,
-/// not permissions: enabling remote loading is the permission decision.
+/// methods. The defaults are a 30-second per-module deadline, a 16 MiB body
+/// limit, a 64 MiB aggregate byte limit, 256 remote modules, five redirects, and
+/// the user-profile package cache. These are resource bounds, not permissions:
+/// enabling remote loading is the permission decision. There is no aggregate
+/// wall-clock deadline; each module fetch has its own.
 #[derive(Clone, Debug)]
 pub struct RemoteOptions {
     timeout: Duration,
     max_module_bytes: usize,
+    max_total_bytes: usize,
+    max_remote_modules: usize,
     max_redirects: u32,
     cache_dir: Option<PathBuf>,
 }
@@ -98,6 +122,8 @@ impl Default for RemoteOptions {
         Self {
             timeout: DEFAULT_TIMEOUT,
             max_module_bytes: DEFAULT_MAX_MODULE_BYTES,
+            max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
+            max_remote_modules: DEFAULT_MAX_REMOTE_MODULES,
             max_redirects: DEFAULT_MAX_REDIRECTS,
             cache_dir: default_cache_dir(),
         }
@@ -112,9 +138,12 @@ impl RemoteOptions {
 
     /// Sets the deadline for one module fetch.
     ///
-    /// The deadline covers every redirect and reading the body. A zero duration
-    /// makes every fetch fail immediately. DNS resolution may exceed it because
-    /// the resolver API cannot be interrupted.
+    /// The deadline covers every redirect and reading one module's body. It is
+    /// not a deadline for the whole module graph: code can keep running and
+    /// dynamically import more modules, each with its own deadline, until the
+    /// aggregate module or byte limit is reached. A zero duration makes every
+    /// fetch fail immediately. DNS resolution may exceed it because the resolver
+    /// API cannot be interrupted.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -126,6 +155,25 @@ impl RemoteOptions {
     /// limit rejects every non-empty module.
     pub fn with_max_module_bytes(mut self, max_module_bytes: usize) -> Self {
         self.max_module_bytes = max_module_bytes;
+        self
+    }
+
+    /// Sets the aggregate remote body limit for one runtime, in bytes.
+    ///
+    /// Every distinct remote module body loaded by the runtime counts once,
+    /// including a body served from the cache. The entry module counts. A zero
+    /// limit rejects the first non-empty module.
+    pub fn with_max_total_bytes(mut self, max_total_bytes: usize) -> Self {
+        self.max_total_bytes = max_total_bytes;
+        self
+    }
+
+    /// Sets how many distinct remote modules one runtime may load.
+    ///
+    /// The entry module counts. A zero limit rejects the remote entry before
+    /// V8 loads it.
+    pub fn with_max_remote_modules(mut self, max_remote_modules: usize) -> Self {
+        self.max_remote_modules = max_remote_modules;
         self
     }
 
@@ -165,6 +213,16 @@ impl RemoteOptions {
     /// Returns the largest accepted module body, in bytes.
     pub fn max_module_bytes(&self) -> usize {
         self.max_module_bytes
+    }
+
+    /// Returns the aggregate remote body limit, in bytes.
+    pub fn max_total_bytes(&self) -> usize {
+        self.max_total_bytes
+    }
+
+    /// Returns how many distinct remote modules one runtime may load.
+    pub fn max_remote_modules(&self) -> usize {
+        self.max_remote_modules
     }
 
     /// Returns how many redirects one module fetch may follow.
@@ -233,6 +291,10 @@ pub(crate) struct RemoteResponse {
     pub(crate) last_modified: Option<String>,
     /// The `Cache-Control` header, when present.
     pub(crate) cache_control: Option<String>,
+    /// The `Date` header, when present.
+    pub(crate) date: Option<String>,
+    /// The `Age` header, when present.
+    pub(crate) age: Option<String>,
     /// The response body, read lazily so the caller can bound it.
     pub(crate) body: Box<dyn Read + Send>,
 }
@@ -258,12 +320,45 @@ pub(crate) trait RemoteTransport: Send + Sync {
     fn get(&self, request: &RemoteRequest<'_>) -> Result<RemoteResponse, String>;
 }
 
+/// The aggregate limits shared by all clones of one runtime's remote client.
+#[derive(Default)]
+struct RemoteBudget {
+    modules: AtomicUsize,
+    bytes: AtomicUsize,
+}
+
+impl RemoteBudget {
+    /// Charges one loaded module, returning a reason when the graph is over its
+    /// limits.
+    fn charge(&self, bytes: usize, options: &RemoteOptions) -> Result<(), String> {
+        let modules = self.modules.fetch_add(1, Ordering::SeqCst) + 1;
+        if modules > options.max_remote_modules {
+            return Err(format!(
+                "the remote module graph exceeds the {} module limit",
+                options.max_remote_modules
+            ));
+        }
+        let total = self
+            .bytes
+            .fetch_add(bytes, Ordering::SeqCst)
+            .saturating_add(bytes);
+        if total > options.max_total_bytes {
+            return Err(format!(
+                "the remote module graph exceeds the {} byte total limit",
+                options.max_total_bytes
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A configured remote module client.
 #[derive(Clone)]
 pub(crate) struct RemoteClient {
     options: RemoteOptions,
     transport: Arc<dyn RemoteTransport>,
     cache: Option<Arc<Cache>>,
+    budget: Arc<RemoteBudget>,
 }
 
 impl RemoteClient {
@@ -277,6 +372,7 @@ impl RemoteClient {
             options,
             transport: Arc::new(UreqTransport::new()),
             cache,
+            budget: Arc::new(RemoteBudget::default()),
         }
     }
 
@@ -294,6 +390,7 @@ impl RemoteClient {
             options,
             transport,
             cache,
+            budget: Arc::new(RemoteBudget::default()),
         }
     }
 
@@ -327,6 +424,7 @@ impl RemoteClient {
             if let Some(cached) = &cached
                 && cached.is_fresh(now)
             {
+                self.budget.charge(cached.body.len(), &self.options)?;
                 return Ok(FetchedModule {
                     body: cached.body.clone(),
                     final_url: current,
@@ -336,6 +434,7 @@ impl RemoteClient {
             let last_modified = cached
                 .as_ref()
                 .and_then(|entry| entry.last_modified.as_deref());
+            let request_started = Instant::now();
             let response = self
                 .transport
                 .get(&RemoteRequest {
@@ -347,6 +446,8 @@ impl RemoteClient {
                 .map_err(|reason| {
                     format!("request for {} failed: {reason}", display_url(&current))
                 })?;
+            let received_at = unix_now();
+            let response_delay = duration_secs_ceil(request_started.elapsed());
 
             if response.status == 304 {
                 let Some(mut cached) = cached else {
@@ -356,7 +457,17 @@ impl RemoteClient {
                     ));
                 };
                 let directives = CacheDirectives::parse(response.cache_control.as_deref());
-                cached.stored_at = now;
+                let previous_age = cached
+                    .initial_age
+                    .saturating_add(received_at.saturating_sub(cached.stored_at));
+                let upstream_age = response_age(
+                    response.date.as_deref(),
+                    response.age.as_deref(),
+                    received_at,
+                    response_delay,
+                );
+                cached.initial_age = previous_age.max(upstream_age);
+                cached.stored_at = received_at;
                 if directives.no_cache {
                     cached.max_age = Some(0);
                 } else if let Some(max_age) = directives.max_age {
@@ -375,6 +486,7 @@ impl RemoteClient {
                         let _ = cache.store(&current, &cached);
                     }
                 }
+                self.budget.charge(cached.body.len(), &self.options)?;
                 return Ok(FetchedModule {
                     body: cached.body,
                     final_url: current,
@@ -437,7 +549,13 @@ impl RemoteClient {
                 } else {
                     let entry = CachedModule {
                         body: body.clone(),
-                        stored_at: now,
+                        stored_at: received_at,
+                        initial_age: response_age(
+                            response.date.as_deref(),
+                            response.age.as_deref(),
+                            received_at,
+                            response_delay,
+                        ),
                         max_age: if directives.no_cache {
                             Some(0)
                         } else {
@@ -449,6 +567,7 @@ impl RemoteClient {
                     let _ = cache.store(&current, &entry);
                 }
             }
+            self.budget.charge(body.len(), &self.options)?;
             return Ok(FetchedModule {
                 body,
                 final_url: current,
@@ -508,12 +627,20 @@ fn request_url(url: &Url) -> Url {
 /// A query can contain a signed token, so it is not written to an error or a
 /// log line even though it is part of the cache key.
 pub(crate) fn display_url(url: &Url) -> String {
+    diagnostic_url(url).to_string()
+}
+
+/// Returns a URL safe to pass to a diagnostic producer.
+///
+/// Credentials, the query, and the fragment are removed, so a type-stripping
+/// error cannot echo a signed query even though it names the module URL.
+pub(crate) fn diagnostic_url(url: &Url) -> Url {
     let mut clean = url.clone();
     let _ = clean.set_username("");
     let _ = clean.set_password(None);
     clean.set_query(None);
     clean.set_fragment(None);
-    clean.to_string()
+    clean
 }
 
 /// Reads at most `limit` bytes, checking the deadline between reads.
@@ -568,15 +695,15 @@ impl CacheDirectives {
         };
         for directive in header.split(',') {
             let directive = directive.trim();
-            if directive.eq_ignore_ascii_case("no-store") {
+            let (name, value) = directive.split_once('=').unwrap_or((directive, ""));
+            let name = name.trim();
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("no-store") {
                 directives.no_store = true;
-            } else if directive.eq_ignore_ascii_case("no-cache") {
+            } else if name.eq_ignore_ascii_case("no-cache") {
+                // A qualified `no-cache="field"` still requires revalidation.
                 directives.no_cache = true;
-            } else if let Some(value) = directive
-                .get(..8)
-                .filter(|prefix| prefix.eq_ignore_ascii_case("max-age="))
-                .map(|_| &directive[8..])
-            {
+            } else if name.eq_ignore_ascii_case("max-age") {
                 let value = value.trim_matches('"');
                 if let Ok(seconds) = value.parse() {
                     directives.max_age = Some(seconds);
@@ -591,6 +718,8 @@ impl CacheDirectives {
 struct CachedModule {
     body: Vec<u8>,
     stored_at: u64,
+    /// Upstream age at the time the response arrived, from `Date` and `Age`.
+    initial_age: u64,
     /// `Cache-Control: max-age`, or `Some(0)` for `no-cache`.
     max_age: Option<u64>,
     etag: Option<String>,
@@ -599,14 +728,26 @@ struct CachedModule {
 
 impl CachedModule {
     /// Returns whether the entry may be used without a request.
+    ///
+    /// The age is the upstream age at storage plus time resident locally. A
+    /// server `Age` or an old `Date` therefore makes an entry stale even while
+    /// it is young in this process.
     fn is_fresh(&self, now: u64) -> bool {
-        self.max_age
-            .is_some_and(|max_age| now.saturating_sub(self.stored_at) < max_age)
+        let age = self
+            .initial_age
+            .saturating_add(now.saturating_sub(self.stored_at));
+        self.max_age.is_some_and(|max_age| age < max_age)
     }
 
     /// Serializes metadata without a URL or any other request-derived secret.
     fn metadata(&self) -> String {
-        let mut metadata = format!("stored={}\n", self.stored_at);
+        let mut metadata = format!(
+            "stored={}\ninitial-age={}\nbody-length={}\nbody-sha256={}\n",
+            self.stored_at,
+            self.initial_age,
+            self.body.len(),
+            hex_encode(&Sha256::digest(&self.body))
+        );
         if let Some(max_age) = self.max_age {
             metadata.push_str(&format!("max-age={max_age}\n"));
         }
@@ -624,8 +765,14 @@ impl CachedModule {
 }
 
 /// Parses the metadata block of a cache entry.
-fn parse_metadata(metadata: &str) -> Option<CachedModule> {
+///
+/// The body length and digest are returned separately so `load` can verify
+/// them against the body bytes before using an entry.
+fn parse_metadata(metadata: &str) -> Option<(CachedModule, usize, String)> {
     let mut stored_at = None;
+    let mut initial_age = None;
+    let mut body_length = None;
+    let mut body_sha256 = None;
     let mut max_age = None;
     let mut etag = None;
     let mut last_modified = None;
@@ -635,19 +782,27 @@ fn parse_metadata(metadata: &str) -> Option<CachedModule> {
         };
         match name {
             "stored" => stored_at = value.parse().ok(),
+            "initial-age" => initial_age = value.parse().ok(),
+            "body-length" => body_length = value.parse().ok(),
+            "body-sha256" => body_sha256 = Some(value.to_string()),
             "max-age" => max_age = value.parse().ok(),
             "etag" => etag = hex_decode(value),
             "last-modified" => last_modified = hex_decode(value),
             _ => {}
         }
     }
-    Some(CachedModule {
-        body: Vec::new(),
-        stored_at: stored_at?,
-        max_age,
-        etag,
-        last_modified,
-    })
+    Some((
+        CachedModule {
+            body: Vec::new(),
+            stored_at: stored_at?,
+            initial_age: initial_age?,
+            max_age,
+            etag,
+            last_modified,
+        },
+        body_length?,
+        body_sha256?,
+    ))
 }
 
 /// Encode bytes as lowercase hexadecimal.
@@ -690,6 +845,30 @@ fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+/// Rounds a duration up to whole seconds, so an age is never understated.
+fn duration_secs_ceil(duration: Duration) -> u64 {
+    duration.as_secs() + u64::from(duration.subsec_nanos() > 0)
+}
+
+/// Returns the response's age when it arrived, from `Date` and `Age`.
+///
+/// This follows the conservative part of RFC 9111's age calculation: the
+/// apparent age from `Date` and the corrected `Age` value (server age plus the
+/// request delay) are both considered, and the larger is used. An `Age` above
+/// the freshness lifetime makes an entry stale immediately. A missing or
+/// malformed `Date` contributes no apparent age, and a malformed `Age` is
+/// ignored.
+fn response_age(date: Option<&str>, age: Option<&str>, now: u64, response_delay: u64) -> u64 {
+    let apparent = date
+        .and_then(|date| httpdate::parse_http_date(date).ok())
+        .and_then(|date| date.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |date| now.saturating_sub(date.as_secs()));
+    let age_value = age
+        .and_then(|age| age.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    apparent.max(age_value.saturating_add(response_delay))
 }
 
 /// The user-profile module cache.
@@ -749,13 +928,17 @@ impl Cache {
         }
         let mut metadata = vec![0u8; metadata_length];
         reader.read_exact(&mut metadata).ok()?;
-        let mut entry = parse_metadata(std::str::from_utf8(&metadata).ok()?)?;
+        let (mut entry, expected_length, expected_digest) =
+            parse_metadata(std::str::from_utf8(&metadata).ok()?)?;
         let mut body = Vec::new();
         reader
             .take(max_body.saturating_add(1) as u64)
             .read_to_end(&mut body)
             .ok()?;
-        if body.len() > max_body {
+        if body.len() > max_body
+            || body.len() != expected_length
+            || !expected_digest.eq_ignore_ascii_case(&hex_encode(&Sha256::digest(&body)))
+        {
             return None;
         }
         entry.body = body;
@@ -817,11 +1000,46 @@ impl UreqTransport {
         let agent = ureq::AgentBuilder::new()
             .https_only(true)
             .redirects(0)
+            // Explicit even though the `proxy-from-env` feature is off: no
+            // ambient proxy URL or proxy credential is ever read.
+            .try_proxy_from_env(false)
             .timeout(DEFAULT_TIMEOUT)
             .user_agent(concat!("neojs/", env!("CARGO_PKG_VERSION")))
             .build();
         Self { agent }
     }
+
+    /// Wraps an agent built with a test-only trust store.
+    #[cfg(test)]
+    fn with_agent(agent: ureq::Agent) -> Self {
+        Self { agent }
+    }
+}
+
+/// Returns a fixed classification for a transport error.
+///
+/// Neither `ureq`'s message nor its URL is used: a URL can carry a signed query
+/// and the transport message can include it. The category is enough to act on.
+fn ureq_error_reason(error: ureq::Error) -> String {
+    let Some(error) = error.into_transport() else {
+        return "HTTP transport error".to_string();
+    };
+    let reason = match error.kind() {
+        ureq::ErrorKind::InvalidUrl => "invalid URL",
+        ureq::ErrorKind::UnknownScheme => "unsupported URL scheme",
+        ureq::ErrorKind::Dns => "DNS resolution failed",
+        ureq::ErrorKind::InsecureRequestHttpsOnly => "non-HTTPS request refused",
+        ureq::ErrorKind::ConnectionFailed => "connection failed",
+        ureq::ErrorKind::TooManyRedirects => "too many redirects",
+        ureq::ErrorKind::BadStatus => "invalid HTTP status line",
+        ureq::ErrorKind::BadHeader => "invalid HTTP header",
+        ureq::ErrorKind::Io => "network I/O error",
+        ureq::ErrorKind::InvalidProxyUrl => "invalid proxy URL",
+        ureq::ErrorKind::ProxyConnect => "proxy connection failed",
+        ureq::ErrorKind::ProxyUnauthorized => "proxy authentication failed",
+        ureq::ErrorKind::HTTP => "HTTP transport error",
+    };
+    reason.to_string()
 }
 
 impl RemoteTransport for UreqTransport {
@@ -841,7 +1059,7 @@ impl RemoteTransport for UreqTransport {
             // A 4xx or 5xx response still carries a status, headers, and a
             // body. Treat it as a response so the policy reports it uniformly.
             Err(ureq::Error::Status(_, response)) => response,
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(ureq_error_reason(error)),
         };
         let status = response.status();
         let location = response.header("location").map(str::to_owned);
@@ -851,6 +1069,8 @@ impl RemoteTransport for UreqTransport {
         let etag = response.header("etag").map(str::to_owned);
         let last_modified = response.header("last-modified").map(str::to_owned);
         let cache_control = response.header("cache-control").map(str::to_owned);
+        let date = response.header("date").map(str::to_owned);
+        let age = response.header("age").map(str::to_owned);
         Ok(RemoteResponse {
             status,
             location,
@@ -858,6 +1078,8 @@ impl RemoteTransport for UreqTransport {
             etag,
             last_modified,
             cache_control,
+            date,
+            age,
             body: response.into_reader(),
         })
     }
@@ -880,6 +1102,10 @@ pub struct TestRemoteResponse {
     pub last_modified: Option<String>,
     /// The `Cache-Control` header, if any.
     pub cache_control: Option<String>,
+    /// The `Date` header, if any.
+    pub date: Option<String>,
+    /// The `Age` header, if any.
+    pub age: Option<String>,
     /// The response body.
     pub body: Vec<u8>,
 }
@@ -908,6 +1134,8 @@ where
             etag: reply.etag,
             last_modified: reply.last_modified,
             cache_control: reply.cache_control,
+            date: reply.date,
+            age: reply.age,
             body: Box::new(std::io::Cursor::new(reply.body)),
         })
     }
@@ -927,9 +1155,16 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::process::Command;
+    use std::process::Stdio;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
+    use std::time::SystemTime;
 
     use deno_core::url::Url;
 
@@ -978,6 +1213,8 @@ mod tests {
             etag: None,
             last_modified: None,
             cache_control: Some("no-store".to_string()),
+            date: None,
+            age: None,
             body: Box::new(std::io::Cursor::new(body.as_bytes().to_vec())),
         }
     }
@@ -1110,6 +1347,8 @@ mod tests {
             etag: None,
             last_modified: None,
             cache_control: None,
+            date: None,
+            age: None,
             body: Box::new(std::io::Cursor::new(b"0123456789".to_vec())),
         }]);
         let client = client(options().with_max_module_bytes(10), transport);
@@ -1128,6 +1367,8 @@ mod tests {
             etag: None,
             last_modified: None,
             cache_control: None,
+            date: None,
+            age: None,
             body: Box::new(std::io::Cursor::new(b"0123456789".to_vec())),
         }]);
         let client = client(options().with_max_module_bytes(9), transport);
@@ -1186,6 +1427,8 @@ mod tests {
             etag: Some("\"v1\"".to_string()),
             last_modified: None,
             cache_control: Some("max-age=60".to_string()),
+            date: None,
+            age: None,
             body: Box::new(std::io::Cursor::new(b"export default 1;".to_vec())),
         }]);
         let saw = Arc::clone(&transport);
@@ -1214,6 +1457,8 @@ mod tests {
                 etag: Some("\"v1\"".to_string()),
                 last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
                 cache_control: Some("max-age=0".to_string()),
+                date: None,
+                age: None,
                 body: Box::new(std::io::Cursor::new(b"export default 1;".to_vec())),
             },
             RemoteResponse {
@@ -1223,6 +1468,8 @@ mod tests {
                 etag: Some("\"v1\"".to_string()),
                 last_modified: None,
                 cache_control: Some("max-age=0".to_string()),
+                date: None,
+                age: None,
                 body: Box::new(std::io::Cursor::new(Vec::new())),
             },
         ]);
@@ -1241,6 +1488,147 @@ mod tests {
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[1].1.as_deref(), Some("\"v1\""));
         assert_eq!(seen[1].2.as_deref(), Some("Wed, 21 Oct 2015 07:28:00 GMT"));
+    }
+
+    #[test]
+    fn a_server_age_counts_toward_freshness() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transport = ScriptedTransport::new(vec![
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: None,
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: None,
+                age: Some("120".to_string()),
+                body: Box::new(std::io::Cursor::new(b"body".to_vec())),
+            },
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: None,
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: None,
+                age: Some("0".to_string()),
+                body: Box::new(std::io::Cursor::new(b"body".to_vec())),
+            },
+        ]);
+        let saw = Arc::clone(&transport);
+        let options = RemoteOptions::new().with_cache_dir(dir.path());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+
+        client(options.clone(), Arc::clone(&transport))
+            .fetch(&url)
+            .expect("first");
+        client(options, Arc::clone(&transport))
+            .fetch(&url)
+            .expect("second");
+        assert_eq!(saw.seen.lock().expect("seen").len(), 2);
+    }
+
+    #[test]
+    fn an_old_date_counts_toward_freshness() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let date = httpdate::fmt_http_date(
+            SystemTime::now()
+                .checked_sub(Duration::from_secs(120))
+                .expect("past time"),
+        );
+        let transport = ScriptedTransport::new(vec![
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: None,
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: Some(date.clone()),
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"body".to_vec())),
+            },
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: None,
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: Some(httpdate::fmt_http_date(SystemTime::now())),
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"body".to_vec())),
+            },
+        ]);
+        let saw = Arc::clone(&transport);
+        let options = RemoteOptions::new().with_cache_dir(dir.path());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+
+        client(options.clone(), Arc::clone(&transport))
+            .fetch(&url)
+            .expect("first");
+        client(options, Arc::clone(&transport))
+            .fetch(&url)
+            .expect("second");
+        assert_eq!(saw.seen.lock().expect("seen").len(), 2);
+    }
+
+    #[test]
+    fn a_304_with_a_server_age_does_not_refresh_the_entry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transport = ScriptedTransport::new(vec![
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: Some("\"v1\"".to_string()),
+                last_modified: None,
+                cache_control: Some("max-age=0".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"body".to_vec())),
+            },
+            RemoteResponse {
+                status: 304,
+                location: None,
+                declared_length: None,
+                etag: Some("\"v1\"".to_string()),
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: None,
+                age: Some("120".to_string()),
+                body: Box::new(std::io::Cursor::new(Vec::new())),
+            },
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: Some("\"v1\"".to_string()),
+                last_modified: None,
+                cache_control: Some("max-age=0".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"body".to_vec())),
+            },
+        ]);
+        let saw = Arc::clone(&transport);
+        let options = RemoteOptions::new().with_cache_dir(dir.path());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+
+        client(options.clone(), Arc::clone(&transport))
+            .fetch(&url)
+            .expect("first");
+        client(options.clone(), Arc::clone(&transport))
+            .fetch(&url)
+            .expect("revalidate");
+        client(options, Arc::clone(&transport))
+            .fetch(&url)
+            .expect("third");
+        let seen = saw.seen.lock().expect("seen");
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[2].1.as_deref(), Some("\"v1\""));
     }
 
     #[test]
@@ -1266,6 +1654,8 @@ mod tests {
                 etag: Some("\"v1\"".to_string()),
                 last_modified: None,
                 cache_control: Some("max-age=0".to_string()),
+                date: None,
+                age: None,
                 body: Box::new(std::io::Cursor::new(b"body".to_vec())),
             },
             response(200, None, "body"),
@@ -1289,6 +1679,8 @@ mod tests {
             etag: None,
             last_modified: None,
             cache_control: Some("max-age=60".to_string()),
+            date: None,
+            age: None,
             body: Box::new(std::io::Cursor::new(b"body".to_vec())),
         }]);
         let options = RemoteOptions::new().with_cache_dir(dir.path());
@@ -1317,6 +1709,7 @@ mod tests {
                 let entry = super::CachedModule {
                     body: vec![b'x'; length * 1024],
                     stored_at: 0,
+                    initial_age: 0,
                     max_age: Some(60),
                     etag: None,
                     last_modified: None,
@@ -1355,10 +1748,363 @@ mod tests {
     }
 
     #[test]
+    fn the_module_and_total_byte_budgets_are_enforced() {
+        let transport = ScriptedTransport::new(vec![
+            response(200, None, "aaaa"),
+            response(200, None, "bbbb"),
+        ]);
+        let module_limited = client(options().with_max_remote_modules(1), Arc::clone(&transport));
+        let one = Url::parse("https://example.test/one.js").expect("url");
+        let two = Url::parse("https://example.test/two.js").expect("url");
+        module_limited.fetch(&one).expect("first module");
+        let error = module_limited.fetch(&two).expect_err("module limit");
+        assert!(error.contains("1 module limit"), "{error}");
+
+        let transport = ScriptedTransport::new(vec![
+            response(200, None, "aaaa"),
+            response(200, None, "bbbb"),
+        ]);
+        let byte_limited = client(options().with_max_total_bytes(7), Arc::clone(&transport));
+        byte_limited.fetch(&one).expect("first bytes");
+        let error = byte_limited.fetch(&two).expect_err("byte limit");
+        assert!(error.contains("7 byte total limit"), "{error}");
+    }
+
+    #[test]
+    fn cache_rejects_a_modified_or_truncated_body() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let entry = super::CachedModule {
+            body: b"export default 1;\n".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+        };
+        cache.store(&url, &entry).expect("store");
+        assert!(cache.load(&url, 1024).is_some());
+
+        let path = cache.path(&url);
+        let original = std::fs::read(&path).expect("read cache");
+        let needle = b"export default 1;\n";
+        let replacement = b"export default 2;\n";
+        let offset = original
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("body in cache file");
+        let mut tampered = original.clone();
+        tampered[offset..offset + needle.len()].copy_from_slice(replacement);
+        std::fs::write(&path, &tampered).expect("write tampered");
+        assert!(
+            cache.load(&url, 1024).is_none(),
+            "a modified body must miss"
+        );
+
+        std::fs::write(&path, &original[..original.len() - 2]).expect("truncate");
+        assert!(
+            cache.load(&url, 1024).is_none(),
+            "a truncated body must miss"
+        );
+
+        std::fs::write(&path, &original).expect("restore");
+        assert_eq!(cache.load(&url, 1024).expect("restored").body, entry.body);
+    }
+
+    #[test]
+    fn a_corrupt_cache_entry_is_refetched_not_executed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transport = ScriptedTransport::new(vec![
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: None,
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"export default 1;".to_vec())),
+            },
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: None,
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"export default 2;".to_vec())),
+            },
+        ]);
+        let saw = Arc::clone(&transport);
+        let options = RemoteOptions::new().with_cache_dir(dir.path());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        client(options.clone(), Arc::clone(&transport))
+            .fetch(&url)
+            .expect("first fetch");
+
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let path = cache.path(&url);
+        let original = std::fs::read(&path).expect("cache file");
+        let mut tampered = original.clone();
+        let needle = b"export default 1;";
+        let replacement = b"export default 9;";
+        let offset = tampered
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("body");
+        tampered[offset..offset + needle.len()].copy_from_slice(replacement);
+        std::fs::write(&path, tampered).expect("tamper");
+
+        let fetched = client(options, transport).fetch(&url).expect("refetch");
+        assert_eq!(fetched.body, b"export default 2;");
+        assert_eq!(saw.seen.lock().expect("seen").len(), 2);
+    }
+
+    #[test]
+    fn concurrent_readers_never_observe_a_partial_entry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = Arc::new(super::Cache::new(dir.path().to_path_buf()));
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut readers = Vec::new();
+        for _ in 0..2 {
+            let cache = Arc::clone(&cache);
+            let url = url.clone();
+            let stop = Arc::clone(&stop);
+            readers.push(std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if let Some(entry) = cache.load(&url, 8192) {
+                        assert_eq!(entry.body.len(), 1024);
+                        assert!(matches!(entry.body[0], b'a'..=b'd'));
+                    }
+                    std::thread::yield_now();
+                }
+            }));
+        }
+        let mut writers = Vec::new();
+        for index in 0..4u8 {
+            let cache = Arc::clone(&cache);
+            let url = url.clone();
+            writers.push(std::thread::spawn(move || {
+                for _ in 0..50 {
+                    let entry = super::CachedModule {
+                        body: vec![b'a' + index; 1024],
+                        stored_at: 1,
+                        initial_age: 0,
+                        max_age: Some(60),
+                        etag: None,
+                        last_modified: None,
+                    };
+                    cache.store(&url, &entry).expect("store");
+                }
+            }));
+        }
+        for writer in writers {
+            writer.join().expect("writer");
+        }
+        stop.store(true, Ordering::Relaxed);
+        for reader in readers {
+            reader.join().expect("reader");
+        }
+        assert_eq!(cache.load(&url, 8192).expect("final").body.len(), 1024);
+    }
+
+    fn certificate() -> (Vec<u8>, Vec<u8>) {
+        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+            .expect("self-signed certificate");
+        (
+            certified.cert.der().to_vec(),
+            certified.signing_key.serialize_der(),
+        )
+    }
+
+    fn spawn_tls_server(cert_der: Vec<u8>, key_der: Vec<u8>) -> (u16, std::thread::JoinHandle<()>) {
+        use rustls::pki_types::CertificateDer;
+        use rustls::pki_types::PrivateKeyDer;
+        use rustls::pki_types::PrivatePkcs8KeyDer;
+
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(cert_der)],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der)),
+            )
+            .expect("server config");
+        let config = Arc::new(config);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let handle = std::thread::spawn(move || {
+            let Ok((tcp, _)) = listener.accept() else {
+                return;
+            };
+            let Ok(connection) = rustls::ServerConnection::new(config) else {
+                return;
+            };
+            let mut stream = rustls::StreamOwned::new(connection, tcp);
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let body = b"export default 1;\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body);
+            let _ = stream.flush();
+        });
+        (port, handle)
+    }
+
+    fn trusted_agent(cert_der: &[u8]) -> ureq::Agent {
+        use rustls::pki_types::CertificateDer;
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(cert_der.to_vec()))
+            .expect("trust test certificate");
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        ureq::AgentBuilder::new()
+            .https_only(true)
+            .redirects(0)
+            .try_proxy_from_env(false)
+            .timeout(Duration::from_secs(5))
+            .tls_config(Arc::new(config))
+            .build()
+    }
+
+    #[test]
+    fn a_real_transport_error_never_echoes_the_query() {
+        let url = Url::parse("https://127.0.0.1:1/mod.js?token=sentinel").expect("url");
+        let error = super::UreqTransport::new()
+            .get(&super::RemoteRequest {
+                url: &url,
+                timeout: Duration::from_secs(1),
+                if_none_match: None,
+                if_modified_since: None,
+            })
+            .err()
+            .expect("connection refused");
+        assert!(!error.contains("sentinel"), "{error}");
+        assert!(!error.contains("token"), "{error}");
+    }
+
+    #[test]
+    fn the_production_transport_negotiates_tls_and_rejects_an_untrusted_certificate() {
+        let (cert_der, key_der) = certificate();
+
+        let (port, handle) = spawn_tls_server(cert_der.clone(), key_der.clone());
+        let url =
+            Url::parse(&format!("https://127.0.0.1:{port}/mod.js?token=sentinel")).expect("url");
+        let untrusted = super::UreqTransport::new();
+        let error = untrusted
+            .get(&super::RemoteRequest {
+                url: &url,
+                timeout: Duration::from_secs(5),
+                if_none_match: None,
+                if_modified_since: None,
+            })
+            .err()
+            .expect("a self-signed certificate is untrusted");
+        assert!(!error.contains("sentinel"), "{error}");
+        assert!(!error.contains(&port.to_string()), "{error}");
+        handle.join().expect("server");
+
+        let (port, handle) = spawn_tls_server(cert_der.clone(), key_der);
+        let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js")).expect("url");
+        let transport = super::UreqTransport::with_agent(trusted_agent(&cert_der));
+        let response = transport
+            .get(&super::RemoteRequest {
+                url: &url,
+                timeout: Duration::from_secs(5),
+                if_none_match: None,
+                if_modified_since: None,
+            })
+            .expect("trusted TLS response");
+        assert_eq!(response.status, 200);
+        let mut body = Vec::new();
+        response
+            .body
+            .take(1024)
+            .read_to_end(&mut body)
+            .expect("body");
+        assert_eq!(body, b"export default 1;\n");
+        handle.join().expect("server");
+    }
+
+    /// Child half of [`production_transport_does_not_use_an_ambient_proxy`].
+    #[test]
+    fn ambient_proxy_child() {
+        if std::env::var_os("NEOJS_PROXY_CHILD").is_none() {
+            return;
+        }
+        let url = Url::parse("https://127.0.0.1:1/mod.js?token=sentinel").expect("url");
+        let transport = super::UreqTransport::new();
+        let _ = transport.get(&super::RemoteRequest {
+            url: &url,
+            timeout: Duration::from_secs(2),
+            if_none_match: None,
+            if_modified_since: None,
+        });
+    }
+
+    #[test]
+    fn production_transport_does_not_use_an_ambient_proxy() {
+        if std::env::var_os("NEOJS_PROXY_CHILD").is_some() {
+            return;
+        }
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind proxy observer");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let port = listener.local_addr().expect("addr").port();
+        let proxy = format!("http://user:secret@127.0.0.1:{port}");
+        let mut child = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "remote::tests::ambient_proxy_child",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("HTTPS_PROXY", &proxy)
+            .env("HTTP_PROXY", &proxy)
+            .env("ALL_PROXY", &proxy)
+            .env("NEOJS_PROXY_CHILD", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn child test");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok((_stream, _)) = listener.accept() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("production transport contacted an ambient proxy");
+            }
+            if let Some(status) = child.try_wait().expect("child status") {
+                assert!(status.success(), "child test failed: {status}");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("child test did not finish");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
     fn cache_metadata_never_contains_the_url() {
         let entry = super::CachedModule {
             body: Vec::new(),
             stored_at: 1,
+            initial_age: 0,
             max_age: Some(60),
             etag: Some("\"v1\"".to_string()),
             last_modified: None,
