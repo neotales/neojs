@@ -275,16 +275,16 @@ impl Runtime {
         Ok(runtime)
     }
 
-    /// Creates a runtime whose loader resolves `jsr:` from the given registry.
+    /// Creates a JSR test runtime with explicit resource limits.
     ///
-    /// This exists only for the crate's loader tests. The registry fixture is
-    /// in-memory; no production build compiles this constructor, and
-    /// [`Runtime::new`] still installs only [`FileModuleLoader`].
+    /// The module-graph tests use small limits to cross a bound through real
+    /// V8 loading. No production build compiles this constructor.
     #[cfg(test)]
-    pub(crate) fn with_jsr_registry(
+    pub(crate) fn with_jsr_registry_limits(
         registry: Rc<dyn crate::jsr_loader::Registry>,
+        limits: crate::jsr_loader::Limits,
     ) -> Result<Self, Error> {
-        let loader = crate::jsr_loader::JsrModuleLoader::new(registry);
+        let loader = crate::jsr_loader::JsrModuleLoader::with_limits(registry, limits);
         Self::with_module_loader(CONSOLE_SHIM, neo_shim(), Rc::new(loader))
     }
 

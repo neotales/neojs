@@ -79,11 +79,11 @@
 //! # Remaining integration
 //!
 //! The test-only `jsr_loader` module wires this core to deno_core's module
-//! loader for crate tests, using an injected in-memory registry. That proves the resolution,
-//! exact-version identity, relative-path containment, manifest verification,
-//! and file/byte bounds through real V8 evaluation. It is compiled only for
-//! tests and is not reachable from [`crate::Runtime::new`], so every public
-//! `jsr:` import is still rejected.
+//! loader for crate tests, using an injected in-memory registry. That proves
+//! the resolution, exact-version identity, relative-path containment, manifest
+//! verification, and file, byte, and metadata-document bounds through real V8
+//! evaluation. It is compiled only for tests and is not reachable from
+//! [`crate::Runtime::new`], so every public `jsr:` import is still rejected.
 //!
 //! A later change must fetch packages and metadata over HTTPS with an `Accept`
 //! header that does not include `text/html`, select and pin a version, fetch

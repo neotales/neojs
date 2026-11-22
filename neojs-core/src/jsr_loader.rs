@@ -22,10 +22,11 @@
 //! treats a [`RegistryError::Redirect`] as a contract violation and reports it;
 //! it never follows one itself. The loader verifies every file's declared
 //! length and SHA-256 checksum before the TypeScript stripper or V8 sees the
-//! bytes, and it keeps an aggregate file and byte budget for one runtime. A
-//! registry module may import another registry module or a built-in, but a
-//! `file:` specifier from a registry module is rejected: the module graph stays
-//! on the registry and cannot use an import to read the user's files.
+//! bytes, and it keeps aggregate file, byte, and metadata-document budgets for
+//! one runtime. A registry module may import another registry module or a
+//! built-in, but a `file:` specifier from a registry module is rejected: the
+//! module graph stays on the registry and cannot use an import to read the
+//! user's files.
 //!
 //! None of this establishes publisher identity, and executing a module is not a
 //! sandbox: the module has the host's authority through the built-ins it can
@@ -153,11 +154,6 @@ pub(crate) struct JsrModuleLoader {
 }
 
 impl JsrModuleLoader {
-    /// Creates a loader with the default bounds.
-    pub(crate) fn new(registry: Rc<dyn Registry>) -> Self {
-        Self::with_limits(registry, Limits::default())
-    }
-
     /// Creates a loader with explicit bounds.
     pub(crate) fn with_limits(registry: Rc<dyn Registry>, limits: Limits) -> Self {
         Self {
@@ -939,11 +935,19 @@ mod tests {
     }
 
     fn run_with_jsr(registry: MockJsrRegistry, source: &str) -> Result<(), Error> {
+        run_with_jsr_limits(registry, Limits::default(), source)
+    }
+
+    fn run_with_jsr_limits(
+        registry: MockJsrRegistry,
+        limits: Limits,
+        source: &str,
+    ) -> Result<(), Error> {
         let directory = tempfile::tempdir().expect("temp dir");
         let entry = directory.path().join("main.js");
         std::fs::write(&entry, source).expect("write entry");
         let registry: Rc<dyn Registry> = Rc::new(registry);
-        let mut runtime = Runtime::with_jsr_registry(registry)?;
+        let mut runtime = Runtime::with_jsr_registry_limits(registry, limits)?;
         runtime.run_file(&entry)
     }
 
@@ -1357,8 +1361,153 @@ if (viaB() !== "BA") throw new Error("module cycle did not evaluate");
         );
     }
 
-    // Unit test: the loader's graph bounds are not reachable through a public
-    // path; this asserts the checks themselves.
+    // Integration test through the actual runtime: a file larger than the
+    // per-file limit is refused before its body runs.
+    #[test]
+    fn runtime_enforces_the_per_file_limit_before_execution() {
+        let source = b"throw new Error(\"EXECUTED\");\n";
+        let registry = MockJsrRegistry::new()
+            .package("scope", "pkg", &[("1.0.0", false)])
+            .version("scope", "pkg", "1.0.0", &[(".", "./mod.js")])
+            .file("scope", "pkg", "1.0.0", "/mod.js", source);
+        let limits = Limits {
+            max_file_bytes: 8,
+            max_graph_files: 8,
+            max_graph_bytes: 1024,
+            max_metadata_documents: 8,
+        };
+        let message = error_message(run_with_jsr_limits(
+            registry,
+            limits,
+            "import \"jsr:@scope/pkg@1\";\n",
+        ));
+        assert!(
+            message.contains(&format!(
+                "the file is {} bytes, over the 8-byte per-file limit",
+                source.len()
+            )),
+            "{message}"
+        );
+        assert!(!message.contains("EXECUTED"), "{message}");
+    }
+
+    // Integration test through the actual runtime: the second file crosses the
+    // graph-file limit and neither module body executes.
+    #[test]
+    fn runtime_enforces_the_graph_file_limit_before_execution() {
+        let registry = MockJsrRegistry::new()
+            .package("scope", "pkg", &[("1.0.0", false)])
+            .version("scope", "pkg", "1.0.0", &[(".", "./root.js")])
+            .file(
+                "scope",
+                "pkg",
+                "1.0.0",
+                "/root.js",
+                b"import \"./dep.js\";\nthrow new Error(\"ENTRY_EXECUTED\");\n",
+            )
+            .file(
+                "scope",
+                "pkg",
+                "1.0.0",
+                "/dep.js",
+                b"throw new Error(\"DEP_EXECUTED\");\n",
+            );
+        let limits = Limits {
+            max_file_bytes: 1024,
+            max_graph_files: 1,
+            max_graph_bytes: 1024 * 1024,
+            max_metadata_documents: 8,
+        };
+        let message = error_message(run_with_jsr_limits(
+            registry,
+            limits,
+            "import \"jsr:@scope/pkg@1\";\n",
+        ));
+        assert!(
+            message.contains("the JSR module graph already has 1 files, the limit"),
+            "{message}"
+        );
+        assert!(!message.contains("ENTRY_EXECUTED"), "{message}");
+        assert!(!message.contains("DEP_EXECUTED"), "{message}");
+    }
+
+    // Integration test through the actual runtime: the second file crosses the
+    // aggregate byte limit and neither module body executes.
+    #[test]
+    fn runtime_enforces_the_graph_byte_limit_before_execution() {
+        let root = b"import \"./dep.js\";\nthrow new Error(\"ENTRY_EXECUTED\");\n";
+        let dep = b"throw new Error(\"DEP_EXECUTED\");\n";
+        let budget = root.len() + dep.len() - 1;
+        let registry = MockJsrRegistry::new()
+            .package("scope", "pkg", &[("1.0.0", false)])
+            .version("scope", "pkg", "1.0.0", &[(".", "./root.js")])
+            .file("scope", "pkg", "1.0.0", "/root.js", root)
+            .file("scope", "pkg", "1.0.0", "/dep.js", dep);
+        let limits = Limits {
+            max_file_bytes: 1024,
+            max_graph_files: 8,
+            max_graph_bytes: budget,
+            max_metadata_documents: 8,
+        };
+        let message = error_message(run_with_jsr_limits(
+            registry,
+            limits,
+            "import \"jsr:@scope/pkg@1\";\n",
+        ));
+        assert!(
+            message.contains(&format!(
+                "loading it would bring the JSR module graph to {} bytes, over the {budget}-byte limit",
+                root.len() + dep.len()
+            )),
+            "{message}"
+        );
+        assert!(!message.contains("ENTRY_EXECUTED"), "{message}");
+        assert!(!message.contains("DEP_EXECUTED"), "{message}");
+    }
+
+    // Integration test through the actual runtime: the fourth metadata document
+    // crosses the limit, and the second package's module body never executes.
+    #[test]
+    fn runtime_enforces_the_metadata_document_limit_before_execution() {
+        let registry = MockJsrRegistry::new()
+            .package("scope", "aa", &[("1.0.0", false)])
+            .version("scope", "aa", "1.0.0", &[(".", "./mod.js")])
+            .file("scope", "aa", "1.0.0", "/mod.js", b"export const aa = 1;\n")
+            .package("scope", "bb", &[("1.0.0", false)])
+            .version("scope", "bb", "1.0.0", &[(".", "./mod.js")])
+            .file(
+                "scope",
+                "bb",
+                "1.0.0",
+                "/mod.js",
+                b"throw new Error(\"B_EXECUTED\");\n",
+            );
+        let limits = Limits {
+            max_file_bytes: 1024,
+            max_graph_files: 8,
+            max_graph_bytes: 1024 * 1024,
+            max_metadata_documents: 3,
+        };
+        let message = error_message(run_with_jsr_limits(
+            registry,
+            limits,
+            r#"
+const first = await import("jsr:@scope/aa@1");
+const second = await import("jsr:@scope/aa@^1.0.0");
+if (first !== second) throw new Error("identity failed");
+await import("jsr:@scope/bb@1");
+"#,
+        ));
+        assert!(
+            message.contains("already requested 3 metadata documents, the limit"),
+            "{message}"
+        );
+        assert!(message.contains("jsr:@scope/bb@1"), "{message}");
+        assert!(!message.contains("B_EXECUTED"), "{message}");
+    }
+
+    // Unit test: a bounds check that is not reachable through a public API; the
+    // Runtime-driven tests above prove the same limits across a real graph.
     #[test]
     fn enforces_per_file_and_graph_limits() {
         let limits = Limits {
