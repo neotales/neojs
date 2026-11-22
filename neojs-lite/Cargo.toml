@@ -1,0 +1,20 @@
+[package]
+name = "neojs-lite"
+description = "Command-line ECMAScript runtime for NeoJS Lite, built on QuickJS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[[bin]]
+name = "neojs-lite"
+path = "src/main.rs"
+
+[dependencies]
+neojs-lite-core = { version = "0.1.0", path = "../neojs-lite-core" }
+
+[dev-dependencies]
+tempfile.workspace = true

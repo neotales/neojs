@@ -1,6 +1,10 @@
 //! Module resolution and loading for the local filesystem and optional HTTPS.
 //!
-//! Resolution accepts relative paths, absolute paths, `file:` URLs, the
+//! Executable-extension and path-specifier decisions come from the shared
+//! `neojs-module-policy` crate, which the separate QuickJS runtime also uses.
+//! Engine-specific resolution and reading stay here.
+//!
+//! Resolution accepts relative paths, absolute paths, `file:` URLs, and the
 //! built-in specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`,
 //! `neo:chars`, `console`, `neo:console`, `crypto`, `neo:crypto`, `os`,
 //! `neo:os`, `path`, `neo:path`, `slices`, `neo:slices`, `ssh`, `neo:ssh`,
@@ -33,9 +37,6 @@
 //! ignored. Attributes that do not name a type are not interpreted by neojs and
 //! are left to the engine.
 
-use std::cell::RefCell;
-use std::path::Path;
-
 use deno_core::FsModuleLoader;
 use deno_core::ModuleLoadOptions;
 use deno_core::ModuleLoadReferrer;
@@ -49,6 +50,9 @@ use deno_core::RequestedModuleType;
 use deno_core::ResolutionKind;
 use deno_core::url::Url;
 use deno_error::JsErrorBox;
+use neojs_module_policy::is_path_specifier;
+use std::cell::RefCell;
+use std::path::Path;
 
 use crate::builtins;
 use crate::remote::RemoteClient;
@@ -57,62 +61,7 @@ use crate::remote::display_url;
 use crate::remote::validate_url;
 use crate::typescript;
 
-const JSX_REASON: &str =
-    "JSX and TSX are not implemented; use .ts or .mts, or transpile the JSX first";
-const CTS_REASON: &str = "CommonJS TypeScript (.cts) is not supported; use .ts or .mts instead";
-const DECLARATION_REASON: &str =
-    "declaration files (.d.ts, .d.mts, and .d.cts) describe types and contain no runnable code";
-const COMMONJS_REASON: &str = "the .cjs extension is not supported; neojs runs ECMAScript modules";
-const JSON_REASON: &str = "JSON modules are not implemented; only ECMAScript modules are loaded";
-const WASM_REASON: &str =
-    "WebAssembly modules are not implemented; only ECMAScript modules are loaded";
-const NATIVE_REASON: &str = "native addons are not implemented";
-
-/// How neojs executes a module file, decided by its name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ModuleFormat {
-    /// ECMAScript, passed to V8 unchanged.
-    JavaScript,
-    /// TypeScript, reduced to ECMAScript by type stripping.
-    TypeScript,
-}
-
-/// Returns the format of a file, or why it is not an executable module.
-///
-/// `.js` and `.mjs` are JavaScript. `.ts` and `.mts` are TypeScript and are
-/// type-stripped before evaluation. An absent extension is accepted and treated
-/// as JavaScript. Declaration files, JSX and TSX, CommonJS, JSON, WebAssembly,
-/// native addons, and unknown extensions are rejected with a reason. The check
-/// is by name only; the file is not opened.
-pub(crate) fn module_format(path: &Path) -> Result<ModuleFormat, String> {
-    if typescript::is_declaration_file(path) {
-        return Err(DECLARATION_REASON.to_string());
-    }
-    let Some(extension) = path.extension() else {
-        return Ok(ModuleFormat::JavaScript);
-    };
-    let extension = match extension.to_str() {
-        Some(extension) => extension.to_ascii_lowercase(),
-        None => return Err("the file extension is not valid UTF-8".to_string()),
-    };
-
-    let reason = match extension.as_str() {
-        "js" | "mjs" => return Ok(ModuleFormat::JavaScript),
-        "ts" | "mts" => return Ok(ModuleFormat::TypeScript),
-        "tsx" | "jsx" => JSX_REASON,
-        "cts" => CTS_REASON,
-        "cjs" => COMMONJS_REASON,
-        "json" => JSON_REASON,
-        "wasm" => WASM_REASON,
-        "node" => NATIVE_REASON,
-        other => {
-            return Err(format!(
-                "unknown module extension `.{other}`; neojs loads ECMAScript modules (.js or .mjs) and erasable TypeScript (.ts or .mts)"
-            ));
-        }
-    };
-    Err(reason.to_string())
-}
+pub(crate) use neojs_module_policy::{ModuleFormat, module_format};
 
 /// Returns why a requested module type is not supported, or `None` when there
 /// is no attribute.
@@ -524,15 +473,6 @@ fn unsupported_scheme(url: &Url) -> String {
         }
     };
     format!("cannot resolve `{specifier}`: {reason}")
-}
-
-fn is_path_specifier(specifier: &str) -> bool {
-    specifier.starts_with('/')
-        || specifier.starts_with("./")
-        || specifier.starts_with("../")
-        || specifier.starts_with(".\\")
-        || specifier.starts_with("..\\")
-        || specifier.starts_with("\\\\")
 }
 
 /// Returns whether a specifier is a URL path that resolves against a remote

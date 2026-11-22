@@ -16,28 +16,12 @@
 //! generation, not erasure, and is not implemented. `.cts` is CommonJS
 //! TypeScript and is not implemented either.
 
-use std::path::Path;
-
 use deno_ast::MediaType;
 use deno_ast::ParseParams;
 use deno_ast::TypeStripOptions;
 use deno_ast::parse_module;
 use deno_ast::type_strip;
 use deno_core::url::Url;
-
-/// Returns whether a path names a declaration file (`.d.ts`, `.d.mts`, or
-/// `.d.cts`).
-///
-/// Declaration files describe types and contain no runnable code, so they are
-/// rejected rather than stripped to an empty module. The name is checked, not
-/// the contents; the file is not opened.
-pub(crate) fn is_declaration_file(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let name = name.to_ascii_lowercase();
-    name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts")
-}
 
 /// Erases TypeScript syntax, returning ECMAScript that keeps source positions.
 ///

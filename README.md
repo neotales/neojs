@@ -12,6 +12,12 @@ Runs ECMAScript modules and erasable TypeScript on V8 through Deno's Rust bindin
 cargo add neojs-core
 ```
 
+For the opt-in, embeddable QuickJS runtime:
+
+```sh
+cargo add neojs-lite-core
+```
+
 Build the `neojs` command from a checkout:
 
 ```sh
@@ -1439,6 +1445,40 @@ not implemented behavior.
 The [`neojs-dbapi` crate](neojs-dbapi/README.md) is the SQLite-only database foundation; other
 database providers and a JavaScript/Node adapter are not yet wired in. See the
 [database API notes](docs/db-api.md) for its scope and design decisions.
+
+### QuickJS runtime: neojs-lite-core
+
+`neojs-lite-core` is the primary, embeddable QuickJS runtime, with `neojs-lite` as a secondary
+command-line wrapper. They are separate workspace members and are not part of the default build:
+`cargo build` neither compiles QuickJS nor puts `rquickjs` in the V8 dependency graph.
+
+```rust
+use neojs_lite_core::Runtime;
+
+fn main() -> Result<(), neojs_lite_core::Error> {
+    let mut runtime = Runtime::new()?;
+    runtime.run_file("main.js")
+}
+```
+
+Build the embeddable crate or the command explicitly:
+
+```sh
+cargo build -p neojs-lite-core
+cargo run -p neojs-lite-core --example embed -- examples/hello.js
+cargo build -p neojs-lite
+```
+
+The QuickJS runtime currently runs `.js`, `.mjs`, and extensionless ECMAScript modules, resolves
+relative imports and `file:` URLs, and awaits top-level `await` that settles from QuickJS's job
+queue. It then drains queued jobs, bounded at 100,000, so trailing `.then` callbacks and unawaited
+dynamic imports still run; a nonconverging job chain or a throwing queued job fails closed, and a
+promise still rejected without a handler when the queue empties is an error; rejection diagnostics use
+primitive values and an Error's own data without invoking getters, proxies, `toString`, or `String`.
+It does **not** implement TypeScript, host asynchrony or timers, `neo:` built-in modules, permissions,
+or a sandbox, and it does not claim parity with the V8 runtime. Both runtimes share
+`neojs-module-policy` for executable-extension decisions and rejection reasons, so `.cjs`, JSX/TSX,
+declaration files, JSON, WebAssembly, and native addons fail with the same explanation in either.
 
 ## Limits
 
