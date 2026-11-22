@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use neojs_module_policy::{ModuleFormat, module_format};
-use rquickjs::{CatchResultExt, Context, Ctx, Function, Module, Value, qjs};
+use rquickjs::{CatchResultExt, Context, Ctx, Function, Module, Persistent, Value, qjs};
 
 use crate::loader::{FileLoader, FileResolver};
 
@@ -37,45 +37,67 @@ globalThis.console = Object.freeze({
 /// Unhandled promise rejections recorded by QuickJS's host rejection tracker.
 #[derive(Default)]
 struct RejectionState {
-    /// Rejections not yet marked handled, keyed by promise identity.
-    unhandled: Vec<UnhandledRejection>,
+    /// Rejections not yet marked handled. The promise and reason are rooted, so
+    /// a handled notification cannot be confused with a later promise that
+    /// reuses a freed address.
+    unhandled: Vec<RetainedRejection>,
 }
 
-struct UnhandledRejection {
-    /// The promise object's address. It is used only as an identity token and
-    /// is never dereferenced.
-    promise: usize,
-    message: String,
+/// A rejection whose promise and reason stay alive until it is handled or
+/// reported.
+struct RetainedRejection {
+    /// The rooted promise's object address. It is stable while the promise is
+    /// retained and is used only as an identity token.
+    key: usize,
+    /// Keeps the promise alive and gives it a stable address.
+    _promise: Persistent<Value<'static>>,
+    /// Keeps the reason alive so formatting can be deferred without invoking
+    /// user code in the tracker callback.
+    reason: Persistent<Value<'static>>,
 }
 
 impl RejectionState {
     /// Records QuickJS's unhandled/handled notification.
     ///
-    /// QuickJS calls the tracker with `handled == false` when a promise rejects
-    /// without a handler and with `handled == true` if a handler is attached
-    /// later. The pointer is stable while the promise is alive, which is when
-    /// the second notification can occur.
-    fn record(&mut self, promise: Value<'_>, handled: bool, message: String) {
-        let promise = promise_identity(&promise);
+    /// This runs inside the engine's reject/handle path, so it deliberately does
+    /// not read properties, call `String`, or otherwise execute user code. It
+    /// only roots the two values and records their identity. QuickJS calls the
+    /// tracker with `handled == false` when a promise rejects without a handler
+    /// and with `handled == true` if a handler is attached later.
+    fn record<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        promise: Value<'js>,
+        reason: Value<'js>,
+        handled: bool,
+    ) {
+        let key = promise_identity(&promise);
         if handled {
-            self.unhandled.retain(|entry| entry.promise != promise);
-        } else if !self.unhandled.iter().any(|entry| entry.promise == promise) {
-            self.unhandled.push(UnhandledRejection { promise, message });
+            self.unhandled.retain(|entry| entry.key != key);
+        } else if !self.unhandled.iter().any(|entry| entry.key == key) {
+            self.unhandled.push(RetainedRejection {
+                key,
+                _promise: Persistent::save(ctx, promise),
+                reason: Persistent::save(ctx, reason),
+            });
         }
     }
 
-    fn take(&mut self) -> Vec<UnhandledRejection> {
+    fn take(&mut self) -> Vec<RetainedRejection> {
         std::mem::take(&mut self.unhandled)
+    }
+
+    /// Drops every root while the context is still alive.
+    fn clear(&mut self) {
+        self.unhandled.clear();
     }
 }
 
-/// Returns a pointer-shaped identity for a promise without retaining it.
+/// Returns a pointer-shaped identity for a promise.
 ///
-/// QuickJS promises are objects, so the object pointer is the identity QuickJS
-/// itself uses in the two tracker notifications. The value is never
-/// dereferenced, so a stale identity cannot cause an invalid access; a new
-/// promise reusing an address can only be compared after the old promise is
-/// gone and its notification is no longer pending.
+/// The value is retained by [`RejectionState`] for as long as the entry exists,
+/// so the address cannot be reused by another promise before the handled
+/// notification is processed. The value is never dereferenced.
 fn promise_identity(promise: &Value<'_>) -> usize {
     debug_assert!(promise.is_object());
     // SAFETY: reading the pointer field of an object-tagged `JSValue` is what
@@ -83,15 +105,42 @@ fn promise_identity(promise: &Value<'_>) -> usize {
     unsafe { promise.as_raw().u.ptr as usize }
 }
 
-/// Formats a rejection reason into a message suitable for an error.
+/// Clears a pending JavaScript exception, if any.
 ///
-/// An Error object's `stack` carries the message and source position. Other
-/// values go through JavaScript `String`. Both can throw or be absent, so the
-/// fallback is the binding's debug representation.
+/// Property getters and `String` can throw while formatting. The exception must
+/// not be left pending for later host work to mistake for a fresh failure.
+fn clear_pending_exception(ctx: &Ctx<'_>) {
+    if ctx.has_exception() {
+        ctx.catch();
+    }
+}
+
+/// Reads a string property for diagnostics, clearing a getter's exception.
+fn diagnostic_string<'js>(
+    ctx: &Ctx<'js>,
+    object: &rquickjs::Object<'js>,
+    key: &str,
+) -> Option<String> {
+    match object.get::<_, String>(key) {
+        Ok(value) => Some(value),
+        Err(_) => {
+            clear_pending_exception(ctx);
+            None
+        }
+    }
+}
+
+/// Formats a rejection reason after the run has finished.
+///
+/// This is deliberately deferred: reading `name`, `message`, or `stack`, or
+/// calling `String`, can execute user code. By the time it runs, the unhandled
+/// set has already been snapshotted, so a getter that attaches a handler cannot
+/// retroactively change the report. Every failure is cleared and falls back to a
+/// type-only description that executes no user code.
 fn rejection_message<'js>(ctx: &Ctx<'js>, reason: &Value<'js>) -> String {
     if let Some(object) = reason.as_object() {
-        let name = object.get::<_, String>("name").ok();
-        let message = object.get::<_, String>("message").ok();
+        let name = diagnostic_string(ctx, object, "name");
+        let message = diagnostic_string(ctx, object, "message");
         if name.is_some() || message.is_some() {
             let head = match (name.as_deref(), message.as_deref()) {
                 (Some(name), Some(message)) if !name.is_empty() => format!("{name}: {message}"),
@@ -99,7 +148,7 @@ fn rejection_message<'js>(ctx: &Ctx<'js>, reason: &Value<'js>) -> String {
                 (Some(name), None) => name.to_string(),
                 (None, None) => String::new(),
             };
-            if let Ok(stack) = object.get::<_, String>("stack") {
+            if let Some(stack) = diagnostic_string(ctx, object, "stack") {
                 if head.is_empty() || stack.contains(&head) {
                     return stack;
                 }
@@ -110,12 +159,15 @@ fn rejection_message<'js>(ctx: &Ctx<'js>, reason: &Value<'js>) -> String {
             }
         }
     }
-    if let Ok(string) = ctx.globals().get::<_, Function>("String")
-        && let Ok(text) = string.call::<_, String>((reason.clone(),))
-    {
-        return text;
+    if let Ok(string) = ctx.globals().get::<_, Function>("String") {
+        match string.call::<_, String>((reason.clone(),)) {
+            Ok(text) => return text,
+            Err(_) => clear_pending_exception(ctx),
+        }
+    } else {
+        clear_pending_exception(ctx);
     }
-    format!("{reason:?}")
+    format!("<unformattable rejection reason: {:?}>", reason.type_of())
 }
 
 /// A failure while constructing or running a QuickJS program.
@@ -177,15 +229,17 @@ pub enum Error {
         details: String,
     },
 
-    /// The entry and its queued jobs kept producing work past the job budget.
+    /// The entry and its queued jobs kept producing work at the job budget.
     ///
     /// The runtime is abandoned; create a new one. This is a fail-closed guard
-    /// against a nonconverging promise loop, not a time or memory limit.
+    /// against a nonconverging promise loop, not a time or memory limit. The
+    /// budget is checked before the next job, so no over-budget side effect is
+    /// executed.
     #[error("cannot evaluate `{module}`: job queue did not settle after {jobs} jobs; aborting")]
     NonConvergingJobs {
         /// The entry module identity.
         module: String,
-        /// Jobs executed when the budget was exceeded.
+        /// Jobs executed when another job was still pending.
         jobs: usize,
     },
 
@@ -193,6 +247,22 @@ pub enum Error {
     /// entry module had already started.
     #[error("the runtime has already run an entry module; create a new runtime")]
     RuntimeConsumed,
+}
+
+/// Installs a test-only way to force QuickJS garbage collection.
+///
+/// Address-reuse regressions need GC at a deterministic point inside a script.
+/// This global exists only when the crate's own unit tests are compiled; it is
+/// absent from normal builds and from integration tests.
+#[cfg(test)]
+fn install_test_gc(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    let runtime = unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) } as usize;
+    let collect = Function::new(ctx.clone(), move || {
+        // SAFETY: the runtime stays alive while this test-only global is
+        // reachable, and QuickJS allows collection from a host callback.
+        unsafe { qjs::JS_RunGC(runtime as *mut qjs::JSRuntime) };
+    })?;
+    ctx.globals().set("__neoltjsGc", collect)
 }
 
 /// An embeddable QuickJS runtime that executes one ECMAScript module entry.
@@ -224,14 +294,9 @@ impl Runtime {
         let tracker_rejections = Rc::clone(&rejections);
         runtime.set_host_promise_rejection_tracker(Some(Box::new(
             move |ctx: Ctx<'_>, promise: Value<'_>, reason: Value<'_>, handled: bool| {
-                let message = if handled {
-                    String::new()
-                } else {
-                    rejection_message(&ctx, &reason)
-                };
                 tracker_rejections
                     .borrow_mut()
-                    .record(promise, handled, message);
+                    .record(&ctx, promise, reason, handled);
             },
         )));
         runtime.set_loader(FileResolver, FileLoader);
@@ -249,6 +314,8 @@ impl Runtime {
                     })?;
                 ctx.globals().set("__neoltjsWrite", write)?;
                 ctx.eval::<(), _>(CONSOLE_SHIM)?;
+                #[cfg(test)]
+                install_test_gc(&ctx)?;
                 Ok(())
             })
             .map_err(|error| Error::Init {
@@ -373,17 +440,40 @@ impl Runtime {
             return Ok(());
         }
         let count = unhandled.len();
-        let details = unhandled
-            .iter()
-            .enumerate()
-            .map(|(index, rejection)| format!("{}) {}", index + 1, rejection.message.trim()))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let details = self.context.with(move |ctx| {
+            clear_pending_exception(&ctx);
+            let details = unhandled
+                .iter()
+                .enumerate()
+                .map(|(index, rejection)| {
+                    let reason = match rejection.reason.clone().restore(&ctx) {
+                        Ok(reason) => rejection_message(&ctx, &reason),
+                        Err(_) => "<reason unavailable>".to_string(),
+                    };
+                    clear_pending_exception(&ctx);
+                    format!("{}) {}", index + 1, reason.trim())
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            // Drop the roots while the context and runtime are alive.
+            drop(unhandled);
+            details
+        });
         Err(Error::UnhandledRejection {
             module,
             count,
             details,
         })
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // The tracker closure holds another `Rc` to this state, so clearing it
+        // here is what releases rooted promises and reasons while the context
+        // is still alive. Dropping them later with the runtime would call into
+        // a freed context.
+        self.rejections.borrow_mut().clear();
     }
 }
 
@@ -395,6 +485,22 @@ enum JobStep {
     Ran,
     /// One job threw; the message is already retrieved and cleared.
     Threw(String),
+}
+
+/// Returns the runtime pointer for operations that need the raw C API.
+fn runtime_ptr(ctx: &Ctx<'_>) -> *mut qjs::JSRuntime {
+    // SAFETY: `ctx` is valid for the duration of the call.
+    unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) }
+}
+
+/// Returns whether QuickJS has at least one queued job.
+///
+/// Checking before execution is what lets an entry that uses exactly the job
+/// budget succeed: the budget is only enforced when another job is known to be
+/// waiting, so no extra job runs merely to discover the queue is empty.
+fn is_job_pending(ctx: &Ctx<'_>) -> bool {
+    // SAFETY: the runtime pointer comes from a live context.
+    unsafe { qjs::JS_IsJobPending(runtime_ptr(ctx)) }
 }
 
 /// Executes one QuickJS job and reports whether it ran or threw.
@@ -410,7 +516,7 @@ enum JobStep {
 /// `Context::with` and this runtime has exactly one context, so the context
 /// QuickJS reports for the job is the context that owns `ctx`.
 fn execute_job(ctx: &Ctx<'_>) -> JobStep {
-    let runtime = unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) };
+    let runtime = runtime_ptr(ctx);
     let mut job_context = MaybeUninit::uninit();
     // SAFETY: the runtime is locked and valid for the duration of the call.
     let result = unsafe { qjs::JS_ExecutePendingJob(runtime, job_context.as_mut_ptr()) };
@@ -454,47 +560,57 @@ fn drive_entry(ctx: &Ctx<'_>, module: &str, promise: &rquickjs::Promise<'_>) -> 
             })?;
             break;
         }
+        if !is_job_pending(ctx) {
+            return Err(Error::Module {
+                module: module.to_owned(),
+                message: "top-level await could not settle; host asynchronous work is not implemented in neoltjs yet".to_string(),
+            });
+        }
+        if jobs >= JOB_BUDGET {
+            return Err(Error::NonConvergingJobs {
+                module: module.to_owned(),
+                jobs,
+            });
+        }
         match execute_job(ctx) {
-            JobStep::Empty => {
-                return Err(Error::Module {
-                    module: module.to_owned(),
-                    message: "top-level await could not settle; host asynchronous work is not implemented in neoltjs yet".to_string(),
-                });
-            }
-            JobStep::Ran => {
-                jobs += 1;
-                if jobs > JOB_BUDGET {
-                    return Err(Error::NonConvergingJobs {
-                        module: module.to_owned(),
-                        jobs,
-                    });
-                }
-            }
+            JobStep::Ran => jobs += 1,
             JobStep::Threw(message) => {
                 return Err(Error::Module {
                     module: module.to_owned(),
                     message: format!("uncaught exception in queued job: {message}"),
+                });
+            }
+            JobStep::Empty => {
+                return Err(Error::Module {
+                    module: module.to_owned(),
+                    message: "job queue reported pending work but no job ran".to_string(),
                 });
             }
         }
     }
 
     loop {
+        if !is_job_pending(ctx) {
+            break;
+        }
+        if jobs >= JOB_BUDGET {
+            return Err(Error::NonConvergingJobs {
+                module: module.to_owned(),
+                jobs,
+            });
+        }
         match execute_job(ctx) {
-            JobStep::Empty => break,
-            JobStep::Ran => {
-                jobs += 1;
-                if jobs > JOB_BUDGET {
-                    return Err(Error::NonConvergingJobs {
-                        module: module.to_owned(),
-                        jobs,
-                    });
-                }
-            }
+            JobStep::Ran => jobs += 1,
             JobStep::Threw(message) => {
                 return Err(Error::Module {
                     module: module.to_owned(),
                     message: format!("uncaught exception in queued job: {message}"),
+                });
+            }
+            JobStep::Empty => {
+                return Err(Error::Module {
+                    module: module.to_owned(),
+                    message: "job queue reported pending work but no job ran".to_string(),
                 });
             }
         }
@@ -507,5 +623,131 @@ fn caught_message(ctx: &rquickjs::Ctx<'_>, error: rquickjs::Error) -> String {
     match Err::<(), _>(error).catch(ctx) {
         Ok(()) => "unknown QuickJS error".to_string(),
         Err(caught) => caught.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freed_promise_address_reuse_does_not_remove_a_retained_rejection() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let error = runtime
+            .run_source(
+                "memory.js",
+                r#"
+const count = 32;
+for (let i = 0; i < count; i++) {
+    Promise.reject(new Error(`unhandled ${i}`));
+}
+__neoltjsGc();
+for (let i = 0; i < count; i++) {
+    Promise.reject(new Error(`handled ${i}`)).catch(() => {});
+}
+"#,
+            )
+            .expect_err("unhandled rejections");
+        let Error::UnhandledRejection { count, details, .. } = error else {
+            panic!("expected an unhandled rejection, got {error:?}");
+        };
+        assert_eq!(count, 32);
+        assert!(details.contains("unhandled 0"), "{details}");
+        assert!(details.contains("unhandled 31"), "{details}");
+        assert!(!details.contains("Error: handled"), "{details}");
+    }
+
+    #[test]
+    fn formatting_a_reason_that_attaches_a_handler_keeps_the_report() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let error = runtime
+            .run_source(
+                "memory.js",
+                r#"
+const reason = {
+    get name() {
+        promise.catch(() => {});
+        return "LateHandled";
+    },
+    get message() {
+        return "attached during formatting";
+    },
+};
+const promise = Promise.reject(reason);
+"#,
+            )
+            .expect_err("unhandled rejection");
+        let Error::UnhandledRejection { count, details, .. } = error else {
+            panic!("expected an unhandled rejection, got {error:?}");
+        };
+        assert_eq!(count, 1);
+        assert!(details.contains("LateHandled"), "{details}");
+        assert!(details.contains("attached during formatting"), "{details}");
+    }
+
+    #[test]
+    fn formatting_clears_throwing_getters_and_string() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let error = runtime
+            .run_source(
+                "memory.js",
+                r#"
+const reason = {};
+Object.defineProperty(reason, "name", {
+    get() { throw new Error("name getter"); },
+});
+Object.defineProperty(reason, "message", {
+    get() { throw new Error("message getter"); },
+});
+Object.defineProperty(reason, "stack", {
+    get() { throw new Error("stack getter"); },
+});
+globalThis.String = () => { throw new Error("String replaced"); };
+Promise.reject(reason);
+"#,
+            )
+            .expect_err("unhandled rejection");
+        assert!(
+            matches!(error, Error::UnhandledRejection { count: 1, .. }),
+            "{error:?}"
+        );
+        let pending = runtime.context.with(|ctx| ctx.has_exception());
+        assert!(!pending, "formatting left an exception pending");
+    }
+
+    #[test]
+    fn exactly_the_job_budget_succeeds_when_the_queue_is_empty() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let source = format!(
+            "for (let i = 0; i < {JOB_BUDGET}; i++) {{ Promise.resolve().then(() => {{}}); }}"
+        );
+        runtime
+            .run_source("memory.js", &source)
+            .expect("exactly the budget");
+    }
+
+    #[test]
+    fn the_job_budget_fails_before_an_extra_job_runs() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let source = format!(
+            r#"
+for (let i = 0; i < {JOB_BUDGET}; i++) {{
+    Promise.resolve().then(() => {{}});
+}}
+Promise.resolve().then(() => {{ globalThis.__extra = 1; }});
+"#
+        );
+        let error = runtime
+            .run_source("memory.js", &source)
+            .expect_err("over budget");
+        assert!(
+            matches!(error, Error::NonConvergingJobs { jobs, .. } if jobs == JOB_BUDGET),
+            "{error:?}"
+        );
+        let extra_ran = runtime
+            .context
+            .with(|ctx| ctx.eval::<bool, _>("globalThis.__extra !== undefined"))
+            .expect("inspect marker");
+        assert!(!extra_ran, "the over-budget job ran before failing");
     }
 }

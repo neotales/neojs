@@ -160,7 +160,7 @@ again();
         )
         .expect_err("nonconverging queue");
     assert!(
-        matches!(error, Error::NonConvergingJobs { jobs, .. } if jobs > 100_000),
+        matches!(error, Error::NonConvergingJobs { jobs, .. } if jobs == 100_000),
         "{error:?}"
     );
 }
