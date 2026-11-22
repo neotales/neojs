@@ -446,9 +446,10 @@ given to the test command before or after `test`; relative imports in a remote
 module resolve against that module's URL. Set NEOJS_ALLOW_REMOTE to 1 or true
 to make that the default for every run and test command, or to 0 or false to
 keep it off; the words are case-insensitive, and any other value is a startup
-error. An explicit --allow-remote or --no-allow-remote overrides the setting.
-The setting is security-relevant: it enables remote code execution for every
-invocation in that environment. Only https: is accepted, remote
+error. An explicit --allow-remote or --no-allow-remote overrides a valid
+setting; an invalid value is rejected even when one is given. The setting is
+security-relevant: it enables remote code execution for every invocation in
+that environment. Only https: is accepted, remote
 modules cannot import file: URLs, redirects must stay credential-free https and
 within the limit, and no credentials or proxy settings are read. After a redirect the final URL is the
 module's identity and its relative-import base; the module format follows that

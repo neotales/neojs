@@ -120,10 +120,10 @@ choice. Setting `NEOJS_ALLOW_REMOTE=1` or `NEOJS_ALLOW_REMOTE=true` makes remote
 default for every `neojs` run and `neojs test` in that environment; `0` and `false` keep it off.
 The words are case-insensitive, and any other value, including an empty one, is a startup error
 (exit 2) rather than an implicit opt-in. An explicit `--allow-remote` or `--no-allow-remote`
-overrides a valid setting; the value is still validated so a typo cannot hide. This is a
-security-relevant persistent switch: it lets every module and test file in that environment load
-and run remote code with the same authority as local code. Set it deliberately, not in a shared
-shell profile.
+overrides a valid setting; an invalid value is rejected even when an explicit flag is given, so a
+typo cannot hide. This is a security-relevant persistent switch: it lets every module and test file
+in that environment load and run remote code with the same authority as local code. Set it
+deliberately, not in a shared shell profile.
 
 A relative import inside a remote module resolves against that module's URL, so it stays remote.
 `.js`, `.mjs`, `.ts`, and `.mts` work, statically and dynamically, and TypeScript is type-stripped

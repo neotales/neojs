@@ -1679,6 +1679,8 @@ fn help_documents_remote_loading_without_promising_isolation() {
     assert!(text.contains("--allow-remote"), "{text}");
     assert!(text.contains("--no-allow-remote"), "{text}");
     assert!(text.contains("NEOJS_ALLOW_REMOTE"), "{text}");
+    assert!(text.contains("overrides a valid"), "{text}");
+    assert!(text.contains("invalid value is rejected"), "{text}");
     assert!(text.contains("disabled by default"), "{text}");
     assert!(text.contains("not SSRF"), "{text}");
     assert!(text.contains("not a sandbox"), "{text}");
