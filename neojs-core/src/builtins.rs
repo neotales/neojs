@@ -4,13 +4,16 @@
 //! The scripts here install globals that neojs supplies: currently [`NEO_SHIM`],
 //! which defines the `Neo` object and its cached built-in modules. `chars`,
 //! `console`, and `strings` are plain ECMAScript. `crypto` calls private host
-//! ops registered by [`crate::crypto`], [`crate::crypto_cipher`], and
-//! [`crate::crypto_hash`]; it
+//! ops registered by [`crate::crypto`], [`crate::crypto_cipher`],
+//! [`crate::crypto_hash`], and [`crate::crypto_shamir`]; it
 //! adds the operating system CSPRNG, the NEO1 AES-256-GCM envelope, bounded
 //! stateful AES-256-CBC/AES-256-GCM ciphers, SHA-2 hashing and HMAC, PBKDF2,
-//! and bcrypt, but no permission, filesystem access, or sandbox. `crypto`'s `hashAsync`,
-//! `hmacAsync`, `pbkdf2Async`, `bcryptHashAsync`, and `bcryptVerifyAsync`
-//! offload their work to the runtime's bounded blocking pool. `age` calls private host
+//! bcrypt, and GF(256) Shamir secret sharing, but no permission, filesystem
+//! access, or sandbox. `crypto`'s `hashAsync`, `hmacAsync`, `pbkdf2Async`,
+//! `bcryptHashAsync`, `bcryptVerifyAsync`, `shamirSplitAsync`, and
+//! `shamirCombineAsync` offload their work to the runtime's bounded blocking
+//! pool. Shamir shares are not authenticated and a wrong reconstruction is not
+//! detected. `age` calls private host
 //! ops registered by [`crate::age`]; it adds binary age v1 encryption for X25519
 //! keys, but no permission, file access, or sandbox. `ssh` calls private host
 //! ops registered by [`crate::ssh`]; it adds outbound TCP and SSH command
@@ -127,7 +130,8 @@ pub(crate) const CRYPTO_SPECIFIER: &str = "neo:crypto";
 /// It re-exports the function objects from the public `crypto` module object,
 /// so the module and `Neo.getBuiltInModule("crypto")` share identity. The
 /// functions call host ops registered by [`crate::crypto`],
-/// [`crate::crypto_cipher`], and [`crate::crypto_hash`].
+/// [`crate::crypto_cipher`], [`crate::crypto_hash`], and
+/// [`crate::crypto_shamir`].
 const CRYPTO_MODULE: &str = include_str!("builtins/crypto.esm.js");
 
 /// The canonical module specifier for the `ssh` built-in.

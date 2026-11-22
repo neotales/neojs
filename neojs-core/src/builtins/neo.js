@@ -2,14 +2,16 @@
 //
 // This script is evaluated once per realm before the entry module. It installs
 // the global `Neo` object and the module objects that object caches. `chars` and
-// `console` are plain ECMAScript; `crypto` calls twenty-six private host ops:
+// `console` are plain ECMAScript; `crypto` calls thirty-three private host ops:
 // four use the operating system CSPRNG and AES-256-GCM in
 // `neojs-core/src/crypto.rs`; eight implement bounded AES-256-CBC/AES-256-GCM
 // ciphers in `neojs-core/src/crypto_cipher.rs`; seven implement SHA-2 hashing and HMAC in
-// `neojs-core/src/crypto_hash.rs`; and seven implement PBKDF2 and bcrypt in
-// `neojs-core/src/crypto_hash/password.rs`. The hash-family ops include
-// bounded asynchronous calls on the runtime's Tokio blocking pool and explicit
-// incremental-object disposal; `age` calls four private host ops that use the
+// `neojs-core/src/crypto_hash.rs`; seven implement PBKDF2 and bcrypt in
+// `neojs-core/src/crypto_hash/password.rs`; and seven implement GF(256) Shamir
+// secret sharing in `neojs-core/src/crypto_shamir.rs`. The hash-family and
+// Shamir ops include bounded asynchronous calls on the runtime's Tokio blocking
+// pool; the hash and cipher families also have explicit incremental-object
+// disposal; `age` calls four private host ops that use the
 // `neotales-age` crate
 // for binary age v1 X25519 encryption; `stdio` calls four
 // private host ops that copy or encode bytes, copy a byte range out of a private
@@ -61,6 +63,7 @@
     const makeTypeError = TypeError;
     const makeRangeError = RangeError;
     const defineProperty = Object.defineProperty;
+    const freeze = Object.freeze;
     const objectKeys = Object.keys;
     const arrayIsArray = Array.isArray;
     const arrayIncludes = Function.prototype.call.bind(Array.prototype.includes);
@@ -73,6 +76,7 @@
     // snapshot buffer to user JavaScript and re-enter the module. Range copies
     // go through the native slice op instead.
     const typedArraySet = Function.prototype.call.bind(Uint8Array.prototype.set);
+    const typedArrayFill = Function.prototype.call.bind(Uint8Array.prototype.fill);
 
     // A Unicode scalar value: an integer code point that is not a surrogate.
     // Surrogates cannot be encoded by `String.fromCodePoint`, and treating
@@ -771,6 +775,13 @@
     const opBcryptHashAsync = cryptoOps.op_neo_crypto_bcrypt_hash_async_submit;
     const opBcryptVerify = cryptoOps.op_neo_crypto_bcrypt_verify;
     const opBcryptVerifyAsync = cryptoOps.op_neo_crypto_bcrypt_verify_async_submit;
+    const opShamirSplit = cryptoOps.op_neo_crypto_shamir_split;
+    const opShamirSplitAsync = cryptoOps.op_neo_crypto_shamir_split_async_submit;
+    const opShamirCombine = cryptoOps.op_neo_crypto_shamir_combine;
+    const opShamirCombineAsync = cryptoOps.op_neo_crypto_shamir_combine_async_submit;
+    const opShamirJoin = cryptoOps.op_neo_crypto_shamir_async_join;
+    const opShamirUnpackSplit = cryptoOps.op_neo_crypto_shamir_unpack_split;
+    const opShamirUnpackCombine = cryptoOps.op_neo_crypto_shamir_unpack_combine;
 
     // The age host ops are captured here for the same reason: replacing
     // `Deno.core.ops` later does not change what the age module calls. The ops
@@ -1870,6 +1881,221 @@
         return joinPassword(response.id, 2);
     }
 
+    // GF(256) Shamir secret sharing. See `neojs-core/src/crypto_shamir.rs`.
+    // Shares are bytewise compatible with the Neotales PLAB and rust-libraries
+    // encodings, but the JavaScript objects are this module's own shape.
+
+    /**
+     * The ordinary `Error` this module reports for Shamir worker failures.
+     *
+     * @param {string} code
+     * @param {string} message
+     * @returns {Error}
+     */
+    function shamirError(code, message) {
+        const error = new makeError(message);
+        defineProperty(error, "code", {
+            __proto__: null,
+            value: code,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+        });
+        return error;
+    }
+
+    /**
+     * Freeze a host-produced share record.
+     *
+     * The object's `index` property cannot be replaced afterwards, but its
+     * `value` bytes remain an ordinary mutable `Uint8Array`.
+     *
+     * @param {{index: number, value: Uint8Array}} share
+     * @returns {{index: number, value: Uint8Array}}
+     */
+    function freezeShare(share) {
+        return freeze({ index: share.index, value: share.value });
+    }
+
+    /**
+     * Copy host-produced share records into frozen objects.
+     *
+     * @param {Array<{index: number, value: Uint8Array}>} shares
+     * @returns {Array<{index: number, value: Uint8Array}>}
+     */
+    function freezeShares(shares) {
+        const out = [];
+        for (let position = 0; position < shares.length; position += 1) {
+            out[position] = freezeShare(shares[position]);
+        }
+        return out;
+    }
+
+    /**
+     * Split a secret into shares using Shamir secret sharing over GF(256).
+     *
+     * The field uses reduction polynomial `0x11b`, generator `0x03`, and
+     * one-based share indexes, so the emitted share values are bytewise
+     * compatible with the Neotales PLAB .NET and rust-libraries Shamir
+     * encodings. Every non-constant polynomial coefficient comes from the
+     * operating-system CSPRNG; there is no fallback. A CSPRNG failure throws
+     * `NEO_CRYPTO_RANDOM` rather than returning predictable shares.
+     *
+     * Every share has the same length as `secret`, so the secret length is
+     * public. The share values are copies; mutating one does not change the
+     * others. The returned records are frozen but their `Uint8Array` values are
+     * mutable. This function is synchronous; `shamirSplitAsync` is the
+     * nonblocking form.
+     *
+     * Shares are not authenticated. Tampered shares, shares from different
+     * splits, and too few shares reconstruct a different byte string, often
+     * without any error. Use a separate authenticated envelope or out-of-band
+     * check if wrong reconstruction must be detected.
+     *
+     * Limits: `secret` is at most 8 MiB, `threshold` and `shareCount` are
+     * integers from 2 through 255 with `shareCount >= threshold`, and
+     * `secret.length * shareCount` is at most 64 MiB.
+     *
+     * @param {Uint8Array} secret
+     * @param {number} threshold
+     * @param {number} shareCount
+     * @returns {Array<{index: number, value: Uint8Array}>}
+     * @throws {TypeError} for a wrong argument count, a non-`Uint8Array`
+     * secret, or a non-number threshold or share count.
+     * @throws {RangeError} for an empty secret or a threshold or share count
+     * outside its documented range.
+     * @throws {Error} with `code` `NEO_CRYPTO_LIMIT`, `NEO_CRYPTO_RANDOM`, or
+     * `NEO_CRYPTO_DETACHED`.
+     */
+    function shamirSplit(secret, threshold, shareCount) {
+        if (arguments.length !== 3) {
+            throw new makeTypeError("shamirSplit takes exactly three arguments");
+        }
+        const response = opShamirSplit(secret, threshold, shareCount);
+        return freezeShares(unwrapCrypto(response));
+    }
+
+    /**
+     * Split a secret on the runtime's bounded blocking pool.
+     *
+     * Validation, budget admission, and one bounded copy of `secret` run before
+     * the returned Promise exists; the random coefficients and all polynomial
+     * arithmetic run on a blocking worker. Copying the finished shares into
+     * JavaScript happens when the Promise resolves. This is not a resolved
+     * Promise around a blocking call. Mutating `secret` after the call does not
+     * change the result. The join starts immediately, so ignoring the Promise
+     * does not cancel the work; only runtime teardown aborts a queued job.
+     *
+     * The same limits, share encoding, randomness source, and authenticity
+     * limitations as `shamirSplit` apply. Pending work shares the `hashAsync`
+     * budget of at most 64 jobs and 64 MiB of copied input plus intended
+     * output; a submission over either bound rejects with `NEO_CRYPTO_BUSY`.
+     *
+     * @param {Uint8Array} secret
+     * @param {number} threshold
+     * @param {number} shareCount
+     * @returns {Promise<Array<{index: number, value: Uint8Array}>>}
+     * @throws rejects with `TypeError`, `RangeError`, or an `Error` carrying a
+     * stable `code`.
+     */
+    async function shamirSplitAsync(secret, threshold, shareCount) {
+        if (arguments.length !== 3) {
+            throw new makeTypeError("shamirSplitAsync takes exactly three arguments");
+        }
+        const id = unwrapId(opShamirSplitAsync(secret, threshold, shareCount));
+        const packed = await opShamirJoin(id);
+        if (packed.length === 0) {
+            throw shamirError("NEO_CRYPTO_INTERNAL", "the Shamir worker failed");
+        }
+        let response;
+        try {
+            response = opShamirUnpackSplit(packed);
+        } finally {
+            typedArrayFill(packed, 0);
+        }
+        return freezeShares(unwrapCrypto(response));
+    }
+
+    /**
+     * Recover a secret from Shamir shares over GF(256).
+     *
+     * The shares are interpolated at `x = 0`; interpolation coefficients are
+     * computed once from the public indexes, not once per secret byte. When
+     * `threshold` is supplied it must be an integer from 2 through 255 and at
+     * least that many shares must be present; omitting it accepts any set of at
+     * least two shares.
+     *
+     * This function does not authenticate shares. A genuine reconstruction is
+     * only possible when the shares are untampered and from the same split. A
+     * tampered set, a mixed set, or fewer than the original threshold produces
+     * a byte string that is not the secret, and this function cannot tell.
+     * Verify the result with a separate authenticated envelope or out-of-band
+     * digest if that matters. The returned bytes are a new `Uint8Array`.
+     *
+     * Limits: at least two and at most 255 shares are accepted, every share
+     * value must have the same non-zero length, and the total share bytes are
+     * at most 64 MiB.
+     *
+     * @param {Array<{index: number, value: Uint8Array}>} shares
+     * @param {number} [threshold]
+     * @returns {Uint8Array}
+     * @throws {TypeError} for a wrong argument count, a non-array `shares`, a
+     * non-object share, an accessor property, a missing or non-number index, or
+     * a non-`Uint8Array` value.
+     * @throws {RangeError} for a malformed count, a zero or out-of-range index,
+     * an empty or unequal share value, or a supplied threshold that is invalid
+     * or larger than the share count.
+     * @throws {Error} with `code` `NEO_CRYPTO_SHAMIR_DUPLICATE`,
+     * `NEO_CRYPTO_SHAMIR_LENGTH`, `NEO_CRYPTO_LIMIT`, or
+     * `NEO_CRYPTO_DETACHED`.
+     */
+    function shamirCombine(shares, threshold) {
+        if (arguments.length < 1 || arguments.length > 2) {
+            throw new makeTypeError("shamirCombine takes one or two arguments");
+        }
+        const response = opShamirCombine(shares, threshold);
+        return unwrapCrypto(response);
+    }
+
+    /**
+     * Recover a secret from Shamir shares on the runtime's bounded blocking
+     * pool.
+     *
+     * Validation, budget admission, and one bounded copy of every share value
+     * run before the returned Promise exists; interpolation runs on a blocking
+     * worker. Copying the recovered bytes into JavaScript happens when the
+     * Promise resolves. Mutating the share objects or their values after the
+     * call does not change the result. The same authenticity and threshold
+     * limitations as `shamirCombine` apply.
+     *
+     * Pending work shares the `hashAsync` budget of at most 64 jobs and 64 MiB
+     * of copied input; a submission over either bound rejects with
+     * `NEO_CRYPTO_BUSY`.
+     *
+     * @param {Array<{index: number, value: Uint8Array}>} shares
+     * @param {number} [threshold]
+     * @returns {Promise<Uint8Array>}
+     * @throws rejects with `TypeError`, `RangeError`, or an `Error` carrying a
+     * stable `code`.
+     */
+    async function shamirCombineAsync(shares, threshold) {
+        if (arguments.length < 1 || arguments.length > 2) {
+            throw new makeTypeError("shamirCombineAsync takes one or two arguments");
+        }
+        const id = unwrapId(opShamirCombineAsync(shares, threshold));
+        const packed = await opShamirJoin(id);
+        if (packed.length === 0) {
+            throw shamirError("NEO_CRYPTO_INTERNAL", "the Shamir worker failed");
+        }
+        let response;
+        try {
+            response = opShamirUnpackCombine(packed);
+        } finally {
+            typedArrayFill(packed, 0);
+        }
+        return unwrapCrypto(response);
+    }
+
     // A frozen module object, like `chars`: the properties cannot be replaced,
     // but the function objects themselves are shared with the imports.
     const crypto = Object.freeze({
@@ -1889,6 +2115,10 @@
         bcryptHashAsync,
         bcryptVerify,
         bcryptVerifyAsync,
+        shamirSplit,
+        shamirSplitAsync,
+        shamirCombine,
+        shamirCombineAsync,
     });
 
     /**

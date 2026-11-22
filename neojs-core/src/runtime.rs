@@ -30,6 +30,7 @@ use crate::builtins::NEO_SHIM;
 use crate::crypto::neojs_crypto;
 use crate::crypto_cipher::neojs_crypto_cipher;
 use crate::crypto_hash::neojs_crypto_hash;
+use crate::crypto_shamir::neojs_crypto_shamir;
 use crate::loader::FileModuleLoader;
 use crate::loader::ModuleFormat;
 use crate::loader::module_format;
@@ -186,6 +187,7 @@ impl Runtime {
             neojs_crypto::init(),
             neojs_crypto_cipher::init(),
             neojs_crypto_hash::init(),
+            neojs_crypto_shamir::init(),
             neojs_path::init(),
             neojs_ssh::init(),
             neojs_stdio::init(),

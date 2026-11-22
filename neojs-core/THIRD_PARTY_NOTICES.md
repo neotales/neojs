@@ -33,6 +33,43 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## PLAB `ShamirSecretSharing` and rust-libraries `shamir`
+
+Source: PLAB `dn/lib/crypto/Crypto/src/ShamirSecretSharing.cs` at revision
+`79faf48ab85d23fcdbf64e29924ac0338841cb58`, released under the MIT License,
+Copyright (c) Neotales and x0craft; and rust-libraries
+`crypto/crypto/src/shamir.rs`, released under the MIT License, Copyright (c)
+2026 Neotales.
+
+`neojs-core/src/crypto_shamir.rs` independently implements the same GF(256)
+field, share encoding, and interpolation. It does not link, call, or vendor
+either source. The field reduction polynomial `0x11b`, generator `0x03`, and
+one-based share indexes are interoperability facts, not copied code. The
+upstream MIT terms are reproduced here because the share format and algorithm
+were adapted from those implementations.
+
+MIT License
+
+Copyright (c) Neotales and x0craft, and Copyright (c) 2026 Neotales
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## `neotales-age`
 
 Source: <https://github.com/neotales/rs-age>, crate `neotales-age` 0.0.0-alpha.1.

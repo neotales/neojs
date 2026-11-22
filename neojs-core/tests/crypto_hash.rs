@@ -803,7 +803,7 @@ if (hmacAsync !== registry.hmacAsync) throw new Error("named hmacAsync identity"
 if ("default" in crypto) throw new Error("crypto must not have a default export");
 if (import.meta.resolve("crypto") !== "neo:crypto") throw new Error("resolve");
 if (import.meta.resolve("neo:crypto") !== "neo:crypto") throw new Error("alias resolve");
-if (Object.keys(registry).length !== 16) throw new Error("unexpected export count");
+if (Object.keys(registry).length !== 20) throw new Error("unexpected export count");
 "#,
     );
 }

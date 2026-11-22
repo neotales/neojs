@@ -135,13 +135,16 @@
 //!
 //! This module implements only [`generate_envelope_key`], [`random_bytes`],
 //! [`encrypt`], and [`decrypt`]. It is not Node's `crypto` module and not the
-//! Web Crypto API. `crypto.subtle`, hashes (`createHash`), HMAC
-//! (`createHmac`), bcrypt, PBKDF2, Shamir secret sharing, and a PLAB .NET
-//! Crypto-compatible encrypt-then-MAC surface are not implemented here. The
-//! stateful `createEncryptor`/`createDecryptor` CBC/GCM surface is a separate
-//! module, `crypto_cipher`; it does not change this NEO1 envelope. These are
-//! additive APIs: the functions above are the synchronous neojs slice and must
-//! not be repurposed for a Node-like, WebCrypto-like, or PLAB-like contract.
+//! Web Crypto API. `crypto.subtle` and a PLAB .NET Crypto-compatible
+//! encrypt-then-MAC surface are not implemented here. Hashes (`createHash`),
+//! HMAC (`createHmac`), bcrypt, and PBKDF2 are in `crypto_hash`; Shamir secret
+//! sharing is in `crypto_shamir`. The stateful
+//! `createEncryptor`/`createDecryptor` CBC/GCM surface is in `crypto_cipher`;
+//! it does not change this NEO1 envelope. These are additive APIs: the
+//! functions above are the synchronous neojs slice and must not be repurposed
+//! for a Node-like, WebCrypto-like, or PLAB API contract. Shamir shares use the
+//! PLAB GF(256) encoding, but that is a data-format compatibility, not a PLAB
+//! API or authentication claim.
 //! The envelope generator is `generateEnvelopeKey`. The name `generateKey` is
 //! deliberately not exported: it is reserved for a future Node-compatible
 //! surface whose `generateKey` has different semantics. WebCrypto's
