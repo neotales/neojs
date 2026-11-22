@@ -790,6 +790,30 @@ console.log(first.toUpper("a".codePointAt(0)));
 }
 
 #[test]
+fn exposes_the_cached_strings_builtin_to_a_module() {
+    let project = Project::new();
+    let file = project.write(
+        "strings.js",
+        r#"
+const strings = Neo.getBuiltInModule("strings");
+console.log(strings === Neo.getBuiltInModule("strings"));
+console.log(strings.equalFold("K", "\u212A"));
+console.log(strings.indexOfFold("\u{1F600}a", "A"));
+console.log(strings.lastIndexOfFold("aaa", "aa"));
+console.log(strings.trim("...hi...", "."));
+console.log(strings.endsWithFold("a\n", "a"));
+console.log(strings.trim("\uFEFF a \uFEFF"));
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "true\ntrue\n2\n1\nhi\nfalse\na\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
 fn reports_bad_built_in_module_names_and_exits_1() {
     let project = Project::new();
     let file = project.write("bad-name.js", "Neo.getBuiltInModule(42);\n");

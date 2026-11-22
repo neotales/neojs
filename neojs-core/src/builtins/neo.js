@@ -228,6 +228,402 @@
         toUpper,
     });
 
+    // `strings` is plain ECMAScript: folded matching and set-based trimming.
+    // It calls no host op and adds no capability beyond the strings it is
+    // given. Folding is ECMAScript's simple case folding, decided per code
+    // point by the engine's own RegExp `/iu` canonicalization, so no Unicode
+    // table is shipped and the Unicode version follows the V8 build. This is
+    // informed by `@neotales/strings` and `@neotales/slices` but is an
+    // independent implementation; it does not port their tables and does not
+    // claim byte-for-byte parity with them.
+    //
+    // Indices are UTF-16 code unit offsets, like `String.prototype.indexOf`,
+    // not Unicode code point offsets. A lone surrogate is compared as itself
+    // and never matches half of a surrogate pair. JS RegExp `$` without `m`
+    // matches only at the end of the input, so `endsWithFold("a\n", "a")` is
+    // false; unlike Python's `re`, there is no match before a final newline.
+    //
+    // Capture the intrinsics used below at shim evaluation. Replacing them
+    // afterwards does not change this module. This is not isolation from code
+    // that replaced them before this script ran, and it is not a sandbox.
+    const makeRegExp = RegExp;
+    const makeSet = Set;
+    const charCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
+    const stringSlice = Function.prototype.call.bind(String.prototype.slice);
+    const stringTrim = Function.prototype.call.bind(String.prototype.trim);
+    const stringTrimStart = Function.prototype.call.bind(String.prototype.trimStart);
+    const stringTrimEnd = Function.prototype.call.bind(String.prototype.trimEnd);
+    const setAdd = Function.prototype.call.bind(Set.prototype.add);
+    const setHas = Function.prototype.call.bind(Set.prototype.has);
+    const mapSet = Function.prototype.call.bind(Map.prototype.set);
+
+    // Code units that are special outside a character class in a RegExp
+    // source: \ ^ $ . * + ? ( ) [ ] { } |. Everything else in a literal is
+    // escaped as itself, so a caller's text is always a literal pattern.
+    const REGEXP_SPECIAL = new makeUint8Array(128);
+    for (const special of [
+        0x5c, 0x5e, 0x24, 0x2e, 0x2a, 0x2b, 0x3f, 0x28, 0x29, 0x5b, 0x5d, 0x7b,
+        0x7d, 0x7c,
+    ]) {
+        REGEXP_SPECIAL[special] = 1;
+    }
+
+    // One single-code-point pattern per code point is enough to decide fold
+    // equality, and the cache keeps a repeated non-ASCII comparison cheap. It
+    // is bounded so a string of many distinct code points cannot retain an
+    // unbounded number of RegExp objects; once full, comparisons fall back to
+    // building a pattern they do not keep.
+    const FOLD_CACHE_LIMIT = 4096;
+    const foldCache = new Map();
+    let foldCacheSize = 0;
+
+    function escapeRegExp(text) {
+        let escaped = "";
+        for (let index = 0; index < text.length; index += 1) {
+            const code = charCodeAt(text, index);
+            if (code < 128 && REGEXP_SPECIAL[code] === 1) escaped += "\\";
+            escaped += fromCharCode(code);
+        }
+        return escaped;
+    }
+
+    function requireString(value, name) {
+        if (typeof value !== "string") {
+            throw new makeTypeError(`${name} must be a string`);
+        }
+    }
+
+    /**
+     * Clamp an optional index argument to `0..length`.
+     *
+     * `undefined` uses `fallback`; `Infinity` and `-Infinity` clamp like the
+     * corresponding `String.prototype` arguments. Any other non-integer is a
+     * `RangeError`, and a non-number is a `TypeError`: this module does not
+     * coerce its arguments.
+     */
+    function toIndex(value, length, fallback) {
+        if (value === undefined) return fallback;
+        if (typeof value !== "number") {
+            throw new makeTypeError("fromIndex must be a number");
+        }
+        if (value === Infinity) return length;
+        if (value === -Infinity) return 0;
+        if (!isInteger(value)) {
+            throw new makeRangeError("fromIndex must be an integer");
+        }
+        if (value <= 0) return 0;
+        if (value >= length) return length;
+        return value;
+    }
+
+    function codepointWidth(point) {
+        return point > 0xffff ? 2 : 1;
+    }
+
+    /**
+     * Move `index` forward off the trailing half of a surrogate pair.
+     *
+     * No well-formed match can start in the middle of a pair, so this changes
+     * no result; it only keeps the scan at code point boundaries.
+     */
+    function codepointStart(text, index) {
+        if (index <= 0 || index >= text.length) return index;
+        const unit = charCodeAt(text, index);
+        if (unit >= 0xdc00 && unit <= 0xdfff) {
+            const previous = charCodeAt(text, index - 1);
+            if (previous >= 0xd800 && previous <= 0xdbff) return index + 1;
+        }
+        return index;
+    }
+
+    /** The start offset of the code point that ends just before `end`. */
+    function previousCodepointStart(text, end) {
+        const unit = charCodeAt(text, end - 1);
+        if (unit >= 0xdc00 && unit <= 0xdfff && end >= 2) {
+            const high = charCodeAt(text, end - 2);
+            if (high >= 0xd800 && high <= 0xdbff) return end - 2;
+        }
+        return end - 1;
+    }
+
+    function asciiFoldEqual(left, right) {
+        if (left === right) return true;
+        if (left >= 0x41 && left <= 0x5a) left += 0x20;
+        if (right >= 0x41 && right <= 0x5a) right += 0x20;
+        return left === right;
+    }
+
+    /**
+     * True when two code points are equivalent under simple case folding.
+     *
+     * ASCII is decided directly. For anything else the engine's `/iu` matcher
+     * decides, which is the ECMAScript definition of canonicalization and the
+     * same relation `String.prototype` regular expressions use.
+     */
+    function foldEqual(left, right) {
+        if (left === right) return true;
+        if (left < 0x80 && right < 0x80) return asciiFoldEqual(left, right);
+        let expression = mapGet(foldCache, left);
+        if (expression === undefined) {
+            expression = makeRegExp(
+                `^(?:${escapeRegExp(fromCodePoint(left))})$`,
+                "iu",
+            );
+            if (foldCacheSize < FOLD_CACHE_LIMIT) {
+                mapSet(foldCache, left, expression);
+                foldCacheSize += 1;
+            }
+        }
+        return regexpExec(expression, fromCodePoint(right)) !== null;
+    }
+
+    /** True when `pattern` matches `text` starting at `start`. */
+    function foldMatchAt(text, start, pattern) {
+        let textIndex = start;
+        let patternIndex = 0;
+        while (patternIndex < pattern.length) {
+            if (textIndex >= text.length) return false;
+            const textPoint = codePointAt(text, textIndex);
+            const patternPoint = codePointAt(pattern, patternIndex);
+            if (!foldEqual(textPoint, patternPoint)) return false;
+            textIndex += codepointWidth(textPoint);
+            patternIndex += codepointWidth(patternPoint);
+        }
+        return true;
+    }
+
+    /**
+     * Determine whether two strings are equal under simple case folding.
+     *
+     * Locale-independent: this is not `toLowerCase()` comparison and does not
+     * apply Turkish or other locale rules. `"K"` equals U+212A KELVIN SIGN and
+     * `"s"` equals U+017F LATIN SMALL LETTER LONG S, while `"ss"` does not
+     * equal `"ß"` (that is full folding) and `"I"` does not equal `"ı"`.
+     *
+     * @param {string} text
+     * @param {string} other
+     * @returns {boolean}
+     * @throws {TypeError} when an argument is not a string.
+     */
+    function equalFold(text, other) {
+        requireString(text, "text");
+        requireString(other, "other");
+        if (text === other) return true;
+        let textIndex = 0;
+        let otherIndex = 0;
+        while (textIndex < text.length && otherIndex < other.length) {
+            const textPoint = codePointAt(text, textIndex);
+            const otherPoint = codePointAt(other, otherIndex);
+            if (!foldEqual(textPoint, otherPoint)) return false;
+            textIndex += codepointWidth(textPoint);
+            otherIndex += codepointWidth(otherPoint);
+        }
+        return textIndex === text.length && otherIndex === other.length;
+    }
+
+    /**
+     * Determine whether `text` begins with `prefix`, ignoring case.
+     *
+     * @param {string} text
+     * @param {string} prefix
+     * @returns {boolean}
+     * @throws {TypeError} when an argument is not a string.
+     */
+    function startsWithFold(text, prefix) {
+        requireString(text, "text");
+        requireString(prefix, "prefix");
+        return foldMatchAt(text, 0, prefix);
+    }
+
+    /**
+     * Determine whether `text` ends with `suffix`, ignoring case.
+     *
+     * `$` in a JavaScript RegExp without the `m` flag matches only at the end
+     * of the input, so a final newline is part of the text: `"a\n"` does not
+     * end with `"a"`.
+     *
+     * @param {string} text
+     * @param {string} suffix
+     * @returns {boolean}
+     * @throws {TypeError} when an argument is not a string.
+     */
+    function endsWithFold(text, suffix) {
+        requireString(text, "text");
+        requireString(suffix, "suffix");
+        let textIndex = text.length;
+        let suffixIndex = suffix.length;
+        while (suffixIndex > 0) {
+            if (textIndex <= 0) return false;
+            const textStart = previousCodepointStart(text, textIndex);
+            const suffixStart = previousCodepointStart(suffix, suffixIndex);
+            const textPoint = codePointAt(text, textStart);
+            const suffixPoint = codePointAt(suffix, suffixStart);
+            if (!foldEqual(textPoint, suffixPoint)) return false;
+            textIndex = textStart;
+            suffixIndex = suffixStart;
+        }
+        return true;
+    }
+
+    /**
+     * Find the first occurrence of `search` in `text`, ignoring case.
+     *
+     * @param {string} text
+     * @param {string} search
+     * @param {number} [fromIndex=0] an integer, or `Infinity`/`-Infinity`
+     * @returns {number} a UTF-16 code unit index, or `-1`
+     * @throws {TypeError} when `text` or `search` is not a string, or
+     * `fromIndex` is not a number.
+     * @throws {RangeError} when `fromIndex` is a non-integer number.
+     */
+    function indexOfFold(text, search, fromIndex) {
+        requireString(text, "text");
+        requireString(search, "search");
+        const from = toIndex(fromIndex, text.length, 0);
+        if (search.length === 0) return from;
+        let index = codepointStart(text, from);
+        while (index < text.length) {
+            if (foldMatchAt(text, index, search)) return index;
+            index += codepointWidth(codePointAt(text, index));
+        }
+        return -1;
+    }
+
+    /**
+     * Find the last occurrence of `search` in `text`, ignoring case.
+     *
+     * Overlapping occurrences are found, like `String.prototype.lastIndexOf`:
+     * `lastIndexOfFold("aaa", "aa")` is `1`. A match must start at or before
+     * `fromIndex`; the default is the end of the string.
+     *
+     * @param {string} text
+     * @param {string} search
+     * @param {number} [fromIndex=text.length] an integer, or
+     * `Infinity`/`-Infinity`
+     * @returns {number} a UTF-16 code unit index, or `-1`
+     * @throws {TypeError} when `text` or `search` is not a string, or
+     * `fromIndex` is not a number.
+     * @throws {RangeError} when `fromIndex` is a non-integer number.
+     */
+    function lastIndexOfFold(text, search, fromIndex) {
+        requireString(text, "text");
+        requireString(search, "search");
+        const limit = toIndex(fromIndex, text.length, text.length);
+        if (search.length === 0) return limit;
+        let last = -1;
+        let index = 0;
+        while (index <= limit && index < text.length) {
+            if (foldMatchAt(text, index, search)) last = index;
+            index += codepointWidth(codePointAt(text, index));
+        }
+        return last;
+    }
+
+    function codePointSet(chars) {
+        const set = new makeSet();
+        for (let index = 0; index < chars.length; ) {
+            const point = codePointAt(chars, index);
+            setAdd(set, point);
+            index += codepointWidth(point);
+        }
+        return set;
+    }
+
+    function trimStartOffset(text, set) {
+        let start = 0;
+        while (start < text.length) {
+            const point = codePointAt(text, start);
+            if (!setHas(set, point)) break;
+            start += codepointWidth(point);
+        }
+        return start;
+    }
+
+    function trimEndOffset(text, set, floor) {
+        let end = text.length;
+        while (end > floor) {
+            const start = previousCodepointStart(text, end);
+            const point = codePointAt(text, start);
+            if (!setHas(set, point)) break;
+            end = start;
+        }
+        return end;
+    }
+
+    /**
+     * Remove leading and trailing code points that occur in `chars`.
+     *
+     * With no `chars`, this is exactly `String.prototype.trim()`, including
+     * JavaScript's whitespace set (which contains U+FEFF and excludes U+0085).
+     * This is deliberately not `neo:chars`' `isSpace`, which follows Go's
+     * `unicode.IsSpace`.
+     *
+     * @param {string} text
+     * @param {string} [chars] a set of Unicode code points, not a prefix
+     * @returns {string}
+     * @throws {TypeError} when `text` or `chars` is not a string.
+     */
+    function trim(text, chars) {
+        requireString(text, "text");
+        if (chars === undefined) return stringTrim(text);
+        requireString(chars, "chars");
+        if (chars.length === 0) return text;
+        const set = codePointSet(chars);
+        const start = trimStartOffset(text, set);
+        if (start === text.length) return "";
+        const end = trimEndOffset(text, set, start);
+        return stringSlice(text, start, end);
+    }
+
+    /**
+     * Remove leading code points that occur in `chars`.
+     *
+     * @param {string} text
+     * @param {string} [chars] a set of Unicode code points, not a prefix
+     * @returns {string}
+     * @throws {TypeError} when `text` or `chars` is not a string.
+     */
+    function trimStart(text, chars) {
+        requireString(text, "text");
+        if (chars === undefined) return stringTrimStart(text);
+        requireString(chars, "chars");
+        if (chars.length === 0) return text;
+        const set = codePointSet(chars);
+        const start = trimStartOffset(text, set);
+        return start === 0 ? text : stringSlice(text, start);
+    }
+
+    /**
+     * Remove trailing code points that occur in `chars`.
+     *
+     * @param {string} text
+     * @param {string} [chars] a set of Unicode code points, not a suffix
+     * @returns {string}
+     * @throws {TypeError} when `text` or `chars` is not a string.
+     */
+    function trimEnd(text, chars) {
+        requireString(text, "text");
+        if (chars === undefined) return stringTrimEnd(text);
+        requireString(chars, "chars");
+        if (chars.length === 0) return text;
+        const set = codePointSet(chars);
+        const end = trimEndOffset(text, set, 0);
+        return end === text.length ? text : stringSlice(text, 0, end);
+    }
+
+    // A frozen module object, like `chars`: the properties cannot be replaced,
+    // but the function objects themselves are shared with the imports.
+    const strings = Object.freeze({
+        equalFold,
+        startsWithFold,
+        endsWithFold,
+        indexOfFold,
+        lastIndexOfFold,
+        trim,
+        trimStart,
+        trimEnd,
+    });
+
     // The host ops for `crypto` are captured now, before user code runs. Later
     // replacement of `Deno.core.ops` therefore does not change what the module
     // calls. This is not isolation from code that replaced them before this
@@ -2168,6 +2564,7 @@
         ["crypto", crypto],
         ["ssh", ssh],
         ["stdio", stdio],
+        ["strings", strings],
     ]);
 
     /**

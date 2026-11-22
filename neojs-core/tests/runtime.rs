@@ -1537,3 +1537,385 @@ fn an_async_preflight_failure_leaves_the_runtime_unused() {
             .expect("the runtime is usable after an async preflight failure");
     });
 }
+
+#[test]
+fn strings_folded_matching_uses_es_simple_folding() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+const cases = [
+    // [text, other, expected, description]
+    ["Hello", "HELLO", true, "ASCII case"],
+    ["café", "CAFÉ", true, "accented Latin"],
+    ["K", "\u212A", true, "Kelvin sign"],
+    ["\u212A", "k", true, "Kelvin sign reversed"],
+    ["S", "\u017F", true, "long s"],
+    ["\u03C3", "\u03C2", true, "sigma and final sigma"],
+    ["I", "\u0131", false, "dotless i is not I"],
+    ["i", "\u0130", false, "dotted I is not i"],
+    ["ss", "\u00DF", false, "sharp s is full folding only"],
+    ["a\n", "A\n", true, "newline inside the text"],
+    ["a\uD800", "a\uD800", true, "the same lone surrogate"],
+    ["a\uD800", "a", false, "a lone surrogate is not absent"],
+    ["\uD83D", "\u{1F600}", false, "half a pair is not the pair"],
+    ["\u{1F600}", "\u{1F600}", true, "the same astral character"],
+    ["", "", true, "both empty"],
+    ["", "\u0000", false, "empty is not NUL"],
+    ["a.b", "a.b", true, "a literal dot"],
+    ["a.b", "axb", false, "the dot is not a wildcard"],
+    ["[a-z]", "[a-z]", true, "a literal character class"],
+    ["\\d", "\\d", true, "a literal backslash"],
+    ["a*", "aaa", false, "a literal star"],
+];
+for (const [text, other, expected, description] of cases) {
+    const actual = strings.equalFold(text, other);
+    if (actual !== expected) {
+        throw new Error(`equalFold(${JSON.stringify(text)}, ${JSON.stringify(other)}) is ${actual}: ${description}`);
+    }
+    if (strings.equalFold(other, text) !== actual) {
+        throw new Error(`equalFold is not symmetric for ${description}`);
+    }
+}
+
+if (!strings.startsWithFold("Hello World", "HELLO")) throw new Error("startsWithFold missed");
+if (strings.startsWithFold("Hello", "World")) throw new Error("startsWithFold overmatched");
+if (!strings.startsWithFold("abc", "")) throw new Error("startsWithFold rejected an empty prefix");
+if (!strings.startsWithFold("(x)", "(x)")) throw new Error("startsWithFold treated a paren as a group");
+if (!strings.startsWithFold("|x", "|")) throw new Error("startsWithFold treated a pipe as alternation");
+
+if (!strings.endsWithFold("Hello World", "WORLD")) throw new Error("endsWithFold missed");
+if (strings.endsWithFold("Hello", "Hell")) throw new Error("endsWithFold overmatched");
+if (!strings.endsWithFold("abc", "")) throw new Error("endsWithFold rejected an empty suffix");
+// JS `$` without `m` matches only at the end of the input.
+if (strings.endsWithFold("a\n", "a")) throw new Error("endsWithFold matched before a final newline");
+if (!strings.endsWithFold("a\n", "\n")) throw new Error("endsWithFold missed a final newline");
+if (!strings.endsWithFold("a\n", "a\n")) throw new Error("endsWithFold missed the newline in the suffix");
+if (strings.endsWithFold("a\r\n", "a")) throw new Error("endsWithFold matched before CRLF");
+"#,
+    );
+}
+
+#[test]
+fn strings_indices_are_utf16_and_last_index_finds_overlaps() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+const cases = [
+    // [text, search, fromIndex, expected, description]
+    ["\u{1F600}a", "A", undefined, 2, "astral prefix counts two code units"],
+    ["a\u{1F600}b", "B", undefined, 3, "astral in the middle"],
+    ["abc", "z", undefined, -1, "absent"],
+    ["abc", "", undefined, 0, "empty search at the start"],
+    ["abc", "", 2, 2, "empty search at an index"],
+    ["\u{1F600}", "", 1, 1, "empty search inside a surrogate pair"],
+    ["\u{1F600}a", "a", 1, 2, "non-empty search starts at the next code point"],
+    ["abc", "b", -5, 1, "a negative index clamps to zero"],
+    ["abc", "c", Infinity, -1, "Infinity clamps to the length"],
+    ["abc", "", Infinity, 3, "an empty search at Infinity is the length"],
+    ["abc", "a", 99, -1, "an index above the length finds nothing"],
+    ["x.a.y", "a.", undefined, 2, "regex metacharacters are literal"],
+];
+for (const [text, search, fromIndex, expected, description] of cases) {
+    const actual = strings.indexOfFold(text, search, fromIndex);
+    if (actual !== expected) {
+        throw new Error(`indexOfFold(${JSON.stringify(text)}, ${JSON.stringify(search)}, ${fromIndex}) is ${actual}, expected ${expected}: ${description}`);
+    }
+}
+
+const lastCases = [
+    ["aaa", "aa", undefined, 1, "overlapping occurrences"],
+    ["aaaa", "aa", undefined, 2, "three overlapping occurrences"],
+    ["aAa", "a", undefined, 2, "case-insensitive last occurrence"],
+    ["a\u{1F600}b\u{1F600}", "B", undefined, 3, "astral text"],
+    ["abc", "z", undefined, -1, "absent"],
+    ["abc", "", undefined, 3, "empty search is the length"],
+    ["abc", "", 1, 1, "empty search at an index"],
+    ["aaaa", "aa", 2, 2, "a match starting at the limit"],
+    ["aaaa", "aa", 1, 1, "a match starting below the limit"],
+    ["aaa", "a", 0, 0, "a zero limit"],
+    ["aaa", "a", -4, 0, "a negative limit clamps to zero"],
+    ["\u212A\u212A", "k", undefined, 1, "folded last occurrence"],
+];
+for (const [text, search, fromIndex, expected, description] of lastCases) {
+    const actual = strings.lastIndexOfFold(text, search, fromIndex);
+    if (actual !== expected) {
+        throw new Error(`lastIndexOfFold(${JSON.stringify(text)}, ${JSON.stringify(search)}, ${fromIndex}) is ${actual}, expected ${expected}: ${description}`);
+    }
+}
+
+// Overlap parity with String.prototype.lastIndexOf on an ASCII haystack.
+const overlapText = "aaaa";
+for (let limit = -1; limit <= overlapText.length + 1; limit += 1) {
+    const actual = strings.lastIndexOfFold(overlapText, "aa", limit);
+    const expected = overlapText.lastIndexOf("aa", limit);
+    if (actual !== expected) {
+        throw new Error(`overlap parity failed at limit ${limit}: ${actual} !== ${expected}`);
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn strings_trim_removes_a_code_point_set_and_defaults_to_js_whitespace() {
+    run_js(
+        r###"
+import * as strings from "strings";
+
+const trimCases = [
+    ["...hi...", ".", "hi", "one character"],
+    ["##a##", "#", "a", "hash"],
+    ["xyhelloyx", "xy", "hello", "a set of characters"],
+    ["\u{1F600}x\u{1F600}", "\u{1F600}", "x", "an astral code point"],
+    ["  a  ", "", "  a  ", "an empty set trims nothing"],
+    ["....", ".", "", "a fully trimmed string"],
+    ["abc", ".", "abc", "no leading or trailing member"],
+    ["", ".", "", "empty text"],
+    ["a.b", ".", "a.b", "a member in the middle is kept"],
+    ["\uD800x\uD800", "\uD800", "x", "a lone surrogate in the set"],
+];
+for (const [text, chars, expected, description] of trimCases) {
+    if (strings.trim(text, chars) !== expected) {
+        throw new Error(`trim failed for ${description}`);
+    }
+}
+
+if (strings.trimStart("///a/b", "/") !== "a/b") throw new Error("trimStart failed");
+if (strings.trimEnd("a/b///", "/") !== "a/b") throw new Error("trimEnd failed");
+if (strings.trimStart("\u{1F600}a", "\u{1F600}") !== "a") throw new Error("trimStart astral failed");
+if (strings.trimEnd("a\u{1F600}", "\u{1F600}") !== "a") throw new Error("trimEnd astral failed");
+
+// No `chars` is exactly String.prototype.trim: JS whitespace contains U+FEFF
+// and excludes U+0085. This is deliberately not neo:chars' Go isSpace.
+const jsWhitespace = "\uFEFF\t a \n\u0085";
+if (strings.trim(jsWhitespace) !== jsWhitespace.trim()) {
+    throw new Error("trim() without chars does not match String.prototype.trim");
+}
+if (strings.trim("\uFEFF a \uFEFF") !== "a") throw new Error("trim() did not remove U+FEFF");
+if (strings.trim("\u0085a\u0085") !== "\u0085a\u0085") {
+    throw new Error("trim() removed U+0085, which is not JS whitespace");
+}
+if (strings.trimStart("  a  ") !== "a  ") throw new Error("trimStart default failed");
+if (strings.trimEnd("  a  ") !== "  a") throw new Error("trimEnd default failed");
+"###,
+    );
+}
+
+#[test]
+fn strings_reject_non_string_and_bad_index_arguments() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+const typeErrors = [
+    () => strings.equalFold(1, "a"),
+    () => strings.equalFold("a", 1),
+    () => strings.startsWithFold("a", null),
+    () => strings.endsWithFold(Symbol("x"), "a"),
+    () => strings.indexOfFold("a", 1),
+    () => strings.lastIndexOfFold("a", "a", "1"),
+    () => strings.trim("a", 1),
+    () => strings.trimStart(undefined, "a"),
+    () => strings.trimEnd("a", {}),
+];
+for (const call of typeErrors) {
+    let threw = false;
+    try {
+        call();
+    } catch (error) {
+        if (!(error instanceof TypeError)) {
+            throw new Error(`expected TypeError, got ${error}`);
+        }
+        threw = true;
+    }
+    if (!threw) throw new Error("a non-string argument was accepted");
+}
+
+for (const index of [1.5, NaN]) {
+    let threw = false;
+    try {
+        strings.indexOfFold("a", "a", index);
+    } catch (error) {
+        if (!(error instanceof RangeError)) {
+            throw new Error(`expected RangeError for ${index}, got ${error}`);
+        }
+        threw = true;
+    }
+    if (!threw) throw new Error(`a non-integer fromIndex was accepted: ${index}`);
+}
+
+// A number is rejected rather than coerced, even when its string form matches.
+let coerced = false;
+try {
+    strings.indexOfFold("a1", 1);
+} catch (error) {
+    coerced = error instanceof TypeError;
+}
+if (!coerced) throw new Error("indexOfFold coerced a number to a string");
+"#,
+    );
+}
+
+#[test]
+fn strings_survive_replaced_intrinsics() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+const baseline = [
+    strings.equalFold("K", "\u212A"),
+    strings.startsWithFold("Hello", "HEL"),
+    strings.endsWithFold("a\n", "\n"),
+    strings.indexOfFold("\u{1F600}a", "A"),
+    strings.lastIndexOfFold("aaa", "aa"),
+    strings.trim("...hi...", "."),
+    strings.trim("\uFEFF a \uFEFF"),
+];
+
+const originals = {
+    exec: RegExp.prototype.exec,
+    regexp: globalThis.RegExp,
+    trim: String.prototype.trim,
+    trimStart: String.prototype.trimStart,
+    trimEnd: String.prototype.trimEnd,
+    slice: String.prototype.slice,
+    charCodeAt: String.prototype.charCodeAt,
+    codePointAt: String.prototype.codePointAt,
+    has: Set.prototype.has,
+    add: Set.prototype.add,
+    get: Map.prototype.get,
+    set: Map.prototype.set,
+};
+// Keep the prototype itself: after the global `RegExp` identifier is
+// replaced, `RegExp.prototype` no longer names this object.
+const regexpPrototype = RegExp.prototype;
+const boom = () => {
+    throw new Error("a replaced intrinsic was called");
+};
+regexpPrototype.exec = boom;
+globalThis.RegExp = boom;
+String.prototype.trim = boom;
+String.prototype.trimStart = boom;
+String.prototype.trimEnd = boom;
+String.prototype.slice = boom;
+String.prototype.charCodeAt = boom;
+String.prototype.codePointAt = boom;
+Set.prototype.has = boom;
+Set.prototype.add = boom;
+Map.prototype.get = boom;
+Map.prototype.set = boom;
+try {
+    const after = [
+        strings.equalFold("K", "\u212A"),
+        strings.startsWithFold("Hello", "HEL"),
+        strings.endsWithFold("a\n", "\n"),
+        strings.indexOfFold("\u{1F600}a", "A"),
+        strings.lastIndexOfFold("aaa", "aa"),
+        strings.trim("...hi...", "."),
+        strings.trim("\uFEFF a \uFEFF"),
+    ];
+    if (JSON.stringify(after) !== JSON.stringify(baseline)) {
+        throw new Error(`results changed: ${JSON.stringify(after)} !== ${JSON.stringify(baseline)}`);
+    }
+} finally {
+    globalThis.RegExp = originals.regexp;
+    regexpPrototype.exec = originals.exec;
+    String.prototype.trim = originals.trim;
+    String.prototype.trimStart = originals.trimStart;
+    String.prototype.trimEnd = originals.trimEnd;
+    String.prototype.slice = originals.slice;
+    String.prototype.charCodeAt = originals.charCodeAt;
+    String.prototype.codePointAt = originals.codePointAt;
+    Set.prototype.has = originals.has;
+    Set.prototype.add = originals.add;
+    Map.prototype.get = originals.get;
+    Map.prototype.set = originals.set;
+}
+if (globalThis.RegExp !== originals.regexp) throw new Error("RegExp was not restored");
+"#,
+    );
+}
+
+#[test]
+fn strings_handle_long_input() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+const long = "a".repeat(1000000);
+const tail = long + "needle";
+
+if (strings.indexOfFold(tail, "NEEDLE") !== 1000000) {
+    throw new Error("indexOfFold failed on a long string");
+}
+if (strings.lastIndexOfFold(tail, "NEEDLE") !== 1000000) {
+    throw new Error("lastIndexOfFold failed on a long string");
+}
+if (!strings.equalFold(long, long)) throw new Error("equalFold failed on identical long strings");
+if (strings.equalFold(long, long + "x")) throw new Error("equalFold accepted a longer string");
+if (!strings.equalFold(long + "a", long + "A")) {
+    throw new Error("equalFold failed on a long ASCII string");
+}
+if (!strings.startsWithFold(long, long)) throw new Error("startsWithFold failed on a long prefix");
+if (!strings.endsWithFold(tail, "NEEDLE")) throw new Error("endsWithFold failed on a long text");
+
+const trimmed = strings.trim(".".repeat(500000) + "x" + ".".repeat(500000), ".");
+if (trimmed !== "x") throw new Error("trim failed on a long string");
+
+const accented = "\u00E9".repeat(200000);
+if (!strings.equalFold(accented, "\u00C9".repeat(200000))) {
+    throw new Error("equalFold failed on a long non-ASCII string");
+}
+"#,
+    );
+}
+
+#[test]
+fn strings_module_named_exports_are_the_registry_functions() {
+    run_js(
+        r#"
+import * as strings from "strings";
+const registry = Neo.getBuiltInModule("strings");
+if (registry !== Neo.getBuiltInModule("strings")) {
+    throw new Error("strings lookup is not cached");
+}
+if (!Object.isFrozen(registry)) throw new Error("strings is not frozen");
+const exported = Object.keys(strings).sort();
+const registered = Object.keys(registry).sort();
+if (JSON.stringify(exported) !== JSON.stringify(registered)) {
+    throw new Error(`export list ${exported} does not match ${registered}`);
+}
+const expected = [
+    "endsWithFold", "equalFold", "indexOfFold", "lastIndexOfFold",
+    "startsWithFold", "trim", "trimEnd", "trimStart",
+];
+if (JSON.stringify(registered) !== JSON.stringify(expected)) {
+    throw new Error(`unexpected exports: ${registered}`);
+}
+for (const name of registered) {
+    if (typeof strings[name] !== "function") throw new Error(`${name} is not a function`);
+    if (strings[name] !== registry[name]) throw new Error(`${name} is not the registry function`);
+}
+if ("default" in strings) throw new Error("strings must not have a default export");
+
+const alias = await import("neo:strings");
+const upper = await import("NEO:strings");
+if (alias !== strings) throw new Error("neo:strings is not the same module instance");
+if (upper !== strings) throw new Error("the scheme is not matched case-insensitively");
+if (import.meta.resolve("strings") !== "neo:strings") {
+    throw new Error("strings did not resolve canonically");
+}
+
+let rejected = false;
+try {
+    strings.trim = () => "replaced";
+} catch (error) {
+    rejected = error instanceof TypeError;
+}
+if (!rejected) throw new Error("a namespace export was assignable");
+if (strings.trim("...x...", ".") !== "x") throw new Error("trim was replaced");
+"#,
+    );
+}

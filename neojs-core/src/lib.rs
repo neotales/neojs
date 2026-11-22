@@ -4,10 +4,12 @@
 //! and drains V8's event loop. A runtime is single-use; a second entry module
 //! returns [`Error::RuntimeConsumed`].
 //!
-//! It provides the `age`, `chars`, `console`, `crypto`, `ssh`, and `stdio`
-//! built-in modules through `Neo.getBuiltInModule(name)` and through the module
+//! It provides the `age`, `chars`, `console`, `crypto`, `ssh`, `stdio`, and
+//! `strings` built-in modules through `Neo.getBuiltInModule(name)` and through
+//! the module
 //! specifiers `age`, `neo:age`, `chars`, `neo:chars`, `console`, `neo:console`,
-//! `crypto`, `neo:crypto`, `ssh`, `neo:ssh`, `stdio`, and `neo:stdio`.
+//! `crypto`, `neo:crypto`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`,
+//! and `neo:strings`.
 //!
 //! `age` is synchronous binary age v1 encryption for X25519 recipients. It
 //! exposes `generateIdentity`, `identityToRecipient`, `encrypt`, and `decrypt`.
@@ -66,6 +68,22 @@
 //! accepts the bytes or reports an error. See `neojs-core/src/stdio.rs` for the
 //! ownership, partial-read, end-of-file, close, error, and size contracts.
 //!
+//! `strings` is plain ECMAScript: folded matching (`equalFold`,
+//! `startsWithFold`, `endsWithFold`, `indexOfFold`, `lastIndexOfFold`) and
+//! trimming of a caller-supplied code point set (`trim`, `trimStart`,
+//! `trimEnd`). Folding is ECMAScript's simple case folding, decided per code
+//! point by V8's own RegExp `/iu` canonicalization, so it ships no Unicode
+//! table, is locale-independent, and follows the Unicode data in the V8 build.
+//! It is not `toLowerCase()` comparison: `"K"` equals U+212A KELVIN SIGN,
+//! `"s"` equals U+017F LONG S, `"I"` does not equal U+0131 DOTLESS I, and
+//! `"ss"` does not equal `"ß"`. Indices are UTF-16 code unit offsets like
+//! `String.prototype.indexOf`, and overlapping occurrences are found. A lone
+//! surrogate is compared as itself and never matches half of a pair. With no
+//! `chars`, trimming is exactly `String.prototype.trim`, so it uses
+//! JavaScript's whitespace set rather than `neo:chars`' Go-derived
+//! `isSpace`. The module does not coerce arguments and calls no host op; it
+//! adds no capability beyond the strings it is given.
+//!
 //! `ssh` is a synchronous command-execution slice over the MIT-licensed
 //! `neotales-ssh` crate: `connect` dials one host, completes the SSH handshake
 //! and exactly one of password, in-memory-private-key, or explicit Unix-agent
@@ -87,8 +105,9 @@
 //! error contracts.
 //!
 //! An ES module namespace object is not the registry object. For `age`, `chars`,
-//! `crypto`, `ssh`, and `stdio`, both paths expose the same classes, functions,
-//! and shared stream objects; the namespace is a separate container over them. For
+//! `crypto`, `ssh`, `stdio`, and `strings`, both paths expose the same classes,
+//! functions, and shared stream objects; the namespace is a separate container
+//! over them. For
 //! `console`, the registry object is the console object the runtime installed,
 //! and the default export's value is that object. The named exports are that
 //! object's method values when the module is
