@@ -142,8 +142,10 @@ body; it leaves an absent-entry tombstone so an older `200` cannot resurrect it.
 freshness lifetime is revalidated on the next run. Publications are serialized per key and use
 persistent monotonic revision files: a `200` loses to a newer entry or `no-store` tombstone, and a
 `304` uses its own request revision rather than a later completion token, so it cannot outrank a
-later-started `200` or `no-store`. Ordering does not depend on the wall clock. A stale lock from a
-crash only delays a cache write; loading falls back to the network. Header and metadata lines are
+later-started `200` or `no-store`. Representation identity (ETag or body digest) is tracked separately
+from the publication revision, so a newer `304` for the same bytes can supersede an older `304`
+without letting an older representation win. Ordering does not depend on the wall clock. A stale lock
+from a crash only delays a cache write; loading falls back to the network. Header and metadata lines are
 bounded, one file handle is used per read, the body length is checked before allocation, and
 appended bytes are rejected as a cache miss. There is no signature or content-addressed store, so the cache is not integrity
 protection against someone who can write it and does not pin a version;
@@ -157,8 +159,10 @@ rejected module is neither fetched nor cached. Each distinct requested URL consu
 even when its fetch fails, so repeatedly caught oversized imports cannot grow the graph without
 bound. Retrying the same URL reuses its slot but repeats the I/O. A separate request limit counts
 every network request, including retries and each redirect hop, so repeating one failed URL cannot
-bypass the network bound. A failed entry preflight is refunded, including its redaction entry,
-because the runtime is still unused. The redaction URL set is capped by the module limit. The
+bypass the network bound. A failed entry preflight refunds its module, byte, and redaction charges
+but not the request it already spent; create a new `Runtime` for a fresh request budget. Idle
+connection pooling is disabled, so ureq cannot hide a retry of a request whose reused connection was
+closed. The redaction URL set is capped by the module limit. The
 deadline is per module, not a wall-clock bound on the whole program: running code can keep importing
 modules until the aggregate limits are reached. These are resource bounds, not a sandbox
 or a CPU or V8 heap bound.
@@ -167,8 +171,10 @@ Generated V8 errors redact known remote module URLs from stack-frame locations a
 messages whose error name and prefix match a generated diagnostic shape. The module's identity and
 `import.meta.url` stay the final URL. A script-supplied exception message, including a quoted
 relative URL-like string, text shaped like "Cannot find module", or ` at <URL>:`, and a custom stack
-are preserved, so code can still expose a URL it puts in its own error; do not use module specifiers
-as secret storage.
+are preserved, so code can still expose a URL it puts in its own error. A user-thrown
+`SyntaxError`/`TypeError` that exactly copies a generated prefix and location shape is
+indistinguishable from V8's own text and may be redacted. Do not use module specifiers as secret
+storage.
 
 Remote loading is a capability switch, not a permission system. It is **not SSRF protection**: there
 is no host allowlist, private-address rejection, or DNS pinning, and neojs fetches whatever HTTPS URL
