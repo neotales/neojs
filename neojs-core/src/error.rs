@@ -89,4 +89,12 @@ pub enum Error {
         "this Runtime has already loaded an entry module; create a new Runtime for each entry module"
     )]
     RuntimeConsumed,
+
+    /// The `test` runner returned an unusable report or failed unexpectedly.
+    ///
+    /// This is a runner fault, not a test failure. Test failures are reported in
+    /// [`crate::TestReport`] and make the command exit non-zero; this variant
+    /// means the counts could not be trusted, so they are not returned.
+    #[error("test runner failed: {0}")]
+    TestRunner(String),
 }

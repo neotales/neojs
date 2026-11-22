@@ -26,7 +26,10 @@
 // host verification, but other modes read no environment and no agent. It adds
 // no filesystem, stdin, or permission capability and never forwards an agent.
 // The `console` module is the realm's installed console
-// object, not a separate console or an isolation boundary.
+// object, not a separate console or an isolation boundary. The `test` module
+// is plain ECMAScript: it registers sync and async tests, reports failures,
+// pending tests, timeouts, and unhandled rejections, and calls no host op. It
+// is not Node's `node:test` and is not an isolation boundary.
 //
 // The `chars` module is an independent implementation for neojs. It is
 // informed by `@neotales/chars` and the QuickJS `neo:chars` module, but it does
@@ -48,6 +51,10 @@
     const isInteger = Number.isInteger;
     const fromCodePoint = String.fromCodePoint;
     const fromCharCode = String.fromCharCode;
+    const toWellFormed =
+        typeof String.prototype.toWellFormed === "function"
+            ? String.prototype.toWellFormed
+            : null;
     const codePointAt = Function.prototype.call.bind(String.prototype.codePointAt);
     // Capture `exec`, not `test`. `RegExp.prototype.test` looks up `this.exec`
     // dynamically, so replacing `RegExp.prototype.exec` would change what the
@@ -5449,8 +5456,559 @@
     defineField(assert, "doesNotReject", doesNotReject);
     Object.freeze(assert);
 
-    // A Map avoids inherited-property lookups, so names such as `constructor`
-    // and `__proto__` are unknown modules rather than functions.
+    // The `test` built-in module.
+    //
+    // `test(name, fn)` queues a callback, and `run()` executes the queue in
+    // registration order. The CLI calls `run()` after the entry module
+    // settles, so tests registered after a top-level await are included. A
+    // callback may return a Promise; it is awaited and a rejection is a
+    // failure. A callback that returns a generator object is rejected rather
+    // than silently skipped. A test registered without a callback is pending
+    // and fails the run. An unhandled rejection that occurs while the module
+    // or the runner is active is recorded and fails the run.
+    //
+    // This is not Node's `node:test`. There are no subtests, hooks, mocks,
+    // snapshots, tags, filters, retries, or parallel execution, and `test()`
+    // returns `undefined` rather than a Promise. Tests share one realm per
+    // file; the CLI gives each file its own Runtime. The runner is not a
+    // sandbox, and a callback that blocks the isolate forever cannot be
+    // interrupted.
+    //
+    // The bookkeeping below avoids mutable prototypes for the queue and the
+    // failure list, so replacing array methods after this shim runs cannot drop
+    // a registration. A test can still replace `Deno.core`, mutate the test
+    // module object, or interfere with console output; this is not isolation.
+    const testObjectToString = Object.prototype.toString;
+    const testCore = Deno.core;
+    const testCreateTimer = testCore.createTimer;
+    const testCancelTimer = testCore.cancelTimer;
+    const testSetUnhandledRejectionHandler = testCore.setUnhandledPromiseRejectionHandler;
+    const TEST_MAX = 10000;
+    const TEST_DEFAULT_TIMEOUT_MS = 30000;
+    const TEST_MAX_TEXT = 2000;
+
+    let testQueueLength = 0;
+    const testQueue = [];
+    let testCursor = 0;
+    let testRegistered = 0;
+    let testRunning = false;
+    let testTotal = 0;
+    let testPassed = 0;
+    let testFailed = 0;
+    let testPending = 0;
+    let testUnhandled = 0;
+    const testFailures = [];
+    let testHandlerInstalled = false;
+
+    function testWrite(text, isError) {
+        try {
+            testCore.print(testWellFormed(text), isError === true);
+        } catch {
+            // A closed descriptor must not hide the counts.
+        }
+    }
+
+    function testPrintLine(text) {
+        testWrite(`${text}\n`, false);
+    }
+
+    function testWellFormed(text) {
+        try {
+            if (typeof toWellFormed === "function") return uncurry(toWellFormed, text);
+        } catch {
+            // Fall through to the raw text.
+        }
+        return text;
+    }
+
+    function testText(value) {
+        try {
+            return NativeString(value);
+        } catch {
+            return "unprintable text";
+        }
+    }
+
+    function testOneLine(text, limit) {
+        const value = testText(text);
+        let out = "";
+        let count = 0;
+        for (let index = 0; index < value.length; index += 1) {
+            if (count >= limit) return `${out}...`;
+            const character = value[index];
+            if (character === "\n" || character === "\r") {
+                if (out.length === 0 || out[out.length - 1] !== " ") out += " ";
+                count += 1;
+                continue;
+            }
+            out += character;
+            count += 1;
+        }
+        return out;
+    }
+
+    function testLabel(name) {
+        return testOneLine(name, 200);
+    }
+
+    function testError(code, message, kind) {
+        const error =
+            kind === "TypeError" ? new makeTypeError(message) : new NativeError(message);
+        defineField(error, "code", code);
+        return error;
+    }
+
+    function testDescribeError(error) {
+        try {
+            if (hasBrand(error, NativeError)) {
+                let name = "Error";
+                let code = "";
+                let message = "";
+                try {
+                    if (typeof error.name === "string" && error.name) name = error.name;
+                } catch {
+                    // Keep the fallback name.
+                }
+                try {
+                    if (typeof error.code === "string" && error.code) code = ` [${error.code}]`;
+                } catch {
+                    // Keep the fallback code.
+                }
+                try {
+                    message = testOneLine(error.message, TEST_MAX_TEXT);
+                } catch {
+                    message = "<message unreadable>";
+                }
+                return `${name}${code}: ${message}`;
+            }
+            if (typeof error === "string") {
+                return `thrown string: ${testOneLine(error, TEST_MAX_TEXT)}`;
+            }
+            return `thrown ${typeof error}: ${testOneLine(testText(error), TEST_MAX_TEXT)}`;
+        } catch {
+            return "thrown value";
+        }
+    }
+
+    function testPrintIndented(text) {
+        const value = testText(text);
+        let start = 0;
+        for (let index = 0; index <= value.length; index += 1) {
+            if (index !== value.length && value[index] !== "\n") continue;
+            testPrintLine(`  ${stringSlice(value, start, index)}`);
+            start = index + 1;
+            if (index - start > TEST_MAX_TEXT) break;
+        }
+    }
+
+    function testPrintStack(error) {
+        let stack = "";
+        try {
+            if (!hasBrand(error, NativeError) || typeof error.stack !== "string") return;
+            stack = error.stack;
+        } catch {
+            return;
+        }
+        let start = 0;
+        let printed = 0;
+        for (let index = 0; index <= stack.length && printed < 20; index += 1) {
+            if (index !== stack.length && stack[index] !== "\n") continue;
+            const line = stringSlice(stack, start, index);
+            if (stringSlice(line, 0, 5) === "    at " || stringSlice(line, 0, 3) === "  at ") {
+                testPrintLine(`  ${line}`);
+                printed += 1;
+            }
+            start = index + 1;
+        }
+    }
+
+    function testFunctionKind(value) {
+        try {
+            const tag = uncurry(testObjectToString, value);
+            if (tag === "[object GeneratorFunction]" || tag === "[object AsyncGeneratorFunction]") {
+                return "generator";
+            }
+        } catch {
+            // A proxy or a broken prototype is handled by the runtime check.
+        }
+        return "ordinary";
+    }
+
+    function testGeneratorObject(value) {
+        if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+            return false;
+        }
+        try {
+            const tag = uncurry(testObjectToString, value);
+            return tag === "[object Generator]" || tag === "[object AsyncGenerator]";
+        } catch {
+            return false;
+        }
+    }
+
+    function testThen(value) {
+        if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+            return null;
+        }
+        const then = value.then;
+        return typeof then === "function" ? then : null;
+    }
+
+    function testAssimilate(value, then) {
+        return new NativePromise(function (resolve, reject) {
+            try {
+                uncurry(then, value, resolve, reject);
+            } catch (error) {
+                reject(error);
+            }
+        });
+    }
+
+    function testTimeoutError(name, milliseconds) {
+        return testError(
+            "NEO_TEST_PENDING",
+            `test "${name}" did not settle within ${milliseconds} ms`,
+            "Error",
+        );
+    }
+
+    function testWithTimeout(value, milliseconds, name) {
+        if (typeof testCreateTimer !== "function" || typeof testCancelTimer !== "function") {
+            return NativePromise.resolve(value);
+        }
+        return new NativePromise(function (resolve, reject) {
+            let settled = false;
+            let timer;
+            try {
+                timer = testCreateTimer(
+                    function () {
+                        if (settled) return;
+                        settled = true;
+                        reject(testTimeoutError(name, milliseconds));
+                    },
+                    milliseconds,
+                    undefined,
+                    false,
+                    true,
+                    false,
+                );
+            } catch {
+                NativePromise.resolve(value).then(resolve, reject);
+                return;
+            }
+            NativePromise.resolve(value).then(
+                function (fulfilled) {
+                    if (settled) return;
+                    settled = true;
+                    try {
+                        testCancelTimer(timer);
+                    } catch {
+                        // The timer already fired or was cleaned up.
+                    }
+                    resolve(fulfilled);
+                },
+                function (rejected) {
+                    if (settled) return;
+                    settled = true;
+                    try {
+                        testCancelTimer(timer);
+                    } catch {
+                        // The timer already fired or was cleaned up.
+                    }
+                    reject(rejected);
+                },
+            );
+        });
+    }
+
+    function testDrain() {
+        return new NativePromise(function (resolve) {
+            if (typeof testCreateTimer !== "function") {
+                resolve(undefined);
+                return;
+            }
+            try {
+                testCreateTimer(
+                    function () {
+                        resolve(undefined);
+                    },
+                    1,
+                    undefined,
+                    false,
+                    true,
+                    false,
+                );
+            } catch {
+                resolve(undefined);
+            }
+        });
+    }
+
+    function testIsBlank(name) {
+        for (let index = 0; index < name.length; index += 1) {
+            const character = name[index];
+            if (
+                character !== " " &&
+                character !== "\t" &&
+                character !== "\n" &&
+                character !== "\r"
+            ) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    function testRegistrationTimeout(options) {
+        if (options === undefined) return TEST_DEFAULT_TIMEOUT_MS;
+        if (options === null || typeof options !== "object") {
+            throw new makeTypeError("test options must be an object");
+        }
+        const keys = objectKeys(options);
+        for (let index = 0; index < keys.length; index += 1) {
+            if (keys[index] !== "timeout") {
+                throw new makeTypeError(`unknown test option \`${NativeString(keys[index])}\``);
+            }
+        }
+        const timeout = options.timeout;
+        if (timeout === undefined) return TEST_DEFAULT_TIMEOUT_MS;
+        if (!isInteger(timeout) || timeout <= 0 || timeout > 2147483647) {
+            throw makeRangeError("test timeout must be a positive integer of milliseconds");
+        }
+        return timeout;
+    }
+
+    function testRunOptions(options) {
+        if (options === undefined) return true;
+        if (options === null || typeof options !== "object") {
+            throw new makeTypeError("run options must be an object");
+        }
+        const keys = objectKeys(options);
+        for (let index = 0; index < keys.length; index += 1) {
+            if (keys[index] !== "throwOnFailure") {
+                throw new makeTypeError(`unknown run option \`${NativeString(keys[index])}\``);
+            }
+        }
+        const value = options.throwOnFailure;
+        if (value === undefined) return true;
+        if (typeof value !== "boolean") {
+            throw new makeTypeError("run option throwOnFailure must be a boolean");
+        }
+        return value;
+    }
+
+    function testSummaryObject() {
+        const summary = { __proto__: null };
+        defineField(summary, "total", testTotal);
+        defineField(summary, "passed", testPassed);
+        defineField(summary, "failed", testFailed);
+        defineField(summary, "pending", testPending);
+        defineField(summary, "unhandled", testUnhandled);
+        const failures = [];
+        for (let index = 0; index < testFailures.length; index += 1) {
+            append(failures, testFailures[index]);
+        }
+        defineField(summary, "failures", failures);
+        return summary;
+    }
+
+    function testPrintSummary() {
+        const parts = [`${testTotal} test${testTotal === 1 ? "" : "s"}`];
+        append(parts, `${testPassed} passed`);
+        append(parts, `${testFailed} failed`);
+        if (testPending > 0) append(parts, `${testPending} pending`);
+        if (testUnhandled > 0) append(parts, `${testUnhandled} unhandled`);
+        testPrintLine(`# ${arrayJoin(parts, ", ")}`);
+    }
+
+    function testRecordFailure(line) {
+        append(testFailures, line);
+    }
+
+    function testUnhandledRejection(promise, reason) {
+        try {
+            testUnhandled += 1;
+            const line = `unhandled rejection: ${testDescribeError(reason)}`;
+            testRecordFailure(line);
+            testPrintLine(`# ${line}`);
+        } catch {
+            // The count is already recorded, so the run still fails.
+        }
+        // Tell deno_core the rejection was observed. The runner reports it as a
+        // failure; letting the process abort here would hide every later test.
+        return true;
+    }
+
+    function testEnsureHandler() {
+        if (testHandlerInstalled) return;
+        testHandlerInstalled = true;
+        try {
+            if (typeof testSetUnhandledRejectionHandler === "function") {
+                testSetUnhandledRejectionHandler(testUnhandledRejection);
+            }
+        } catch {
+            // If the runtime has no handler slot, an unhandled rejection keeps
+            // its normal behaviour rather than being silently discarded.
+        }
+    }
+
+    /** Thrown by `run()` after one or more tests failed, were pending, or left an unhandled rejection. */
+    class TestFailureError extends NativeError {
+        constructor(message, failures) {
+            super(message);
+            defineField(this, "name", "TestFailureError");
+            defineField(this, "code", "NEO_TEST_FAILURES");
+            defineField(this, "failures", failures);
+        }
+    }
+
+    /**
+     * Register a test. Sync and async callbacks are both accepted; a returned
+     * thenable is awaited. With no callback the test is registered as pending,
+     * which fails the run. A generator function is rejected at registration.
+     *
+     * @throws {TypeError} for a bad name, callback, or options.
+     * @throws {Error} with code `NEO_TEST_DURING_RUN` when called during a run.
+     * @throws {Error} with code `NEO_TEST_LIMIT` past `MAX_TESTS`.
+     */
+    function test(name, fn, options) {
+        if (arguments.length < 1 || arguments.length > 3) {
+            throw new makeTypeError("test expects one to three arguments");
+        }
+        if (testRunning) {
+            throw testError(
+                "NEO_TEST_DURING_RUN",
+                "cannot register a test while tests are running",
+                "Error",
+            );
+        }
+        if (typeof name !== "string" || testIsBlank(name)) {
+            throw new makeTypeError("test name must be a non-empty string");
+        }
+        const pending = arguments.length === 1;
+        let timeout = 0;
+        if (!pending) {
+            if (typeof fn !== "function") {
+                throw new makeTypeError("test callback must be a function");
+            }
+            if (testFunctionKind(fn) === "generator") {
+                throw testError(
+                    "NEO_TEST_UNSUPPORTED",
+                    `test "${testLabel(name)}" must be a sync or async function, not a generator function`,
+                    "TypeError",
+                );
+            }
+            timeout = testRegistrationTimeout(options);
+        }
+        if (testRegistered >= TEST_MAX) {
+            throw testError(
+                "NEO_TEST_LIMIT",
+                `cannot register more than ${TEST_MAX} tests in one runtime`,
+                "Error",
+            );
+        }
+        testRegistered += 1;
+        defineField(testQueue, testQueueLength, {
+            name,
+            fn: pending ? undefined : fn,
+            pending,
+            timeout,
+        });
+        testQueueLength += 1;
+    }
+
+    /**
+     * Run every queued test in registration order and return cumulative counts.
+     *
+     * A failing test does not stop later tests. Failures, pending tests, and
+     * unhandled rejections are printed and retained. `options.throwOnFailure`
+     * defaults to true; the host passes false so it can read the report after a
+     * failing run. A callback that never settles is failed after its timeout,
+     * which defaults to 30 seconds and can be set per test.
+     */
+    async function run(options) {
+        const throwOnFailure = testRunOptions(options);
+        if (testRunning) {
+            throw testError(
+                "NEO_TEST_ALREADY_RUNNING",
+                "tests are already running",
+                "Error",
+            );
+        }
+        const beforeFailed = testFailed;
+        const beforePending = testPending;
+        const beforeUnhandled = testUnhandled;
+        testRunning = true;
+        try {
+            const start = testCursor;
+            let runIndex = 0;
+            for (let index = start; index < testQueueLength; index += 1) {
+                const entry = testQueue[index];
+                const name = testLabel(entry.name);
+                runIndex += 1;
+                testTotal += 1;
+                if (entry.pending) {
+                    testPending += 1;
+                    const detail = `${name}: pending; no callback was supplied`;
+                    testRecordFailure(detail);
+                    testPrintLine(`not ok ${runIndex} - ${name} # PENDING`);
+                    testPrintLine(`  ${detail}`);
+                    continue;
+                }
+                try {
+                    const result = entry.fn();
+                    if (testGeneratorObject(result)) {
+                        throw testError(
+                            "NEO_TEST_UNSUPPORTED",
+                            `test "${name}" returned a generator object; the body did not run`,
+                            "TypeError",
+                        );
+                    }
+                    const then = testThen(result);
+                    if (then !== null) {
+                        await testWithTimeout(testAssimilate(result, then), entry.timeout, name);
+                    }
+                    testPassed += 1;
+                    testPrintLine(`ok ${runIndex} - ${name}`);
+                } catch (error) {
+                    testFailed += 1;
+                    const detail = `${name}: ${testDescribeError(error)}`;
+                    testRecordFailure(detail);
+                    testPrintLine(`not ok ${runIndex} - ${name}`);
+                    testPrintIndented(testDescribeError(error));
+                    testPrintStack(error);
+                }
+            }
+            testCursor = testQueueLength;
+            // Give deno_core a tick to deliver unhandled rejections that were
+            // queued by a test body but not returned from it.
+            await testDrain();
+        } finally {
+            testRunning = false;
+        }
+        const summary = testSummaryObject();
+        testPrintSummary();
+        if (
+            throwOnFailure &&
+            (testFailed > beforeFailed ||
+                testPending > beforePending ||
+                testUnhandled > beforeUnhandled)
+        ) {
+            throw new TestFailureError(
+                `${testFailed} failed, ${testPending} pending, ${testUnhandled} unhandled`,
+                summary.failures,
+            );
+        }
+        return summary;
+    }
+
+    const testModule = Object.freeze({
+        test,
+        run,
+        MAX_TESTS: TEST_MAX,
+        TestFailureError,
+    });
+
     const modules = new Map([
         ["age", age],
         ["assert", assert],
@@ -5461,6 +6019,7 @@
         ["ssh", ssh],
         ["stdio", stdio],
         ["strings", strings],
+        ["test", testModule],
     ]);
 
     /**
@@ -5473,6 +6032,7 @@
         if (typeof name !== "string") {
             throw new makeTypeError("module name must be a string");
         }
+        if (name === "test") testEnsureHandler();
         return mapGet(modules, name);
     }
 

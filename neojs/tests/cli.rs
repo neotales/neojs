@@ -1430,12 +1430,12 @@ fn help_describes_the_exit_codes_the_cli_uses() {
     assert_eq!(help.status.code(), Some(0));
     let text = stdout(&help);
     assert!(
-        text.contains("1  the module failed to compile, resolve imports, link, or run"),
+        text.contains("1  the module failed to compile, resolve imports, link, or run; or a test"),
         "{text}"
     );
     assert!(
         text.contains(
-            "2  neojs could not start (bad arguments, unreadable or unsupported entry file)"
+            "2  neojs could not start (bad arguments, unreadable or unsupported entry file,"
         ),
         "{text}"
     );
@@ -1475,8 +1475,10 @@ fn prints_help_and_version() {
     let help = run_args(&["--help"]);
     assert_eq!(help.status.code(), Some(0));
     assert!(stdout(&help).contains("Usage:"));
-    assert!(stdout(&help).contains("age, assert, chars, console, crypto, ssh, and stdio"));
-    assert!(stdout(&help).contains("built-in modules are implemented"));
+    assert!(stdout(&help).contains("neojs test <file-or-glob>..."));
+    assert!(stdout(&help).contains("age, assert, chars, console, crypto, path, ssh,"));
+    assert!(stdout(&help).contains("stdio, strings, and test built-in modules are implemented"));
+    assert!(stdout(&help).contains("node:test"));
 
     let version = run_args(&["--version"]);
     assert_eq!(version.status.code(), Some(0));
@@ -1484,6 +1486,10 @@ fn prints_help_and_version() {
         stdout(&version),
         format!("neojs {}\n", env!("CARGO_PKG_VERSION"))
     );
+
+    let test_help = run_args(&["test", "--help"]);
+    assert_eq!(test_help.status.code(), Some(0));
+    assert!(stdout(&test_help).contains("neojs test <file-or-glob>..."));
 }
 
 #[test]
@@ -2441,4 +2447,281 @@ console.log("agent bounded");
     let (connections, signs) = agent.finish();
     assert!(connections >= 1);
     assert_eq!(signs, 0);
+}
+
+/// `neojs test` must expand files and globs deterministically and run an
+/// overlapping selection once. The order is canonical-path order, so the
+/// three file headers are the only stable way to count the selection.
+#[test]
+fn test_command_expands_files_and_globs_without_duplicates() {
+    let project = Project::new();
+    project.write(
+        "a.test.js",
+        "import test from \"test\";\ntest(\"a\", () => {});\n",
+    );
+    project.write(
+        "b.test.js",
+        "import test from \"neo:test\";\ntest(\"b\", () => {});\n",
+    );
+    project.write(
+        "sub/c.test.js",
+        "import test from \"node:test\";\ntest(\"c\", () => {});\n",
+    );
+    let dir = project.dir.path().to_str().expect("utf-8 path");
+    let literal = format!("{dir}/a.test.js");
+    let glob = format!("{dir}/**/*.test.js");
+
+    let output = run_args(&["test", &literal, &glob]);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert_eq!(
+        printed
+            .lines()
+            .filter(|line| line.starts_with("test "))
+            .count(),
+        3,
+        "{printed}"
+    );
+    assert_eq!(
+        printed
+            .lines()
+            .filter(|line| line.ends_with("a.test.js:"))
+            .count(),
+        1,
+        "the literal and the glob overlap; a.test.js ran twice\n{printed}"
+    );
+    assert!(
+        printed.contains("# 3 selected file(s): 3 test(s): 3 passed"),
+        "{printed}"
+    );
+}
+
+/// A failure in one file must not stop the next file, and the next file must
+/// not see the failing file's globals.
+#[test]
+fn test_command_continues_after_a_failure_and_isolates_files() {
+    let project = Project::new();
+    project.write(
+        "a-fail.test.js",
+        r#"
+import test from "test";
+globalThis.leaked = "a-fail";
+test("fails", () => { throw new Error("first file failed"); });
+"#,
+    );
+    project.write(
+        "b-pass.test.js",
+        r#"
+import test from "test";
+test("isolated", () => {
+    if (globalThis.leaked !== undefined) throw new Error("state leaked from a-fail");
+});
+"#,
+    );
+    let dir = project.dir.path().to_str().expect("utf-8 path");
+    let glob = format!("{dir}/*.test.js");
+
+    let output = run_args(&["test", &glob]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(printed.contains("not ok 1 - fails"), "{printed}");
+    assert!(printed.contains("b-pass.test.js:"), "{printed}");
+    assert!(printed.contains("ok 1 - isolated"), "{printed}");
+    assert!(
+        printed.contains("# 2 selected file(s): 2 test(s): 1 passed, 1 failed"),
+        "{printed}"
+    );
+}
+
+/// A pending test and an unhandled rejection are both failures. A run that
+/// printed only "ok" lines for other tests must still be non-zero.
+#[test]
+fn test_command_fails_for_pending_and_unhandled_cases() {
+    let project = Project::new();
+    let file = project.write(
+        "problems.test.js",
+        r#"
+import test from "test";
+test("pending case");
+test("unhandled case", () => { Promise.reject(new Error("boom")); });
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(
+        printed.contains("not ok 1 - pending case # PENDING"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("unhandled rejection: Error: boom"),
+        "{printed}"
+    );
+    assert!(printed.contains("1 pending, 1 unhandled"), "{printed}");
+}
+
+/// A callback that returns a Promise which never settles is failed by the
+/// per-test timeout rather than blocking the command forever.
+#[test]
+fn test_command_fails_a_pending_promise_at_its_timeout() {
+    let project = Project::new();
+    let file = project.write(
+        "timeout.test.js",
+        r#"
+import test from "test";
+test("never settles", () => new Promise(() => {}), { timeout: 10 });
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("did not settle within 10 ms"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+/// Registration after a top-level await must still be found by the host.
+#[test]
+fn test_command_runs_tests_registered_after_top_level_await() {
+    let project = Project::new();
+    let file = project.write(
+        "await.test.js",
+        r#"
+import test from "test";
+const value = await Promise.resolve(41);
+test("after await", () => {
+    if (value + 1 !== 42) throw new Error("wrong value");
+});
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("ok 1 - after await"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+/// A file that imports the runner but registers nothing is not a pass.
+#[test]
+fn test_command_fails_a_file_with_no_tests() {
+    let project = Project::new();
+    let file = project.write("empty.test.js", "console.log(\"nothing registered\");\n");
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no tests registered"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// Literal misses, malformed globs, and globs with no file are startup errors,
+/// not a clean run with zero tests.
+#[test]
+fn test_command_reports_unmatched_and_malformed_selections() {
+    let project = Project::new();
+    let dir = project.dir.path().to_str().expect("utf-8 path");
+
+    let unmatched = run_args(&["test", &format!("{dir}/missing*.test.js")]);
+    assert_eq!(unmatched.status.code(), Some(2));
+    assert!(
+        stderr(&unmatched).contains("matched no files"),
+        "{}",
+        stderr(&unmatched)
+    );
+
+    let malformed = run_args(&["test", "["]);
+    assert_eq!(malformed.status.code(), Some(2));
+    assert!(
+        stderr(&malformed).contains("invalid test glob"),
+        "{}",
+        stderr(&malformed)
+    );
+
+    let missing = run_args(&["test", &format!("{dir}/missing.test.js")]);
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(
+        stderr(&missing).contains("does not exist or is not a regular file"),
+        "{}",
+        stderr(&missing)
+    );
+
+    let no_args = run_args(&["test"]);
+    assert_eq!(no_args.status.code(), Some(2));
+    assert!(
+        stderr(&no_args).contains("no test files or globs"),
+        "{}",
+        stderr(&no_args)
+    );
+}
+
+/// An async rejection is a failure, and a later test in the same file runs.
+#[test]
+fn test_command_reports_an_async_rejection_and_continues_in_the_file() {
+    let project = Project::new();
+    let file = project.write(
+        "async.test.js",
+        r#"
+import test from "test";
+test("rejects", async () => {
+    await Promise.resolve();
+    throw new Error("async failure");
+});
+test("later", () => {});
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(printed.contains("not ok 1 - rejects"), "{printed}");
+    assert!(printed.contains("async failure"), "{printed}");
+    assert!(printed.contains("ok 2 - later"), "{printed}");
+}
+
+/// Calling `run()` yourself and catching its `TestFailureError` must not hide
+/// the failure from the host's final report.
+#[test]
+fn test_command_does_not_let_a_caught_run_failure_pass() {
+    let project = Project::new();
+    let file = project.write(
+        "caught.test.js",
+        r#"
+import test, { run, TestFailureError } from "test";
+test("fails once", () => { throw new Error("caught failure"); });
+try {
+    await run();
+} catch (error) {
+    if (!(error instanceof TestFailureError)) throw error;
+    if (error.code !== "NEO_TEST_FAILURES") throw error;
+}
+"#,
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(printed.contains("not ok 1 - fails once"), "{printed}");
+    assert!(printed.contains("1 failed"), "{printed}");
 }

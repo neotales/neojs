@@ -3,8 +3,9 @@
 //!
 //! The scripts here install globals that neojs supplies: currently [`NEO_SHIM`],
 //! which defines the `Neo` object and its cached built-in modules. `chars`,
-//! `console`, and `strings` are plain ECMAScript; `assert` calls one private host
-//! op registered by [`crate::assert`] to observe a genuine native Promise.
+//! `console`, `strings`, and `test` are plain ECMAScript; `assert` calls one
+//! private host op registered by [`crate::assert`] to observe a genuine native
+//! Promise.
 //! `crypto` calls private host ops registered by [`crate::crypto`],
 //! [`crate::crypto_cipher`], [`crate::crypto_hash`], and
 //! [`crate::crypto_shamir`]; it
@@ -47,37 +48,39 @@
 //! containment check.
 //!
 //! [`AGE_MODULE`], [`ASSERT_MODULE`], [`CHARS_MODULE`], [`CONSOLE_MODULE`],
-//! [`CRYPTO_MODULE`], [`PATH_MODULE`], [`SSH_MODULE`], [`STDIO_MODULE`], and
-//! [`STRINGS_MODULE`] are not evaluated as scripts. They are the sources
-//! returned by the module loader for the built-in specifiers [`AGE_SPECIFIER`],
-//! [`ASSERT_SPECIFIER`], [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`],
-//! [`CRYPTO_SPECIFIER`], [`PATH_SPECIFIER`], [`SSH_SPECIFIER`],
-//! [`STDIO_SPECIFIER`], and [`STRINGS_SPECIFIER`], and for their bare names.
+//! [`CRYPTO_MODULE`], [`PATH_MODULE`], [`SSH_MODULE`], [`STDIO_MODULE`],
+//! [`STRINGS_MODULE`], and [`TEST_MODULE`] are not evaluated as scripts. They
+//! are the sources returned by the module loader for the built-in specifiers
+//! [`AGE_SPECIFIER`], [`ASSERT_SPECIFIER`], [`CHARS_SPECIFIER`],
+//! [`CONSOLE_SPECIFIER`], [`CRYPTO_SPECIFIER`], [`PATH_SPECIFIER`],
+//! [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], [`STRINGS_SPECIFIER`], and
+//! [`TEST_SPECIFIER`], and for their bare names. `node:test` resolves to
+//! [`TEST_SPECIFIER`] as a narrow alias.
 //! All read the public module objects installed by [`NEO_SHIM`], so the registry
 //! and the module bindings share identity. `assert` is the frozen callable
 //! `assert` function itself, with its named assertions as properties; it also
-//! has a default export in its module namespace. `age`, `chars`, and `strings`
-//! are frozen module objects whose named exports are their function objects.
-//! `console` is the console object the runtime installed: the default export's
-//! value is that object, and the named exports are its method values when the
-//! module is evaluated. `crypto`, `path`, `ssh`, and `stdio` are frozen module
-//! objects whose named exports are their synchronous classes, functions,
-//! constants, and shared stream objects. In every case the ES module namespace
-//! is a separate object from the registry object.
+//! has a default export in its module namespace. `age`, `chars`, `strings`, and
+//! `test` are frozen module objects whose named exports are their function
+//! objects and constants. `console` is the console object the runtime installed:
+//! the default export's value is that object, and the named exports are its
+//! method values when the module is evaluated. `crypto`, `path`, `ssh`, and
+//! `stdio` are frozen module objects whose named exports are their synchronous
+//! classes, functions, constants, and shared stream objects. In every case the
+//! ES module namespace is a separate object from the registry object.
 
 use deno_core::url::Url;
 
 /// Installs the global `Neo` object and the built-in module registry.
 ///
 /// Evaluation happens once per realm. The `age`, `assert`, `chars`, `crypto`,
-/// `path`, `ssh`, `stdio`, and `strings` module objects are frozen and cached,
-/// so repeated `Neo.getBuiltInModule` calls return the same object for each. The
-/// `console` module object is the console object the runtime installed,
-/// captured after the console shim runs. At installation time the registry, the
-/// module bindings, and the global console share the same function objects; a
-/// method replaced before the console module
-/// is evaluated is what its named exports capture. Names that are not
-/// implemented return `undefined`.
+/// `path`, `ssh`, `stdio`, `strings`, and `test` module objects are frozen and
+/// cached, so repeated `Neo.getBuiltInModule` calls return the same object for
+/// each. The `console` module object is the console object the runtime
+/// installed, captured after the console shim runs. At installation time the
+/// registry, the module bindings, and the global console share the same
+/// function objects; a method replaced before the console module is evaluated
+/// is what its named exports capture. Names that are not implemented return
+/// `undefined`.
 pub(crate) const NEO_SHIM: &str = include_str!("builtins/neo.js");
 
 /// The canonical module specifier for the `age` built-in.
@@ -215,6 +218,22 @@ pub(crate) const STRINGS_SPECIFIER: &str = "neo:strings";
 /// implementations are plain ECMAScript in [`NEO_SHIM`]; no host op is called.
 const STRINGS_MODULE: &str = include_str!("builtins/strings.esm.js");
 
+/// The canonical module specifier for the `test` built-in.
+///
+/// Both `"test"`, `"neo:test"`, and the narrow alias `"node:test"` resolve to
+/// this URL, so the engine caches one module instance for all three spellings.
+/// It is not a `file:` URL and is never read from disk.
+pub(crate) const TEST_SPECIFIER: &str = "neo:test";
+
+/// The ECMAScript module source served for [`TEST_SPECIFIER`].
+///
+/// It re-exports the callable `test` function and the runner helpers from the
+/// public `test` module object, so the module and
+/// `Neo.getBuiltInModule("test")` share identity. The implementation is in
+/// [`NEO_SHIM`]; it calls no host op. The `node:test` spelling is an alias for
+/// this module only; no other Node built-in is implemented.
+const TEST_MODULE: &str = include_str!("builtins/test.esm.js");
+
 /// Registry name and canonical specifier for each implemented built-in module.
 ///
 /// The loader serves one module instance per canonical specifier, and the error
@@ -229,6 +248,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("ssh", SSH_SPECIFIER),
     ("stdio", STDIO_SPECIFIER),
     ("strings", STRINGS_SPECIFIER),
+    ("test", TEST_SPECIFIER),
 ];
 
 /// Returns the canonical specifier for a built-in module name, or `None`.
@@ -248,6 +268,12 @@ pub(crate) fn resolve_name(name: &str) -> Option<&'static str> {
 /// that is not listed is not treated as a module name, and a relative or
 /// absolute path is never intercepted.
 pub(crate) fn resolve(specifier: &str) -> Option<&'static str> {
+    // `node:test` is the one Node built-in neojs provides. It is the same
+    // module as `test` and `neo:test`, so a portable test file can keep the
+    // import it already has without claiming Node compatibility.
+    if specifier == "node:test" {
+        return Some(TEST_SPECIFIER);
+    }
     resolve_name(specifier.strip_prefix("neo:").unwrap_or(specifier))
 }
 
@@ -263,16 +289,20 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         SSH_SPECIFIER => Some(SSH_MODULE),
         STDIO_SPECIFIER => Some(STDIO_MODULE),
         STRINGS_SPECIFIER => Some(STRINGS_MODULE),
+        TEST_SPECIFIER => Some(TEST_MODULE),
         _ => None,
     }
 }
 
 /// Human-readable list of implemented built-in specifiers, for error messages.
 pub(crate) fn implemented_specifiers() -> String {
-    let mut specifiers = Vec::with_capacity(BUILTINS.len() * 2);
+    let mut specifiers = Vec::with_capacity(BUILTINS.len() * 2 + 1);
     for (registry, canonical) in BUILTINS {
         specifiers.push(*registry);
         specifiers.push(*canonical);
+        if *registry == "test" {
+            specifiers.push("node:test");
+        }
     }
     specifiers.join(", ")
 }

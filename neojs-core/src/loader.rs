@@ -3,9 +3,10 @@
 //! Resolution accepts relative paths, absolute paths, `file:` URLs, and the
 //! built-in specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`,
 //! `neo:chars`, `console`, `neo:console`, `crypto`, `neo:crypto`, `path`,
-//! `neo:path`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`, and
-//! `neo:strings` ([`crate::builtins`]). Every other scheme is rejected with a
-//! reason that names the missing feature instead of failing later inside V8.
+//! `neo:path`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`,
+//! `neo:strings`, `test`, `neo:test`, and the narrow alias `node:test`
+//! ([`crate::builtins`]). Every other scheme is rejected with a reason that
+//! names the missing feature instead of failing later inside V8.
 //!
 //! Built-in specifiers resolve to one canonical `neo:` URL, so the engine caches
 //! a single module instance however many spellings or importers use. They are
@@ -273,7 +274,10 @@ fn unsupported_scheme(url: &Url) -> String {
                 )
             }
         }
-        "node" => "Node.js built-in modules are not implemented".to_string(),
+        "node" => {
+            "Node.js built-in modules are not implemented; only the `node:test` alias is available"
+                .to_string()
+        }
         "npm" => "npm: modules are not implemented".to_string(),
         "jsr" => "jsr: modules are not implemented".to_string(),
         "http" | "https" => "remote modules are not implemented".to_string(),

@@ -73,6 +73,48 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## NeoLiteJS `neo:test`
+
+Source: NeoLiteJS `neojs-core/src/js/test.js`.
+
+Revision `bafa9bc14cfbdbc50d64b3c68d63d1fceb2b8afa`; file SHA-256
+`79a5fb09e85205c996a8f435a36e908a12af990ada833a8c6b4e1dd8100c6776`.
+
+`neojs-core/src/builtins/neo.js` adapts the registration queue, failure
+bookkeeping, report shape, and prototype-independent append helpers from this
+MIT-licensed source for the `test` built-in. The adaptation adds asynchronous
+callbacks with per-test timeouts, pending tests, unhandled-rejection capture,
+top-level-await registration, and the host report used by `neojs test`; it
+removes the synchronous-only restriction and does not implement Node's
+`node:test`. The API is not Node compatible beyond the `test(name, fn)` call
+shape.
+
+Copyright (c) 2026 NeoTales contributors
+
+Licensed under the MIT License:
+
+MIT License
+
+Copyright (c) 2026 NeoTales contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## PLAB `ShamirSecretSharing` and rust-libraries `shamir`
 
 Source: PLAB `dn/lib/crypto/Crypto/src/ShamirSecretSharing.cs` at revision

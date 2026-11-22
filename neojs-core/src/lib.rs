@@ -5,11 +5,12 @@
 //! returns [`Error::RuntimeConsumed`].
 //!
 //! It provides the `age`, `assert`, `chars`, `console`, `crypto`, `path`, `ssh`,
-//! `stdio`, and `strings` built-in modules through
+//! `stdio`, `strings`, and `test` built-in modules through
 //! `Neo.getBuiltInModule(name)` and through the module specifiers `age`,
 //! `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
 //! `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`,
-//! `stdio`, `neo:stdio`, `strings`, and `neo:strings`.
+//! `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`, `neo:test`, and the
+//! narrow alias `node:test`.
 //!
 //! `assert` is a synchronous assertion surface inspired by Node's
 //! `assert/strict` and Deno's `@std/assert`. The registry object is the
@@ -34,6 +35,22 @@
 //! and assimilate a thenable by reading `then` once. A `rejects` rejection reason
 //! that is itself a thenable is subject to native Promise assimilation in the
 //! returned Promise.
+//!
+//! `test` is a small registration-based runner inspired by Node's
+//! `node:test`. `test(name, fn)` accepts a synchronous or async callback, and
+//! `test(name)` registers a pending test that fails the run. The CLI runs the
+//! queue after the entry module settles, so tests registered after a top-level
+//! await are included, and it gives each file a fresh [`Runtime`]. `run()`
+//! returns cumulative counts and throws `TestFailureError` (`code`
+//! `"NEO_TEST_FAILURES"`) unless called with `{ throwOnFailure: false }`, which
+//! is what the host does. A rejected Promise, a rejected thenable, a timeout,
+//! a generator object, and an unhandled rejection are failures. The default
+//! per-test timeout is 30 seconds and can be set with `{ timeout }`. The module
+//! is available as `test`, `neo:test`, and the narrow alias `node:test`; no
+//! other Node built-in is implemented. It is not Node's `node:test`: there are
+//! no subtests, hooks, mocks, snapshots, tags, filters, retries, or parallel
+//! tests, and `test()` returns `undefined`. Tests in one file share one realm
+//! and its mutable state, so this is not isolation or a sandbox.
 //!
 //! `age` is synchronous binary age v1 encryption for X25519 recipients. It
 //! exposes `generateIdentity`, `identityToRecipient`, `encrypt`, and `decrypt`.
@@ -169,9 +186,10 @@
 //! evaluated, so a method replaced before then is what they capture; later
 //! replacements are not followed. Neither path follows a replacement of the
 //! whole `globalThis.console` property. It does not provide other `neo:` or
-//! `node:` import specifiers, CommonJS (`.cjs` and `.cts` files), remote
-//! imports, module type attributes, or a permission system. See the repository
-//! README for the full list of limits.
+//! `node:` import specifiers except the `node:test` alias described above;
+//! CommonJS (`.cjs` and `.cts` files), remote imports, module type attributes,
+//! and a permission system are not implemented. See the repository README for
+//! the full list of limits.
 //!
 //! A [`Runtime`] owns two Tokio runtimes: a multi-thread driver with one worker
 //! thread for V8's delayed foreground tasks and `crypto`'s bounded blocking
@@ -227,6 +245,7 @@ mod typescript;
 
 pub use error::Error;
 pub use runtime::Runtime;
+pub use runtime::TestReport;
 
 /// Test-only hooks. Compiled only with the off-by-default `test-support`
 /// feature, which a normal build never enables.

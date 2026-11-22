@@ -3009,3 +3009,136 @@ if (!(error instanceof AssertionError)) throw new Error("doesNotReject accepted 
 "#,
     );
 }
+
+/// The `test` built-in must count sync and async passes, a sync failure, and a
+/// pending registration. The counts are the embedding API's contract, not the
+/// printed text.
+#[test]
+fn test_built_in_reports_sync_async_failure_and_pending() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write_module(
+        &dir,
+        "main.js",
+        r#"
+import test from "test";
+import assert from "assert";
+
+test("sync pass", () => assert.equals(1 + 1, 2));
+test("async pass", async () => {
+    await Promise.resolve();
+    assert.equals(2 + 2, 4);
+});
+test("sync fail", () => assert.equals(1, 2));
+test("pending case");
+"#,
+    );
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime.run_file(&file).expect("run file");
+    let report = runtime.run_tests().expect("run tests");
+
+    assert_eq!(report.total, 4);
+    assert_eq!(report.passed, 2);
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.pending, 1);
+    assert_eq!(report.unhandled, 0);
+    assert_eq!(report.failures.len(), 2);
+    assert!(!report.all_passed());
+}
+
+/// A returned Promise that never settles is failed by the per-test timeout.
+#[test]
+fn test_built_in_timeout_is_a_failure() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write_module(
+        &dir,
+        "main.js",
+        r#"
+import test from "test";
+test("never", () => new Promise(() => {}), { timeout: 10 });
+"#,
+    );
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime.run_file(&file).expect("run file");
+    let report = runtime.run_tests().expect("run tests");
+
+    assert_eq!(report.total, 1);
+    assert_eq!(report.failed, 1);
+    assert!(report.failures[0].contains("did not settle within 10 ms"));
+}
+
+/// An unhandled rejection is observed while the test module is active and is
+/// reported separately from executed tests.
+#[test]
+fn test_built_in_records_unhandled_rejections() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write_module(
+        &dir,
+        "main.js",
+        r#"
+import test from "test";
+test("schedules a rejection", () => {
+    Promise.reject(new Error("unhandled from a test"));
+});
+"#,
+    );
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime.run_file(&file).expect("run file");
+    let report = runtime.run_tests().expect("run tests");
+
+    assert_eq!(report.total, 1);
+    assert_eq!(report.passed, 1);
+    assert_eq!(report.unhandled, 1);
+    assert!(!report.all_passed());
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|line| line.contains("unhandled from a test")),
+        "{:?}",
+        report.failures
+    );
+}
+
+/// A runtime that never imports `test` has no queue, not a pass.
+#[test]
+fn test_built_in_reports_nothing_when_unused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write_module(&dir, "main.js", "console.log(\"plain\");\n");
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime.run_file(&file).expect("run file");
+    let report = runtime.run_tests().expect("run tests");
+
+    assert_eq!(report, neojs_core::TestReport::default());
+    assert!(report.all_passed());
+}
+
+/// The async runner form must work on a caller's current-thread executor,
+/// including an async test that awaits a resolved Promise.
+#[test]
+fn test_runner_async_form_works_inside_tokio() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write_module(
+        &dir,
+        "main.js",
+        r#"
+import test from "test";
+test("async pass", async () => { await Promise.resolve(); });
+"#,
+    );
+    let caller = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("caller runtime");
+    caller.block_on(async {
+        let mut runtime = Runtime::new().expect("runtime");
+        runtime.run_file_async(&file).await.expect("run file");
+        let report = runtime.run_tests_async().await.expect("run tests");
+        assert_eq!(report.total, 1);
+        assert_eq!(report.passed, 1);
+        assert!(report.all_passed());
+    });
+}
