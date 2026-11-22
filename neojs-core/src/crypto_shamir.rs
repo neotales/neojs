@@ -1081,7 +1081,7 @@ unsafe extern "C" fn wipe_vec_backing_store(
     // the full spare capacity, followed by its optimization barrier. This
     // covers the original allocation including capacity without reallocating.
     owner.bytes.zeroize();
-    #[cfg(any(debug_assertions, feature = "test-support"))]
+    #[cfg(any(test, debug_assertions, feature = "test-support"))]
     {
         // Only the originally initialized logical bytes are inspected here.
         // If the wipe were removed, reading this range is still initialized and
@@ -1547,7 +1547,7 @@ impl Drop for SensitiveVec {
         if let Some(mut bytes) = self.bytes.take() {
             let initialized = bytes.len();
             bytes.zeroize();
-            #[cfg(any(debug_assertions, feature = "test-support"))]
+            #[cfg(any(test, debug_assertions, feature = "test-support"))]
             {
                 // Only the originally initialized logical bytes are inspected
                 // here. This range is initialized even if the wipe is removed.
