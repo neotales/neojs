@@ -1269,6 +1269,11 @@ failure such as an unsupported format or unreadable entry. Once loading starts, 
 the runtime consumed, and the module may already have run and printed. Create the `Runtime` on the
 thread that will use it; it is not `Send`.
 
+## Design
+
+The [ECMAScript npm modules proposal](docs/esm-npm-proposal.md) is a design proposal for review,
+not implemented behavior.
+
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
