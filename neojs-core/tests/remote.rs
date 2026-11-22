@@ -307,6 +307,38 @@ if (greet("world") !== "hello, world") throw new Error("remote import failed");
 }
 
 #[test]
+fn a_test_file_in_a_remote_runtime_can_import_a_remote_module() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = dir.path().join("remote.test.js");
+    fs::write(
+        &file,
+        r#"
+import test from "test";
+import { greet } from "https://mods.test/greet.js";
+test("remote import", () => {
+    if (greet("world") !== "hello, world") throw new Error("remote import failed");
+});
+"#,
+    )
+    .expect("write source");
+    let server = Server::new(&[(
+        "https://mods.test/greet.js",
+        Reply::ok("export function greet(name) { return `hello, ${name}`; }\n"),
+    )]);
+
+    let mut runtime = remote_runtime(&server);
+    runtime
+        .run_file(&file)
+        .expect("local test file imports remote");
+    let report = runtime.run_tests().expect("run tests");
+
+    assert_eq!(report.total, 1);
+    assert_eq!(report.passed, 1);
+    assert_eq!(report.failed, 0);
+    assert_eq!(server.seen(), ["https://mods.test/greet.js"]);
+}
+
+#[test]
 fn a_remote_module_cannot_import_a_file_url() {
     let server = Server::new(&[(
         "https://mods.test/main.js",

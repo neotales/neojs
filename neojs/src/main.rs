@@ -39,14 +39,23 @@ fn main() -> ExitCode {
             input,
             allow_remote,
         } => run(input, allow_remote),
-        Command::Test(patterns) => run_tests(&patterns),
+        Command::Test {
+            patterns,
+            allow_remote,
+        } => run_tests(&patterns, allow_remote),
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
-    Run { input: Input, allow_remote: bool },
-    Test(Vec<String>),
+    Run {
+        input: Input,
+        allow_remote: bool,
+    },
+    Test {
+        patterns: Vec<String>,
+        allow_remote: bool,
+    },
     Help,
     Version,
 }
@@ -87,7 +96,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
                     allow_remote,
                 });
             }
-            "test" => return parse_test_args(&rest[1..]),
+            "test" => return parse_test_args(&rest[1..], allow_remote),
             _ => {}
         }
     }
@@ -106,10 +115,12 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
 
 /// Parses `neojs test <file-or-glob>...`.
 ///
-/// Every argument is a pattern. `--` ends option parsing so a pattern beginning
-/// with `-` can still be named. The command requires at least one pattern;
-/// discovery defaults are deliberately absent.
-fn parse_test_args(args: &[OsString]) -> Result<Command, String> {
+/// Every argument is a pattern. `--allow-remote` may appear before or after
+/// `test` and enables remote loading for each selected file's fresh runtime. `--`
+/// ends option parsing so a pattern beginning with `-`, including one named
+/// `--allow-remote`, can still be named. The command requires at least one
+/// pattern; discovery defaults are deliberately absent.
+fn parse_test_args(args: &[OsString], mut allow_remote: bool) -> Result<Command, String> {
     if args.len() == 1 && matches!(args[0].to_str(), Some("-h" | "--help")) {
         return Ok(Command::Help);
     }
@@ -123,6 +134,10 @@ fn parse_test_args(args: &[OsString]) -> Result<Command, String> {
             after_double_dash = true;
             continue;
         }
+        if !after_double_dash && value == "--allow-remote" {
+            allow_remote = true;
+            continue;
+        }
         if !after_double_dash && value.starts_with('-') {
             return Err(format!("unknown option `{value}`"));
         }
@@ -131,7 +146,10 @@ fn parse_test_args(args: &[OsString]) -> Result<Command, String> {
     if patterns.is_empty() {
         return Err("no test files or globs given".to_string());
     }
-    Ok(Command::Test(patterns))
+    Ok(Command::Test {
+        patterns,
+        allow_remote,
+    })
 }
 
 /// Decides whether an input names a local path or a remote URL.
@@ -155,12 +173,7 @@ fn classify_input(input: &OsString) -> Input {
 }
 
 fn run(input: Input, allow_remote: bool) -> ExitCode {
-    let runtime = if allow_remote {
-        Runtime::with_remote(RemoteOptions::new())
-    } else {
-        Runtime::new()
-    };
-    let mut runtime = match runtime {
+    let mut runtime = match create_runtime(allow_remote) {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("neojs: {error}");
@@ -178,6 +191,19 @@ fn run(input: Input, allow_remote: bool) -> ExitCode {
             eprintln!("neojs: {error}");
             ExitCode::from(exit_code(&error))
         }
+    }
+}
+
+/// Creates a runtime, with remote loading only when explicitly enabled.
+///
+/// Each call gets its own default [`RemoteOptions`], so a fresh runtime also
+/// gets a fresh remote request, module, and byte budget. The default package
+/// cache is shared per user profile, as for a normal run.
+fn create_runtime(allow_remote: bool) -> Result<Runtime, Error> {
+    if allow_remote {
+        Runtime::with_remote(RemoteOptions::new())
+    } else {
+        Runtime::new()
     }
 }
 
@@ -224,8 +250,10 @@ impl TestTotals {
 /// A file that fails to load, fails a test, registers no tests, leaves a test
 /// pending, or leaves an unhandled rejection makes the command exit 1. A later
 /// file still runs, and each file gets a new isolate so globals, module state,
-/// and the test queue cannot leak between files.
-fn run_tests(patterns: &[String]) -> ExitCode {
+/// and the test queue cannot leak between files. With `allow_remote`, every
+/// fresh runtime can also load `https:` modules, with its own default remote
+/// limits and the shared user-profile package cache.
+fn run_tests(patterns: &[String], allow_remote: bool) -> ExitCode {
     let files = match test_command::expand(patterns) {
         Ok(files) => files,
         Err(message) => {
@@ -239,7 +267,7 @@ fn run_tests(patterns: &[String]) -> ExitCode {
     let mut failed_files = 0usize;
     for file in &files {
         println!("test {}:", file.display());
-        let mut runtime = match Runtime::new() {
+        let mut runtime = match create_runtime(allow_remote) {
             Ok(runtime) => runtime,
             Err(error) => {
                 eprintln!("neojs: {error}");
@@ -297,6 +325,7 @@ Usage:
   neojs <file>
   neojs --allow-remote <file-or-https-url>
   neojs test <file-or-glob>...
+  neojs test --allow-remote <file-or-glob>...
   neojs --help
   neojs --version
 
@@ -322,10 +351,11 @@ the import specifiers \"age\", \"neo:age\", \"assert\", \"neo:assert\",
 \"neo:strings\", \"test\", \"neo:test\", \"uuid\", \"neo:uuid\", \"uuid/v4\",
 \"neo:uuid/v4\", \"uuid/v7\", and \"neo:uuid/v7\".
 Remote modules are disabled by default. --allow-remote enables an https: entry
-and explicit https: imports; relative imports in a remote module resolve against
-that module's URL. Only https: is accepted, remote modules cannot import file:
-URLs, redirects must stay credential-free https and within the limit, and no
-credentials or proxy settings are read. After a redirect the final URL is the
+and explicit https: imports for a run, and for every selected test file when
+given to the test command before or after `test`; relative imports in a remote
+module resolve against that module's URL. Only https: is accepted, remote
+modules cannot import file: URLs, redirects must stay credential-free https and
+within the limit, and no credentials or proxy settings are read. After a redirect the final URL is the
 module's identity and its relative-import base; the module format follows that
 final URL. Downloads are cached in $XDG_CACHE_HOME/neojs/packages, or
 $HOME/.cache/neojs/packages when XDG_CACHE_HOME is unset, with body length and
@@ -360,13 +390,16 @@ canonical path and deduplicated, so overlapping arguments run once. A missing
 literal, a malformed glob, or a glob that selects no regular file is an error;
 there is no default discovery pattern. Each file gets a fresh runtime, so
 global state and the test queue do not leak between files, and a failed file
-does not stop later files. A file that registers no tests fails. The runner
-waits up to about 100 ms of event-loop turns for detached timers, async ops,
-imports, and rejection events; if work remains, the verdict is unsettled and
-fails rather than passing on partial evidence. Test files run
-with this process's full filesystem authority; there is no sandbox, watch
-mode, parallelism, filtering, retry, subtests, mocks, snapshots, or Node
-compatibility claim.
+does not stop later files. A file that registers no tests fails. --allow-remote
+may be given before or after `test` and enables https: imports in every selected
+file; each file's fresh runtime gets its own default remote limits, while the
+user-profile package cache is shared. `--` ends option parsing, so a pattern
+named --allow-remote can still be selected. The runner waits up to about 100 ms
+of event-loop turns for detached timers, async ops, imports, and rejection
+events; if work remains, the verdict is unsettled and fails rather than passing
+on partial evidence. Test files run with this process's full filesystem
+authority; there is no sandbox, watch mode, parallelism, filtering, retry,
+subtests, mocks, snapshots, or Node compatibility claim.
 
 Exit codes:
   0  the module finished, or every test file ran with no failures
@@ -378,4 +411,67 @@ Exit codes:
 ",
         env!("CARGO_PKG_VERSION")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Command;
+    use super::parse_args;
+    use std::ffi::OsString;
+
+    fn args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn test_command_carries_allow_remote_from_before_the_subcommand() {
+        assert_eq!(
+            parse_args(args(&["--allow-remote", "test", "a.test.js"])),
+            Ok(Command::Test {
+                patterns: vec!["a.test.js".to_string()],
+                allow_remote: true,
+            })
+        );
+    }
+
+    #[test]
+    fn test_command_carries_allow_remote_from_after_the_subcommand() {
+        assert_eq!(
+            parse_args(args(&["test", "--allow-remote", "a.test.js"])),
+            Ok(Command::Test {
+                patterns: vec!["a.test.js".to_string()],
+                allow_remote: true,
+            })
+        );
+    }
+
+    #[test]
+    fn test_command_keeps_remote_disabled_without_the_flag() {
+        assert_eq!(
+            parse_args(args(&["test", "a.test.js"])),
+            Ok(Command::Test {
+                patterns: vec!["a.test.js".to_string()],
+                allow_remote: false,
+            })
+        );
+    }
+
+    #[test]
+    fn test_command_double_dash_keeps_allow_remote_as_a_pattern() {
+        assert_eq!(
+            parse_args(args(&["test", "--", "--allow-remote"])),
+            Ok(Command::Test {
+                patterns: vec!["--allow-remote".to_string()],
+                allow_remote: false,
+            })
+        );
+    }
+
+    #[test]
+    fn test_command_rejects_unknown_options() {
+        assert_eq!(
+            parse_args(args(&["test", "--unknown", "a.test.js"])),
+            Err("unknown option `--unknown`".to_string())
+        );
+    }
 }

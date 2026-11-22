@@ -2657,6 +2657,112 @@ fn test_command_expands_files_and_globs_without_duplicates() {
     );
 }
 
+/// A loopback port that was bound and released, so a connection is refused
+/// immediately. This keeps the CLI remote tests off any external network while
+/// still proving a selected test file's runtime was allowed to try the fetch.
+fn unused_loopback_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    listener.local_addr().expect("local addr").port()
+}
+
+fn write_remote_importing_test(project: &Project, name: &str, url: &str) -> PathBuf {
+    project.write(
+        name,
+        &format!(
+            "import test from \"test\";\n\
+             import {{ value }} from \"{url}\";\n\
+             test(\"remote import\", () => {{ if (value !== 1) throw new Error(\"bad value\"); }});\n"
+        ),
+    )
+}
+
+/// `--allow-remote` must reach every fresh test runtime, whether it is written
+/// before or after `test`. The fetch itself fails against a closed loopback
+/// port, but it must get far enough to attempt it instead of reporting that
+/// remote loading is disabled.
+#[test]
+fn test_command_accepts_allow_remote_for_remote_imports() {
+    let project = Project::new();
+    let url = format!("https://127.0.0.1:{}/dep.js", unused_loopback_port());
+    let file = write_remote_importing_test(&project, "remote.test.js", &url);
+    let path = file.to_str().expect("utf-8 path");
+
+    for prefix in [
+        ["--allow-remote", "test"].as_slice(),
+        ["test", "--allow-remote"].as_slice(),
+    ] {
+        let mut args = prefix.to_vec();
+        args.push(path);
+        let output = run_args(&args);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "args: {args:?}, stderr: {}",
+            stderr(&output)
+        );
+        let message = stderr(&output);
+        assert!(
+            !message.contains("remote module loading is disabled"),
+            "args: {args:?}, stderr: {message}"
+        );
+        assert!(message.contains("cannot load"), "stderr: {message}");
+    }
+}
+
+/// Without the flag the same selected test file must fail with remote loading
+/// disabled, not silently ignore the import or attempt a fetch.
+#[test]
+fn test_command_refuses_remote_imports_without_allow_remote() {
+    let project = Project::new();
+    let url = format!("https://127.0.0.1:{}/dep.js", unused_loopback_port());
+    let file = write_remote_importing_test(&project, "remote.test.js", &url);
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["test", path]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let message = stderr(&output);
+    assert!(
+        message.contains("remote module loading is disabled"),
+        "{message}"
+    );
+}
+
+/// Enabling remote loading must not change the per-file runtime isolation: a
+/// glob still gets one fresh runtime per file.
+#[test]
+fn test_command_allow_remote_keeps_globbed_files_isolated() {
+    let project = Project::new();
+    project.write(
+        "a-isolation.test.js",
+        r#"
+import test from "test";
+globalThis.leaked = "a-isolation";
+test("a", () => {});
+"#,
+    );
+    project.write(
+        "b-isolation.test.js",
+        r#"
+import test from "test";
+test("b", () => {
+    if (globalThis.leaked !== undefined) throw new Error("state leaked from a-isolation");
+});
+"#,
+    );
+    let dir = project.dir.path().to_str().expect("utf-8 path");
+    let glob = format!("{dir}/*.test.js");
+
+    let output = run_args(&["--allow-remote", "test", &glob]);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    assert!(
+        printed.contains("# 2 selected file(s): 2 test(s): 2 passed"),
+        "{printed}"
+    );
+}
+
 /// A failure in one file must not stop the next file, and the next file must
 /// not see the failing file's globals.
 #[test]
