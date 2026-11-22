@@ -987,13 +987,34 @@ names, encodings, limits, and Promise forms are neojs-specific. It does not prom
 zeroization: key, input, and digest-state bytes may remain in Rust buffers and the JavaScript heap
 until reclaimed.
 
+**Shamir secret sharing.** `shamirSplit(secret, threshold, shareCount)` splits a `Uint8Array`
+secret into `shareCount` shares over GF(256), each a frozen `{ index, value }` record whose `value`
+is a `Uint8Array` of the secret's length. `threshold` and `shareCount` are integers from 2 through
+255 with `shareCount >= threshold`; a secret is at most 8 MiB, and `secret.length * shareCount` is
+at most 64 MiB. Field arithmetic uses reduction polynomial `0x11b` with generator `0x03` and
+one-based indexes, so share values interoperate bytewise with the Neotales PLAB .NET and
+rust-libraries Shamir encodings; the JavaScript record shape is not a PLAB wire format. Every
+non-constant coefficient comes from the operating system CSPRNG, and an entropy failure throws
+`NEO_CRYPTO_RANDOM` rather than returning predictable shares. `shamirCombine(shares[, threshold])`
+interpolates at `x = 0` and returns a new `Uint8Array`; with `threshold` it requires at least that
+many shares, and it always requires at least two. Shares are not authenticated: tampered shares,
+shares mixed from different splits, a wrong index, or fewer than the original threshold reconstruct
+a different byte string, often without an error. Compare the result with an authenticated envelope
+or an out-of-band digest when a wrong reconstruction must be detected. A `SharedArrayBuffer` view is
+rejected with `NEO_CRYPTO_SHAMIR_SHARED` because copying it is not one coherent snapshot.
+`shamirSplitAsync` and `shamirCombineAsync` are the `Promise` forms: validation and one bounded copy
+run on the isolate thread and the arithmetic runs on the bounded blocking pool, sharing the 64-job
+and 64-MiB budget with `hashAsync`. Both need the same Tokio current-thread runtime as the other
+asynchronous crypto calls.
+
 **Scope of this slice.** This is a neojs-specific AES-256-GCM envelope, bounded stateful
-AES-256-CBC/AES-256-GCM cipher, randomness, SHA-2, HMAC, PBKDF2, and bcrypt surface, not Node's
-`crypto` module and not the Web Crypto API. `crypto.subtle` (and with it `subtle.encrypt`,
-`subtle.decrypt`, `subtle.digest`, and `subtle.generateKey`), `createCipheriv`/`createDecipheriv`,
+AES-256-CBC/AES-256-GCM cipher, randomness, SHA-2, HMAC, PBKDF2, bcrypt, and GF(256) Shamir secret
+sharing surface, not Node's `crypto` module and not the Web Crypto API. `crypto.subtle` (and with it
+`subtle.encrypt`, `subtle.decrypt`, `subtle.digest`, and `subtle.generateKey`),
+`createCipheriv`/`createDecipheriv`,
 Node's full `Cipher` contract, AES modes other than CBC and GCM, other KDFs,
-PHC/MCF/`crypt(3)` password-string parsing, Shamir secret sharing, and a PLAB .NET
-Crypto-compatible encrypt-then-MAC surface are **not implemented**. The envelope key generator is
+PHC/MCF/`crypt(3)` password-string parsing, and a PLAB .NET Crypto-compatible encrypt-then-MAC
+surface are **not implemented**. The envelope key generator is
 `generateEnvelopeKey`. `generateKey` is deliberately **not** exported in this slice: the name is
 reserved for a future Node-compatible surface, whose `generateKey` has different semantics from the
 envelope generator. Asynchronous neojs APIs are `Promise`-based, not callback-based. WebCrypto's
@@ -1003,14 +1024,15 @@ Node or PLAB compatibility layer. The slice is unreleased, so the names can stil
 expansion needs one of them.
 
 The envelope functions, the stateful cipher objects, the incremental hash and HMAC objects,
-`pbkdf2`, `bcryptHash`, and `bcryptVerify` are **synchronous**. None of them returns a `Promise` or
-takes a callback.
-`hashAsync`, `hmacAsync`, `pbkdf2Async`, `bcryptHashAsync`, and `bcryptVerifyAsync` are the
-asynchronous forms: they return a `Promise` and do real work on the bounded blocking pool, rather
-than wrapping blocking work in an already-resolved `Promise` to look nonblocking. Under
-`Runtime::run_file_async`, asynchronous hashing and password hashing need a Tokio current-thread
-runtime to host deno_core's async-op driver; a non-Tokio executor or a multi-thread Tokio runtime
-gets `NEO_CRYPTO_NO_EXECUTOR` instead. The synchronous API works on every executor.
+`pbkdf2`, `bcryptHash`, `bcryptVerify`, `shamirSplit`, and `shamirCombine` are **synchronous**.
+None of them returns a `Promise` or takes a callback.
+`hashAsync`, `hmacAsync`, `pbkdf2Async`, `bcryptHashAsync`, `bcryptVerifyAsync`,
+`shamirSplitAsync`, and `shamirCombineAsync` are the asynchronous forms: they return a `Promise` and
+do real work on the bounded blocking pool, rather than wrapping blocking work in an
+already-resolved `Promise` to look nonblocking. Under
+`Runtime::run_file_async`, asynchronous hashing, password hashing, and Shamir work need a Tokio
+current-thread runtime to host deno_core's async-op driver; a non-Tokio executor or a multi-thread
+Tokio runtime gets `NEO_CRYPTO_NO_EXECUTOR` instead. The synchronous API works on every executor.
 `Runtime::run_file` drives the async-op driver, so asynchronous hashing works there. There is no
 secure-context or TLS condition: the module is available in every runtime.
 
@@ -1091,14 +1113,14 @@ list are not implemented.
 - There is no permission system. The loader reads any file the process can read. neojs is not a
   sandbox. `chars`, `console`, and `strings` are plain ECMAScript and add no capability beyond the
   globals they expose; the `console` module writes to the process streams already used by the
-  global console. `assert` calls one host op that observes a genuine native Promise's settlement;
-  it adds no other capability.
-  `assert` calls one host op that attaches settlement handlers to a genuine native Promise without
-  reading a user `then` or consulting `Symbol.species`.
+  global console. `assert` calls one host op that observes a genuine native Promise's settlement by
+  attaching settlement handlers without reading a user `then` or consulting `Symbol.species`; it
+  adds no other capability.
   `age` calls four host ops for X25519 identity generation and binary age v1 encryption/decryption.
-  `crypto` calls twenty-six host ops: four for the operating system CSPRNG and AES-256-GCM, eight
-  for bounded stateful AES-256-CBC/AES-256-GCM ciphers, seven for SHA-2 hashing and HMAC, and seven
-  for PBKDF2 and bcrypt, including their bounded asynchronous paths. `ssh` calls three
+  `crypto` calls thirty-two host ops: four for the operating system CSPRNG and AES-256-GCM, eight
+  for bounded stateful AES-256-CBC/AES-256-GCM ciphers, seven for SHA-2 hashing and HMAC, seven for
+  PBKDF2 and bcrypt, and six for GF(256) Shamir secret sharing, including their bounded
+  asynchronous paths. `ssh` calls three
   host ops: it performs DNS and outbound TCP, completes the SSH handshake, verifies an explicit
   Ed25519 host-key pin or explicit `known_hosts` text, authenticates with exactly one of a password,
   an in-memory private key, or an explicit Unix `agent: true`, and runs one command at a time. It has
