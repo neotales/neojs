@@ -243,7 +243,7 @@ Usage:
 The file is read as an ECMAScript module, and relative imports resolve against
 it. ECMAScript modules, local .js, .mjs, .ts, and .mts imports, console output,
 top-level await, and the age, assert, chars, console, crypto, os, path, slices,
-ssh, stdio, strings, and test built-in modules are implemented. TypeScript is run
+ssh, stdio, strings, test, and uuid built-in modules are implemented. TypeScript is run
 by erasing type syntax: it is not type checked, constructs that need a transform
 (such as enum and namespace) are rejected, and .tsx, .jsx, .cts, and declaration
 files are not supported. The built-ins are available as
@@ -252,12 +252,15 @@ Neo.getBuiltInModule(\"chars\"), Neo.getBuiltInModule(\"console\"),
 Neo.getBuiltInModule(\"crypto\"), Neo.getBuiltInModule(\"os\"),
 Neo.getBuiltInModule(\"path\"), Neo.getBuiltInModule(\"slices\"),
 Neo.getBuiltInModule(\"ssh\"), Neo.getBuiltInModule(\"stdio\"),
-Neo.getBuiltInModule(\"strings\"), and Neo.getBuiltInModule(\"test\"), and as
+Neo.getBuiltInModule(\"strings\"), Neo.getBuiltInModule(\"test\"),
+Neo.getBuiltInModule(\"uuid\"), Neo.getBuiltInModule(\"uuid/v4\"), and
+Neo.getBuiltInModule(\"uuid/v7\"), and as
 the import specifiers \"age\", \"neo:age\", \"assert\", \"neo:assert\",
 \"chars\", \"neo:chars\", \"console\", \"neo:console\", \"crypto\",
 \"neo:crypto\", \"os\", \"neo:os\", \"path\", \"neo:path\", \"slices\",
 \"neo:slices\", \"ssh\", \"neo:ssh\", \"stdio\", \"neo:stdio\", \"strings\",
-\"neo:strings\", \"test\", and \"neo:test\".
+\"neo:strings\", \"test\", \"neo:test\", \"uuid\", \"neo:uuid\", \"uuid/v4\",
+\"neo:uuid/v4\", \"uuid/v7\", and \"neo:uuid/v7\".
 The stdio module writes to this process's stdout and stderr and offers bounded
 in-memory byte streams; it adds no filesystem, process, environment, or stdin
 access. The os module reports the Rust build target's platform and arch; it
@@ -273,6 +276,10 @@ that remains after a bounded settle window as failures, and is not Node's
 node:test. node: modules, including node:test, are rejected while no explicit
 Node-module opt-in exists. .cjs files, other neo: imports, remote imports,
 module type attributes, and permissions are not.
+
+The uuid module generates RFC 9562 version 4 and version 7 UUIDs as canonical
+lowercase text from the operating system CSPRNG, with no insecure fallback.
+Version 7 embeds a millisecond timestamp but promises no monotonic order.
 
 The test command expands every argument as an existing file or a shell-style
 glob. Globs are case-sensitive, * and ? do not cross a path separator, and a

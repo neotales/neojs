@@ -26,6 +26,13 @@
 //! other modes read no environment and no agent. Its socket connect may block
 //! and its backend timeout is inactivity-based, not a hard wall clock. It adds
 //! no filesystem or permission capability and never forwards an agent.
+//! `uuid` calls two private host ops registered by [`crate::uuid`]: it
+//! generates RFC 9562 version 4 and version 7 UUIDs from the operating system
+//! CSPRNG and returns canonical lowercase text. It has no insecure fallback and
+//! promises no monotonic order; the version 7 timestamp is the only ordering
+//! component. The `uuid/v4` and `uuid/v7` subpath modules expose one generator
+//! each as both the named and default export, backed by the same function
+//! objects. Parsing, validation, and other versions are not implemented.
 //! `strings` is plain ECMAScript: case-insensitive folded matching
 //! (`equalFold`, `startsWithFold`, `endsWithFold`, `indexOfFold`,
 //! `lastIndexOfFold`) and trimming of a caller-supplied code point set. The
@@ -63,34 +70,39 @@
 //!
 //! [`AGE_MODULE`], [`ASSERT_MODULE`], [`CHARS_MODULE`], [`CONSOLE_MODULE`],
 //! [`CRYPTO_MODULE`], [`OS_MODULE`], [`PATH_MODULE`], [`SLICES_MODULE`],
-//! [`SSH_MODULE`], [`STDIO_MODULE`], [`STRINGS_MODULE`], and [`TEST_MODULE`]
+//! [`SSH_MODULE`], [`STDIO_MODULE`], [`STRINGS_MODULE`], [`TEST_MODULE`],
+//! [`UUID_MODULE`], [`UUID_V4_MODULE`], and [`UUID_V7_MODULE`]
 //! are not evaluated as scripts. They are the sources returned by the module
 //! loader for the built-in specifiers [`AGE_SPECIFIER`], [`ASSERT_SPECIFIER`],
 //! [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`], [`CRYPTO_SPECIFIER`],
 //! [`OS_SPECIFIER`], [`PATH_SPECIFIER`], [`SLICES_SPECIFIER`],
-//! [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], [`STRINGS_SPECIFIER`], and
-//! [`TEST_SPECIFIER`], and for their bare names.
+//! [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], [`STRINGS_SPECIFIER`],
+//! [`TEST_SPECIFIER`], [`UUID_SPECIFIER`], [`UUID_V4_SPECIFIER`], and
+//! [`UUID_V7_SPECIFIER`], and for their bare names.
 //! All read the public module objects installed by [`neo_shim`], so the registry
 //! and the module bindings share identity. `assert` is the frozen callable
 //! `assert` function itself, with its named assertions as properties; it also
 //! has a default export in its module namespace. `age`, `chars`, `slices`,
-//! `strings`, and `test` are frozen module objects whose named exports are their
+//! `strings`, `test`, and `uuid` are frozen module objects whose named exports are their
 //! function or class objects, plus `test`'s constants. `console` is the console
 //! object the runtime installed: the
 //! default export's value is that object, and the named exports are its method
 //! values when the module is evaluated. `crypto`, `path`, `ssh`, and `stdio` are
 //! frozen module objects whose named exports are their synchronous classes,
 //! functions, constants, and shared stream objects; `os` is a frozen module
-//! object whose named exports are two build-target strings. In every case the ES
-//! module namespace is a separate object from the registry object.
+//! object whose named exports are two build-target strings; `uuid` is a frozen
+//! module object whose named exports are the two generator functions, and
+//! `uuid/v4`/`uuid/v7` are frozen module objects that expose one generator as
+//! both the named and default export. In every
+//! case the ES module namespace is a separate object from the registry object.
 
 use deno_core::url::Url;
 
 /// Installs the global `Neo` object and the built-in module registry.
 ///
 /// Evaluation happens once per realm. The `age`, `assert`, `chars`, `crypto`,
-/// `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, and `test` module objects
-/// are frozen and
+/// `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, `uuid`,
+/// `uuid/v4`, and `uuid/v7` module objects are frozen and
 /// cached, so repeated `Neo.getBuiltInModule` calls return the same object for
 /// each. The `console` module object is the console object the runtime
 /// installed, captured after the console shim runs. At installation time the
@@ -325,6 +337,47 @@ pub(crate) const TEST_SPECIFIER: &str = "neo:test";
 /// [`neo_shim`]; it calls no host op.
 const TEST_MODULE: &str = include_str!("builtins/test.esm.js");
 
+/// The canonical module specifier for the `uuid` built-in.
+///
+/// Both `"uuid"` and `"neo:uuid"` resolve to this URL, so the engine caches one
+/// module instance for both spellings. It is not a `file:` URL and is never read
+/// from disk.
+pub(crate) const UUID_SPECIFIER: &str = "neo:uuid";
+
+/// The ECMAScript module source served for [`UUID_SPECIFIER`].
+///
+/// It re-exports the version 4 and version 7 generators from the public `uuid`
+/// module object, so the module and `Neo.getBuiltInModule("uuid")` share
+/// identity. The functions call host ops registered by [`crate::uuid`]; they
+/// draw from the operating system CSPRNG and return canonical lowercase text.
+const UUID_MODULE: &str = include_str!("builtins/uuid.esm.js");
+
+/// The canonical module specifier for the version 4 UUID built-in.
+///
+/// Both `"uuid/v4"` and `"neo:uuid/v4"` resolve to this URL. It is a thin
+/// module over the same function as `uuid.v4`, with that function as both the
+/// named `v4` export and the default export. It is not read from disk.
+pub(crate) const UUID_V4_SPECIFIER: &str = "neo:uuid/v4";
+
+/// The ECMAScript module source served for [`UUID_V4_SPECIFIER`].
+///
+/// It re-exports `uuid.v4` as the named `v4` export and as the default export,
+/// so all spellings share one function object.
+const UUID_V4_MODULE: &str = include_str!("builtins/uuid-v4.esm.js");
+
+/// The canonical module specifier for the version 7 UUID built-in.
+///
+/// Both `"uuid/v7"` and `"neo:uuid/v7"` resolve to this URL. It is a thin
+/// module over the same function as `uuid.v7`, with that function as both the
+/// named `v7` export and the default export. It is not read from disk.
+pub(crate) const UUID_V7_SPECIFIER: &str = "neo:uuid/v7";
+
+/// The ECMAScript module source served for [`UUID_V7_SPECIFIER`].
+///
+/// It re-exports `uuid.v7` as the named `v7` export and as the default export,
+/// so all spellings share one function object.
+const UUID_V7_MODULE: &str = include_str!("builtins/uuid-v7.esm.js");
+
 /// Registry name and canonical specifier for each implemented built-in module.
 ///
 /// The loader serves one module instance per canonical specifier, and the error
@@ -342,6 +395,9 @@ const BUILTINS: &[(&str, &str)] = &[
     ("stdio", STDIO_SPECIFIER),
     ("strings", STRINGS_SPECIFIER),
     ("test", TEST_SPECIFIER),
+    ("uuid", UUID_SPECIFIER),
+    ("uuid/v4", UUID_V4_SPECIFIER),
+    ("uuid/v7", UUID_V7_SPECIFIER),
 ];
 
 /// Returns the canonical specifier for a built-in module name, or `None`.
@@ -379,6 +435,9 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         STDIO_SPECIFIER => Some(STDIO_MODULE),
         STRINGS_SPECIFIER => Some(STRINGS_MODULE),
         TEST_SPECIFIER => Some(TEST_MODULE),
+        UUID_SPECIFIER => Some(UUID_MODULE),
+        UUID_V4_SPECIFIER => Some(UUID_V4_MODULE),
+        UUID_V7_SPECIFIER => Some(UUID_V7_MODULE),
         _ => None,
     }
 }

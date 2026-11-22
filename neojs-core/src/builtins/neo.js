@@ -25,6 +25,9 @@
 // command execution; an explicit Unix agent opt-in reads SSH_AUTH_SOCK after
 // host verification, but other modes read no environment and no agent. It adds
 // no filesystem, stdin, or permission capability and never forwards an agent.
+// `uuid` calls two private host ops that generate RFC 9562 version 4 and
+// version 7 UUIDs from the operating system CSPRNG and return canonical
+// lowercase text; it has no insecure fallback and promises no monotonic order.
 // The `console` module is the realm's installed console
 // object, not a separate console or an isolation boundary. The `test` module
 // runs in the realm without a private host op: it registers sync and async
@@ -824,6 +827,14 @@
     const opSshConnect = sshOps.op_neo_ssh_connect;
     const opSshExec = sshOps.op_neo_ssh_exec;
     const opSshClose = sshOps.op_neo_ssh_close;
+
+    // The uuid host ops are captured here for the same reason: replacing
+    // `Deno.core.ops` later does not change what the module calls. They draw
+    // from the operating system CSPRNG and return canonical text; neither takes
+    // an argument, and neither falls back to a weaker source.
+    const uuidOps = Deno.core.ops;
+    const opUuidV4 = uuidOps.op_neo_uuid_v4;
+    const opUuidV7 = uuidOps.op_neo_uuid_v7;
 
     /**
      * Throw the exception described by a failed host result.
@@ -2316,6 +2327,124 @@
         identityToRecipient,
         encrypt: ageEncrypt,
         decrypt: ageDecrypt,
+    });
+
+    /**
+     * Turn a uuid host result object into a value or the documented exception.
+     *
+     * The host result object has a null prototype, so its properties cannot be
+     * intercepted. The `code` is defined as an own property instead of assigned,
+     * so an inherited `Object.prototype.code` accessor cannot swallow it.
+     *
+     * @param {{ok: boolean, value?: string, name?: string, code?: string, message?: string}} response
+     * @returns {string}
+     */
+    function unwrapUuid(response) {
+        if (response.ok) return response.value;
+        const error = new makeError(response.message);
+        defineProperty(error, "code", {
+            __proto__: null,
+            value: response.code,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+        });
+        // The host sends only a fixed diagnostic: an OS error number or one of
+        // getrandom's fixed categories. It never sends entropy, UUID bytes, a
+        // clock value, or the OS error text. `cause` is non-enumerable like a
+        // native Error cause.
+        if (typeof response.cause === "string") {
+            defineProperty(error, "cause", {
+                __proto__: null,
+                value: response.cause,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            });
+        }
+        throw error;
+    }
+
+    /**
+     * Generate a new RFC 9562 version 4 UUID.
+     *
+     * The 122 payload bits come from the operating system CSPRNG; the four
+     * version bits are `0100` and the two variant bits are `10`. The result is
+     * canonical lowercase text, 36 characters long. A version 4 UUID carries no
+     * timestamp or sequence, so it has no order and must not be used as a sort
+     * key.
+     *
+     * There is no insecure fallback: an entropy failure throws instead of
+     * returning predictable or time-derived bytes.
+     *
+     * @returns {string}
+     * @throws {TypeError} when any argument is supplied.
+     * @throws {Error} with `code` `NEO_UUID_RANDOM` when the OS CSPRNG fails.
+     * Its optional `cause` is a fixed diagnostic such as
+     * `getrandom: OS error 5`; it never contains entropy or UUID bytes.
+     */
+    function uuidV4() {
+        if (arguments.length !== 0) {
+            throw new makeTypeError("v4 takes no arguments");
+        }
+        return unwrapUuid(opUuidV4());
+    }
+
+    /**
+     * Generate a new RFC 9562 version 7 UUID.
+     *
+     * The first 48 bits are the current Unix time in milliseconds, big-endian.
+     * The version is `0111`, the variant is `10`, and the remaining 74 payload
+     * bits come from the operating system CSPRNG. The result is canonical
+     * lowercase text, 36 characters long.
+     *
+     * Ordering is only what the timestamp prefix provides: values from
+     * different milliseconds sort by that timestamp when the system clock moves
+     * forward, while values from the same millisecond are randomly ordered.
+     * A clock step backwards can produce a value that sorts before an earlier
+     * one, and values from different processes are not ordered. This function
+     * does not promise monotonicity, uniqueness, or a total order; use an
+     * explicit sequence or ordering field when the application needs one.
+     *
+     * A time before the Unix epoch or at or beyond 2^48 milliseconds is refused
+     * rather than wrapped or clamped. There is no insecure fallback: an entropy
+     * failure throws instead of returning predictable bytes.
+     *
+     * @returns {string}
+     * @throws {TypeError} when any argument is supplied.
+     * @throws {Error} with `code` `NEO_UUID_CLOCK` when the clock is outside the
+     * 48-bit timestamp range, or `NEO_UUID_RANDOM` when the OS CSPRNG fails.
+     * A random failure's optional `cause` is a fixed diagnostic such as
+     * `getrandom: OS error 5`; it never contains entropy or UUID bytes.
+     */
+    function uuidV7() {
+        if (arguments.length !== 0) {
+            throw new makeTypeError("v7 takes no arguments");
+        }
+        return unwrapUuid(opUuidV7());
+    }
+
+    // A frozen module object, like `chars`, `crypto`, and `age`: the properties
+    // cannot be replaced, but the function objects themselves are shared with
+    // imports. There is no default export.
+    const uuid = Object.freeze({
+        v4: uuidV4,
+        v7: uuidV7,
+    });
+
+    // The `uuid/v4` and `uuid/v7` subpath modules are thin views over the two
+    // functions above. They expose the function as both the named export and the
+    // default export, matching the conventional `uuid/v4` import shape, while
+    // the aggregate `uuid` module has no default. The registry objects and the
+    // ES module namespaces therefore list the same properties, and every path
+    // shares the one function object.
+    const uuidV4Module = Object.freeze({
+        default: uuidV4,
+        v4: uuidV4,
+    });
+    const uuidV7Module = Object.freeze({
+        default: uuidV7,
+        v7: uuidV7,
     });
 
     // The ssh module is a synchronous command-execution slice. It is not a
@@ -7086,6 +7215,9 @@
         ["stdio", stdio],
         ["strings", strings],
         ["test", testModule],
+        ["uuid", uuid],
+        ["uuid/v4", uuidV4Module],
+        ["uuid/v7", uuidV7Module],
     ]);
 
     /**

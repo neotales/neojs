@@ -5,12 +5,15 @@
 //! returns [`Error::RuntimeConsumed`].
 //!
 //! It provides the `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`,
-//! `slices`, `ssh`, `stdio`, `strings`, and `test` built-in modules through
-//! `Neo.getBuiltInModule(name)` and through the module specifiers `age`,
+//! `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid` built-in modules
+//! through `Neo.getBuiltInModule(name)` and through the module specifiers `age`,
 //! `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
 //! `neo:console`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`,
 //! `slices`, `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`,
-//! `neo:strings`, `test`, and `neo:test`.
+//! `neo:strings`, `test`, `neo:test`, `uuid`, `neo:uuid`, `uuid/v4`,
+//! `neo:uuid/v4`, `uuid/v7`, and `neo:uuid/v7`. The `uuid/v4` and `uuid/v7`
+//! subpaths are thin modules whose named and default exports are the same
+//! functions as `uuid.v4` and `uuid.v7`.
 //!
 //! `assert` is a synchronous assertion surface inspired by Node's
 //! `assert/strict` and Deno's `@std/assert`. The registry object is the
@@ -142,6 +145,24 @@
 //! global. `version`, `codename`, `variant`, user, keyring, and scheduler
 //! surfaces are not implemented.
 //!
+//! `uuid` generates RFC 9562 version 4 and version 7 UUIDs as canonical
+//! lowercase text. `v4` is 122 random bits with no timestamp or order. `v7`
+//! embeds the current Unix time in milliseconds in its first 48 bits, followed
+//! by a random payload; values from different milliseconds sort by that
+//! timestamp when the clock moves forward, but values within one millisecond
+//! are randomly ordered and a backward clock step can break the order. The
+//! module promises no monotonicity. Both functions are synchronous, take no
+//! arguments, and draw entirely from the operating system CSPRNG through
+//! fallible `getrandom`, with no insecure fallback. A time before the Unix epoch
+//! or beyond the 48-bit field fails with `NEO_UUID_CLOCK`; an entropy failure
+//! fails with `NEO_UUID_RANDOM`. The layout and formatting use the `uuid` crate's
+//! `Builder`; its panic-on-entropy-failure convenience constructors are not
+//! used. Parsing, validation, timestamp extraction, and versions other than 4
+//! and 7 are not implemented. The `uuid/v4` and `uuid/v7` subpath modules
+//! export the same functions as both the named and default export. See
+//! `neojs-core/src/uuid.rs` for the bit layout, ordering limits, and error
+//! contract.
+//!
 //! `strings` is plain ECMAScript: folded matching (`equalFold`,
 //! `startsWithFold`, `endsWithFold`, `indexOfFold`, `lastIndexOfFold`) and
 //! trimming of a caller-supplied code point set (`trim`, `trimStart`,
@@ -272,6 +293,7 @@ mod runtime;
 mod ssh;
 mod stdio;
 mod typescript;
+mod uuid;
 
 pub use error::Error;
 pub use runtime::Runtime;
@@ -321,6 +343,15 @@ pub mod test_support {
     /// production hook.
     pub fn fail_next_shamir_random() {
         crate::crypto_shamir::fail_next_shamir_random();
+    }
+
+    /// Make the next UUID entropy draw fail with `NEO_UUID_RANDOM`.
+    ///
+    /// The injection is consumed exactly once and is compiled only with the
+    /// off-by-default `test-support` feature. It exists so the JavaScript error
+    /// path can be tested deterministically without a production hook.
+    pub fn fail_next_uuid_random() {
+        crate::uuid::fail_next_uuid_random();
     }
 
     /// Count Shamir V8 backing stores cleared by the zeroizing deleter.

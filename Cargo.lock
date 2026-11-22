@@ -1946,6 +1946,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "uuid",
  "zeroize",
 ]
 
