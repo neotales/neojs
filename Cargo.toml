@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["neojs-core", "neojs"]
+members = ["neojs-core", "neojs", "neojs-dbapi"]
 
 [workspace.package]
 version = "0.1.0"
@@ -56,6 +56,10 @@ neotales-age = "=0.0.0-alpha.1"
 # alpha and its Rust API can change. It declares rust-version 1.100, the same
 # floor as this workspace.
 neotales-ssh = "=0.0.0-alpha.1"
+# Driver-neutral contract and the SQLite provider, published from neotales/rs-db.
+# Both are alpha releases of the same version, so they are pinned exactly.
+neotales-dbapi = "=0.0.0-alpha.0"
+neotales-dbapi-sqlite = "=0.0.0-alpha.0"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 tempfile = "3"
