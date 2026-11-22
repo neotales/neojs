@@ -29,12 +29,21 @@ fn v4_preserves_an_injected_entropy_failure() {
 import { v4 } from "neo:uuid";
 
 let code = "none";
+let cause = "none";
+let causeEnumerable = null;
 try {
     v4();
 } catch (error) {
     code = error.code;
+    cause = error.cause;
+    const descriptor = Object.getOwnPropertyDescriptor(error, "cause");
+    causeEnumerable = descriptor === undefined ? null : descriptor.enumerable;
 }
 if (code !== "NEO_UUID_RANDOM") throw new Error("unexpected code: " + code);
+// The retained getrandom error is converted to a fixed diagnostic, never its
+// Display text, entropy bytes, or a UUID.
+if (cause !== "getrandom: unexpected error") throw new Error("unexpected cause: " + cause);
+if (causeEnumerable !== false) throw new Error("cause must be non-enumerable");
 
 // The single-shot injection is consumed, so a real draw now succeeds.
 const value = v4();
@@ -54,12 +63,21 @@ fn v7_preserves_an_injected_entropy_failure() {
 import { v7 } from "neo:uuid";
 
 let code = "none";
+let cause = "none";
+let causeEnumerable = null;
 try {
     v7();
 } catch (error) {
     code = error.code;
+    cause = error.cause;
+    const descriptor = Object.getOwnPropertyDescriptor(error, "cause");
+    causeEnumerable = descriptor === undefined ? null : descriptor.enumerable;
 }
 if (code !== "NEO_UUID_RANDOM") throw new Error("unexpected code: " + code);
+// The retained getrandom error is converted to a fixed diagnostic, never its
+// Display text, entropy bytes, or a UUID.
+if (cause !== "getrandom: unexpected error") throw new Error("unexpected cause: " + cause);
+if (causeEnumerable !== false) throw new Error("cause must be non-enumerable");
 
 // The single-shot injection is consumed, so a real draw now succeeds.
 const value = v7();

@@ -2349,6 +2349,19 @@
             enumerable: true,
             configurable: true,
         });
+        // The host sends only a fixed diagnostic: an OS error number or one of
+        // getrandom's fixed categories. It never sends entropy, UUID bytes, a
+        // clock value, or the OS error text. `cause` is non-enumerable like a
+        // native Error cause.
+        if (typeof response.cause === "string") {
+            defineProperty(error, "cause", {
+                __proto__: null,
+                value: response.cause,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            });
+        }
         throw error;
     }
 
@@ -2367,6 +2380,8 @@
      * @returns {string}
      * @throws {TypeError} when any argument is supplied.
      * @throws {Error} with `code` `NEO_UUID_RANDOM` when the OS CSPRNG fails.
+     * Its optional `cause` is a fixed diagnostic such as
+     * `getrandom: OS error 5`; it never contains entropy or UUID bytes.
      */
     function uuidV4() {
         if (arguments.length !== 0) {
@@ -2399,6 +2414,8 @@
      * @throws {TypeError} when any argument is supplied.
      * @throws {Error} with `code` `NEO_UUID_CLOCK` when the clock is outside the
      * 48-bit timestamp range, or `NEO_UUID_RANDOM` when the OS CSPRNG fails.
+     * A random failure's optional `cause` is a fixed diagnostic such as
+     * `getrandom: OS error 5`; it never contains entropy or UUID bytes.
      */
     function uuidV7() {
         if (arguments.length !== 0) {

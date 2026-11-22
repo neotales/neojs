@@ -85,7 +85,10 @@
 //!   result string.
 //!
 //! Messages are fixed and never include entropy, the clock value, or any other
-//! input. A failed call returns no partial or placeholder UUID.
+//! input. A failed call returns no partial or placeholder UUID. A random
+//! failure additionally exposes an own `cause` string built only from a numeric
+//! OS error code or one of `getrandom`'s fixed categories; the crate's `Display`
+//! text, entropy bytes, UUID bytes, and clock values are not exposed.
 //!
 //! # Scope
 //!
@@ -157,35 +160,71 @@ impl UuidErrorCode {
 }
 
 /// A failure safe to describe without echoing any input.
+///
+/// A random failure retains the `getrandom` error so it can be diagnosed. The
+/// error is only ever converted into a fixed diagnostic string: an OS error
+/// number, or one of the crate's fixed categories. Its `Display` output is not
+/// forwarded, so locale text or any host-provided string cannot reach
+/// JavaScript. UUID bytes, entropy bytes, and clock values are never retained
+/// here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct UuidError {
     code: UuidErrorCode,
+    source: Option<getrandom::Error>,
 }
 
 impl UuidError {
     fn new(code: UuidErrorCode) -> Self {
-        Self { code }
+        Self { code, source: None }
     }
 
-    fn random() -> Self {
-        Self::new(UuidErrorCode::Random)
+    /// A random failure that keeps the underlying OS entropy error.
+    fn random(source: getrandom::Error) -> Self {
+        Self {
+            code: UuidErrorCode::Random,
+            source: Some(source),
+        }
     }
 
     fn clock() -> Self {
         Self::new(UuidErrorCode::Clock)
+    }
+
+    /// A fixed, non-secret diagnostic for the JavaScript `cause` property.
+    ///
+    /// Only a numeric OS error code or a fixed `getrandom` category is exposed,
+    /// never the error's `Display` text. UUID bytes, entropy, and clock values
+    /// are not part of this value.
+    fn diagnostic(self) -> Option<String> {
+        self.source.map(|source| {
+            if let Some(errno) = source.raw_os_error() {
+                format!("getrandom: OS error {errno}")
+            } else if source == getrandom::Error::UNSUPPORTED {
+                "getrandom: unsupported platform".to_string()
+            } else if source == getrandom::Error::ERRNO_NOT_POSITIVE {
+                "getrandom: non-positive OS error code".to_string()
+            } else if source == getrandom::Error::UNEXPECTED {
+                "getrandom: unexpected error".to_string()
+            } else {
+                "getrandom: internal error".to_string()
+            }
+        })
     }
 }
 
 /// Fills `bytes` from the operating system CSPRNG.
 ///
 /// There is no fallback. A failure leaves the buffer zeroed and returns
-/// [`UuidErrorCode::Random`]; callers must not use the buffer.
+/// [`UuidErrorCode::Random`] with the underlying `getrandom` error retained for
+/// a safe diagnostic; callers must not use the buffer.
 fn fill_random(bytes: &mut [u8]) -> Result<(), UuidError> {
     #[cfg(feature = "test-support")]
     if take_uuid_random_failure() {
-        return Err(UuidError::random());
+        // Use the crate's own fixed `UNEXPECTED` value so the injected path has
+        // the same retained-error shape and diagnostic as a real failure.
+        return Err(UuidError::random(getrandom::Error::UNEXPECTED));
     }
-    getrandom::fill(bytes).map_err(|_| UuidError::random())
+    getrandom::fill(bytes).map_err(UuidError::random)
 }
 
 /// Formats 16 already-random bytes as a version 4 UUID.
@@ -313,6 +352,11 @@ fn set_failure<'s>(
     set_string(scope, object, "name", "Error");
     set_string(scope, object, "code", error.code.as_str());
     set_string(scope, object, "message", error.code.message());
+    // Only a fixed diagnostic is exposed. `diagnostic` never returns the
+    // `getrandom` Display text, entropy bytes, or a clock value.
+    if let Some(cause) = error.diagnostic() {
+        set_string(scope, object, "cause", &cause);
+    }
 }
 
 /// Turns a Rust string result into `{ ok: true, value }` or `{ ok: false, ... }`.
@@ -468,14 +512,28 @@ mod tests {
 
     #[test]
     fn an_entropy_failure_is_returned_and_produces_no_uuid() {
+        let failure = UuidError::random(getrandom::Error::UNEXPECTED);
+        assert_eq!(v4_with_entropy(|_| Err(failure)), Err(failure));
+        assert_eq!(v7_with_entropy(0, |_| Err(failure)), Err(failure));
+    }
+
+    #[test]
+    fn a_random_failure_retains_a_fixed_non_secret_diagnostic() {
+        let failure = UuidError::random(getrandom::Error::UNEXPECTED);
+        assert_eq!(failure.code, UuidErrorCode::Random);
         assert_eq!(
-            v4_with_entropy(|_| Err(UuidError::random())),
-            Err(UuidError::random())
+            failure.diagnostic().as_deref(),
+            Some("getrandom: unexpected error")
         );
+
+        let unsupported = UuidError::random(getrandom::Error::UNSUPPORTED);
         assert_eq!(
-            v7_with_entropy(0, |_| Err(UuidError::random())),
-            Err(UuidError::random())
+            unsupported.diagnostic().as_deref(),
+            Some("getrandom: unsupported platform")
         );
+
+        // A clock or allocation failure has no OS entropy source to report.
+        assert_eq!(UuidError::clock().diagnostic(), None);
     }
 
     #[test]

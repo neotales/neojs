@@ -1283,7 +1283,10 @@ The 48-bit timestamp is a format limit. A current time before the Unix epoch, or
 milliseconds (roughly the year 10889), fails with `NEO_UUID_CLOCK` instead of wrapping, truncating, or
 clamping. The clock is read before the CSPRNG, so an unrepresentable time consumes no entropy. An
 operating-system CSPRNG failure is `NEO_UUID_RANDOM`; there is no `Math.random`, time-derived, or
-other insecure fallback. Messages are fixed and never include entropy or a clock value.
+other insecure fallback. Messages are fixed and never include entropy or a clock value. A random
+failure also has a non-enumerable `cause` string built only from a numeric OS error code or one of
+`getrandom`'s fixed categories (for example `getrandom: OS error 5`); the crate's display text,
+entropy bytes, UUID bytes, and clock values are not exposed.
 
 The RFC 9562 bit layout, version and variant setting, and formatting come from the MIT OR
 Apache-2.0 `uuid` crate's `Builder`. Its convenience constructors `Uuid::new_v4` and `Uuid::now_v7`
@@ -1292,7 +1295,8 @@ itself and passes the bytes to the builder, so an entropy failure is a returned 
 tests reproduce the RFC 9562 Appendix A.4 version 4 example and Appendix A.7 version 7 example byte
 for byte, check the version and variant fields, and cover the epoch and 48-bit overflow boundaries.
 The JavaScript tests cover registry and import identity, canonical output, uniqueness, argument
-strictness, and an injected entropy failure.
+strictness, and an injected entropy failure that verifies the stable code and the fixed `cause`
+diagnostic.
 
 This slice implements generation only. It does not parse or validate UUID text, extract a timestamp,
 generate nil or max UUIDs, or implement versions 1, 3, 5, 6, or 8. It reads no file, environment
