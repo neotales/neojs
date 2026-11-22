@@ -28,6 +28,11 @@
 // The `console` module is the realm's installed console
 // object, not a separate console or an isolation boundary.
 //
+// The `os` module exposes only the build target's `platform` and `arch`. They
+// are Rust's `std::env::consts` values substituted before this script runs; the
+// module calls no host op, reads no environment or operating-system file, and
+// installs no global.
+//
 // The `chars` module is an independent implementation for neojs. It is
 // informed by `@neotales/chars` and the QuickJS `neo:chars` module, but it does
 // not port their lookup tables and does not claim compatibility with them.
@@ -2926,6 +2931,24 @@
     // contract, not a security boundary.
     const consoleModule = globalThis.console;
 
+    // The `neo:os` built-in module object.
+    //
+    // `platform` and `arch` are Rust's `std::env::consts::OS` and `ARCH` for the
+    // target this runtime was compiled for. The two placeholders are replaced by
+    // `neojs-core/src/builtins.rs` before this script is evaluated; they are
+    // compilation-target constants, not a runtime probe. The vocabulary is
+    // Rust's, not Node's: macOS is `macos` and the architecture is `x86_64` or
+    // `aarch64`, not `darwin`, `x64`, or `arm64`.
+    //
+    // This module calls no host op. It reads no environment variable,
+    // OS-release file, registry, sysctl value, file, or process table, and it
+    // installs no global. `version`, `codename`, `variant`, user, keyring, and
+    // scheduler surfaces are not implemented here.
+    const os = Object.freeze({
+        platform: __NEO_OS_PLATFORM__,
+        arch: __NEO_OS_ARCH__,
+    });
+
     // The `neo:path` built-in module object.
     //
     // This is a lexical path implementation adapted from NeoLiteJS `neo:path` and
@@ -5457,6 +5480,7 @@
         ["chars", chars],
         ["console", consoleModule],
         ["crypto", crypto],
+        ["os", os],
         ["path", path],
         ["ssh", ssh],
         ["stdio", stdio],

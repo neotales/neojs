@@ -894,6 +894,36 @@ console.log(strings.trim("\uFEFF a \uFEFF"));
 }
 
 #[test]
+fn exposes_the_cached_os_builtin_to_a_module() {
+    let project = Project::new();
+    let file = project.write(
+        "os.js",
+        r#"
+import * as os from "os";
+import { arch, platform } from "neo:os";
+const registry = Neo.getBuiltInModule("os");
+console.log(registry === Neo.getBuiltInModule("os"));
+console.log(os.platform === registry.platform && os.arch === registry.arch);
+console.log(platform === os.platform && arch === os.arch);
+console.log(`${os.platform}/${os.arch}`);
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "true\ntrue\ntrue\n{}/{}\n",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
 fn assert_builtin_passes_from_the_cli() {
     let project = Project::new();
     let file = project.write(
@@ -1090,7 +1120,7 @@ fn reports_an_unknown_neo_module_and_lists_the_implemented_ones() {
     assert!(message.contains("not implemented"), "{message}");
     assert!(
         message.contains(
-            "neojs implements age, neo:age, assert, neo:assert, chars, neo:chars, console, neo:console, crypto, neo:crypto, path, neo:path, ssh, neo:ssh, stdio, neo:stdio, strings, neo:strings"
+            "neojs implements age, neo:age, assert, neo:assert, chars, neo:chars, console, neo:console, crypto, neo:crypto, os, neo:os, path, neo:path, ssh, neo:ssh, stdio, neo:stdio, strings, neo:strings"
         ),
         "{message}"
     );
@@ -1475,7 +1505,7 @@ fn prints_help_and_version() {
     let help = run_args(&["--help"]);
     assert_eq!(help.status.code(), Some(0));
     assert!(stdout(&help).contains("Usage:"));
-    assert!(stdout(&help).contains("age, assert, chars, console, crypto, ssh, and stdio"));
+    assert!(stdout(&help).contains("age, assert, chars, console, crypto, os, ssh, and stdio"));
     assert!(stdout(&help).contains("built-in modules are implemented"));
 
     let version = run_args(&["--version"]);

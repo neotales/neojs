@@ -1,10 +1,12 @@
 //! JavaScript evaluated in every runtime before the entry module, and the
 //! synthetic ECMAScript modules that import specifiers reach.
 //!
-//! The scripts here install globals that neojs supplies: currently [`NEO_SHIM`],
-//! which defines the `Neo` object and its cached built-in modules. `chars`,
-//! `console`, and `strings` are plain ECMAScript; `assert` calls one private host
-//! op registered by [`crate::assert`] to observe a genuine native Promise.
+//! The scripts here install globals that neojs supplies: currently
+//! [`neo_shim`], which defines the `Neo` object and its cached built-in
+//! modules. `chars`, `console`, `os`, and `strings` are plain ECMAScript (the
+//! `os` module contains two build-target constants substituted by
+//! [`neo_shim`]); `assert` calls one private host op registered by
+//! [`crate::assert`] to observe a genuine native Promise.
 //! `crypto` calls private host ops registered by [`crate::crypto`],
 //! [`crate::crypto_cipher`], [`crate::crypto_hash`], and
 //! [`crate::crypto_shamir`]; it
@@ -47,13 +49,14 @@
 //! containment check.
 //!
 //! [`AGE_MODULE`], [`ASSERT_MODULE`], [`CHARS_MODULE`], [`CONSOLE_MODULE`],
-//! [`CRYPTO_MODULE`], [`PATH_MODULE`], [`SSH_MODULE`], [`STDIO_MODULE`], and
-//! [`STRINGS_MODULE`] are not evaluated as scripts. They are the sources
-//! returned by the module loader for the built-in specifiers [`AGE_SPECIFIER`],
-//! [`ASSERT_SPECIFIER`], [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`],
-//! [`CRYPTO_SPECIFIER`], [`PATH_SPECIFIER`], [`SSH_SPECIFIER`],
-//! [`STDIO_SPECIFIER`], and [`STRINGS_SPECIFIER`], and for their bare names.
-//! All read the public module objects installed by [`NEO_SHIM`], so the registry
+//! [`CRYPTO_MODULE`], [`OS_MODULE`], [`PATH_MODULE`], [`SSH_MODULE`],
+//! [`STDIO_MODULE`], and [`STRINGS_MODULE`] are not evaluated as scripts. They
+//! are the sources returned by the module loader for the built-in specifiers
+//! [`AGE_SPECIFIER`], [`ASSERT_SPECIFIER`], [`CHARS_SPECIFIER`],
+//! [`CONSOLE_SPECIFIER`], [`CRYPTO_SPECIFIER`], [`OS_SPECIFIER`],
+//! [`PATH_SPECIFIER`], [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], and
+//! [`STRINGS_SPECIFIER`], and for their bare names.
+//! All read the public module objects installed by [`neo_shim`], so the registry
 //! and the module bindings share identity. `assert` is the frozen callable
 //! `assert` function itself, with its named assertions as properties; it also
 //! has a default export in its module namespace. `age`, `chars`, and `strings`
@@ -62,23 +65,67 @@
 //! value is that object, and the named exports are its method values when the
 //! module is evaluated. `crypto`, `path`, `ssh`, and `stdio` are frozen module
 //! objects whose named exports are their synchronous classes, functions,
-//! constants, and shared stream objects. In every case the ES module namespace
-//! is a separate object from the registry object.
+//! constants, and shared stream objects; `os` is a frozen module object whose
+//! named exports are two build-target strings. In every case the ES module
+//! namespace is a separate object from the registry object.
 
 use deno_core::url::Url;
 
 /// Installs the global `Neo` object and the built-in module registry.
 ///
 /// Evaluation happens once per realm. The `age`, `assert`, `chars`, `crypto`,
-/// `path`, `ssh`, `stdio`, and `strings` module objects are frozen and cached,
-/// so repeated `Neo.getBuiltInModule` calls return the same object for each. The
-/// `console` module object is the console object the runtime installed,
-/// captured after the console shim runs. At installation time the registry, the
-/// module bindings, and the global console share the same function objects; a
-/// method replaced before the console module
-/// is evaluated is what its named exports capture. Names that are not
-/// implemented return `undefined`.
-pub(crate) const NEO_SHIM: &str = include_str!("builtins/neo.js");
+/// `os`, `path`, `ssh`, `stdio`, and `strings` module objects are frozen and
+/// cached, so repeated `Neo.getBuiltInModule` calls return the same object for
+/// each. The `console` module object is the console object the runtime
+/// installed, captured after the console shim runs. At installation time the
+/// registry, the module bindings, and the global console share the same
+/// function objects; a method replaced before the console module is evaluated
+/// is what its named exports capture. Names that are not implemented return
+/// `undefined`.
+const NEO_SHIM_SOURCE: &str = include_str!("builtins/neo.js");
+
+/// The placeholder replaced with the build target's `std::env::consts::OS`.
+const OS_PLATFORM_TOKEN: &str = "__NEO_OS_PLATFORM__";
+
+/// The placeholder replaced with the build target's `std::env::consts::ARCH`.
+const OS_ARCH_TOKEN: &str = "__NEO_OS_ARCH__";
+
+/// Returns the shim with the build target's `os` constants substituted.
+///
+/// [`NEO_SHIM_SOURCE`] holds two placeholders, one per `neo:os` value. They are
+/// replaced with ECMAScript string literals for this build's
+/// `std::env::consts::OS` and `std::env::consts::ARCH`, so the module reports the
+/// target the runtime was compiled for and reads no host state at runtime.
+pub(crate) fn neo_shim() -> String {
+    NEO_SHIM_SOURCE
+        .replace(OS_PLATFORM_TOKEN, &js_string(std::env::consts::OS))
+        .replace(OS_ARCH_TOKEN, &js_string(std::env::consts::ARCH))
+}
+
+/// Encodes `value` as a double-quoted ECMAScript string literal.
+///
+/// The build-target constants are plain ASCII identifiers, but the helper
+/// escapes everything that would end or alter a literal so the substitution
+/// cannot produce invalid or misleading source.
+fn js_string(value: &str) -> String {
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => literal.push_str("\\\""),
+            '\\' => literal.push_str("\\\\"),
+            '\n' => literal.push_str("\\n"),
+            '\r' => literal.push_str("\\r"),
+            '\t' => literal.push_str("\\t"),
+            character if character.is_control() => {
+                literal.push_str(&format!("\\u{{{:x}}}", character as u32));
+            }
+            character => literal.push(character),
+        }
+    }
+    literal.push('"');
+    literal
+}
 
 /// The canonical module specifier for the `age` built-in.
 ///
@@ -105,7 +152,7 @@ pub(crate) const ASSERT_SPECIFIER: &str = "neo:assert";
 ///
 /// It re-exports the callable `assert` function and its named assertions from
 /// the public `assert` module object, and also exposes that function as the
-/// default export. The implementations are in [`NEO_SHIM`]; the only host op
+/// default export. The implementations are in [`neo_shim`]; the only host op
 /// called observes a genuine native Promise and is registered by
 /// [`crate::assert`].
 const ASSERT_MODULE: &str = include_str!("builtins/assert.esm.js");
@@ -153,6 +200,21 @@ pub(crate) const CRYPTO_SPECIFIER: &str = "neo:crypto";
 /// [`crate::crypto_cipher`], [`crate::crypto_hash`], and
 /// [`crate::crypto_shamir`].
 const CRYPTO_MODULE: &str = include_str!("builtins/crypto.esm.js");
+
+/// The canonical module specifier for the `os` built-in.
+///
+/// Both `"os"` and `"neo:os"` resolve to this URL, so the engine caches one
+/// module instance for both spellings. It is not a `file:` URL and is never
+/// read from disk.
+pub(crate) const OS_SPECIFIER: &str = "neo:os";
+
+/// The ECMAScript module source served for [`OS_SPECIFIER`].
+///
+/// It re-exports the two build-target constants from the public `os` module
+/// object, so the module and `Neo.getBuiltInModule("os")` share identity. The
+/// values are substituted into [`neo_shim`]; the module calls no host op and
+/// reads no environment variable or operating-system file.
+const OS_MODULE: &str = include_str!("builtins/os.esm.js");
 
 /// The canonical module specifier for the `ssh` built-in.
 ///
@@ -212,7 +274,7 @@ pub(crate) const STRINGS_SPECIFIER: &str = "neo:strings";
 ///
 /// It re-exports the function objects from the public `strings` module object,
 /// so the module and `Neo.getBuiltInModule("strings")` share identity. The
-/// implementations are plain ECMAScript in [`NEO_SHIM`]; no host op is called.
+/// implementations are plain ECMAScript in [`neo_shim`]; no host op is called.
 const STRINGS_MODULE: &str = include_str!("builtins/strings.esm.js");
 
 /// Registry name and canonical specifier for each implemented built-in module.
@@ -225,6 +287,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("chars", CHARS_SPECIFIER),
     ("console", CONSOLE_SPECIFIER),
     ("crypto", CRYPTO_SPECIFIER),
+    ("os", OS_SPECIFIER),
     ("path", PATH_SPECIFIER),
     ("ssh", SSH_SPECIFIER),
     ("stdio", STDIO_SPECIFIER),
@@ -259,6 +322,7 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         CHARS_SPECIFIER => Some(CHARS_MODULE),
         CONSOLE_SPECIFIER => Some(CONSOLE_MODULE),
         CRYPTO_SPECIFIER => Some(CRYPTO_MODULE),
+        OS_SPECIFIER => Some(OS_MODULE),
         PATH_SPECIFIER => Some(PATH_MODULE),
         SSH_SPECIFIER => Some(SSH_MODULE),
         STDIO_SPECIFIER => Some(STDIO_MODULE),
@@ -275,4 +339,29 @@ pub(crate) fn implemented_specifiers() -> String {
         specifiers.push(*canonical);
     }
     specifiers.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OS_ARCH_TOKEN;
+    use super::OS_PLATFORM_TOKEN;
+    use super::neo_shim;
+
+    /// The shim is not valid JavaScript until the two `os` placeholders are
+    /// replaced, so a missing substitution must fail here rather than at the
+    /// first `Runtime::new`.
+    #[test]
+    fn shim_substitutes_the_build_target_constants() {
+        let shim = neo_shim();
+        assert!(!shim.contains(OS_PLATFORM_TOKEN));
+        assert!(!shim.contains(OS_ARCH_TOKEN));
+        assert!(
+            shim.contains(&format!("platform: \"{}\"", std::env::consts::OS)),
+            "platform literal is missing from the shim"
+        );
+        assert!(
+            shim.contains(&format!("arch: \"{}\"", std::env::consts::ARCH)),
+            "arch literal is missing from the shim"
+        );
+    }
 }
