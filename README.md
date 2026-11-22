@@ -1348,6 +1348,10 @@ thread that will use it; it is not `Send`.
 The [ECMAScript npm modules proposal](docs/esm-npm-proposal.md) is a design proposal for review,
 not implemented behavior.
 
+The [`neojs-dbapi` crate](neojs-dbapi/README.md) is the SQLite-only database foundation; other
+database providers and a JavaScript/Node adapter are not yet wired in. See the
+[database API notes](docs/db-api.md) for its scope and design decisions.
+
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
