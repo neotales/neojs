@@ -71,7 +71,11 @@ JSR is separate and out of scope; npm packages are not JSR packages.
    metadata. Resolve each package's declared runtime dependency edges recursively, allowing
    multiple versions and cycles. Resolve bare imports *inside* packages relative to the
    importing package's dependency graph, not a global latest version; reject undeclared
-   dependencies rather than falling through to the registry. Existing neojs built-in bare
+   dependencies rather than falling through to the registry. Artifact identity alone is not
+   module identity: propagate a graph-instance identity including the resolved peer context
+   through resolution, and key module instances by that identity and canonical module path.
+   The same artifact used with different peer bindings must not share a module instance or
+   resolve imports using the other context. Existing neojs built-in bare
    specifiers retain their behavior; define and test the collision rule inside packages before
    release. An explicit `npm:` import must never resolve to a neojs built-in.
 3. Honor package `exports` for root, subpaths, patterns, null exclusions, nested conditions
@@ -122,7 +126,11 @@ never silently treat a partial npm lock as equivalent. Cache presence alone is n
   `%LOCALAPPDATA%\\neojs\\packages`), not a literal Unix path. Test drive letters, UNC paths,
   case collisions, reserved names and long paths; do not require administrator rights.
 - Partition metadata by registry origin and packages by immutable identity and verified digest.
-  A cache hit verifies integrity before execution; detect corruption and refetch only when
+  A cache hit verifies the executed extracted bytes against a trusted record derived from the
+  verified archive, or re-extracts them from the reverified archive before execution. Verifying
+  the tarball alone does not detect changes to previously extracted files. Protect that record
+  from untrusted cache modification, or rederive it from the verified archive; ensure verification
+  and execution do not race with replacement of the files. Detect corruption and refetch only when
   policy permits. Strong integrity verifies bytes against the expected digest, not publisher
   identity or benign behavior. Reject missing/unsupported integrity in the proposed first
   release rather than execute unverified artifacts; determine compatibility impact.
@@ -156,7 +164,9 @@ No real registry access is required in tests.
 
 **1. ESM npm loading.** From an empty isolated cache, import exact and ranged unscoped and
 scoped fixtures, root and subpath, with transitive dependencies, cycles, and two versions of
-one package. A second run reuses verified artifacts; offline locked run succeeds. Export
+one package. A fixture uses the same package artifact under two graph instances with different
+peer versions: each resolves its own peer and receives a distinct module instance. A second
+run reuses verified artifacts; offline locked run succeeds. Export
 conditions honor key order, `#` mappings work, and private/unexported or escaping targets fail.
 `.cjs`, CommonJS-typed `.js`, ambiguous `.js` under the proposed policy, unsupported formats,
 unknown built-ins and unsupported specs fail with package, referrer and reason. Existing
@@ -166,7 +176,9 @@ local imports and neojs built-ins remain unchanged.
 tag fixtures, lock update/frozen/offline behavior, peer conflicts and optional/platform cases
 are deterministic. Integrity mismatch, corrupted cache, unsafe archives, interrupted writes,
 concurrent processes, redirect abuse and resource limits fail closed. Test on Linux and
-Windows; document any unverified platform. Confirm no lifecycle script or native addon runs.
+Windows; document any unverified platform. Modify an extracted `.js` file before a cache hit:
+the modified bytes must never execute, including in offline mode; verification fails or
+re-extraction restores verified bytes. Confirm no lifecycle script or native addon runs.
 
 **3. Independent extensions.** Specify and test selected opt-in `node:*` APIs, then consider
 project manifest and `node_modules` integration, TypeScript improvements and JSR as separate
