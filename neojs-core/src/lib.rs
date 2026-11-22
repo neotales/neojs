@@ -181,6 +181,12 @@ pub mod test_support {
         crate::ssh::FAIL_NEXT_PEER_CLOSE_REPLY.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Install a deterministic cwd sequence for `f` and return its call count.
+    ///
+    /// Used by the path tests to prove that `relative` takes one lazy cwd
+    /// snapshot per call. Compiled only with `test-support`.
+    pub use crate::path::with_cwd_sequence;
+
     /// Test-only gate that holds a real blocking hash worker after it starts.
     pub use crate::crypto_hash::CancellationGate;
 

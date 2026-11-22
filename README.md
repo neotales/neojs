@@ -309,8 +309,11 @@ unchanged.
 **Working directory and errors.** `resolve` works right-to-left, validates every segment, ignores
 empty strings, and resets at an absolute segment. `resolve`, `relative`, and Windows
 `toNamespacedPath` read the current process working directory only when their inputs do not supply a
-complete base. There is no runtime-local `chdir` and no per-drive environment lookup. A failure is an
-ordinary `Error` with `name = "PathError"` and a stable own `code`: `PATH_CWD` when the working
+complete base. A call takes one lazy snapshot: `relative` shares one snapshot across both endpoints
+and reads cwd at most once, and does not read it at all when both endpoints are absolute. `resolve`
+and Windows `toNamespacedPath` also read at most once per call. There is no runtime-local `chdir` and
+no per-drive environment lookup. A failure is an ordinary `Error` with `name = "PathError"` and a
+stable own `code`: `PATH_CWD` when the working
 directory is unavailable or not valid UTF-8, `PATH_CWD_DIALECT` when the non-host dialect needs a
 working directory, and `PATH_WINDOWS_ROOT` when Windows cannot establish a matching drive, share, or
 complete namespace root. There is no `PATH_PERMISSION`; neojs has no permission system.

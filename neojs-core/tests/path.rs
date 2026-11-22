@@ -349,7 +349,7 @@ expectTypeError(() => posix.format(new Proxy({}, {
 fn errors_have_own_codes_and_tampered_intrinsics_do_not_change_results() {
     run_js(&with_helpers(
         r#"
-import { posix, win32 } from "path";
+import { posix, win32, SEPARATOR } from "path";
 
 // A path error must not lose its code through an inherited accessor.
 const originalCode = Object.getOwnPropertyDescriptor(Object.prototype, "code");
@@ -387,6 +387,20 @@ try {
     String.prototype.toLowerCase = originalToLowerCase;
     Array.prototype.join = originalJoin;
     Map.prototype.get = originalMapGet;
+}
+
+// The op functions are captured at shim install. Replacing a property on
+// `Deno.core.ops` after import must not change what path calls.
+const originalCwdOp = Deno.core.ops.op_neo_path_cwd;
+const originalDialectOp = Deno.core.ops.op_neo_path_is_windows;
+try {
+    Deno.core.ops.op_neo_path_cwd = () => { throw new Error("tampered cwd op"); };
+    Deno.core.ops.op_neo_path_is_windows = () => { throw new Error("tampered dialect op"); };
+    equal(posix.relative(".", "."), "", "relative after op replacement");
+    equal(SEPARATOR, SEPARATOR === "\\" ? win32.sep : posix.sep, "separator after op replacement");
+} finally {
+    Deno.core.ops.op_neo_path_cwd = originalCwdOp;
+    Deno.core.ops.op_neo_path_is_windows = originalDialectOp;
 }
 
 // Lexical results are not authorization. `..` is resolved as text, not against
@@ -433,6 +447,37 @@ if (SEPARATOR !== "\\") {
 expectCode(() => win32.resolve("\\\\?\\UNC\\server"), "PATH_WINDOWS_ROOT");
 "#,
     ));
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn relative_uses_one_lazy_cwd_snapshot_per_call() {
+    use neojs_core::test_support::with_cwd_sequence;
+
+    let ((), calls) = with_cwd_sequence(
+        vec![Some("C:\\one".to_string()), Some("C:\\two".to_string())],
+        || {
+            run_js(&with_helpers(
+                r#"
+import { posix, win32, SEPARATOR } from "path";
+
+const native = SEPARATOR === "\\" ? win32 : posix;
+const expected = SEPARATOR === "\\" ? "..\\b" : "../b";
+equal(native.relative("a", "b"), expected, "one snapshot for two endpoints");
+
+const from = SEPARATOR === "\\" ? "C:\\a\\b" : "/a/b";
+const to = SEPARATOR === "\\" ? "C:\\a\\c" : "/a/c";
+const expectedAbsolute = SEPARATOR === "\\" ? "..\\c" : "../c";
+equal(native.relative(from, to), expectedAbsolute, "absolute endpoints avoid cwd");
+"#,
+            ));
+        },
+    );
+
+    assert_eq!(
+        calls, 1,
+        "relative must read cwd once for two relative endpoints and never for two absolute endpoints"
+    );
 }
 
 #[test]

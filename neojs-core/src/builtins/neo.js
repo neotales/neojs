@@ -2187,6 +2187,11 @@
     // input rule: it splits on `\` only, matching the reference, so `/` is not
     // a component boundary there.
     //
+    // `relative` resolves its two endpoints against one lazy per-call cwd
+    // snapshot. It reads the process cwd at most once per call, and not at all
+    // when both endpoints already have a complete absolute base. `resolve` and
+    // Windows `toNamespacedPath` likewise read at most once per call.
+    //
     // This block is evaluated inside the `neo.js` IIFE before user code. It is
     // wrapped in its own scope so its captured intrinsics do not collide with the
     // other built-in modules.
@@ -2194,9 +2199,13 @@
         "use strict";
 
         const pathOps = Deno.core.ops;
-        const hostWindows = pathOps.op_neo_path_is_windows();
+        // Capture the functions, not just the ops object. Replacing a property on
+        // `Deno.core.ops` later must not change what this module calls.
+        const opNeoPathIsWindows = pathOps.op_neo_path_is_windows;
+        const opNeoPathCwd = pathOps.op_neo_path_cwd;
+        const hostWindows = opNeoPathIsWindows();
         function readCwd() {
-            const directory = pathOps.op_neo_path_cwd();
+            const directory = opNeoPathCwd();
             return directory === undefined ? null : directory;
         }
 
@@ -3009,12 +3018,36 @@
           return directory;
         }
 
-        /** Resolve from the rightmost absolute segment, or the current runtime cwd. */
+        /**
+         * A lazy, per-call cwd snapshot for one dialect.
+         *
+         * `relative` resolves two endpoints; both must see the same directory
+         * even if the host directory changes between reads. The first call that
+         * actually needs a base reads cwd; later calls in the same operation
+         * reuse it. A call whose inputs are all absolute never invokes it.
+         */
+        function cwdSnapshot(windows) {
+          let read = false;
+          let value;
+          return function readCwdOnce() {
+            if (!read) {
+              value = requireCwd(windows);
+              read = true;
+            }
+            return value;
+          };
+        }
+
+        /** Resolve from the rightmost absolute segment, or one cwd snapshot. */
         function resolvePosix(...paths) {
           for (let i = 0; i < paths.length; ++i) assertPath(paths[i]);
+          return resolvePosixInternal(paths, cwdSnapshot(false));
+        }
+
+        function resolvePosixInternal(paths, readCwdOnce) {
           const tails = [];
           for (let i = paths.length - 1; i >= -1; --i) {
-            const path = i === -1 ? requireCwd(false) : paths[i];
+            const path = i === -1 ? readCwdOnce() : paths[i];
             if (path === '') continue;
             tails[tails.length] = path;
             if (isPosixSeparator(charCodeAt(path, 0))) break;
@@ -3092,12 +3125,16 @@
         /** Resolve on one drive/share, without consulting any per-drive environment. */
         function resolveWin32(...paths) {
           for (let i = 0; i < paths.length; ++i) assertPath(paths[i]);
+          return resolveWin32Internal(paths, cwdSnapshot(true));
+        }
+
+        function resolveWin32Internal(paths, readCwdOnce) {
           let device = '';
           let driveRelative = false;
           let absolute = false;
           const tails = [];
           for (let i = paths.length - 1; i >= -1; --i) {
-            const path = i === -1 ? requireCwd(true) : paths[i];
+            const path = i === -1 ? readCwdOnce() : paths[i];
             if (path === '') continue;
             const root = resolutionRootWin32(path);
             if (root.device !== '') {
@@ -3143,14 +3180,18 @@
         function relativePosix(from, to) {
           assertPath(from);
           assertPath(to);
-          return relativeTail(slice(resolvePosix(from), 1), slice(resolvePosix(to), 1), '/', false);
+          const readCwdOnce = cwdSnapshot(false);
+          const source = resolvePosixInternal([from], readCwdOnce);
+          const target = resolvePosixInternal([to], readCwdOnce);
+          return relativeTail(slice(source, 1), slice(target, 1), '/', false);
         }
 
         function relativeWin32(from, to) {
           assertPath(from);
           assertPath(to);
-          const source = resolveWin32(from);
-          const target = resolveWin32(to);
+          const readCwdOnce = cwdSnapshot(true);
+          const source = resolveWin32Internal([from], readCwdOnce);
+          const target = resolveWin32Internal([to], readCwdOnce);
           const sourceRoot = resolutionRootWin32(source);
           const targetRoot = resolutionRootWin32(target);
           if (lower(sourceRoot.device) !== lower(targetRoot.device)) return target;

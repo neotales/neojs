@@ -22,11 +22,67 @@
 //! runtime-local value. It uses `Path::to_str` rather than a lossy conversion,
 //! so a non-UTF-8 directory is reported as unavailable instead of silently
 //! changing the path. There is no per-drive working directory and no
-//! environment-variable fallback. A caller that needs a stable base should pass
-//! an explicit absolute path to `resolve` instead of relying on this op.
+//! environment-variable fallback. `relative` resolves both endpoints against one
+//! lazy per-call snapshot, so it reads this op at most once and not at all when
+//! both endpoints are absolute; `resolve` and Windows `toNamespacedPath` also
+//! read at most once per call. A caller that needs a stable base across calls
+//! should pass an explicit absolute path instead of relying on this op.
 
 use deno_core::op2;
 use deno_core::v8;
+
+#[cfg(feature = "test-support")]
+use std::cell::Cell;
+#[cfg(feature = "test-support")]
+use std::cell::RefCell;
+#[cfg(feature = "test-support")]
+use std::collections::VecDeque;
+
+// Test-only cwd values consumed by the next `op_neo_path_cwd` calls. The
+// value is per thread, matching the runtime and the test harness. A sequence
+// that runs out yields `null`, which makes an unexpected extra read surface as
+// `PATH_CWD` instead of silently falling back to the host directory.
+#[cfg(feature = "test-support")]
+thread_local! {
+    static TEST_CWD: RefCell<Option<VecDeque<Option<String>>>> = const { RefCell::new(None) };
+    static TEST_CWD_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Return an injected cwd value, or `None` when no sequence is installed.
+///
+/// The outer `None` means "use the real process directory"; `Some(None)` means
+/// "simulate an unavailable directory".
+#[cfg(feature = "test-support")]
+fn test_cwd_override() -> Option<Option<String>> {
+    TEST_CWD.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let values = slot.as_mut()?;
+        TEST_CWD_CALLS.with(|calls| calls.set(calls.get() + 1));
+        Some(values.pop_front().unwrap_or(None))
+    })
+}
+
+/// Install a deterministic cwd sequence for `f` and return its cwd call count.
+///
+/// This is compiled only with the off-by-default `test-support` feature. The
+/// guard clears the sequence even if `f` panics, so a failed test cannot leak a
+/// synthetic directory into a later test on the same thread.
+#[cfg(feature = "test-support")]
+pub fn with_cwd_sequence<T>(values: Vec<Option<String>>, f: impl FnOnce() -> T) -> (T, usize) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_CWD.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    TEST_CWD.with(|slot| *slot.borrow_mut() = Some(values.into()));
+    TEST_CWD_CALLS.with(|calls| calls.set(0));
+    let _reset = Reset;
+    let result = f();
+    let calls = TEST_CWD_CALLS.with(Cell::get);
+    (result, calls)
+}
 
 /// The private host boundary behind `neo:path`.
 ///
@@ -47,6 +103,17 @@ fn op_neo_path_is_windows() -> bool {
 /// does not name the directory the process is actually in.
 #[op2]
 fn op_neo_path_cwd<'s, 'i>(scope: &mut v8::PinScope<'s, 'i>) -> v8::Local<'s, v8::Value> {
+    #[cfg(feature = "test-support")]
+    if let Some(value) = test_cwd_override() {
+        return match value {
+            Some(text) => match v8::String::new(scope, &text) {
+                Some(value) => value.into(),
+                None => v8::null(scope).into(),
+            },
+            None => v8::null(scope).into(),
+        };
+    }
+
     let Some(directory) = std::env::current_dir().ok() else {
         return v8::null(scope).into();
     };
