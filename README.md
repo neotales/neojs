@@ -147,9 +147,13 @@ the actual body digest, so a weak ETag shared by different bytes is not treated 
 representation. It is tracked separately from the publication revision, so a newer `304` for the
 same bytes can supersede an older `304` without letting an older representation win. A newer `304`
 merges only headers it actually supplied, so omitting Cache-Control cannot undo an earlier
-`no-cache`. Ordering does not depend on the wall clock. Lock waits are capped at 250 ms and the
-remaining fetch deadline; a held or stale lock skips the cache operation and the fetch continues to
-the network. Header and metadata lines are
+`no-cache`. A newer `304` merges only fields it supplied and, without a usable `Date`/`Age`, derives
+age from the current cached metadata under the publication lock, so it cannot overwrite a more
+conservative age applied by an earlier `304`. Ordering does
+not depend on the wall clock. Lock waits are capped at 250 ms and the remaining fetch deadline; with a
+longer deadline a held or stale lock skips the cache operation and the fetch continues to the
+network, while a deadline at or below the cap may be consumed and the fetch times out before
+transport. Header and metadata lines are
 bounded, one file handle is used per read, the body length is checked before allocation, and
 appended bytes are rejected as a cache miss. There is no signature or content-addressed store, so the cache is not integrity
 protection against someone who can write it and does not pin a version;
