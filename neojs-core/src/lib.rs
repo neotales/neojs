@@ -261,6 +261,11 @@ mod crypto_cipher;
 mod crypto_hash;
 mod crypto_shamir;
 mod error;
+// Private groundwork for native `jsr:` imports. It is not wired into the
+// loader, so every `jsr:` import is still rejected; see `src/jsr.rs` for the
+// implemented core and the work that remains.
+#[allow(dead_code)]
+mod jsr;
 mod loader;
 mod path;
 mod runtime;
