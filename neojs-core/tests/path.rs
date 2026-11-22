@@ -396,7 +396,8 @@ const originalDialectOp = Deno.core.ops.op_neo_path_is_windows;
 try {
     Deno.core.ops.op_neo_path_cwd = () => { throw new Error("tampered cwd op"); };
     Deno.core.ops.op_neo_path_is_windows = () => { throw new Error("tampered dialect op"); };
-    equal(posix.relative(".", "."), "", "relative after op replacement");
+    const native = SEPARATOR === "\\" ? win32 : posix;
+    equal(native.relative(".", "."), "", "relative after op replacement");
     equal(SEPARATOR, SEPARATOR === "\\" ? win32.sep : posix.sep, "separator after op replacement");
 } finally {
     Deno.core.ops.op_neo_path_cwd = originalCwdOp;
