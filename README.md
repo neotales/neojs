@@ -142,10 +142,12 @@ body; it leaves an absent-entry tombstone so an older `200` cannot resurrect it.
 freshness lifetime is revalidated on the next run. Publications are serialized per key and use
 persistent monotonic revision files: a `200` loses to a newer entry or `no-store` tombstone, and a
 `304` uses its own request revision rather than a later completion token, so it cannot outrank a
-later-started `200` or `no-store`. Representation identity (ETag or body digest) is tracked separately
-from the publication revision, so a newer `304` for the same bytes can supersede an older `304`
-without letting an older representation win. Ordering does not depend on the wall clock. A stale lock
-from a crash only delays a cache write; loading falls back to the network. Header and metadata lines are
+later-started `200` or `no-store`. Representation identity combines the validator, when present, with
+the actual body digest, so a weak ETag shared by different bytes is not treated as the same
+representation. It is tracked separately from the publication revision, so a newer `304` for the
+same bytes can supersede an older `304` without letting an older representation win. Ordering does
+not depend on the wall clock. Lock waits are bounded by the fetch deadline; a held or stale lock
+skips the cache operation rather than blocking past the deadline. Header and metadata lines are
 bounded, one file handle is used per read, the body length is checked before allocation, and
 appended bytes are rejected as a cache miss. There is no signature or content-addressed store, so the cache is not integrity
 protection against someone who can write it and does not pin a version;
