@@ -2,15 +2,16 @@
 //!
 //! # Status
 //!
-//! This module is private and is not wired into [`crate::loader`]. Every `jsr:`
-//! import is still rejected with `jsr: modules are not implemented`; nothing
-//! here downloads, reads, caches, or executes a JSR package, and no public API
-//! is exposed. It is the deterministic part of a later loader integration:
-//! strict specifier parsing, registry-metadata parsing, version selection,
-//! entrypoint resolution, and per-file size and checksum verification.
-//! Fetching, transport, extraction, module loading, lockfiles, and cache policy
-//! are deliberately absent. A caller must not treat this module as evidence
-//! that native JSR imports work. Only the public registry's documented metadata
+//! This module is private and is not wired into [`crate::loader`] for a normal
+//! build. Every public `jsr:` import is still rejected with
+//! `jsr: modules are not implemented`; the test-only `jsr_loader` module
+//! exercises this core without exposing it. Nothing here downloads, reads,
+//! caches, or executes a JSR package, and no public API is exposed. It is the
+//! deterministic part of a loader integration: strict specifier parsing,
+//! registry-metadata parsing, version selection, entrypoint resolution, and
+//! per-file size and checksum verification. Fetching, transport, extraction,
+//! module loading, lockfiles, and cache policy are deliberately absent here. A
+//! caller must not treat this module as evidence that native JSR imports work. Only the public registry's documented metadata
 //! shape is modeled; private registries, authentication, credentials, and
 //! custom origins are out of scope.
 //!
