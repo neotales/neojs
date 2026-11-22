@@ -228,74 +228,59 @@ fn run_tests(patterns: &[String]) -> ExitCode {
     }
 }
 
+/// The default `--help` text, shared by `neojs --help` and `neojs test --help`.
+///
+/// This stays short on purpose: the built-in module surfaces, remote limits,
+/// unsupported features, and test-runner limits are documented in the README,
+/// which the last line points at. The options and both `--allow-remote`
+/// placements must stay in step with the current dev parser.
 fn help() -> String {
     format!(
         "\
 neojs {}
-Run an ECMAScript module or erasable TypeScript file on V8, or run test files.
+Run an ECMAScript module or erasable TypeScript file, or run test files.
 
 Usage:
-  neojs <file>
-  neojs test <file-or-glob>...
-  neojs --help
-  neojs --version
+  neojs <file>                    run one module
+  neojs --allow-remote <file-or-https-url>
+  neojs test <file-or-glob>...    run test files
+  neojs test --allow-remote <file-or-glob>...
+  neojs --allow-remote test <file-or-glob>...
 
-The file is read as an ECMAScript module, and relative imports resolve against
-it. ECMAScript modules, local .js, .mjs, .ts, and .mts imports, console output,
-top-level await, and the age, assert, chars, console, crypto, os, path, slices,
-ssh, stdio, strings, and test built-in modules are implemented. TypeScript is run
-by erasing type syntax: it is not type checked, constructs that need a transform
-(such as enum and namespace) are rejected, and .tsx, .jsx, .cts, and declaration
-files are not supported. The built-ins are available as
-Neo.getBuiltInModule(\"age\"), Neo.getBuiltInModule(\"assert\"),
-Neo.getBuiltInModule(\"chars\"), Neo.getBuiltInModule(\"console\"),
-Neo.getBuiltInModule(\"crypto\"), Neo.getBuiltInModule(\"os\"),
-Neo.getBuiltInModule(\"path\"), Neo.getBuiltInModule(\"slices\"),
-Neo.getBuiltInModule(\"ssh\"), Neo.getBuiltInModule(\"stdio\"),
-Neo.getBuiltInModule(\"strings\"), and Neo.getBuiltInModule(\"test\"), and as
-the import specifiers \"age\", \"neo:age\", \"assert\", \"neo:assert\",
-\"chars\", \"neo:chars\", \"console\", \"neo:console\", \"crypto\",
-\"neo:crypto\", \"os\", \"neo:os\", \"path\", \"neo:path\", \"slices\",
-\"neo:slices\", \"ssh\", \"neo:ssh\", \"stdio\", \"neo:stdio\", \"strings\",
-\"neo:strings\", \"test\", and \"neo:test\".
-The stdio module writes to this process's stdout and stderr and offers bounded
-in-memory byte streams; it adds no filesystem, process, environment, or stdin
-access. The os module reports the Rust build target's platform and arch; it
-reads no environment or operating-system file and installs no os global. The
-ssh module requires an explicit host-key pin or known-hosts document (there is
-no insecure default), adds outbound TCP and synchronous
-command execution, authenticates with a password, an in-memory key, or an
-explicit Unix agent opt-in, and reads no files or environment except
-SSH_AUTH_SOCK in that agent mode. It never forwards an agent. The test module
-registers sync and async tests, treats a rejected Promise, a generator object,
-a pending test, a per-test timeout, an unhandled rejection, and event-loop work
-that remains after a bounded settle window as failures, and is not Node's
-node:test. node: modules, including node:test, are rejected while no explicit
-Node-module opt-in exists. .cjs files, other neo: imports, remote imports,
-module type attributes, and permissions are not.
+Options:
+  --allow-remote   allow https: entry and imports; off by default
+  -h, --help       show this help; alone, or after `test`
+  -V, --version    show the version; must be the only argument
+  --               end option parsing, for a file or pattern beginning with `-`
 
-The test command expands every argument as an existing file or a shell-style
-glob. Globs are case-sensitive, * and ? do not cross a path separator, and a
-leading dot is matched only literally. The selected files are sorted by
-canonical path and deduplicated, so overlapping arguments run once. A missing
-literal, a malformed glob, or a glob that selects no regular file is an error;
-there is no default discovery pattern. Each file gets a fresh runtime, so
-global state and the test queue do not leak between files, and a failed file
-does not stop later files. A file that registers no tests fails. The runner
-waits up to about 100 ms of event-loop turns for detached timers, async ops,
-imports, and rejection events; if work remains, the verdict is unsettled and
-fails rather than passing on partial evidence. Test files run
-with this process's full filesystem authority; there is no sandbox, watch
-mode, parallelism, filtering, retry, subtests, mocks, snapshots, or Node
-compatibility claim.
+Modules are ECMAScript modules, and relative imports resolve from the importing
+file. .js, .mjs, .ts, and .mts run. TypeScript is stripped, not type checked:
+only erasable syntax is accepted (no enum, namespace, or other transforms), and
+.tsx, .jsx, .cts, and declaration files are rejected.
+
+The age, assert, chars, console, crypto, os, path, slices,
+ssh, stdio, strings, test, and uuid built-in modules are implemented, including
+the uuid/v4 and uuid/v7 subpaths. Import one by bare name or with the `neo:`
+prefix, or use `Neo.getBuiltInModule(\"test\")` and
+`Neo.getBuiltInModule(\"uuid\")`; the README lists every specifier.
+
+Remote loading is disabled by default. `--allow-remote` enables an https:
+entry and absolute https: imports; it may appear before the module, or before or
+after `test`. It is not SSRF protection and not a sandbox, and downloads are
+cached under `neojs/packages` in the user cache.
+
+`neojs test` expands each argument as an existing file or a case-sensitive
+shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
+runtime. There is no default discovery, and a file that registers no tests fails.
+Node modules (`node:`) are rejected; there is no Node-module opt-in.
 
 Exit codes:
-  0  the module finished, or every test file ran with no failures
-  1  the module failed to compile, resolve imports, link, or run; or a test
-     failed, was pending, left an unhandled rejection or unsettled event-loop
-     work, or registered no tests
-  2  neojs could not start (bad arguments, unreadable or unsupported entry file,
-     or a test file/glob that could not be expanded)
+  0  the module finished, or every test file passed
+  1  the module or a test failed, or a test file registered no tests
+  2  neojs could not start: bad arguments, an unreadable or unsupported entry
+     file, or a test file or glob that could not be expanded
+
+Docs: https://github.com/neotales/neojs#readme
 ",
         env!("CARGO_PKG_VERSION")
     )

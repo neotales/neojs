@@ -18,6 +18,29 @@ Build the `neojs` command from a checkout:
 cargo install --path neojs
 ```
 
+## Command line
+
+`neojs --help` prints a short summary of the command:
+
+```text
+Usage:
+  neojs <file>                    run one module
+  neojs --allow-remote <file-or-https-url>
+  neojs test <file-or-glob>...    run test files
+  neojs test --allow-remote <file-or-glob>...
+  neojs --allow-remote test <file-or-glob>...
+
+Options:
+  --allow-remote   allow https: entry and imports; off by default
+  -h, --help       show this help; alone, or after `test`
+  -V, --version    show the version; must be the only argument
+  --               end option parsing, for a file or pattern beginning with `-`
+```
+
+With no arguments, `neojs` exits 2 and points at `--help`. `--allow-remote` is off by default and
+may appear before the module, or before or after `test`. The module sections below document each
+built-in; [Limits](#limits) lists the unsupported features and the exit codes.
+
 ## What you can do ⚡
 
 **Run a module file.** `neojs` reads the file as an ECMAScript module, evaluates it, and waits

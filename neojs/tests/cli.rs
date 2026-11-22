@@ -1520,15 +1520,10 @@ fn help_describes_the_exit_codes_the_cli_uses() {
     assert_eq!(help.status.code(), Some(0));
     let text = stdout(&help);
     assert!(
-        text.contains("1  the module failed to compile, resolve imports, link, or run; or a test"),
+        text.contains("1  the module or a test failed, or a test file registered no tests"),
         "{text}"
     );
-    assert!(
-        text.contains(
-            "2  neojs could not start (bad arguments, unreadable or unsupported entry file,"
-        ),
-        "{text}"
-    );
+    assert!(text.contains("2  neojs could not start"), "{text}");
 }
 
 #[test]
@@ -1560,17 +1555,16 @@ fn refuses_a_neo_import_and_exits_1() {
     assert!(message.contains("not implemented"), "{message}");
 }
 
+/// Golden help text. The default help is deliberately short: details live in
+/// the README, and every option named here is one the current dev parser
+/// accepts. This branch predates remote loading, so only the help text is
+/// checked here; current dev's CLI tests cover the runtime behavior.
 #[test]
-fn prints_help_and_version() {
+fn prints_the_compact_help() {
     let help = run_args(&["--help"]);
+
     assert_eq!(help.status.code(), Some(0));
-    assert!(stdout(&help).contains("Usage:"));
-    assert!(stdout(&help).contains("age, assert, chars, console, crypto, os, path, slices"));
-    assert!(
-        stdout(&help).contains("ssh, stdio, strings, and test built-in modules are implemented")
-    );
-    assert!(stdout(&help).contains("Neo.getBuiltInModule(\"test\")"));
-    assert!(stdout(&help).contains("Node-module opt-in"));
+    assert_eq!(stdout(&help), expected_help());
 
     let version = run_args(&["--version"]);
     assert_eq!(version.status.code(), Some(0));
@@ -1579,24 +1573,168 @@ fn prints_help_and_version() {
         format!("neojs {}\n", env!("CARGO_PKG_VERSION"))
     );
 
+    // `test` has no separate help page; it prints the same text.
     let test_help = run_args(&["test", "--help"]);
     assert_eq!(test_help.status.code(), Some(0));
-    assert!(stdout(&test_help).contains("neojs test <file-or-glob>..."));
+    assert_eq!(stdout(&test_help), expected_help());
+}
+
+fn expected_help() -> String {
+    format!(
+        "\
+neojs {}
+Run an ECMAScript module or erasable TypeScript file, or run test files.
+
+Usage:
+  neojs <file>                    run one module
+  neojs --allow-remote <file-or-https-url>
+  neojs test <file-or-glob>...    run test files
+  neojs test --allow-remote <file-or-glob>...
+  neojs --allow-remote test <file-or-glob>...
+
+Options:
+  --allow-remote   allow https: entry and imports; off by default
+  -h, --help       show this help; alone, or after `test`
+  -V, --version    show the version; must be the only argument
+  --               end option parsing, for a file or pattern beginning with `-`
+
+Modules are ECMAScript modules, and relative imports resolve from the importing
+file. .js, .mjs, .ts, and .mts run. TypeScript is stripped, not type checked:
+only erasable syntax is accepted (no enum, namespace, or other transforms), and
+.tsx, .jsx, .cts, and declaration files are rejected.
+
+The age, assert, chars, console, crypto, os, path, slices,
+ssh, stdio, strings, test, and uuid built-in modules are implemented, including
+the uuid/v4 and uuid/v7 subpaths. Import one by bare name or with the `neo:`
+prefix, or use `Neo.getBuiltInModule(\"test\")` and
+`Neo.getBuiltInModule(\"uuid\")`; the README lists every specifier.
+
+Remote loading is disabled by default. `--allow-remote` enables an https:
+entry and absolute https: imports; it may appear before the module, or before or
+after `test`. It is not SSRF protection and not a sandbox, and downloads are
+cached under `neojs/packages` in the user cache.
+
+`neojs test` expands each argument as an existing file or a case-sensitive
+shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
+runtime. There is no default discovery, and a file that registers no tests fails.
+Node modules (`node:`) are rejected; there is no Node-module opt-in.
+
+Exit codes:
+  0  the module finished, or every test file passed
+  1  the module or a test failed, or a test file registered no tests
+  2  neojs could not start: bad arguments, an unreadable or unsupported entry
+     file, or a test file or glob that could not be expanded
+
+Docs: https://github.com/neotales/neojs#readme
+",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// The help names `--allow-remote` for a module run and in both test
+/// placements accepted by the current dev parser. This branch has no remote
+/// runtime, so the assertions are on the documented contract, not on a run.
+#[test]
+fn help_documents_allow_remote_for_modules_and_both_test_positions() {
+    for args in [["--help"].as_slice(), ["test", "--help"].as_slice()] {
+        let output = run_args(args);
+        assert_eq!(output.status.code(), Some(0), "{args:?}");
+        let text = stdout(&output);
+
+        assert!(
+            text.contains("neojs --allow-remote <file-or-https-url>"),
+            "{text}"
+        );
+        assert!(
+            text.contains("neojs test --allow-remote <file-or-glob>..."),
+            "{text}"
+        );
+        assert!(
+            text.contains("neojs --allow-remote test <file-or-glob>..."),
+            "{text}"
+        );
+        assert!(
+            text.contains("--allow-remote   allow https: entry and imports"),
+            "{text}"
+        );
+        assert!(text.contains("disabled by default"), "{text}");
+    }
+}
+
+/// The built-in list names UUID and its subpaths, and points at the README as
+/// the complete list, so adding a built-in does not require a help edit here.
+#[test]
+fn help_lists_uuid_and_points_at_the_readme_for_every_specifier() {
+    let help = run_args(&["--help"]);
+    assert_eq!(help.status.code(), Some(0));
+    let text = stdout(&help);
+
+    for expected in [
+        "uuid built-in modules are implemented",
+        "uuid/v4 and uuid/v7 subpaths",
+        "Neo.getBuiltInModule(\"uuid\")",
+        "README lists every specifier",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?}: {text}");
+    }
+}
+
+#[test]
+fn help_and_version_options_succeed_alone() {
+    for option in ["-h", "--help", "-V", "--version"] {
+        let output = run_args(&[option]);
+        assert_eq!(output.status.code(), Some(0), "{option}");
+    }
+
+    // No long help is claimed or implemented. Adding one is a deliberate
+    // change to this contract, not a silent extra page.
+    let long_help = run_args(&["--help-long"]);
+    assert_eq!(long_help.status.code(), Some(2));
+    assert!(stderr(&long_help).contains("unknown option `--help-long`"));
 }
 
 #[test]
 fn reports_bad_arguments_and_exits_2() {
     let no_args = run_args(&[]);
     assert_eq!(no_args.status.code(), Some(2));
-    assert!(stderr(&no_args).contains("no input file"));
+    assert_eq!(stdout(&no_args), "");
+    assert_eq!(
+        stderr(&no_args),
+        "neojs: no input file\nTry 'neojs --help'.\n"
+    );
 
     let unknown = run_args(&["--unknown"]);
     assert_eq!(unknown.status.code(), Some(2));
-    assert!(stderr(&unknown).contains("unknown option"));
+    assert_eq!(
+        stderr(&unknown),
+        "neojs: unknown option `--unknown`\nTry 'neojs --help'.\n"
+    );
+
+    // Options are accepted only as the sole argument; `--` is the exception.
+    let help_with_file = run_args(&["--help", "main.js"]);
+    assert_eq!(help_with_file.status.code(), Some(2));
+    assert_eq!(
+        stderr(&help_with_file),
+        "neojs: expected one input file, got 2\nTry 'neojs --help'.\n"
+    );
 
     let two_files = run_args(&["a.js", "b.js"]);
     assert_eq!(two_files.status.code(), Some(2));
     assert!(stderr(&two_files).contains("expected one input file"));
+
+    let no_patterns = run_args(&["test"]);
+    assert_eq!(no_patterns.status.code(), Some(2));
+    assert_eq!(
+        stderr(&no_patterns),
+        "neojs: no test files or globs given\nTry 'neojs --help'.\n"
+    );
+
+    let test_unknown = run_args(&["test", "--unknown"]);
+    assert_eq!(test_unknown.status.code(), Some(2));
+    assert_eq!(
+        stderr(&test_unknown),
+        "neojs: unknown option `--unknown`\nTry 'neojs --help'.\n"
+    );
 }
 
 #[test]
