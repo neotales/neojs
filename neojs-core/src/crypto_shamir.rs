@@ -1030,9 +1030,38 @@ pub(crate) fn zeroized_worker_results() -> usize {
     ZEROIZED_WORKER_RESULTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The original vector and its zeroization test metadata.
+///
+/// In test builds the context also records whether the spare capacity was fully
+/// initialized by a fixture. Production contexts leave it false, so assertions
+/// never read uninitialized capacity even if the wipe were removed.
+struct VecOwner {
+    bytes: Vec<u8>,
+    #[cfg(any(test, feature = "test-support"))]
+    capacity_initialized: bool,
+}
+
+impl VecOwner {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            #[cfg(any(test, feature = "test-support"))]
+            capacity_initialized: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_initialized_capacity(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            capacity_initialized: true,
+        }
+    }
+}
+
 /// V8 backing-store deleter for the original `Vec` allocation.
 ///
-/// `deleter_data` is a `Box<Vec<u8>>` created by [`zeroizing_bytes_to_v8`].
+/// `deleter_data` is a `Box<VecOwner>` created by [`zeroizing_bytes_to_v8`].
 /// The vector still owns its original allocation and capacity, so clearing the
 /// full capacity covers bytes past the logical length without reallocating.
 /// Dropping the vector frees that same allocation.
@@ -1044,23 +1073,35 @@ unsafe extern "C" fn wipe_vec_backing_store(
     if deleter_data.is_null() {
         return;
     }
-    // SAFETY: `deleter_data` is the `Box<Vec<u8>>` handed to V8, and V8 calls
+    // SAFETY: `deleter_data` is the `Box<VecOwner>` handed to V8, and V8 calls
     // this deleter exactly once.
-    let mut owner = unsafe { Box::from_raw(deleter_data.cast::<Vec<u8>>()) };
+    let mut owner = unsafe { Box::from_raw(deleter_data.cast::<VecOwner>()) };
+    let initialized = owner.bytes.len();
     // `Zeroize for Vec` uses volatile writes over the elements and then over
     // the full spare capacity, followed by its optimization barrier. This
     // covers the original allocation including capacity without reallocating.
-    owner.zeroize();
+    owner.bytes.zeroize();
     #[cfg(any(debug_assertions, feature = "test-support"))]
     {
-        // SAFETY: `Zeroize for Vec` has just written zero to every capacity
-        // byte, so the memory is initialized and can be inspected safely. This
-        // fails a test if the wipe is removed.
-        let all = unsafe { std::slice::from_raw_parts(owner.as_ptr(), owner.capacity()) };
+        // Only the originally initialized logical bytes are inspected here.
+        // If the wipe were removed, reading this range is still initialized and
+        // cannot observe uninitialized spare capacity.
+        let all = unsafe { std::slice::from_raw_parts(owner.bytes.as_ptr(), initialized) };
         assert!(
             all.iter().all(|byte| *byte == 0),
-            "the full vector allocation was not zeroized"
+            "the initialized vector bytes were not zeroized"
         );
+        #[cfg(any(test, feature = "test-support"))]
+        if owner.capacity_initialized {
+            // The fixture initialized every capacity byte, so this full-range
+            // read remains safe even if the wipe is removed.
+            let all =
+                unsafe { std::slice::from_raw_parts(owner.bytes.as_ptr(), owner.bytes.capacity()) };
+            assert!(
+                all.iter().all(|byte| *byte == 0),
+                "the fully initialized vector capacity was not zeroized"
+            );
+        }
     }
     #[cfg(feature = "test-support")]
     ZEROIZED_V8_BUFFERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1092,10 +1133,10 @@ fn zeroizing_bytes_to_v8<'s>(
     }
     let vec = std::mem::take(&mut *bytes);
     let original_pointer = vec.as_ptr();
-    let mut owner = Box::new(vec);
-    debug_assert_eq!(owner.len(), length);
-    debug_assert_eq!(owner.as_ptr(), original_pointer);
-    let data = owner.as_mut_ptr().cast::<c_void>();
+    let mut owner = Box::new(VecOwner::new(vec));
+    debug_assert_eq!(owner.bytes.len(), length);
+    debug_assert_eq!(owner.bytes.as_ptr(), original_pointer);
+    let data = owner.bytes.as_mut_ptr().cast::<c_void>();
     let context = Box::into_raw(owner).cast::<c_void>();
     // SAFETY: `data` points into the vector allocation owned by `context`.
     // V8 takes both until it calls `wipe_vec_backing_store`, which reconstructs
@@ -1453,27 +1494,47 @@ fn validate_plan_total(plans: &[SharePlan<'_>]) -> Result<usize, ShamirError> {
 /// is cleared with the vetted [`Zeroize for Vec`] implementation, which
 /// volatile-writes the elements and full spare capacity and then applies its
 /// optimization barrier. The drop instrumentation runs only after that clear.
-struct SensitiveVec(Option<Vec<u8>>);
+struct SensitiveVec {
+    bytes: Option<Vec<u8>>,
+    #[cfg(any(test, feature = "test-support"))]
+    capacity_initialized: bool,
+}
 
 impl SensitiveVec {
     fn new(bytes: Vec<u8>) -> Self {
-        Self(Some(bytes))
+        Self {
+            bytes: Some(bytes),
+            #[cfg(any(test, feature = "test-support"))]
+            capacity_initialized: false,
+        }
     }
 
     fn empty() -> Self {
-        Self(None)
+        Self {
+            bytes: None,
+            #[cfg(any(test, feature = "test-support"))]
+            capacity_initialized: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_initialized_capacity(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes: Some(bytes),
+            capacity_initialized: true,
+        }
     }
 
     fn take(&mut self) -> Option<Vec<u8>> {
-        self.0.take()
+        self.bytes.take()
     }
 
     fn as_slice(&self) -> &[u8] {
-        self.0.as_deref().unwrap_or(&[])
+        self.bytes.as_deref().unwrap_or(&[])
     }
 
     fn len(&self) -> usize {
-        self.0.as_ref().map_or(0, Vec::len)
+        self.bytes.as_ref().map_or(0, Vec::len)
     }
 
     fn is_empty(&self) -> bool {
@@ -1483,18 +1544,29 @@ impl SensitiveVec {
 
 impl Drop for SensitiveVec {
     fn drop(&mut self) {
-        if let Some(mut bytes) = self.0.take() {
+        if let Some(mut bytes) = self.bytes.take() {
+            let initialized = bytes.len();
             bytes.zeroize();
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "test-support"))]
             {
-                // SAFETY: `Zeroize for Vec` has just written zero to every
-                // capacity byte. Reading it is initialized and catches a
-                // removed wipe in tests without reading freed memory.
-                let all = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.capacity()) };
-                debug_assert!(
+                // Only the originally initialized logical bytes are inspected
+                // here. This range is initialized even if the wipe is removed.
+                let all = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), initialized) };
+                assert!(
                     all.iter().all(|byte| *byte == 0),
                     "sensitive bytes were not cleared before drop"
                 );
+                #[cfg(any(test, feature = "test-support"))]
+                if self.capacity_initialized {
+                    // The fixture initialized every capacity byte, so this
+                    // full-range read is safe even if the wipe is removed.
+                    let all =
+                        unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.capacity()) };
+                    assert!(
+                        all.iter().all(|byte| *byte == 0),
+                        "fully initialized sensitive capacity was not cleared"
+                    );
+                }
             }
             #[cfg(feature = "test-support")]
             ZEROIZED_WORKER_RESULTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1802,9 +1874,10 @@ mod tests {
         }
         #[cfg(feature = "test-support")]
         let before = zeroized_worker_results();
-        // The Drop implementation's debug assertion fails if the full-capacity
-        // wipe is removed. It inspects the live allocation before it is freed.
-        drop(SensitiveVec::new(vec));
+        // The Drop implementation's live-byte assertion fails if the
+        // full-capacity wipe is removed. The fixture initializes every capacity
+        // byte, so the assertion can read the full range without UB.
+        drop(SensitiveVec::new_with_initialized_capacity(vec));
         #[cfg(feature = "test-support")]
         assert_eq!(
             zeroized_worker_results(),
@@ -1826,7 +1899,8 @@ mod tests {
             std::ptr::write_bytes(vec.as_mut_ptr().add(length), 0xaa, capacity - length);
         }
         let data = vec.as_mut_ptr().cast::<c_void>();
-        let context = Box::into_raw(Box::new(vec)).cast::<c_void>();
+        let context =
+            Box::into_raw(Box::new(VecOwner::new_with_initialized_capacity(vec))).cast::<c_void>();
         // SAFETY: `data`/`context` match the layout the deleter expects; this is
         // the same ownership transfer V8 performs exactly once.
         unsafe {
