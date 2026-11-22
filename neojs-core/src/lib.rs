@@ -4,11 +4,11 @@
 //! and drains V8's event loop. A runtime is single-use; a second entry module
 //! returns [`Error::RuntimeConsumed`].
 //!
-//! It provides the `age`, `chars`, `console`, `crypto`, `path`, `ssh`, and
-//! `stdio` built-in modules through `Neo.getBuiltInModule(name)` and through the
-//! module specifiers `age`, `neo:age`, `chars`, `neo:chars`, `console`,
-//! `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`,
-//! `stdio`, and `neo:stdio`.
+//! It provides the `age`, `chars`, `console`, `crypto`, `path`, `ssh`, `stdio`,
+//! and `strings` built-in modules through `Neo.getBuiltInModule(name)` and
+//! through the module specifiers `age`, `neo:age`, `chars`, `neo:chars`,
+//! `console`, `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`,
+//! `neo:ssh`, `stdio`, `neo:stdio`, `strings`, and `neo:strings`.
 //!
 //! `age` is synchronous binary age v1 encryption for X25519 recipients. It
 //! exposes `generateIdentity`, `identityToRecipient`, `encrypt`, and `decrypt`.
@@ -67,6 +67,26 @@
 //! accepts the bytes or reports an error. See `neojs-core/src/stdio.rs` for the
 //! ownership, partial-read, end-of-file, close, error, and size contracts.
 //!
+//! `strings` is plain ECMAScript: folded matching (`equalFold`,
+//! `startsWithFold`, `endsWithFold`, `indexOfFold`, `lastIndexOfFold`) and
+//! trimming of a caller-supplied code point set (`trim`, `trimStart`,
+//! `trimEnd`). Folding is ECMAScript's simple case folding, decided per code
+//! point by V8's own RegExp `/iu` canonicalization, so it ships no Unicode
+//! table, is locale-independent, and follows the Unicode data in the V8 build.
+//! It is not `toLowerCase()` comparison: `"K"` equals U+212A KELVIN SIGN,
+//! `"s"` equals U+017F LONG S, `"I"` does not equal U+0131 DOTLESS I, and
+//! `"ss"` does not equal `"ß"`. Indices are UTF-16 code unit offsets like
+//! `String.prototype.indexOf`, and overlapping occurrences are found. Searching
+//! is linear in the text plus the search string (KMP over simple-fold
+//! equivalence) and uses O(search) extra memory, so a repeated prefix cannot
+//! make it quadratic. `lastIndexOfFold` stops as soon as no match can begin at
+//! or before its limit, so a small limit does not scan a long tail. A lone
+//! surrogate is compared as itself and never matches half of a pair. With no
+//! `chars`, trimming is exactly `String.prototype.trim`, so it uses
+//! JavaScript's whitespace set rather than `neo:chars`' Go-derived
+//! `isSpace`. The module does not coerce arguments and calls no host op; it
+//! adds no capability beyond the strings it is given.
+//!
 //! `ssh` is a synchronous command-execution slice over the MIT-licensed
 //! `neotales-ssh` crate: `connect` dials one host, completes the SSH handshake
 //! and exactly one of password, in-memory-private-key, or explicit Unix-agent
@@ -101,11 +121,11 @@
 //! provenance contracts.
 //!
 //! An ES module namespace object is not the registry object. For `age`, `chars`,
-//! `crypto`, `path`, `ssh`, and `stdio`, both paths expose the same classes,
-//! functions, and shared stream objects; the namespace is a separate container
-//! over them. For `console`, the registry object is the console object the
-//! runtime installed, and the default export's value is that object. The named
-//! exports are that
+//! `crypto`, `path`, `ssh`, `stdio`, and `strings`, both paths expose the same
+//! classes, functions, and shared stream objects; the namespace is a separate
+//! container over them. For `console`, the registry object is the console
+//! object the runtime installed, and the default export's value is that object.
+//! The named exports are that
 //! object's method values when the module is
 //! evaluated, so a method replaced before then is what they capture; later
 //! replacements are not followed. Neither path follows a replacement of the

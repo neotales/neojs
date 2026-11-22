@@ -1537,3 +1537,642 @@ fn an_async_preflight_failure_leaves_the_runtime_unused() {
             .expect("the runtime is usable after an async preflight failure");
     });
 }
+
+#[test]
+fn strings_folded_matching_uses_es_simple_folding() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+const cases = [
+    // [text, other, expected, description]
+    ["Hello", "HELLO", true, "ASCII case"],
+    ["café", "CAFÉ", true, "accented Latin"],
+    ["K", "\u212A", true, "Kelvin sign"],
+    ["\u212A", "k", true, "Kelvin sign reversed"],
+    ["S", "\u017F", true, "long s"],
+    ["\u03C3", "\u03C2", true, "sigma and final sigma"],
+    ["I", "\u0131", false, "dotless i is not I"],
+    ["i", "\u0130", false, "dotted I is not i"],
+    ["ss", "\u00DF", false, "sharp s is full folding only"],
+    ["a\n", "A\n", true, "newline inside the text"],
+    ["a\uD800", "a\uD800", true, "the same lone surrogate"],
+    ["a\uD800", "a", false, "a lone surrogate is not absent"],
+    ["\uD83D", "\u{1F600}", false, "half a pair is not the pair"],
+    ["\u{1F600}", "\u{1F600}", true, "the same astral character"],
+    ["", "", true, "both empty"],
+    ["", "\u0000", false, "empty is not NUL"],
+    ["a.b", "a.b", true, "a literal dot"],
+    ["a.b", "axb", false, "the dot is not a wildcard"],
+    ["[a-z]", "[a-z]", true, "a literal character class"],
+    ["\\d", "\\d", true, "a literal backslash"],
+    ["a*", "aaa", false, "a literal star"],
+];
+for (const [text, other, expected, description] of cases) {
+    const actual = strings.equalFold(text, other);
+    if (actual !== expected) {
+        throw new Error(`equalFold(${JSON.stringify(text)}, ${JSON.stringify(other)}) is ${actual}: ${description}`);
+    }
+    if (strings.equalFold(other, text) !== actual) {
+        throw new Error(`equalFold is not symmetric for ${description}`);
+    }
+}
+
+if (!strings.startsWithFold("Hello World", "HELLO")) throw new Error("startsWithFold missed");
+if (strings.startsWithFold("Hello", "World")) throw new Error("startsWithFold overmatched");
+if (!strings.startsWithFold("abc", "")) throw new Error("startsWithFold rejected an empty prefix");
+if (!strings.startsWithFold("(x)", "(x)")) throw new Error("startsWithFold treated a paren as a group");
+if (!strings.startsWithFold("|x", "|")) throw new Error("startsWithFold treated a pipe as alternation");
+
+if (!strings.endsWithFold("Hello World", "WORLD")) throw new Error("endsWithFold missed");
+if (strings.endsWithFold("Hello", "Hell")) throw new Error("endsWithFold overmatched");
+if (!strings.endsWithFold("abc", "")) throw new Error("endsWithFold rejected an empty suffix");
+// JS `$` without `m` matches only at the end of the input.
+if (strings.endsWithFold("a\n", "a")) throw new Error("endsWithFold matched before a final newline");
+if (!strings.endsWithFold("a\n", "\n")) throw new Error("endsWithFold missed a final newline");
+if (!strings.endsWithFold("a\n", "a\n")) throw new Error("endsWithFold missed the newline in the suffix");
+if (strings.endsWithFold("a\r\n", "a")) throw new Error("endsWithFold matched before CRLF");
+"#,
+    );
+}
+
+#[test]
+fn strings_indices_are_utf16_and_last_index_finds_overlaps() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+const cases = [
+    // [text, search, fromIndex, expected, description]
+    ["\u{1F600}a", "A", undefined, 2, "astral prefix counts two code units"],
+    ["a\u{1F600}b", "B", undefined, 3, "astral in the middle"],
+    ["abc", "z", undefined, -1, "absent"],
+    ["abc", "", undefined, 0, "empty search at the start"],
+    ["abc", "", 2, 2, "empty search at an index"],
+    ["\u{1F600}", "", 1, 1, "empty search inside a surrogate pair"],
+    ["\u{1F600}a", "a", 1, 2, "non-empty search starts at the next code point"],
+    ["abc", "b", -5, 1, "a negative index clamps to zero"],
+    ["abc", "c", Infinity, -1, "Infinity clamps to the length"],
+    ["abc", "", Infinity, 3, "an empty search at Infinity is the length"],
+    ["abc", "a", 99, -1, "an index above the length finds nothing"],
+    ["x.a.y", "a.", undefined, 2, "regex metacharacters are literal"],
+];
+for (const [text, search, fromIndex, expected, description] of cases) {
+    const actual = strings.indexOfFold(text, search, fromIndex);
+    if (actual !== expected) {
+        throw new Error(`indexOfFold(${JSON.stringify(text)}, ${JSON.stringify(search)}, ${fromIndex}) is ${actual}, expected ${expected}: ${description}`);
+    }
+}
+
+const lastCases = [
+    ["aaa", "aa", undefined, 1, "overlapping occurrences"],
+    ["aaaa", "aa", undefined, 2, "three overlapping occurrences"],
+    ["aAa", "a", undefined, 2, "case-insensitive last occurrence"],
+    ["a\u{1F600}b\u{1F600}", "B", undefined, 3, "astral text"],
+    ["abc", "z", undefined, -1, "absent"],
+    ["abc", "", undefined, 3, "empty search is the length"],
+    ["abc", "", 1, 1, "empty search at an index"],
+    ["aaaa", "aa", 2, 2, "a match starting at the limit"],
+    ["aaaa", "aa", 1, 1, "a match starting below the limit"],
+    ["aaa", "a", 0, 0, "a zero limit"],
+    ["aaa", "a", -4, 0, "a negative limit clamps to zero"],
+    ["\u212A\u212A", "k", undefined, 1, "folded last occurrence"],
+];
+for (const [text, search, fromIndex, expected, description] of lastCases) {
+    const actual = strings.lastIndexOfFold(text, search, fromIndex);
+    if (actual !== expected) {
+        throw new Error(`lastIndexOfFold(${JSON.stringify(text)}, ${JSON.stringify(search)}, ${fromIndex}) is ${actual}, expected ${expected}: ${description}`);
+    }
+}
+
+// Overlap parity with String.prototype.lastIndexOf on an ASCII haystack.
+const overlapText = "aaaa";
+for (let limit = -1; limit <= overlapText.length + 1; limit += 1) {
+    const actual = strings.lastIndexOfFold(overlapText, "aa", limit);
+    const expected = overlapText.lastIndexOf("aa", limit);
+    if (actual !== expected) {
+        throw new Error(`overlap parity failed at limit ${limit}: ${actual} !== ${expected}`);
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn strings_trim_removes_a_code_point_set_and_defaults_to_js_whitespace() {
+    run_js(
+        r###"
+import * as strings from "strings";
+
+const trimCases = [
+    ["...hi...", ".", "hi", "one character"],
+    ["##a##", "#", "a", "hash"],
+    ["xyhelloyx", "xy", "hello", "a set of characters"],
+    ["\u{1F600}x\u{1F600}", "\u{1F600}", "x", "an astral code point"],
+    ["  a  ", "", "  a  ", "an empty set trims nothing"],
+    ["....", ".", "", "a fully trimmed string"],
+    ["abc", ".", "abc", "no leading or trailing member"],
+    ["", ".", "", "empty text"],
+    ["a.b", ".", "a.b", "a member in the middle is kept"],
+    ["\uD800x\uD800", "\uD800", "x", "a lone surrogate in the set"],
+];
+for (const [text, chars, expected, description] of trimCases) {
+    if (strings.trim(text, chars) !== expected) {
+        throw new Error(`trim failed for ${description}`);
+    }
+}
+
+if (strings.trimStart("///a/b", "/") !== "a/b") throw new Error("trimStart failed");
+if (strings.trimEnd("a/b///", "/") !== "a/b") throw new Error("trimEnd failed");
+if (strings.trimStart("\u{1F600}a", "\u{1F600}") !== "a") throw new Error("trimStart astral failed");
+if (strings.trimEnd("a\u{1F600}", "\u{1F600}") !== "a") throw new Error("trimEnd astral failed");
+
+// No `chars` is exactly String.prototype.trim: JS whitespace contains U+FEFF
+// and excludes U+0085. This is deliberately not neo:chars' Go isSpace.
+const jsWhitespace = "\uFEFF\t a \n\u0085";
+if (strings.trim(jsWhitespace) !== jsWhitespace.trim()) {
+    throw new Error("trim() without chars does not match String.prototype.trim");
+}
+if (strings.trim("\uFEFF a \uFEFF") !== "a") throw new Error("trim() did not remove U+FEFF");
+if (strings.trim("\u0085a\u0085") !== "\u0085a\u0085") {
+    throw new Error("trim() removed U+0085, which is not JS whitespace");
+}
+if (strings.trimStart("  a  ") !== "a  ") throw new Error("trimStart default failed");
+if (strings.trimEnd("  a  ") !== "  a") throw new Error("trimEnd default failed");
+"###,
+    );
+}
+
+#[test]
+fn strings_reject_non_string_and_bad_index_arguments() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+const typeErrors = [
+    () => strings.equalFold(1, "a"),
+    () => strings.equalFold("a", 1),
+    () => strings.startsWithFold("a", null),
+    () => strings.endsWithFold(Symbol("x"), "a"),
+    () => strings.indexOfFold("a", 1),
+    () => strings.lastIndexOfFold("a", "a", "1"),
+    () => strings.trim("a", 1),
+    () => strings.trimStart(undefined, "a"),
+    () => strings.trimEnd("a", {}),
+];
+for (const call of typeErrors) {
+    let threw = false;
+    try {
+        call();
+    } catch (error) {
+        if (!(error instanceof TypeError)) {
+            throw new Error(`expected TypeError, got ${error}`);
+        }
+        threw = true;
+    }
+    if (!threw) throw new Error("a non-string argument was accepted");
+}
+
+for (const index of [1.5, NaN]) {
+    let threw = false;
+    try {
+        strings.indexOfFold("a", "a", index);
+    } catch (error) {
+        if (!(error instanceof RangeError)) {
+            throw new Error(`expected RangeError for ${index}, got ${error}`);
+        }
+        threw = true;
+    }
+    if (!threw) throw new Error(`a non-integer fromIndex was accepted: ${index}`);
+}
+
+// A number is rejected rather than coerced, even when its string form matches.
+let coerced = false;
+try {
+    strings.indexOfFold("a1", 1);
+} catch (error) {
+    coerced = error instanceof TypeError;
+}
+if (!coerced) throw new Error("indexOfFold coerced a number to a string");
+"#,
+    );
+}
+
+#[test]
+fn strings_survive_replaced_intrinsics() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+const baseline = [
+    strings.equalFold("K", "\u212A"),
+    strings.startsWithFold("Hello", "HEL"),
+    strings.endsWithFold("a\n", "\n"),
+    strings.indexOfFold("\u{1F600}a", "A"),
+    strings.lastIndexOfFold("aaa", "aa"),
+    strings.trim("...hi...", "."),
+    strings.trim("\uFEFF a \uFEFF"),
+];
+
+const originals = {
+    exec: RegExp.prototype.exec,
+    regexp: globalThis.RegExp,
+    trim: String.prototype.trim,
+    trimStart: String.prototype.trimStart,
+    trimEnd: String.prototype.trimEnd,
+    slice: String.prototype.slice,
+    charCodeAt: String.prototype.charCodeAt,
+    codePointAt: String.prototype.codePointAt,
+    has: Set.prototype.has,
+    add: Set.prototype.add,
+    get: Map.prototype.get,
+    set: Map.prototype.set,
+};
+// Keep the prototype itself: after the global `RegExp` identifier is
+// replaced, `RegExp.prototype` no longer names this object.
+const regexpPrototype = RegExp.prototype;
+const boom = () => {
+    throw new Error("a replaced intrinsic was called");
+};
+regexpPrototype.exec = boom;
+globalThis.RegExp = boom;
+String.prototype.trim = boom;
+String.prototype.trimStart = boom;
+String.prototype.trimEnd = boom;
+String.prototype.slice = boom;
+String.prototype.charCodeAt = boom;
+String.prototype.codePointAt = boom;
+Set.prototype.has = boom;
+Set.prototype.add = boom;
+Map.prototype.get = boom;
+Map.prototype.set = boom;
+try {
+    const after = [
+        strings.equalFold("K", "\u212A"),
+        strings.startsWithFold("Hello", "HEL"),
+        strings.endsWithFold("a\n", "\n"),
+        strings.indexOfFold("\u{1F600}a", "A"),
+        strings.lastIndexOfFold("aaa", "aa"),
+        strings.trim("...hi...", "."),
+        strings.trim("\uFEFF a \uFEFF"),
+    ];
+    if (JSON.stringify(after) !== JSON.stringify(baseline)) {
+        throw new Error(`results changed: ${JSON.stringify(after)} !== ${JSON.stringify(baseline)}`);
+    }
+} finally {
+    globalThis.RegExp = originals.regexp;
+    regexpPrototype.exec = originals.exec;
+    String.prototype.trim = originals.trim;
+    String.prototype.trimStart = originals.trimStart;
+    String.prototype.trimEnd = originals.trimEnd;
+    String.prototype.slice = originals.slice;
+    String.prototype.charCodeAt = originals.charCodeAt;
+    String.prototype.codePointAt = originals.codePointAt;
+    Set.prototype.has = originals.has;
+    Set.prototype.add = originals.add;
+    Map.prototype.get = originals.get;
+    Map.prototype.set = originals.set;
+}
+if (globalThis.RegExp !== originals.regexp) throw new Error("RegExp was not restored");
+"#,
+    );
+}
+
+#[test]
+fn strings_handle_long_input() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+const long = "a".repeat(1000000);
+const tail = long + "needle";
+
+if (strings.indexOfFold(tail, "NEEDLE") !== 1000000) {
+    throw new Error("indexOfFold failed on a long string");
+}
+if (strings.lastIndexOfFold(tail, "NEEDLE") !== 1000000) {
+    throw new Error("lastIndexOfFold failed on a long string");
+}
+if (!strings.equalFold(long, long)) throw new Error("equalFold failed on identical long strings");
+if (strings.equalFold(long, long + "x")) throw new Error("equalFold accepted a longer string");
+if (!strings.equalFold(long + "a", long + "A")) {
+    throw new Error("equalFold failed on a long ASCII string");
+}
+if (!strings.startsWithFold(long, long)) throw new Error("startsWithFold failed on a long prefix");
+if (!strings.endsWithFold(tail, "NEEDLE")) throw new Error("endsWithFold failed on a long text");
+
+const trimmed = strings.trim(".".repeat(500000) + "x" + ".".repeat(500000), ".");
+if (trimmed !== "x") throw new Error("trim failed on a long string");
+
+const accented = "\u00E9".repeat(200000);
+if (!strings.equalFold(accented, "\u00C9".repeat(200000))) {
+    throw new Error("equalFold failed on a long non-ASCII string");
+}
+"#,
+    );
+}
+
+#[test]
+fn strings_module_named_exports_are_the_registry_functions() {
+    run_js(
+        r#"
+import * as strings from "strings";
+const registry = Neo.getBuiltInModule("strings");
+if (registry !== Neo.getBuiltInModule("strings")) {
+    throw new Error("strings lookup is not cached");
+}
+if (!Object.isFrozen(registry)) throw new Error("strings is not frozen");
+const exported = Object.keys(strings).sort();
+const registered = Object.keys(registry).sort();
+if (JSON.stringify(exported) !== JSON.stringify(registered)) {
+    throw new Error(`export list ${exported} does not match ${registered}`);
+}
+const expected = [
+    "endsWithFold", "equalFold", "indexOfFold", "lastIndexOfFold",
+    "startsWithFold", "trim", "trimEnd", "trimStart",
+];
+if (JSON.stringify(registered) !== JSON.stringify(expected)) {
+    throw new Error(`unexpected exports: ${registered}`);
+}
+for (const name of registered) {
+    if (typeof strings[name] !== "function") throw new Error(`${name} is not a function`);
+    if (strings[name] !== registry[name]) throw new Error(`${name} is not the registry function`);
+}
+if ("default" in strings) throw new Error("strings must not have a default export");
+
+const alias = await import("neo:strings");
+const upper = await import("NEO:strings");
+if (alias !== strings) throw new Error("neo:strings is not the same module instance");
+if (upper !== strings) throw new Error("the scheme is not matched case-insensitively");
+if (import.meta.resolve("strings") !== "neo:strings") {
+    throw new Error("strings did not resolve canonically");
+}
+
+let rejected = false;
+try {
+    strings.trim = () => "replaced";
+} catch (error) {
+    rejected = error instanceof TypeError;
+}
+if (!rejected) throw new Error("a namespace export was assignable");
+if (strings.trim("...x...", ".") !== "x") throw new Error("trim was replaced");
+"#,
+    );
+}
+
+#[test]
+fn strings_folded_search_stays_linear_on_repeated_prefixes() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+// A per-position retry of the whole needle performs about 10^10 comparisons
+// for the ASCII case and about 2.5 * 10^9 for the astral case at these sizes,
+// so restoring that implementation fails this test by not completing. KMP
+// finishes in milliseconds.
+const asciiPrefix = "a".repeat(100000);
+if (strings.indexOfFold(asciiPrefix + "c", asciiPrefix + "b") !== -1) {
+    throw new Error("ASCII repeated-prefix miss was found");
+}
+if (strings.lastIndexOfFold(asciiPrefix + "c", asciiPrefix + "b") !== -1) {
+    throw new Error("lastIndexOfFold ASCII repeated-prefix miss was found");
+}
+const asciiHit = asciiPrefix + asciiPrefix + "b";
+if (strings.indexOfFold(asciiHit, asciiPrefix + "b") !== 100000) {
+    throw new Error("ASCII repeated-prefix hit was missed");
+}
+if (strings.lastIndexOfFold(asciiHit, asciiPrefix + "b") !== 100000) {
+    throw new Error("lastIndexOfFold ASCII repeated-prefix hit was missed");
+}
+
+const astralBlock = "\u{1F600}".repeat(50000);
+if (strings.indexOfFold(astralBlock + "x", astralBlock + "y") !== -1) {
+    throw new Error("astral repeated-prefix miss was found");
+}
+if (strings.lastIndexOfFold(astralBlock + "x", astralBlock + "y") !== -1) {
+    throw new Error("lastIndexOfFold astral repeated-prefix miss was found");
+}
+
+const foldedBlock = "\u03C3".repeat(50000);
+const foldedNeedle = "\u03A3".repeat(50000) + "y";
+const foldedHit = foldedBlock + "\u03A3".repeat(50000) + "y";
+if (strings.indexOfFold(foldedHit, foldedNeedle) !== 50000) {
+    throw new Error("folded repeated-prefix hit was missed");
+}
+if (strings.lastIndexOfFold(foldedHit, foldedNeedle) !== 50000) {
+    throw new Error("lastIndexOfFold folded repeated-prefix hit was missed");
+}
+"#,
+    );
+}
+
+#[test]
+fn strings_folded_search_keeps_unicode_and_overlap_semantics() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+const indexCases = [
+    ["aaaa", "aa", 0, "overlapping first match"],
+    ["aaab", "aab", 1, "KMP fallback after a failed prefix"],
+    ["xabab", "abA", 1, "folded needle"],
+    ["kK", "K\u212A", 0, "fold-equivalent code points in the prefix"],
+    ["\u03A3\u03A3x\u03A3\u03A3y", "\u03A3\u03A3y", 3, "folded repeated prefix"],
+    ["\u{1F600}a\u{1F600}a", "A\u{1F600}", 2, "astral match starts on a boundary"],
+    ["\u{1F600}", "\uDE00", -1, "a lone surrogate never matches half a pair"],
+];
+for (const [text, search, expected, description] of indexCases) {
+    const actual = strings.indexOfFold(text, search);
+    if (actual !== expected) {
+        throw new Error(`indexOfFold(${JSON.stringify(text)}, ${JSON.stringify(search)}) is ${actual}, expected ${expected}: ${description}`);
+    }
+}
+if (strings.indexOfFold("\u{1F600}a", "a", 1) !== 2) {
+    throw new Error("fromIndex inside a pair did not move to the next boundary");
+}
+
+const lastCases = [
+    ["aaaa", "aa", 2, "overlapping last match"],
+    ["aaa", "aa", 1, "single overlap"],
+    ["xababA", "abA", 3, "folded needle at the end"],
+    ["\u03C3".repeat(1000), "\u03C3\u03C3", 998, "long overlapping block"],
+    ["\u{1F600}\u{1F600}", "\u{1F600}", 2, "astral last match"],
+];
+for (const [text, search, expected, description] of lastCases) {
+    const actual = strings.lastIndexOfFold(text, search);
+    if (actual !== expected) {
+        throw new Error(`lastIndexOfFold(${JSON.stringify(text)}, ${JSON.stringify(search)}) is ${actual}, expected ${expected}: ${description}`);
+    }
+}
+
+// KMP must report the same last index as String.prototype.lastIndexOf on an
+// ASCII haystack for every limit, including limits inside a match.
+const overlapText = "abababab";
+for (let limit = -1; limit <= overlapText.length + 1; limit += 1) {
+    const actual = strings.lastIndexOfFold(overlapText, "abab", limit);
+    const expected = overlapText.lastIndexOf("abab", limit);
+    if (actual !== expected) {
+        throw new Error(`overlap parity failed at ${limit}: ${actual} !== ${expected}`);
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn strings_last_index_stops_at_a_small_limit() {
+    run_js(
+        r#"
+import * as strings from "strings";
+
+// One million code points with no match. With fromIndex 0 the scan must stop
+// as soon as no pending or future match can start at or before 0; a scan that
+// ignores the limit reads the whole text.
+const astral = "\u{1F600}".repeat(1000000) + "needle";
+if (strings.lastIndexOfFold(astral, "zzz", 0) !== -1) {
+    throw new Error("small-limit no-match found something");
+}
+if (strings.lastIndexOfFold(astral, "NEEDLE", 0) !== -1) {
+    throw new Error("a match after the limit was reported");
+}
+
+// A match at the limit is still found.
+if (strings.lastIndexOfFold("needle" + "x".repeat(1000000), "NEEDLE", 0) !== 0) {
+    throw new Error("a match at the limit was skipped");
+}
+if (strings.lastIndexOfFold("a".repeat(1000000) + "b", "B", 1000000) !== 1000000) {
+    throw new Error("a match exactly at a large limit was skipped");
+}
+if (strings.lastIndexOfFold("a".repeat(1000000) + "b", "B", 999999) !== -1) {
+    throw new Error("a match after the limit was reported");
+}
+
+// A pending partial match that starts at the limit keeps the scan alive until
+// it fails; a limit inside a surrogate pair admits no boundary after it.
+if (strings.lastIndexOfFold("ab" + "x".repeat(1000000), "abc", 0) !== -1) {
+    throw new Error("a pending match at the limit was mishandled");
+}
+if (strings.lastIndexOfFold("\u{1F600}" + "a".repeat(1000000), "a", 1) !== -1) {
+    throw new Error("a mid-pair limit matched a later boundary");
+}
+if (strings.lastIndexOfFold("ab" + "x".repeat(1000000), "ab", 0) !== 0) {
+    throw new Error("an overlapping match at the limit was skipped");
+}
+
+// Folded characters behave the same way under a small limit.
+if (strings.lastIndexOfFold("\u03C3".repeat(1000000) + "x", "\u03A3", 0) !== 0) {
+    throw new Error("a folded match at the limit was skipped");
+}
+if (strings.lastIndexOfFold("\u03C3" + "\u03A3".repeat(1000000), "z", 0) !== -1) {
+    throw new Error("a folded small-limit no-match found something");
+}
+"#,
+    );
+}
+
+/// The production `strings` section of the realm shim, extracted so a test can
+/// evaluate the real implementation with a counting `codePointAt`.
+///
+/// The instrumentation is generated by the test below and exists only in that
+/// test module. `neo.js` contains no counter, no hook, and no test-only branch,
+/// so neither the registry object nor an import can observe it.
+fn strings_implementation_source() -> &'static str {
+    const SHIM: &str = include_str!("../src/builtins/neo.js");
+    const START: &str = "    // `strings` is plain ECMAScript";
+    const END: &str = "    // The host ops for `crypto` are captured now";
+    let start = SHIM
+        .find(START)
+        .expect("the strings section start marker moved");
+    let end = SHIM
+        .find(END)
+        .expect("the strings section end marker moved");
+    assert!(start < end, "the strings section markers are reversed");
+    let section = &SHIM[start..end];
+    assert!(
+        section.contains("function lastIndexOfFold"),
+        "the extracted strings section does not contain lastIndexOfFold"
+    );
+    section
+}
+
+#[test]
+fn strings_last_index_reads_only_through_the_limit() {
+    // The real `strings` section captures the counting wrapper below as its
+    // `codePointAt`, so `reads` counts every code point it examines in both
+    // the needle and the text. The bounds are deterministic: no timers, and
+    // the constants leave room for the needle's two passes plus the text the
+    // limit requires. Removing the early termination reads the whole million
+    // code point text and fails every bound.
+    let mut source = String::new();
+    source.push_str(
+        r#"
+const nativeCodePointAt = String.prototype.codePointAt;
+let reads = 0;
+const codePointAt = Function.prototype.call.bind(function (index) {
+    reads += 1;
+    return nativeCodePointAt.call(this, index);
+});
+const isInteger = Number.isInteger;
+const fromCodePoint = String.fromCodePoint;
+const fromCharCode = String.fromCharCode;
+const regexpExec = Function.prototype.call.bind(RegExp.prototype.exec);
+const mapGet = Function.prototype.call.bind(Map.prototype.get);
+const makeUint8Array = Uint8Array;
+const makeTypeError = TypeError;
+const makeRangeError = RangeError;
+"#,
+    );
+    source.push_str(strings_implementation_source());
+    source.push_str(
+        r#"
+// Six needle reads (count plus fill) and one text code point.
+reads = 0;
+const long = "\u{1F600}".repeat(1000000) + "needle";
+if (strings.lastIndexOfFold(long, "zzz", 0) !== -1) {
+    throw new Error("a small-limit no-match found something");
+}
+if (reads > 16) {
+    throw new Error(`small-limit no-match read ${reads} code points; the limit was 0`);
+}
+
+// Twelve needle reads and one text code point.
+reads = 0;
+if (strings.lastIndexOfFold(long, "NEEDLE", 0) !== -1) {
+    throw new Error("a match after the limit was reported");
+}
+if (reads > 16) {
+    throw new Error(`a match after the limit read ${reads} code points`);
+}
+
+// The bound follows the limit rather than a fixed constant: one needle read
+// pair plus the ten thousand and first code point.
+reads = 0;
+const atLimit = "a".repeat(10000) + "z" + "a".repeat(1000000);
+if (strings.lastIndexOfFold(atLimit, "z", 10000) !== 10000) {
+    throw new Error("a match exactly at the limit was missed");
+}
+if (reads > 10016) {
+    throw new Error(`a limit of 10000 read ${reads} code points`);
+}
+
+reads = 0;
+if (strings.lastIndexOfFold("a".repeat(1000000) + "z", "q", 10000) !== -1) {
+    throw new Error("a no-match at the limit found something");
+}
+if (reads > 10016) {
+    throw new Error(`a no-match at a limit of 10000 read ${reads} code points`);
+}
+
+// A pending partial match that starts at the limit keeps the scan alive until
+// it fails, and no further.
+reads = 0;
+if (strings.lastIndexOfFold("ab" + "x".repeat(1000000), "abc", 0) !== -1) {
+    throw new Error("a pending match at the limit was mishandled");
+}
+if (reads > 32) {
+    throw new Error(`a pending match read ${reads} code points`);
+}
+"#,
+    );
+    run_js(&source);
+}

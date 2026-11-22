@@ -2,9 +2,10 @@
 //! synthetic ECMAScript modules that import specifiers reach.
 //!
 //! The scripts here install globals that neojs supplies: currently [`NEO_SHIM`],
-//! which defines the `Neo` object and its cached built-in modules. `chars` and
-//! `console` are plain ECMAScript. `crypto` calls private host ops registered by
-//! [`crate::crypto`], [`crate::crypto_cipher`], and [`crate::crypto_hash`]; it
+//! which defines the `Neo` object and its cached built-in modules. `chars`,
+//! `console`, and `strings` are plain ECMAScript. `crypto` calls private host
+//! ops registered by [`crate::crypto`], [`crate::crypto_cipher`], and
+//! [`crate::crypto_hash`]; it
 //! adds the operating system CSPRNG, the NEO1 AES-256-GCM envelope, bounded
 //! stateful AES-256-CBC/AES-256-GCM ciphers, SHA-2 hashing and HMAC, PBKDF2,
 //! and bcrypt, but no permission, filesystem access, or sandbox. `crypto`'s `hashAsync`,
@@ -18,6 +19,16 @@
 //! other modes read no environment and no agent. Its socket connect may block
 //! and its backend timeout is inactivity-based, not a hard wall clock. It adds
 //! no filesystem or permission capability and never forwards an agent.
+//! `strings` is plain ECMAScript: case-insensitive folded matching
+//! (`equalFold`, `startsWithFold`, `endsWithFold`, `indexOfFold`,
+//! `lastIndexOfFold`) and trimming of a caller-supplied code point set. The
+//! search functions are linear in the text plus the needle and use O(needle)
+//! extra memory; `lastIndexOfFold` also stops once no match can begin at or
+//! before its limit. It returns UTF-16 code unit indices like
+//! `String.prototype`, calls no host op,
+//! and adds no capability. Its folding is ECMAScript simple case folding,
+//! decided by the engine's own RegExp `/iu` canonicalization, so it is
+//! locale-independent and follows the Unicode data in the V8 build.
 //! `stdio` is plain
 //! ECMAScript plus host ops registered by [`crate::stdio`]: bounded in-memory
 //! byte streams and writes to the current process's standard output and standard
@@ -31,19 +42,20 @@
 //! containment check.
 //!
 //! [`AGE_MODULE`], [`CHARS_MODULE`], [`CONSOLE_MODULE`], [`CRYPTO_MODULE`],
-//! [`PATH_MODULE`], [`SSH_MODULE`], and [`STDIO_MODULE`] are not evaluated as
-//! scripts. They are the sources returned by the module loader for the built-in
-//! specifiers [`AGE_SPECIFIER`], [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`],
-//! [`CRYPTO_SPECIFIER`], [`PATH_SPECIFIER`], [`SSH_SPECIFIER`], and
-//! [`STDIO_SPECIFIER`], and for their bare names. All read the public module
-//! objects installed by [`NEO_SHIM`], so the registry and the module bindings
-//! share identity. `age` and `chars` are frozen module objects whose named
-//! exports are their function objects. `console` is the console object the
-//! runtime installed: the default export's value is that object, and the named
-//! exports are its method values when the module is evaluated. `crypto`,
-//! `path`, `ssh`, and `stdio` are frozen module objects whose named exports are
-//! their synchronous classes, functions, constants, and shared stream objects.
-//! In every case the ES module namespace is a separate object from the registry
+//! [`PATH_MODULE`], [`SSH_MODULE`], [`STDIO_MODULE`], and [`STRINGS_MODULE`] are
+//! not evaluated as scripts. They are the sources returned by the module loader
+//! for the built-in specifiers [`AGE_SPECIFIER`], [`CHARS_SPECIFIER`],
+//! [`CONSOLE_SPECIFIER`], [`CRYPTO_SPECIFIER`], [`PATH_SPECIFIER`],
+//! [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], and [`STRINGS_SPECIFIER`], and for
+//! their bare names. All read the public module objects installed by
+//! [`NEO_SHIM`], so the registry and the module bindings share identity. `age`,
+//! `chars`, and `strings` are frozen module objects whose named exports are
+//! their function objects. `console` is the console object the runtime
+//! installed: the default export's value is that object, and the named exports
+//! are its method values when the module is evaluated. `crypto`, `path`, `ssh`,
+//! and `stdio` are frozen module objects whose named exports are their
+//! synchronous classes, functions, constants, and shared stream objects. In
+//! every case the ES module namespace is a separate object from the registry
 //! object.
 
 use deno_core::url::Url;
@@ -51,12 +63,12 @@ use deno_core::url::Url;
 /// Installs the global `Neo` object and the built-in module registry.
 ///
 /// Evaluation happens once per realm. The `age`, `chars`, `crypto`, `path`,
-/// `ssh`, and `stdio` module objects are frozen and cached, so repeated
-/// `Neo.getBuiltInModule` calls return the same object for each. The `console`
-/// module object is the console object the runtime installed, captured after
-/// the console shim runs. At installation time the registry, the module
-/// bindings, and the global console share the same function objects; a method
-/// replaced before the console module
+/// `ssh`, `stdio`, and `strings` module objects are frozen and cached, so
+/// repeated `Neo.getBuiltInModule` calls return the same object for each. The
+/// `console` module object is the console object the runtime installed,
+/// captured after the console shim runs. At installation time the registry, the
+/// module bindings, and the global console share the same function objects; a
+/// method replaced before the console module
 /// is evaluated is what its named exports capture. Names that are not
 /// implemented return `undefined`.
 pub(crate) const NEO_SHIM: &str = include_str!("builtins/neo.js");
@@ -165,6 +177,20 @@ pub(crate) const PATH_SPECIFIER: &str = "neo:path";
 /// the latter only when an operation lacks an explicit absolute base.
 const PATH_MODULE: &str = include_str!("builtins/path.esm.js");
 
+/// The canonical module specifier for the `strings` built-in.
+///
+/// Both `"strings"` and `"neo:strings"` resolve to this URL, so the engine
+/// caches one module instance for both spellings. It is not a `file:` URL and
+/// is never read from disk.
+pub(crate) const STRINGS_SPECIFIER: &str = "neo:strings";
+
+/// The ECMAScript module source served for [`STRINGS_SPECIFIER`].
+///
+/// It re-exports the function objects from the public `strings` module object,
+/// so the module and `Neo.getBuiltInModule("strings")` share identity. The
+/// implementations are plain ECMAScript in [`NEO_SHIM`]; no host op is called.
+const STRINGS_MODULE: &str = include_str!("builtins/strings.esm.js");
+
 /// Registry name and canonical specifier for each implemented built-in module.
 ///
 /// The loader serves one module instance per canonical specifier, and the error
@@ -177,6 +203,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("path", PATH_SPECIFIER),
     ("ssh", SSH_SPECIFIER),
     ("stdio", STDIO_SPECIFIER),
+    ("strings", STRINGS_SPECIFIER),
 ];
 
 /// Returns the canonical specifier for a built-in module name, or `None`.
@@ -209,6 +236,7 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         PATH_SPECIFIER => Some(PATH_MODULE),
         SSH_SPECIFIER => Some(SSH_MODULE),
         STDIO_SPECIFIER => Some(STDIO_MODULE),
+        STRINGS_SPECIFIER => Some(STRINGS_MODULE),
         _ => None,
     }
 }

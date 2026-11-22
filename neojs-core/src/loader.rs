@@ -2,8 +2,8 @@
 //!
 //! Resolution accepts relative paths, absolute paths, `file:` URLs, and the
 //! built-in specifiers `age`, `neo:age`, `chars`, `neo:chars`, `console`,
-//! `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`,
-//! `neo:ssh`, `stdio`, and `neo:stdio`
+//! `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`,
+//! `stdio`, `neo:stdio`, `strings`, and `neo:strings`
 //! ([`crate::builtins`]). Every other scheme is rejected with a reason that
 //! names the missing feature instead of failing later inside V8.
 //!

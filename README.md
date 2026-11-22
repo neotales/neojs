@@ -404,6 +404,48 @@ U+0085 and U+00A0 but excludes U+FEFF. This module is an independent implementat
 `@neotales/chars` and the QuickJS `neo:chars` module. It does not port their lookup tables, and it
 does not claim compatibility with either API.
 
+**Use the strings built-in.** `Neo.getBuiltInModule("strings")` returns a frozen module object that
+is cached for the realm. `strings` is the canonical bare specifier and `neo:strings` is an alias for
+the same module instance. The named exports are `equalFold`, `startsWithFold`, `endsWithFold`,
+`indexOfFold`, `lastIndexOfFold`, `trim`, `trimStart`, and `trimEnd`; each is the same function
+object as the matching registry property, and there is no default export. The module is plain
+ECMAScript: it calls no host op and adds no capability beyond the strings it is given.
+
+```js
+import { equalFold, indexOfFold, lastIndexOfFold, trim } from "strings";
+
+console.log(equalFold("Hello WÖrLD", "hello wörld")); // true
+console.log(indexOfFold("😀a", "A")); // 2 (UTF-16 code units)
+console.log(lastIndexOfFold("aaa", "aa")); // 1 (overlapping)
+console.log(trim("file.txt...", ".")); // "file.txt"
+```
+
+Folded matching uses ECMAScript's simple case folding, decided per code point by V8's own RegExp
+`/iu` canonicalization. It is locale-independent and is not a `toLowerCase()` comparison:
+`equalFold("K", "\u212A")` is `true` (Kelvin sign) and `equalFold("s", "\u017F")` is `true` (long s),
+while `equalFold("I", "\u0131")` is `false` (dotless i) and `equalFold("ss", "ß")` is `false` (that
+is full folding). Indices are UTF-16 code unit offsets, like `String.prototype.indexOf`, not code
+point offsets; `indexOfFold` and `lastIndexOfFold` find overlapping occurrences, and an empty search
+returns the clamped start index or the string length. Searching is linear in the text plus the
+search string and uses O(search) extra memory: a repeated prefix cannot make it quadratic.
+`lastIndexOfFold` also stops as soon as no match can begin at or before `fromIndex`, so a small limit
+does not scan a long tail. A lone surrogate
+is compared as itself and never matches half of a surrogate pair. Argument values are not coerced:
+a non-string throws
+`TypeError`, and a non-integer `fromIndex` throws `RangeError` (apart from `Infinity`, which clamps
+to the length).
+
+With no `chars`, `trim`, `trimStart`, and `trimEnd` are exactly `String.prototype.trim`,
+`trimStart`, and `trimEnd`, so they use JavaScript's whitespace set, which includes U+FEFF and
+excludes U+0085. This is deliberately not `neo:chars`' `isSpace`, which follows Go's
+`unicode.IsSpace`. With `chars`, the argument is a set of Unicode code points, not a prefix or
+suffix, and every leading or trailing code point in the set is removed: `trim("##a##", "#")` is
+`"a"`, and an empty `chars` string removes nothing.
+
+Folding and trimming are independent implementations informed by `@neotales/strings` and
+`@neotales/slices`. They do not port those packages' tables and do not claim compatibility with
+their code point indexing or their `Uint8Array`/`Uint16Array` buffer forms.
+
 **Use the age built-in.** `Neo.getBuiltInModule("age")` returns a frozen module object that is
 cached for the realm. `age` is the canonical bare specifier and `neo:age` is an alias for the same
 module instance. The named exports are `generateIdentity`, `identityToRecipient`, `encrypt`, and
@@ -924,8 +966,8 @@ thread that will use it; it is not `Send`.
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
-local module loading, imports of the `age`, `chars`, `console`, `crypto`, `path`, `ssh`, and
-`stdio` built-ins by their bare or `neo:` specifiers, console output, bounded in-memory byte
+local module loading, imports of the `age`, `chars`, `console`, `crypto`, `path`, `ssh`, `stdio`,
+and `strings` built-ins by their bare or `neo:` specifiers, console output, bounded in-memory byte
 streams, writes to the process's stdout and stderr, lexical POSIX and Windows path operations,
 SHA-2 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
@@ -939,14 +981,15 @@ list are not implemented.
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
 - `node:`, `npm:`, `jsr:`, `http:`, `https:`, `data:`, and `blob:` imports are rejected. The
-  built-in modules are `age`, `chars`, `console`, `crypto`, `path`, `ssh`, and `stdio`, reached
-  through `Neo.getBuiltInModule("age")`, `Neo.getBuiltInModule("chars")`,
+  built-in modules are `age`, `chars`, `console`, `crypto`, `path`, `ssh`, `stdio`, and `strings`,
+  reached through `Neo.getBuiltInModule("age")`, `Neo.getBuiltInModule("chars")`,
   `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("crypto")`,
-  `Neo.getBuiltInModule("path")`, `Neo.getBuiltInModule("ssh")`, and
-  `Neo.getBuiltInModule("stdio")`, or through the import specifiers `age`, `neo:age`, `chars`,
-  `neo:chars`, `console`, `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`,
-  `neo:ssh`, `stdio`, and `neo:stdio`. Other `neo:` modules are rejected by name. Bare module
-  specifiers that are not a built-in, and import maps, are not supported.
+  `Neo.getBuiltInModule("path")`, `Neo.getBuiltInModule("ssh")`,
+  `Neo.getBuiltInModule("stdio")`, and `Neo.getBuiltInModule("strings")`, or through the import
+  specifiers `age`, `neo:age`, `chars`, `neo:chars`, `console`, `neo:console`, `crypto`,
+  `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`, and
+  `neo:strings`. Other `neo:` modules are rejected by name. Bare module specifiers that are not a
+  built-in, and import maps, are not supported.
 - Module type attributes are rejected. `with { type: "json" }`, `with { type: "text" }`, `with {
   type: "bytes" }`, and custom types fail with a reason on static and dynamic imports, including for
   built-in modules. Only untyped ECMAScript modules are loaded. Attributes that do not name a type
@@ -954,8 +997,9 @@ list are not implemented.
 - JSON and WebAssembly module files are rejected, both as the entry file and as imports. V8's
   `WebAssembly` global is present but untested.
 - There is no permission system. The loader reads any file the process can read. neojs is not a
-  sandbox. `chars` and `console` are plain ECMAScript and add no capability beyond the globals they
-  expose; the `console` module writes to the process streams already used by the global console.
+  sandbox. `chars`, `console`, and `strings` are plain ECMAScript and add no capability beyond the
+  globals they expose; the `console` module writes to the process streams already used by the
+  global console.
   `age` calls four host ops for X25519 identity generation and binary age v1 encryption/decryption.
   `crypto` calls twenty-six host ops: four for the operating system CSPRNG and AES-256-GCM, eight
   for bounded stateful AES-256-CBC/AES-256-GCM ciphers, seven for SHA-2 hashing and HMAC, and seven
