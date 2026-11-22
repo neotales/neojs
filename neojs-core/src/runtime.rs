@@ -200,21 +200,27 @@ impl Runtime {
     /// `$HOME/.cache/neojs/packages`, keyed by the SHA-256 of the canonical URL
     /// including its query. A fresh `Cache-Control: max-age` entry is reused;
     /// freshness includes the upstream `Age` and `Date`; a stale entry is
-    /// revalidated with `If-None-Match` and `If-Modified-Since`; `no-store` is
-    /// not cached. Writes are atomic and concurrent processes cannot publish a
+    /// revalidated with `If-None-Match` and `If-Modified-Since`; `no-store` does
+    /// not store the body and leaves an absent-entry tombstone. Writes are atomic
+    /// and concurrent processes cannot publish a
     /// partial body. Each entry records and verifies the body length and SHA-256
-    /// digest, so corruption is a cache miss. A per-key lock and exact
-    /// generation make an older `304` lose to a newer `200`; a stale lock only
-    /// delays a cache write and never blocks loading. There is no signature or
-    /// content-addressed store: the cache is not integrity protection against
-    /// someone who can write it and pins no version. See [`RemoteOptions`] to
-    /// change the directory or disable it.
+    /// digest, so corruption is a cache miss. A per-key lock and sortable
+    /// generations make a `200` lose to a newer entry or no-store tombstone, and
+    /// make a successful `304` advance the generation so an older `304` cannot
+    /// replace newer headers. A stale lock only delays a cache write and never
+    /// blocks loading. There is no signature or content-addressed store: the
+    /// cache is not integrity protection against someone who can write it and
+    /// pins no version. See [`RemoteOptions`] to change the directory or disable
+    /// it.
     ///
     /// One runtime's remote graph is bounded by per-module body, aggregate
     /// byte, and module-count limits. A module and its bytes are admitted before
     /// the network or cache is consulted, a body is read only up to the
     /// remaining aggregate allowance, and a rejected module is neither fetched
-    /// nor published to the cache. The deadline is per module, not for the whole
+    /// nor published to the cache. Each distinct requested URL consumes one
+    /// module slot even when its fetch fails; retrying the same URL reuses that
+    /// slot but repeats the I/O. A failed entry preflight is refunded because the
+    /// runtime remains unused. The deadline is per module, not for the whole
     /// wall-clock execution of a program. These are resource bounds, not a
     /// sandbox or a CPU or V8 heap bound.
     ///
@@ -643,18 +649,19 @@ fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, 
     })?;
 
     let fetched = remote
-        .fetch(&requested)
+        .fetch_entry(&requested)
         .map_err(|reason| Error::RemoteEntry {
             url: display_url(&requested),
             reason,
         })?;
     let body_len = fetched.body.len();
+    let module_charged = fetched.module_charged;
     // A redirect can change the extension. The format follows the final URL,
     // just as the module identity and relative-import base do.
     let format = match module_format(Path::new(fetched.final_url.path())) {
         Ok(format) => format,
         Err(reason) => {
-            remote.refund(body_len);
+            remote.refund_entry(&requested, &fetched.final_url, body_len, module_charged);
             return Err(Error::RemoteEntry {
                 url: display_url(&requested),
                 reason,
@@ -664,7 +671,7 @@ fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, 
     let code = match String::from_utf8(fetched.body) {
         Ok(code) => code,
         Err(_) => {
-            remote.refund(body_len);
+            remote.refund_entry(&requested, &fetched.final_url, body_len, module_charged);
             return Err(Error::RemoteEntry {
                 url: display_url(&requested),
                 reason: "the module is not valid UTF-8".to_string(),
@@ -677,7 +684,7 @@ fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, 
             match typescript::strip(&diagnostic_url(&fetched.final_url), code) {
                 Ok(source) => source,
                 Err(reason) => {
-                    remote.refund(body_len);
+                    remote.refund_entry(&requested, &fetched.final_url, body_len, module_charged);
                     return Err(Error::RemoteTypeScript {
                         url: display_url(&requested),
                         reason,

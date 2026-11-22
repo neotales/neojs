@@ -673,6 +673,23 @@ fn a_script_supplied_exception_value_is_not_rewritten() {
         message.contains("value https://mods.test/value.js?token=secret"),
         "{message}"
     );
+
+    let server = Server::new(&[(
+        "https://mods.test/relative.js",
+        Reply::ok("throw new Error(\"keep './module.js?token=secret'\");\n"),
+    )]);
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/relative.js")
+        .expect_err("throws");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("keep './module.js?token=secret'"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -878,6 +895,60 @@ for (let index = 0; index < 6; index += 1) {
         })
         .count();
     assert_eq!(entries, 2, "rejected imports must not be cached");
+}
+
+#[test]
+fn repeatedly_caught_oversized_imports_exhaust_the_attempted_graph() {
+    let big = "x".repeat(400);
+    let server = Server::new(&[
+        (
+            "https://mods.test/main.js",
+            Reply::ok(
+                r#"
+for (let index = 0; index < 6; index += 1) {
+    try {
+        await import(`./module.js?${index}`);
+    } catch {
+        // Each distinct failure consumes an attempt until the cap is reached.
+    }
+}
+"#,
+            ),
+        ),
+        (
+            "https://mods.test/module.js?0",
+            Reply {
+                status: 200,
+                body: Box::leak(big.clone().into_boxed_str()),
+                ..Reply::default()
+            },
+        ),
+        (
+            "https://mods.test/module.js?1",
+            Reply {
+                status: 200,
+                body: Box::leak(big.clone().into_boxed_str()),
+                ..Reply::default()
+            },
+        ),
+    ]);
+    let options = RemoteOptions::new()
+        .with_max_module_bytes(300)
+        .with_max_remote_modules(3)
+        .without_cache();
+    let mut runtime = remote_runtime_with_options(options, &server);
+    runtime
+        .run_url("https://mods.test/main.js")
+        .expect("the caught failures are handled");
+
+    assert_eq!(
+        server.seen(),
+        [
+            "https://mods.test/main.js",
+            "https://mods.test/module.js?0",
+            "https://mods.test/module.js?1",
+        ]
+    );
 }
 
 #[test]
