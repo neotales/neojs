@@ -17,6 +17,9 @@
 //!   checked. The target must be `https:`, credential-free, and within the
 //!   configured redirect limit. Cross-origin HTTPS redirects are allowed
 //!   because no credential, cookie, or referrer is sent.
+//! - Idle connection pooling is disabled. `ureq` may otherwise retry a request
+//!   whose reused connection was closed, which would be an invisible extra
+//!   request; every actual request must count against the request budget.
 //! - The body is streamed with a byte limit and the whole fetch, including every
 //!   redirect and the body, is bounded by one deadline. A declared
 //!   `Content-Length` above the limit fails before the body is read.
@@ -46,10 +49,12 @@
 //! checked before allocation, and a body followed by extra bytes is rejected.
 //! Publications are serialized by a per-key lock file. Each request receives a
 //! monotonic per-key revision from a revision file updated under that lock, so
-//! ordering does not depend on the wall clock. A `200` publishes only when its
-//! request revision is newer than the current entry or tombstone, a `304`
-//! publishes only when its base generation is still current and then uses its
-//! own request revision, and `no-store` publishes an absent-entry tombstone.
+//! ordering does not depend on the wall clock. A separate representation
+//! identity (ETag, or body digest) lets two `304`s for the same underlying bytes
+//! supersede one another by revision: a `200` publishes only when its request
+//! revision is newer than the current entry or tombstone, a `304` publishes only
+//! when the current representation still matches and its request revision is not
+//! older, and `no-store` publishes an absent-entry tombstone.
 //! Thus an older `200` cannot resurrect an entry after a newer `no-store`, and a
 //! `304` cannot outrank a later-started `200` or `no-store`. A stale lock left by a crash can delay a
 //! cache write until the lock times out; it never blocks loading, which falls
@@ -71,9 +76,11 @@
 //! oversized imports cannot grow the graph without bound. Retrying the same URL
 //! reuses its slot but repeats the I/O. A separate request limit counts every
 //! network request, including retries and each redirect hop, so retrying one URL
-//! cannot bypass the network bound. A failed entry preflight is the exception
-//! and is refunded so the unused runtime can try again. The redaction URL set and
-//! its rollback are capped by the module limit. The deadline is per module, not a wall-clock
+//! cannot bypass the network bound. Requests already spent are never refunded,
+//! including by a failed entry preflight: module/byte/redaction charges are
+//! released, but a runtime that exhausts requests needs a new `Runtime` for a
+//! fresh budget. The redaction URL set and its rollback are capped by the module
+//! limit. The deadline is per module, not a wall-clock
 //! bound on the whole graph: JavaScript can keep running and dynamically import
 //! more modules, each with its own deadline, until the aggregate module or byte
 //! limit is reached. Module execution and compilation are trusted; these are
@@ -86,8 +93,10 @@
 //! Module identity and `import.meta.url` remain the final URL. A user-thrown
 //! `Error` whose message merely contains "Cannot find module" or ` at <URL>:`
 //! keeps its text, as do a quoted relative string and a custom stack, so code
-//! that puts a URL (or any other value) in its own error still exposes it.
-//! Module specifiers are not secret storage.
+//! that puts a URL (or any other value) in its own error still exposes it. A
+//! user-thrown `SyntaxError`/`TypeError` that exactly copies a generated prefix
+//! and location shape is indistinguishable from V8's own text and may be
+//! redacted too. Module specifiers are not secret storage.
 //!
 //! This is not SSRF protection. There is no host allowlist, no private-address
 //! rejection, and no DNS pinning: neojs fetches whatever HTTPS URL the program
@@ -137,9 +146,9 @@ const DEFAULT_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 /// redirects.
 const DEFAULT_MAX_REQUESTS: usize = 512;
 /// The first line of a cache entry.
-const CACHE_MAGIC: &str = "neojs-remote-cache 4";
+const CACHE_MAGIC: &str = "neojs-remote-cache 5";
 /// The first line of an absent-entry tombstone.
-const TOMBSTONE_MAGIC: &str = "neojs-remote-tombstone 4";
+const TOMBSTONE_MAGIC: &str = "neojs-remote-tombstone 5";
 /// Largest metadata block accepted from a cache entry.
 const MAX_META_BYTES: usize = 64 * 1024;
 
@@ -227,8 +236,10 @@ impl RemoteOptions {
     /// Sets the maximum number of HTTP requests one runtime may make.
     ///
     /// Every network request counts, including retries of the same URL and each
-    /// redirect hop. Cache hits do not count. A zero limit refuses all network
-    /// requests.
+    /// redirect hop. Cache hits do not count. A failed entry preflight refunds
+    /// its module/byte/redaction charge but not the request it already spent; a
+    /// runtime that exhausts this budget needs a new `Runtime` to renew it. A
+    /// zero limit refuses all network requests.
     pub fn with_max_requests(mut self, max_requests: usize) -> Self {
         self.max_requests = max_requests;
         self
@@ -570,17 +581,14 @@ impl RemoteClient {
     /// With a cache, the token comes from a persistent per-key revision file
     /// updated under the interprocess lock, so it does not depend on the wall
     /// clock. Without a cache there is nothing to order across processes.
-    fn next_request_generation(&self, url: &Url) -> Result<String, String> {
-        if let Some(cache) = &self.cache
-            && let Ok(revision) = cache.next_revision(url)
-        {
-            return Ok(revision);
+    fn next_request_generation(&self, url: &Url) -> Option<String> {
+        if let Some(cache) = &self.cache {
+            // A failed revision means publication ordering is unknown. The
+            // fetch may continue, but it must not publish over newer state.
+            return cache.next_revision(url).ok();
         }
-        // A cache failure is best-effort: loading continues with a local,
-        // non-persistent ordering token and what remains of the publication
-        // attempt will also fail harmlessly.
         let revision = self.local_revision.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(format!("{revision:020}"))
+        Some(format!("{revision:020}"))
     }
 
     /// Records a URL whose query must not appear in a generated diagnostic.
@@ -698,8 +706,14 @@ impl RemoteClient {
             let last_modified = cached
                 .as_ref()
                 .and_then(|entry| entry.last_modified.as_deref());
-            let request_generation = self.next_request_generation(&current)?;
+            // Reserve the request before revision-file I/O: a retry cannot
+            // avoid the request budget by failing while allocating a token.
             self.budget.charge_request(&self.options)?;
+            let request_generation = self.next_request_generation(&current);
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!("timed out fetching {}", display_url(&current)));
+            }
             let request_started = Instant::now();
             let response = self
                 .transport
@@ -755,13 +769,16 @@ impl RemoteClient {
                 }
                 self.record_url(&current)?;
                 admission.commit(cached.body.len())?;
-                let previous_generation = cached.generation.clone();
-                cached.generation = request_generation.to_string();
-                if let Some(cache) = &self.cache {
+                let previous_representation = cached.representation.clone();
+                if let (Some(generation), Some(cache)) =
+                    (request_generation.as_deref(), &self.cache)
+                {
                     if directives.no_store {
-                        let _ = cache.tombstone_if_newer(&current, &request_generation);
+                        let _ = cache.tombstone_if_newer(&current, generation);
                     } else {
-                        let _ = cache.store_revalidated(&current, &cached, &previous_generation);
+                        cached.generation = generation.to_string();
+                        let _ =
+                            cache.store_revalidated(&current, &cached, &previous_representation);
                     }
                 }
                 return Ok(FetchedModule {
@@ -824,9 +841,10 @@ impl RemoteClient {
             self.record_url(&current)?;
             admission.commit(body.len())?;
             let directives = CacheDirectives::parse(response.cache_control.as_deref());
-            if let Some(cache) = &self.cache {
+            let representation = representation_id(&body, response.etag.as_deref());
+            if let (Some(generation), Some(cache)) = (request_generation.as_deref(), &self.cache) {
                 if directives.no_store {
-                    let _ = cache.tombstone_if_newer(&current, &request_generation);
+                    let _ = cache.tombstone_if_newer(&current, generation);
                 } else {
                     let entry = CachedModule {
                         body: body.clone(),
@@ -844,7 +862,8 @@ impl RemoteClient {
                         },
                         etag: response.etag,
                         last_modified: response.last_modified,
-                        generation: request_generation.to_string(),
+                        generation: generation.to_string(),
+                        representation,
                     };
                     let _ = cache.store_if_newer(&current, &entry);
                 }
@@ -1235,8 +1254,11 @@ struct CachedModule {
     max_age: Option<u64>,
     etag: Option<String>,
     last_modified: Option<String>,
-    /// Exact publication generation. A `304` may only replace this generation.
+    /// Exact publication generation.
     generation: String,
+    /// Stable identity of the underlying representation, independent of which
+    /// request or `304` published the current headers.
+    representation: String,
 }
 
 impl CachedModule {
@@ -1255,12 +1277,13 @@ impl CachedModule {
     /// Serializes metadata without a URL or any other request-derived secret.
     fn metadata(&self) -> String {
         let mut metadata = format!(
-            "stored={}\ninitial-age={}\nbody-length={}\nbody-sha256={}\ngeneration={}\n",
+            "stored={}\ninitial-age={}\nbody-length={}\nbody-sha256={}\ngeneration={}\nrepresentation={}\n",
             self.stored_at,
             self.initial_age,
             self.body.len(),
             hex_encode(&Sha256::digest(&self.body)),
-            self.generation
+            self.generation,
+            hex_encode(self.representation.as_bytes())
         );
         if let Some(max_age) = self.max_age {
             metadata.push_str(&format!("max-age={max_age}\n"));
@@ -1307,6 +1330,7 @@ fn parse_metadata(metadata: &str) -> Option<(CachedModule, usize, String)> {
     let mut body_length = None;
     let mut body_sha256 = None;
     let mut generation = None;
+    let mut representation = None;
     let mut max_age = None;
     let mut etag = None;
     let mut last_modified = None;
@@ -1320,6 +1344,7 @@ fn parse_metadata(metadata: &str) -> Option<(CachedModule, usize, String)> {
             "body-length" => body_length = value.parse().ok(),
             "body-sha256" => body_sha256 = Some(value.to_string()),
             "generation" => generation = Some(value.to_string()),
+            "representation" => representation = hex_decode(value),
             "max-age" => max_age = value.parse().ok(),
             "etag" => etag = hex_decode(value),
             "last-modified" => last_modified = hex_decode(value),
@@ -1335,10 +1360,23 @@ fn parse_metadata(metadata: &str) -> Option<(CachedModule, usize, String)> {
             etag,
             last_modified,
             generation: generation?,
+            representation: representation?,
         },
         body_length?,
         body_sha256?,
     ))
+}
+
+/// Returns a stable identity for the cached representation.
+///
+/// An ETag is the server's representation identity. Without one, the body
+/// digest is the identity, so a later `304` can still be recognized as
+/// revalidating the same bytes.
+fn representation_id(body: &[u8], etag: Option<&str>) -> String {
+    match etag {
+        Some(etag) => format!("etag:{etag}"),
+        None => format!("sha256:{}", hex_encode(&Sha256::digest(body))),
+    }
 }
 
 /// Encode bytes as lowercase hexadecimal.
@@ -1631,16 +1669,25 @@ impl Cache {
         Ok(true)
     }
 
-    /// Publishes a revalidated entry only when it is still based on the exact
-    /// cached generation. The entry carries a new generation.
+    /// Publishes a revalidated entry only when the current representation is
+    /// still the one this `304` revalidated and its request token is not older
+    /// than the current publication.
     fn store_revalidated(
         &self,
         url: &Url,
         entry: &CachedModule,
-        expected: &str,
+        expected_representation: &str,
     ) -> std::io::Result<bool> {
         let _lock = self.lock(url)?;
-        if self.state(url).as_deref() != Some(expected) {
+        if self.read_tombstone(url).is_some() {
+            return Ok(false);
+        }
+        let Some((current, _, _)) = self.read_metadata(url) else {
+            return Ok(false);
+        };
+        if current.representation != expected_representation
+            || current.generation.as_str() > entry.generation.as_str()
+        {
             return Ok(false);
         }
         self.write_entry(url, entry)?;
@@ -1750,6 +1797,11 @@ impl UreqTransport {
             // Explicit even though the `proxy-from-env` feature is off: no
             // ambient proxy URL or proxy credential is ever read.
             .try_proxy_from_env(false)
+            // A pooled connection that the server has closed can make ureq
+            // silently retry. Every actual request must be visible to the
+            // request budget, so keep no idle connections.
+            .max_idle_connections(0)
+            .max_idle_connections_per_host(0)
             .timeout(DEFAULT_TIMEOUT)
             .user_agent(concat!("neojs/", env!("CARGO_PKG_VERSION")))
             .build();
@@ -1912,6 +1964,7 @@ mod tests {
     use std::process::Stdio;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
     use std::time::SystemTime;
@@ -2580,6 +2633,7 @@ mod tests {
                     etag: None,
                     last_modified: None,
                     generation: "test".to_string(),
+                    representation: "test".to_string(),
                 };
                 cache.store(&url, &entry).expect("store");
             }));
@@ -2671,6 +2725,25 @@ mod tests {
     }
 
     #[test]
+    fn a_request_rejected_by_the_cap_does_not_write_a_revision() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let transport = ScriptedTransport::new(vec![response(200, None, "a")]);
+        let client = client(
+            RemoteOptions::new()
+                .with_cache_dir(dir.path())
+                .with_max_requests(1),
+            transport,
+        );
+        client.fetch(&url).expect("first request");
+        let error = client.fetch(&url).expect_err("second request rejected");
+        assert!(error.contains("1 request limit"), "{error}");
+        let revision = std::fs::read_to_string(cache.revision_path(&url)).expect("revision file");
+        assert_eq!(revision, "1\n");
+    }
+
+    #[test]
     fn a_failed_import_keeps_its_distinct_attempt_slot() {
         let transport =
             ScriptedTransport::new(vec![response(200, None, "aa"), response(200, None, "bb")]);
@@ -2732,6 +2805,57 @@ mod tests {
             .fetch(&one)
             .expect_err("a retry with a new final URL exceeds the redaction cap");
         assert!(error.contains("cannot retain"), "{error}");
+    }
+
+    #[test]
+    fn a_failed_revision_allocation_skips_cache_publication() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        std::fs::create_dir_all(cache.revision_path(&url)).expect("revision blocker");
+        let transport = ScriptedTransport::new(vec![RemoteResponse {
+            status: 200,
+            location: None,
+            declared_length: None,
+            etag: None,
+            last_modified: None,
+            cache_control: Some("max-age=60".to_string()),
+            date: None,
+            age: None,
+            body: Box::new(std::io::Cursor::new(b"body".to_vec())),
+        }]);
+        let client = client(RemoteOptions::new().with_cache_dir(dir.path()), transport);
+        client.fetch(&url).expect("network fetch still succeeds");
+        assert!(
+            cache.load(&url, 1024).is_none(),
+            "a request without a revision must not publish"
+        );
+    }
+
+    #[test]
+    fn a_failed_revision_does_not_apply_a_no_store_tombstone() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let old = super::CachedModule {
+            body: b"old".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(0),
+            etag: None,
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: "test".to_string(),
+        };
+        cache.store(&url, &old).expect("old store");
+        std::fs::create_dir_all(cache.revision_path(&url)).expect("revision blocker");
+        let transport = ScriptedTransport::new(vec![response(200, None, "new")]);
+        let client = client(RemoteOptions::new().with_cache_dir(dir.path()), transport);
+        client.fetch(&url).expect("network fetch still succeeds");
+        assert_eq!(
+            cache.load(&url, 1024).expect("old entry remains").body,
+            b"old"
+        );
     }
 
     #[test]
@@ -2874,6 +2998,7 @@ mod tests {
             etag: None,
             last_modified: None,
             generation: "0001".to_string(),
+            representation: "test".to_string(),
         };
         cache.store(&url, &old).expect("old store");
         let (mut reader, _entry, expected_length, expected_digest) =
@@ -2887,6 +3012,7 @@ mod tests {
             etag: None,
             last_modified: None,
             generation: "0002".to_string(),
+            representation: "test".to_string(),
         };
         cache.store(&url, &new).expect("new store");
 
@@ -2913,6 +3039,7 @@ mod tests {
             etag: None,
             last_modified: None,
             generation: "test".to_string(),
+            representation: "test".to_string(),
         };
         cache.store(&url, &entry).expect("store");
         assert!(cache.load(&url, 1024).is_some());
@@ -3038,6 +3165,7 @@ mod tests {
                         etag: None,
                         last_modified: None,
                         generation: "test".to_string(),
+                        representation: "test".to_string(),
                     };
                     // Cache publication is best-effort; a lock timeout is
                     // allowed and must never expose a partial entry.
@@ -3101,6 +3229,67 @@ mod tests {
         (port, handle)
     }
 
+    fn spawn_counting_tls_server(
+        cert_der: Vec<u8>,
+        key_der: Vec<u8>,
+        expected: usize,
+    ) -> (u16, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+        use rustls::pki_types::CertificateDer;
+        use rustls::pki_types::PrivateKeyDer;
+        use rustls::pki_types::PrivatePkcs8KeyDer;
+
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(cert_der)],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der)),
+            )
+            .expect("server config");
+        let config = Arc::new(config);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let port = listener.local_addr().expect("addr").port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&accepted);
+        let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while count.load(Ordering::SeqCst) < expected && std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((tcp, _)) => {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        let config = Arc::clone(&config);
+                        std::thread::spawn(move || {
+                            let Ok(connection) = rustls::ServerConnection::new(config) else {
+                                return;
+                            };
+                            let mut stream = rustls::StreamOwned::new(connection, tcp);
+                            let mut request = [0u8; 4096];
+                            let _ = stream.read(&mut request);
+                            let body = b"export default 1;\n";
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                            let _ = stream.write_all(body);
+                            let _ = stream.flush();
+                            // Hold the connection open long enough that a
+                            // pooling client would try to reuse it.
+                            std::thread::sleep(Duration::from_secs(2));
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        (port, accepted, handle)
+    }
+
     fn trusted_agent(cert_der: &[u8]) -> ureq::Agent {
         use rustls::pki_types::CertificateDer;
 
@@ -3115,6 +3304,8 @@ mod tests {
             .https_only(true)
             .redirects(0)
             .try_proxy_from_env(false)
+            .max_idle_connections(0)
+            .max_idle_connections_per_host(0)
             .timeout(Duration::from_secs(5))
             .tls_config(Arc::new(config))
             .build()
@@ -3177,6 +3368,31 @@ mod tests {
             .expect("body");
         assert_eq!(body, b"export default 1;\n");
         handle.join().expect("server");
+    }
+
+    #[test]
+    fn production_transport_does_not_hide_pooled_retries() {
+        let (cert_der, key_der) = certificate();
+        let (port, accepted, handle) = spawn_counting_tls_server(cert_der.clone(), key_der, 2);
+        let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js")).expect("url");
+        let transport = super::UreqTransport::with_agent(trusted_agent(&cert_der));
+        for _ in 0..2 {
+            let response = transport
+                .get(&super::RemoteRequest {
+                    url: &url,
+                    timeout: Duration::from_secs(5),
+                    if_none_match: None,
+                    if_modified_since: None,
+                })
+                .expect("TLS response");
+            assert_eq!(response.status, 200);
+        }
+        handle.join().expect("server");
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            2,
+            "two requests must open two connections when pooling is disabled"
+        );
     }
 
     /// Child half of [`production_transport_does_not_use_an_ambient_proxy`].
@@ -3295,6 +3511,7 @@ mod tests {
             etag: Some("\"old\"".to_string()),
             last_modified: None,
             generation: "0001".to_string(),
+            representation: "test".to_string(),
         };
         cache.store(&url, &old).expect("old store");
         let loaded = cache.load(&url, 1024).expect("old entry");
@@ -3306,11 +3523,12 @@ mod tests {
             etag: Some("\"new\"".to_string()),
             last_modified: None,
             generation: "0002".to_string(),
+            representation: "test".to_string(),
         };
         cache.store(&url, &new).expect("new store");
 
         let published = cache
-            .store_revalidated(&url, &loaded, &loaded.generation)
+            .store_revalidated(&url, &loaded, &loaded.representation)
             .expect("conditional store");
         assert!(!published, "the old generation must lose");
         assert_eq!(cache.load(&url, 1024).expect("current").body, b"new");
@@ -3405,6 +3623,7 @@ mod tests {
             etag: None,
             last_modified: None,
             generation: "0001".to_string(),
+            representation: "test".to_string(),
         };
 
         assert!(cache.tombstone_if_newer(&url, "0002").expect("tombstone"));
@@ -3439,6 +3658,7 @@ mod tests {
             etag: None,
             last_modified: None,
             generation: "0001".to_string(),
+            representation: "test".to_string(),
         };
         cache.store(&url, &old).expect("old store");
         let new = super::CachedModule {
@@ -3449,6 +3669,7 @@ mod tests {
             etag: None,
             last_modified: None,
             generation: "0002".to_string(),
+            representation: "test".to_string(),
         };
         cache.store(&url, &new).expect("new store");
         assert!(
@@ -3472,6 +3693,7 @@ mod tests {
             etag: Some("\"v1\"".to_string()),
             last_modified: None,
             generation: "generation-1".to_string(),
+            representation: "test".to_string(),
         };
         cache.store(&url, &entry).expect("store");
         let mut revalidated = cache.load(&url, 1024).expect("entry");
@@ -3480,10 +3702,70 @@ mod tests {
         revalidated.generation = "generation-2".to_string();
         assert!(
             cache
-                .store_revalidated(&url, &revalidated, "generation-1")
+                .store_revalidated(&url, &revalidated, &revalidated.representation)
                 .expect("conditional store")
         );
         assert_eq!(cache.load(&url, 1024).expect("entry").max_age, Some(60));
+    }
+
+    #[test]
+    fn a_newer_304_can_supersede_an_older_304_for_the_same_representation() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let cached = super::CachedModule {
+            body: b"body".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(0),
+            etag: Some("\"v1\"".to_string()),
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: "etag:\"v1\"".to_string(),
+        };
+        let mut older = cached.clone();
+        older.generation = "0002".to_string();
+        older.max_age = Some(30);
+        let mut newer = cached.clone();
+        newer.generation = "0003".to_string();
+        newer.max_age = Some(60);
+
+        cache.store(&url, &cached).expect("cached");
+        assert!(
+            cache
+                .store_revalidated(&url, &older, &cached.representation)
+                .expect("older 304")
+        );
+        assert!(
+            cache
+                .store_revalidated(&url, &newer, &cached.representation)
+                .expect("newer 304 supersedes")
+        );
+        let current = cache.load(&url, 1024).expect("current");
+        assert_eq!(current.generation, "0003");
+        assert_eq!(current.max_age, Some(60));
+
+        assert!(
+            !cache
+                .store_revalidated(&url, &older, &cached.representation)
+                .expect("older 304 after newer")
+        );
+        assert_eq!(cache.load(&url, 1024).expect("current").max_age, Some(60));
+
+        let mut changed = cached.clone();
+        changed.generation = "0004".to_string();
+        changed.body = b"changed".to_vec();
+        changed.representation = "etag:\"v2\"".to_string();
+        assert!(cache.store_if_newer(&url, &changed).expect("changed 200"));
+        assert!(
+            !cache
+                .store_revalidated(&url, &newer, &cached.representation)
+                .expect("old representation")
+        );
+        assert_eq!(
+            cache.load(&url, 1024).expect("current").representation,
+            "etag:\"v2\""
+        );
     }
 
     #[test]
@@ -3499,6 +3781,7 @@ mod tests {
             etag: None,
             last_modified: None,
             generation: "0001".to_string(),
+            representation: "test".to_string(),
         };
         let mut revalidated = cached.clone();
         revalidated.body = b"revalidated".to_vec();
@@ -3511,7 +3794,7 @@ mod tests {
         cache.store(&url, &cached).expect("cached");
         assert!(
             cache
-                .store_revalidated(&url, &revalidated, "0001")
+                .store_revalidated(&url, &revalidated, &cached.representation)
                 .expect("304")
         );
         assert!(cache.store_if_newer(&url, &later).expect("later 200"));
@@ -3522,7 +3805,7 @@ mod tests {
         assert!(cache.store_if_newer(&url, &later).expect("later 200"));
         assert!(
             !cache
-                .store_revalidated(&url, &revalidated, "0001")
+                .store_revalidated(&url, &revalidated, &cached.representation)
                 .expect("old 304")
         );
         assert_eq!(cache.load(&url, 1024).expect("current").body, b"later");
@@ -3531,7 +3814,7 @@ mod tests {
         cache.store(&url, &cached).expect("cached third time");
         assert!(
             cache
-                .store_revalidated(&url, &revalidated, "0001")
+                .store_revalidated(&url, &revalidated, &cached.representation)
                 .expect("304")
         );
         assert!(cache.tombstone_if_newer(&url, "0003").expect("no-store"));
@@ -3552,6 +3835,7 @@ mod tests {
             etag: Some("\"v1\"".to_string()),
             last_modified: None,
             generation: "0001".to_string(),
+            representation: "test".to_string(),
         };
         cache.store(&url, &initial).expect("store");
         let first = cache.load(&url, 1024).expect("first load");
@@ -3559,24 +3843,24 @@ mod tests {
 
         let mut newer_headers = first.clone();
         newer_headers.max_age = Some(60);
-        newer_headers.generation = "0002".to_string();
+        newer_headers.generation = "0003".to_string();
         assert!(
             cache
-                .store_revalidated(&url, &newer_headers, "0001")
+                .store_revalidated(&url, &newer_headers, &initial.representation)
                 .expect("first 304")
         );
 
         let mut older_headers = second.clone();
         older_headers.max_age = Some(0);
-        older_headers.generation = "0003".to_string();
+        older_headers.generation = "0002".to_string();
         assert!(
             !cache
-                .store_revalidated(&url, &older_headers, "0001")
+                .store_revalidated(&url, &older_headers, &initial.representation)
                 .expect("second 304")
         );
         let current = cache.load(&url, 1024).expect("current");
         assert_eq!(current.max_age, Some(60));
-        assert_eq!(current.generation, "0002");
+        assert_eq!(current.generation, "0003");
     }
 
     #[test]
@@ -3592,6 +3876,7 @@ mod tests {
             etag: None,
             last_modified: None,
             generation: "0001".to_string(),
+            representation: "test".to_string(),
         };
         old_cache.store(&url, &old).expect("old store");
         let loaded = old_cache.load(&url, 1024).expect("old entry");
@@ -3609,6 +3894,7 @@ mod tests {
                 etag: None,
                 last_modified: None,
                 generation: "0002".to_string(),
+                representation: "test".to_string(),
             };
             let barrier = Arc::new(std::sync::Barrier::new(2));
             let left = {
@@ -3625,7 +3911,7 @@ mod tests {
                 std::thread::spawn(move || {
                     barrier.wait();
                     right_cache
-                        .store_revalidated(&url_for_old, &old_entry, &old_entry.generation)
+                        .store_revalidated(&url_for_old, &old_entry, &old_entry.representation)
                         .expect("old conditional store");
                 })
             };
@@ -3664,13 +3950,13 @@ mod tests {
             } else {
                 std::env::var("NEOJS_CACHE_OLD_GENERATION").expect("old generation")
             },
+            representation: "test".to_string(),
         };
         if role == "new" {
             cache.store_if_newer(&url, &entry).expect("new store");
         } else {
-            let expected = std::env::var("NEOJS_CACHE_OLD_GENERATION").expect("old generation");
             cache
-                .store_revalidated(&url, &entry, &expected)
+                .store_revalidated(&url, &entry, &entry.representation)
                 .expect("old conditional store");
         }
     }
@@ -3698,6 +3984,7 @@ mod tests {
                 etag: None,
                 last_modified: None,
                 generation,
+                representation: "test".to_string(),
             };
             cache.store_if_newer(&url, &entry).expect("old store");
         }
@@ -3769,6 +4056,7 @@ mod tests {
             etag: None,
             last_modified: None,
             generation: "0001".to_string(),
+            representation: "test".to_string(),
         };
         cache.store(&url, &old).expect("old store");
 
@@ -3809,6 +4097,7 @@ mod tests {
             etag: Some("\"v1\"".to_string()),
             last_modified: None,
             generation: "test".to_string(),
+            representation: "test".to_string(),
         };
         assert!(!entry.metadata().contains("https://"));
         assert!(!entry.metadata().contains("example"));

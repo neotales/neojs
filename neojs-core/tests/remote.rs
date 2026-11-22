@@ -611,6 +611,28 @@ fn imported_v8_errors_do_not_echo_a_redirected_final_query() {
 }
 
 #[test]
+fn a_mimicking_syntax_error_is_indistinguishable_and_may_be_redacted() {
+    let server = Server::new(&[(
+        "https://mods.test/mimic.js?token=secret",
+        Reply::ok(
+            "throw new SyntaxError(\"Missing initializer at https://mods.test/mimic.js?token=secret:1:1\");\n",
+        ),
+    )]);
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/mimic.js?token=secret")
+        .expect_err("throws");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let message = error.to_string();
+    assert!(
+        !message.contains("token"),
+        "a message that exactly mimics a generated SyntaxError location is not distinguishable: {message}"
+    );
+}
+
+#[test]
 fn generated_syntax_errors_do_not_echo_a_module_query() {
     let server = Server::new(&[(
         "https://mods.test/bad.js?token=secret",
@@ -1016,6 +1038,39 @@ fn a_preflight_rejection_refunds_the_entry_budget() {
     runtime
         .run_url("https://mods.test/good.js")
         .expect("a failed preflight must refund the module slot");
+}
+
+#[test]
+fn a_failed_entry_preflight_still_spends_its_network_request() {
+    let server = Server::new(&[
+        (
+            "https://mods.test/bad.ts",
+            Reply::ok("enum Color { Red }\n"),
+        ),
+        (
+            "https://mods.test/good.js",
+            Reply::ok("globalThis.__good = true;\n"),
+        ),
+    ]);
+    let options = RemoteOptions::new()
+        .with_max_requests(1)
+        .with_max_remote_modules(1)
+        .without_cache();
+    let mut runtime = remote_runtime_with_options(options, &server);
+
+    let error = runtime
+        .run_url("https://mods.test/bad.ts")
+        .expect_err("preflight fails");
+    assert!(matches!(error, Error::RemoteTypeScript { .. }), "{error:?}");
+    let error = runtime
+        .run_url("https://mods.test/good.js")
+        .expect_err("the request budget is spent");
+    match error {
+        Error::RemoteEntry { reason, .. } => {
+            assert!(reason.contains("1 request limit"), "{reason}")
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 #[test]

@@ -195,7 +195,9 @@ impl Runtime {
     /// The transport is the blocking `ureq` client over `rustls` with the
     /// bundled Mozilla root store. It sends no ambient credentials, does not
     /// read proxy settings from the environment, and does not accept a URL with
-    /// a username or password. Downloaded modules are cached in one
+    /// a username or password. Idle connection pooling is disabled so ureq cannot
+    /// hide a retry of a request whose reused connection was closed. Downloaded
+    /// modules are cached in one
     /// user-profile package cache, `$XDG_CACHE_HOME/neojs/packages` or
     /// `$HOME/.cache/neojs/packages`, keyed by the SHA-256 of the canonical URL
     /// including its query. A fresh `Cache-Control: max-age` entry is reused;
@@ -207,8 +209,9 @@ impl Runtime {
     /// digest, so corruption is a cache miss. A per-key lock and persistent
     /// monotonic revision files make a `200` lose to a newer entry or no-store
     /// tombstone, make a `304` use its request revision and not a later
-    /// completion token, and keep ordering independent of the wall clock. A
-    /// stale lock only delays a cache write and never
+    /// completion token, and compare representations separately from publication
+    /// revisions so a newer `304` for the same bytes can supersede an older one.
+    /// Ordering is independent of the wall clock. A stale lock only delays a cache write and never
     /// blocks loading. There is no signature or content-addressed store: the
     /// cache is not integrity protection against someone who can write it and
     /// pins no version. See [`RemoteOptions`] to change the directory or disable
@@ -221,18 +224,21 @@ impl Runtime {
     /// nor published to the cache. Each distinct requested URL consumes one
     /// module slot even when its fetch fails; retrying the same URL reuses that
     /// slot but repeats the I/O. A separate request limit counts every network
-    /// request, including retries and redirect hops. A failed entry preflight is
-    /// refunded because the runtime remains unused. The deadline is per module,
-    /// not for the whole wall-clock execution of a program. These are resource
-    /// bounds, not a sandbox or a CPU or V8 heap bound.
+    /// request, including retries and redirect hops. A failed entry preflight
+    /// refunds module, byte, and redaction charges but not the request already
+    /// spent; create a new `Runtime` for a fresh request budget. The deadline is
+    /// per module, not for the whole wall-clock execution of a program. These are
+    /// resource bounds, not a sandbox or a CPU or V8 heap bound.
     ///
     /// Generated V8 errors redact known remote module URLs from frame locations
     /// and only from messages whose name and prefix match a generated
     /// diagnostic. Module identity and `import.meta.url` are unchanged, and a
     /// script-supplied exception message, including text shaped like "Cannot
     /// find module" or ` at <URL>:`, and a custom stack are preserved, so a
-    /// program can still expose a URL it puts in its own error. Do not treat a
-    /// module specifier as secret storage.
+    /// program can still expose a URL it puts in its own error. A user-thrown
+    /// `SyntaxError`/`TypeError` that exactly copies a generated prefix and
+    /// location shape is indistinguishable from V8's text and may be redacted.
+    /// Do not treat a module specifier as secret storage.
     ///
     /// Remote loading is not SSRF protection: there is no host allowlist,
     /// private-address rejection, or DNS pinning, so the program can fetch any
