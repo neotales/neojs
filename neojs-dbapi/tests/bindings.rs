@@ -165,15 +165,98 @@ fn postgres_dollar_quotes_are_literals() {
 }
 
 #[test]
-fn backslash_escapes_follow_the_dialect() {
+fn explicit_escape_strings_are_accepted() {
     let postgres =
         compile(r"SELECT E'it\'s @id', @id", &id(1), Dialect::Postgres).expect("compiled");
     assert_eq!(postgres.sql(), r"SELECT E'it\'s @id', $1");
     assert_eq!(postgres.parameters().len(), 1);
 
-    let mysql = compile(r"SELECT 'it\'s @id', @id", &id(1), Dialect::MySql).expect("compiled");
-    assert_eq!(mysql.sql(), r"SELECT 'it\'s @id', ?");
-    assert_eq!(mysql.parameters().len(), 1);
+    let unicode = compile(r"SELECT U&'d\0061t', @id", &id(1), Dialect::Postgres).expect("compiled");
+    assert_eq!(unicode.parameters().len(), 1);
+}
+
+#[test]
+fn server_dependent_string_boundaries_are_rejected() {
+    for dialect in [Dialect::Postgres, Dialect::MySql] {
+        let error = compile(r"SELECT 'it\'s @id', @id", &id(1), dialect)
+            .expect_err("backslash-quote boundary depends on server mode");
+        assert_eq!(error.kind(), ErrorKind::Sql, "{dialect:?}");
+    }
+
+    let error = compile(r"SELECT 'a\'", &Params::none(), Dialect::MySql)
+        .expect_err("escaped closing quote");
+    assert_eq!(error.kind(), ErrorKind::Sql);
+}
+
+#[test]
+fn mode_independent_backslashes_are_accepted() {
+    for dialect in [Dialect::Postgres, Dialect::MySql] {
+        let compiled = compile(r"SELECT 'C:\temp', @id", &id(1), dialect).expect("compiled");
+        assert_eq!(compiled.parameters().len(), 1, "{dialect:?}");
+
+        let compiled = compile(r"SELECT 'a\\', @id", &id(1), dialect).expect("compiled");
+        assert_eq!(compiled.parameters().len(), 1, "{dialect:?}");
+    }
+}
+
+#[test]
+fn server_dependent_text_as_a_parameter_stays_bound() {
+    let payload = r"a\' OR 1=1 --";
+    let compiled = compile(
+        "SELECT @value",
+        &named(&[("value", Param::Text(payload.to_owned()))]),
+        Dialect::MySql,
+    )
+    .expect("compiled");
+    assert_eq!(compiled.sql(), "SELECT ?");
+    assert!(!compiled.sql().contains("OR 1=1"));
+    assert_eq!(compiled.parameters().len(), 1);
+}
+
+#[test]
+fn mysql_double_dash_is_a_comment_only_before_whitespace() {
+    let compiled = compile("SELECT 1--2", &Params::none(), Dialect::MySql).expect("compiled");
+    assert_eq!(compiled.sql(), "SELECT 1--2");
+
+    let error = compile("SELECT 1--2; SELECT 3", &Params::none(), Dialect::MySql)
+        .expect_err("the semicolon is not inside a comment");
+    assert_eq!(error.kind(), ErrorKind::Sql);
+
+    let unused =
+        compile("SELECT 1-- @id", &id(1), Dialect::MySql).expect_err("a space makes it a comment");
+    assert_eq!(unused.kind(), ErrorKind::Parameter);
+
+    for sql in ["SELECT 1--\t2", "SELECT 1--\u{7f}2"] {
+        let compiled = compile(sql, &Params::none(), Dialect::MySql).expect("a control character");
+        assert_eq!(compiled.sql(), sql);
+    }
+}
+
+#[test]
+fn mysql_double_dash_without_space_keeps_placeholders() {
+    let compiled = compile(
+        "SELECT 1--? , ?",
+        &Params::positional([Param::I64(1), Param::I64(2)]),
+        Dialect::MySql,
+    )
+    .expect("compiled");
+    assert_eq!(compiled.sql(), "SELECT 1--? , ?");
+    assert_eq!(compiled.parameters().len(), 2);
+
+    let compiled = compile("SELECT 1--@id", &id(1), Dialect::MySql).expect("compiled");
+    assert_eq!(compiled.sql(), "SELECT 1--?");
+    assert_eq!(compiled.parameters().len(), 1);
+}
+
+#[test]
+fn mysql_executable_comment_after_a_terminator_is_rejected() {
+    let error = compile(
+        "SELECT 1; /*!50700 SELECT 2 */",
+        &Params::none(),
+        Dialect::MySql,
+    )
+    .expect_err("executable comment after terminator");
+    assert_eq!(error.kind(), ErrorKind::Sql);
 }
 
 #[test]

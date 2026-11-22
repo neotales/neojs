@@ -86,6 +86,10 @@ impl Error {
     }
 
     /// Returns the provider's stable category when the failure came from it.
+    ///
+    /// `WriteOutcomeUnknown` means a dispatched write may or may not have
+    /// happened; `CommitOutcomeUnknown` means a dispatched `COMMIT` may have
+    /// succeeded. Both require caller-owned verification, not a blind retry.
     #[must_use]
     pub const fn database_kind(self) -> Option<ProviderErrorKind> {
         self.database_kind

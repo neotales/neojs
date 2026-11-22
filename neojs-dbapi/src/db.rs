@@ -26,6 +26,24 @@ use neotales_dbapi_sqlite::{SqliteConfig as ProviderSqliteConfig, SqlitePoolProv
 /// Only SQLite is linked in this build. Opening a PostgreSQL, MySQL, or
 /// Microsoft SQL Server configuration returns
 /// [`crate::ErrorKind::DriverUnavailable`] without attempting a connection.
+///
+/// # Cancellation and uncertain outcomes
+///
+/// This type does not create a task or a timeout. Dropping an in-flight future
+/// is the cancellation signal. With SQLite, the provider's progress handler
+/// observes a cancellation flag that the drop sets, and the provider discards
+/// that connection if a dispatched statement is interrupted. The handler
+/// interrupts SQLite VM execution but cannot interrupt a blocked user-defined
+/// function, a VFS call, or a busy handler; `busy_timeout` bounds a lock wait
+/// and is not a prompt cancellation guarantee. A validation failure detected
+/// before dispatch leaves the session usable.
+///
+/// A cancelled or interrupted write, including a fetch of `INSERT ...
+/// RETURNING`, can be reported as `WriteOutcomeUnknown`; never replay it
+/// without caller-owned idempotency. A dispatched `COMMIT` that does not
+/// return a confirmed success is reported as `CommitOutcomeUnknown`: success is
+/// unknown, not a rollback. Use [`Error::database_kind`] to distinguish these
+/// categories.
 pub struct Db {
     driver: Driver,
     dialect: Dialect,
@@ -99,6 +117,11 @@ impl Db {
 
     /// Executes one statement and returns the affected-row count.
     ///
+    /// A write whose dispatch outcome is unknown, including one cancelled by
+    /// dropping the returned future, is reported as `WriteOutcomeUnknown`.
+    /// Check [`Error::database_kind`] before retrying; this facade does not
+    /// infer replay safety from SQL shape.
+    ///
     /// # Errors
     /// Returns a SQL, parameter, or provider error.
     pub async fn execute(&self, sql: &str, params: &Params) -> Result<u64, Error> {
@@ -120,6 +143,9 @@ impl Db {
     }
 
     /// Fetches one bounded batch using the default [`RowLimit`].
+    ///
+    /// Fetching does not imply read-only SQL: `INSERT ... RETURNING` can write,
+    /// and an interrupted fetch can have an unknown write outcome.
     ///
     /// # Errors
     /// Returns a SQL, parameter, limit, or provider error.
@@ -159,6 +185,9 @@ impl Db {
     }
 
     /// Acquires one exclusive connection from the pool.
+    ///
+    /// The connection is discarded, not returned to the pool, if a dispatched
+    /// statement fails or is cancelled.
     ///
     /// # Errors
     /// Returns [`crate::ErrorKind::DriverUnavailable`] when no provider is
@@ -209,8 +238,12 @@ impl fmt::Debug for Db {
 
 /// An exclusive session acquired from [`Db`].
 ///
-/// Dropping a connection returns it to the pool. A session that a failed
-/// statement invalidated is discarded by the provider instead.
+/// Dropping a connection returns it to the pool. A session that a failed or
+/// cancelled dispatched statement invalidated is discarded by the provider
+/// instead. Dropping an in-flight future on this connection is the cancellation
+/// signal; the SQLite progress handler cannot interrupt a blocked user
+/// function, VFS call, or busy handler, and `busy_timeout` bounds lock waits
+/// rather than promising prompt cancellation.
 pub struct Connection {
     inner: Box<dyn DbSession>,
     dialect: Dialect,
@@ -218,6 +251,11 @@ pub struct Connection {
 
 impl Connection {
     /// Executes one statement on this connection.
+    ///
+    /// A write whose dispatch outcome is unknown, including one cancelled by
+    /// dropping the returned future, is reported as `WriteOutcomeUnknown`. A
+    /// dispatched failure or interruption discards this connection; acquire a
+    /// new one rather than assuming the session is usable.
     ///
     /// # Errors
     /// Returns a SQL, parameter, or provider error.
@@ -231,6 +269,9 @@ impl Connection {
     }
 
     /// Fetches one bounded batch on this connection.
+    ///
+    /// Fetching does not imply read-only SQL, and an interrupted fetch can have
+    /// an unknown write outcome.
     ///
     /// # Errors
     /// Returns a SQL, parameter, limit, or provider error.
@@ -275,6 +316,10 @@ impl Connection {
 
     /// Begins a transaction that borrows this connection.
     ///
+    /// Dropping an in-flight begin future is a cancellation. The provider must
+    /// discard the connection rather than return one whose transaction state is
+    /// unknown.
+    ///
     /// # Errors
     /// Returns a provider error. SQLite does not accept isolation-level or
     /// read-only requests here; this method requests neither.
@@ -304,9 +349,14 @@ impl fmt::Debug for Connection {
 ///
 /// Dropping without [`Transaction::commit`] or [`Transaction::rollback`] leaves
 /// cleanup to the provider, which must not return a possibly-active connection
-/// to the pool. A dispatched statement failure may invalidate the borrowed
-/// connection; acquire a new one rather than assuming the transaction is still
-/// usable.
+/// to the pool. A dispatched statement failure or an interrupted future may
+/// invalidate the borrowed connection; acquire a new one rather than assuming
+/// the transaction is still usable. Dropping an in-flight future is the
+/// cancellation signal, and the SQLite progress handler has the limits
+/// described on [`Connection`].
+///
+/// A statement inside the transaction can write, so a cancelled execute has the
+/// same unknown-outcome risk as one outside a transaction.
 pub struct Transaction<'a> {
     inner: Box<dyn DbTransaction<'a> + 'a>,
     dialect: Dialect,
@@ -314,6 +364,10 @@ pub struct Transaction<'a> {
 
 impl Transaction<'_> {
     /// Executes one statement inside this transaction.
+    ///
+    /// A write whose dispatch outcome is unknown is reported as
+    /// `WriteOutcomeUnknown`; the transaction must not be reused after that or
+    /// after any dispatched failure.
     ///
     /// # Errors
     /// Returns a SQL, parameter, or provider error.
@@ -327,6 +381,9 @@ impl Transaction<'_> {
     }
 
     /// Fetches one bounded batch inside this transaction.
+    ///
+    /// Fetching does not imply read-only SQL; an interrupted fetch can have an
+    /// unknown write outcome.
     ///
     /// # Errors
     /// Returns a SQL, parameter, limit, or provider error.
@@ -371,13 +428,23 @@ impl Transaction<'_> {
 
     /// Commits the transaction and returns the borrowed connection.
     ///
+    /// If `COMMIT` was dispatched and did not return a confirmed success, the
+    /// SQLite provider reports `CommitOutcomeUnknown` and discards the
+    /// connection. That category means the commit may have succeeded; it is not
+    /// a rollback. Do not retry the commit on this transaction. Acquire a new
+    /// connection and verify the data instead.
+    ///
     /// # Errors
-    /// Returns a provider error, including an unconfirmed commit outcome.
+    /// Returns a provider error, including `CommitOutcomeUnknown`.
     pub async fn commit(self) -> Result<(), Error> {
         self.inner.commit_async().await.map_err(Error::from)
     }
 
     /// Rolls the transaction back and returns the borrowed connection.
+    ///
+    /// A failed rollback is reported as `Connection` after the provider discards
+    /// the connection; the rollback is not confirmed. Dropping an in-flight
+    /// rollback future has the same cancellation limits as other operations.
     ///
     /// # Errors
     /// Returns a provider error.

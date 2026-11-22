@@ -318,6 +318,17 @@ struct Compiler<'a> {
     has_code: bool,
 }
 
+/// How a quoted string interprets backslashes.
+#[derive(Clone, Copy)]
+enum StringEscape {
+    /// Backslash is an ordinary character.
+    Literal,
+    /// Backslash always escapes the next character.
+    Escape,
+    /// The server setting decides; scan both ways and require the same end.
+    ServerDependent,
+}
+
 impl Compiler<'_> {
     fn run(&mut self) -> Result<(), Error> {
         let mut index = 0;
@@ -325,7 +336,8 @@ impl Compiler<'_> {
             let byte = self.bytes[index];
             match byte {
                 b'\'' => {
-                    index = self.copy_string(index, b'\'', self.single_quote_backslash(index))?
+                    let escape = self.string_escape(index, b'\'');
+                    index = self.copy_string(index, b'\'', escape)?;
                 }
                 b'"' => {
                     if self.dialect == Dialect::Postgres && self.unicode_escape_prefix(index) {
@@ -333,11 +345,12 @@ impl Compiler<'_> {
                             "PostgreSQL U& quoted identifiers are not supported",
                         ));
                     }
-                    index = self.copy_string(index, b'"', self.dialect == Dialect::MySql)?;
+                    let escape = self.string_escape(index, b'"');
+                    index = self.copy_string(index, b'"', escape)?;
                 }
                 b'`' => {
                     if matches!(self.dialect, Dialect::Sqlite | Dialect::MySql) {
-                        index = self.copy_string(index, b'`', false)?;
+                        index = self.copy_string(index, b'`', StringEscape::Literal)?;
                     } else {
                         return Err(Error::sql("backtick quoting is not valid for this dialect"));
                     }
@@ -351,7 +364,9 @@ impl Compiler<'_> {
                         index += 1;
                     }
                 }
-                b'-' if self.bytes.get(index + 1) == Some(&b'-') => {
+                b'-' if self.bytes.get(index + 1) == Some(&b'-')
+                    && self.mysql_dash_starts_comment(index) =>
+                {
                     index = self.copy_line_comment(index);
                 }
                 b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
@@ -378,7 +393,7 @@ impl Compiler<'_> {
                 b'@' => index = self.handle_at(index)?,
                 b'?' => index = self.handle_question(index)?,
                 b';' => {
-                    if self.rest_is_terminator(index + 1) {
+                    if self.rest_is_terminator(index + 1)? {
                         self.out.push_str(&self.sql[index..]);
                         return Ok(());
                     }
@@ -424,21 +439,32 @@ impl Compiler<'_> {
         self.out.push_str(text);
     }
 
-    fn single_quote_backslash(&self, index: usize) -> bool {
-        match self.dialect {
-            Dialect::MySql => true,
-            Dialect::Postgres => {
-                // PostgreSQL `E'...'` strings interpret backslash escapes.
-                let previous = index.checked_sub(1).and_then(|value| self.bytes.get(value));
-                let before_previous = index.checked_sub(2).and_then(|value| self.bytes.get(value));
-                match previous {
-                    Some(b'E' | b'e') => before_previous.is_none_or(|byte| !is_ident_byte(*byte)),
-                    Some(b'&') => self.unicode_escape_prefix(index),
-                    _ => false,
-                }
+    fn string_escape(&self, index: usize, delimiter: u8) -> StringEscape {
+        match (self.dialect, delimiter) {
+            (Dialect::MySql, b'\'' | b'"') => StringEscape::ServerDependent,
+            (Dialect::Postgres, b'\'') if self.explicit_escape_prefix(index) => {
+                StringEscape::Escape
             }
-            Dialect::Sqlite | Dialect::Mssql => false,
+            (Dialect::Postgres, b'\'') => StringEscape::ServerDependent,
+            (Dialect::Postgres, b'"') | (Dialect::Sqlite | Dialect::Mssql, _) => {
+                StringEscape::Literal
+            }
+            (Dialect::MySql, _) | (Dialect::Postgres, _) => StringEscape::Literal,
         }
+    }
+
+    fn explicit_escape_prefix(&self, index: usize) -> bool {
+        self.e_string_prefix(index) || self.unicode_escape_prefix(index)
+    }
+
+    fn e_string_prefix(&self, index: usize) -> bool {
+        if self.dialect != Dialect::Postgres {
+            return false;
+        }
+        let previous = index.checked_sub(1).and_then(|value| self.bytes.get(value));
+        let before_previous = index.checked_sub(2).and_then(|value| self.bytes.get(value));
+        matches!(previous, Some(b'E' | b'e'))
+            && before_previous.is_none_or(|byte| !is_ident_byte(*byte))
     }
 
     fn unicode_escape_prefix(&self, index: usize) -> bool {
@@ -459,6 +485,36 @@ impl Compiler<'_> {
         &mut self,
         start: usize,
         delimiter: u8,
+        escape: StringEscape,
+    ) -> Result<usize, Error> {
+        let end = match escape {
+            StringEscape::Literal => self.scan_string(start, delimiter, false)?,
+            StringEscape::Escape => self.scan_string(start, delimiter, true)?,
+            StringEscape::ServerDependent => {
+                let literal = self.scan_string(start, delimiter, false);
+                let escaped = self.scan_string(start, delimiter, true);
+                match (literal, escaped) {
+                    (Ok(literal), Ok(escaped)) if literal == escaped => literal,
+                    (Ok(_), Ok(_)) | (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+                        return Err(Error::sql(
+                            "string boundary depends on the server escape mode; use an explicit escape form or bind the value as a parameter",
+                        ));
+                    }
+                    (Err(_), Err(_)) => {
+                        return Err(Error::sql("unterminated SQL string"));
+                    }
+                }
+            }
+        };
+        self.out.push_str(&self.sql[start..end]);
+        self.has_code = true;
+        Ok(end)
+    }
+
+    fn scan_string(
+        &self,
+        start: usize,
+        delimiter: u8,
         backslash_escape: bool,
     ) -> Result<usize, Error> {
         let mut index = start + 1;
@@ -473,10 +529,7 @@ impl Compiler<'_> {
                 if self.bytes.get(index + 1) == Some(&delimiter) {
                     index += 2;
                 } else {
-                    let end = index + 1;
-                    self.out.push_str(&self.sql[start..end]);
-                    self.has_code = true;
-                    return Ok(end);
+                    return Ok(index + 1);
                 }
             } else {
                 index += 1;
@@ -686,24 +739,29 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    fn rest_is_terminator(&self, start: usize) -> bool {
+    fn rest_is_terminator(&self, start: usize) -> Result<bool, Error> {
         let mut index = start;
         while index < self.bytes.len() {
             match self.bytes[index] {
                 b';' => index += 1,
                 byte if byte.is_ascii_whitespace() => index += 1,
-                b'-' if self.bytes.get(index + 1) == Some(&b'-') => {
+                b'-' if self.bytes.get(index + 1) == Some(&b'-')
+                    && self.mysql_dash_starts_comment(index) =>
+                {
                     index = self.bytes[index..]
                         .iter()
                         .position(|byte| *byte == b'\n')
                         .map_or(self.bytes.len(), |offset| index + offset);
                 }
                 b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
+                    if self.dialect == Dialect::MySql && self.bytes.get(index + 2) == Some(&b'!') {
+                        return Err(Error::sql("MySQL executable comments are not supported"));
+                    }
                     let Some(offset) = self.bytes[index + 2..]
                         .windows(2)
                         .position(|window| window == b"*/")
                     else {
-                        return false;
+                        return Err(Error::sql("unterminated SQL comment"));
                     };
                     index += offset + 4;
                 }
@@ -713,10 +771,20 @@ impl Compiler<'_> {
                         .position(|byte| *byte == b'\n')
                         .map_or(self.bytes.len(), |offset| index + offset);
                 }
-                _ => return false,
+                _ => return Ok(false),
             }
         }
-        true
+        Ok(true)
+    }
+
+    fn mysql_dash_starts_comment(&self, index: usize) -> bool {
+        if self.dialect != Dialect::MySql {
+            return true;
+        }
+        matches!(
+            self.bytes.get(index + 2),
+            Some(byte) if byte.is_ascii_whitespace() || *byte < 0x20 || *byte == 0x7f
+        )
     }
 }
 

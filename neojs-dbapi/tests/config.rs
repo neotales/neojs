@@ -1,4 +1,6 @@
-use neojs_dbapi::{Db, DbConfig, Dialect, Driver, ErrorKind, Param, Params, SqliteConfig, compile};
+use neojs_dbapi::{
+    Db, DbConfig, Dialect, Driver, ErrorKind, NetworkConfig, Param, Params, SqliteConfig, compile,
+};
 
 #[test]
 fn sqlite_config_parses_and_reports_values() {
@@ -90,6 +92,25 @@ fn network_config_parses_but_password_is_redacted() {
     assert!(!debug.contains("s3cr3t"));
     assert!(!debug.contains("db.internal"));
     assert!(!debug.contains("admin"));
+}
+
+#[test]
+fn network_variant_supplies_the_driver() {
+    let postgres = DbConfig::postgres(NetworkConfig::new("db.internal", 5432, "app", "admin"));
+    assert_eq!(postgres.driver(), Driver::Postgres);
+    assert_eq!(postgres.network_options().expect("network").port(), 5432);
+
+    let mysql = DbConfig::mysql(NetworkConfig::new("db.internal", 3306, "app", "admin"));
+    assert_eq!(mysql.driver(), Driver::MySql);
+
+    let mssql = DbConfig::mssql(NetworkConfig::new("db.internal", 1433, "app", "admin"));
+    assert_eq!(mssql.driver(), Driver::Mssql);
+
+    let zero_port = DbConfig::postgres(NetworkConfig::new("db.internal", 0, "app", "admin"));
+    assert_eq!(
+        zero_port.validate().expect_err("zero port").kind(),
+        ErrorKind::Config
+    );
 }
 
 #[test]

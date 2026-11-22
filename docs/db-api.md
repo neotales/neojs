@@ -52,12 +52,21 @@ deliberately does not provide (it requires native placeholder syntax and does no
   delimiters.
 - **Ambiguity fails closed.** `?NNN`, `:name`, `$name`, `??`, a bare `@`, mixed named and
   positional forms, multiple statements, and trigger bodies are errors. A `;` is accepted only when
-  the remainder is whitespace, comments, and further semicolons.
+  the remainder is whitespace, comments, and further semicolons. MySQL `--` is a comment only when
+  followed by whitespace or a control character; otherwise it is two minus signs and a following
+  placeholder is real.
 - **Dialect-aware literals.** Single and double quotes, backticks (SQLite/MySQL), brackets
   (SQLite/SQL Server), line and block comments, nested block comments (PostgreSQL/SQL Server),
   PostgreSQL dollar quoting, and MySQL/PostgreSQL backslash-escape rules are handled. A
   placeholder inside a string, quoted identifier, or comment is not a placeholder. MySQL
-  executable comments (`/*! ... */`) are rejected because MySQL executes their contents.
+  executable comments (`/*! ... */`) are rejected in both the primary scan and the trailing
+  terminator scan because MySQL executes their contents.
+- **Server-mode ambiguity.** A MySQL string and an ordinary PostgreSQL string can change where
+  they end depending on `NO_BACKSLASH_ESCAPES` or `standard_conforming_strings`. The scanner
+  evaluates both interpretations and rejects the string unless they agree on the end boundary.
+  PostgreSQL `E'...'` and `U&'...'` are explicit escape forms and are accepted. This keeps a
+  mode-dependent quote from hiding or exposing a placeholder. No configuration flag forces a
+  server SQL mode, so an ambiguous string is rejected rather than guessed.
 - **Configuration errors are static.** The error type holds a category and a fixed detail string.
   It never contains a path, host, user, password, SQL text, or driver message. `Debug` for a
   network configuration redacts host, database, user, and password.
@@ -82,6 +91,22 @@ deliberately does not provide (it requires native placeholder syntax and does no
   preserving case-sensitive names.
 - `query_one` materializes the bounded batch before deciding cardinality; use paging for large
   result sets.
+
+## Cancellation and outcomes
+
+The crate creates no task and no timeout. Dropping an in-flight future is the cancellation signal.
+The SQLite provider installs a progress handler on the connection; dropping an in-flight future
+sets the cancellation flag it observes, and an interrupted dispatched statement discards that
+connection. The handler interrupts SQLite VM
+execution but not a blocked user-defined function, a VFS call, or a busy handler, and
+`busy_timeout` bounds a lock wait rather than guaranteeing prompt cancellation. A validation
+failure detected before dispatch does not invalidate the session.
+
+A cancelled or interrupted write, including an `INSERT ... RETURNING` fetch, can be reported as
+`WriteOutcomeUnknown`. The SQLite provider maps a dispatched `COMMIT` error to
+`CommitOutcomeUnknown` and discards the connection: the commit may have succeeded, so it is not a
+rollback. Callers must not blindly retry either category; acquire a new connection and verify.
+`Error::database_kind()` exposes the provider category.
 
 ## Verification
 

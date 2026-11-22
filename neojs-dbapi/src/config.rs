@@ -194,7 +194,6 @@ impl fmt::Debug for SqliteConfig {
 /// accessor.
 #[derive(Clone)]
 pub struct NetworkConfig {
-    driver: Driver,
     host: String,
     port: u16,
     database: String,
@@ -204,21 +203,18 @@ pub struct NetworkConfig {
 }
 
 impl NetworkConfig {
-    /// Creates network configuration for a network driver.
-    ///
-    /// `driver` must be [`Driver::Postgres`], [`Driver::MySql`], or
-    /// [`Driver::Mssql`]. A SQLite driver is rejected by [`crate::Db::open`].
+    /// Creates network configuration. The [`DbConfig`] variant supplies the
+    /// driver; there is no second driver field that could disagree with it.
     #[must_use]
     pub fn new(
-        driver: Driver,
         host: impl Into<String>,
+        port: u16,
         database: impl Into<String>,
         user: impl Into<String>,
     ) -> Self {
         Self {
-            driver,
             host: host.into(),
-            port: driver.default_port().unwrap_or(0),
+            port,
             database: database.into(),
             user: user.into(),
             password: None,
@@ -238,12 +234,6 @@ impl NetworkConfig {
     pub const fn tls(mut self, enabled: bool) -> Self {
         self.tls = enabled;
         self
-    }
-
-    /// Returns the configured driver.
-    #[must_use]
-    pub const fn driver(&self) -> Driver {
-        self.driver
     }
 
     /// Returns the host name.
@@ -283,11 +273,6 @@ impl NetworkConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        if self.driver == Driver::Sqlite {
-            return Err(Error::config(
-                "a network configuration requires a network driver",
-            ));
-        }
         if !valid_text(&self.host) {
             return Err(Error::config("host must be a non-empty string without NUL"));
         }
@@ -315,7 +300,6 @@ impl fmt::Debug for NetworkConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("NetworkConfig")
-            .field("driver", &self.driver)
             .field("host", &"[redacted]")
             .field("port", &self.port)
             .field("database", &"[redacted]")
@@ -479,8 +463,7 @@ impl DbConfig {
             Some(_) => return Err(Error::config("tls must be a boolean")),
             None => false,
         };
-        let mut config = NetworkConfig::new(driver, host, database, user);
-        config.port = port;
+        let mut config = NetworkConfig::new(host, port, database, user);
         config.password = password;
         config.tls = tls;
         let config = match driver {
