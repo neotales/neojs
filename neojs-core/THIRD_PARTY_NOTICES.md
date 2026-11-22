@@ -1,7 +1,8 @@
 # Third-party notices
 
 `neojs-core` contains code adapted from the NeoLiteJS project and uses the
-`neotales-age` and `neotales-ssh` crates at runtime.
+`neotales-age`, `neotales-ssh`, `ureq`, `rustls`, `rustls-webpki`, and
+`webpki-roots` crates at runtime.
 
 ## NeoLiteJS `neo:crypto` and `neo:age`
 
@@ -406,3 +407,20 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## HTTPS module loading
+
+`neojs-core/src/remote.rs` uses the following crates through their published
+Rust APIs. It does not modify or vendor them.
+
+- `ureq` 2.12.1, <https://github.com/algesten/ureq>, MIT OR Apache-2.0.
+- `rustls` 0.23.46, <https://github.com/rustls/rustls>, Apache-2.0 OR ISC OR
+  MIT.
+- `rustls-webpki` 0.103.17, <https://github.com/rustls/webpki>, ISC.
+- `webpki-roots` 0.26.11, <https://github.com/rustls/webpki-roots>,
+  CDLA-Permissive-2.0. This crate supplies the bundled Mozilla root
+  certificates as data.
+
+The neojs code decides redirect policy, request headers, size limits,
+deadlines, cache layout, and error messages; those decisions are not upstream
+code. No Deno source is copied.

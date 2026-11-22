@@ -1502,6 +1502,56 @@ fn reports_bad_arguments_and_exits_2() {
 }
 
 #[test]
+fn remote_urls_are_refused_without_the_allow_remote_flag() {
+    let output = run_args(&["https://mods.test/main.js"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let message = stderr(&output);
+    assert!(
+        message.contains("remote module loading is disabled"),
+        "{message}"
+    );
+}
+
+#[test]
+fn allow_remote_still_refuses_http_and_credential_bearing_urls() {
+    let http = run_args(&["--allow-remote", "http://mods.test/main.js"]);
+    assert_eq!(http.status.code(), Some(2));
+    assert!(stderr(&http).contains("https"), "{}", stderr(&http));
+
+    let credentials = run_args(&["--allow-remote", "https://user:secret@mods.test/main.js"]);
+    assert_eq!(credentials.status.code(), Some(2));
+    let message = stderr(&credentials);
+    assert!(message.contains("username or password"), "{message}");
+    assert!(!message.contains("secret"), "{message}");
+}
+
+#[test]
+fn allow_remote_still_runs_local_files() {
+    let project = Project::new();
+    let file = project.write("main.js", "console.log(\"local with remote enabled\");\n");
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["--allow-remote", path]);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "local with remote enabled\n");
+}
+
+#[test]
+fn help_documents_remote_loading_without_promising_isolation() {
+    let help = run_args(&["--help"]);
+
+    assert_eq!(help.status.code(), Some(0));
+    let text = stdout(&help);
+    assert!(text.contains("--allow-remote"), "{text}");
+    assert!(text.contains("disabled by default"), "{text}");
+    assert!(text.contains("not SSRF"), "{text}");
+    assert!(text.contains("not a sandbox"), "{text}");
+    assert!(text.contains("neojs/packages"), "{text}");
+}
+
+#[test]
 fn accepts_a_path_after_a_double_dash() {
     let project = Project::new();
     let file = project.write("dash.js", "console.log(\"after dash\");\n");

@@ -50,4 +50,8 @@ neotales-ssh = "=0.0.0-alpha.1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 tempfile = "3"
+# HTTPS module loading. `ureq` is a blocking client over `rustls`; only the
+# `tls` feature is enabled, so it uses the bundled `webpki-roots` store and no
+# native certificate store, decompression, cookie jar, or environment proxy.
+ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
 url = "2"

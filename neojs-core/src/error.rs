@@ -57,6 +57,52 @@ pub enum Error {
         reason: String,
     },
 
+    /// A remote entry module was requested from a runtime without remote
+    /// loading enabled.
+    ///
+    /// Remote loading is opt-in: create the runtime with
+    /// [`crate::Runtime::with_remote`] and an explicit
+    /// [`crate::RemoteOptions`]. A remote import from an already-running module
+    /// fails as [`Error::Core`] with a message instead.
+    #[error(
+        "remote module loading is disabled; create the Runtime with Runtime::with_remote to enable it"
+    )]
+    RemoteDisabled,
+
+    /// The remote entry module could not be fetched or is not a format this
+    /// runtime executes.
+    ///
+    /// This covers an invalid or non-HTTPS URL, a URL with credentials, a
+    /// network or TLS failure, an HTTP error status, a redirect that violates
+    /// the policy, a body above the configured limit, and an unsupported module
+    /// extension. The failure happens before V8 loads the module, so the
+    /// runtime remains unused. A remote module imported by a running module
+    /// fails as [`Error::Core`] instead.
+    #[error("cannot load `{url}`: {reason}")]
+    RemoteEntry {
+        /// The requested URL without credentials, a query, or a fragment.
+        ///
+        /// A query can contain a signed token, so it is not included in an
+        /// error message.
+        url: String,
+        /// Why the remote entry module is not executed.
+        reason: String,
+    },
+
+    /// The remote entry module is TypeScript that cannot be reduced to
+    /// ECMAScript.
+    ///
+    /// This has the same meaning as [`Error::TypeScript`] for a URL entry. The
+    /// runtime remains unused, because the failure happens before V8 loads the
+    /// module.
+    #[error("cannot compile `{url}`: {reason}")]
+    RemoteTypeScript {
+        /// The requested URL without credentials, a query, or a fragment.
+        url: String,
+        /// Why the module could not be reduced to ECMAScript.
+        reason: String,
+    },
+
     /// V8 rejected the module while loading, linking, or evaluating it.
     ///
     /// This covers module resolution, import loading, syntax errors, uncaught

@@ -102,6 +102,50 @@ TypeScript is reported with the parser's position and source excerpt. Erased tex
 spaces, so a stack trace from a `.ts` file points at the original line and column. `.tsx`, `.jsx`,
 `.cts`, `.d.ts`, `.d.mts`, and `.d.cts` files are not supported.
 
+**Run a remote module, explicitly.** Remote loading is off by default. Pass `--allow-remote` to
+run an `https:` entry or to let a local module import an absolute `https:` URL:
+
+```sh
+neojs --allow-remote https://example.com/main.js
+```
+
+```js
+// main.js, run with `neojs --allow-remote main.js`
+import { greet } from "https://example.com/greet.js";
+console.log(greet("world"));
+```
+
+A relative import inside a remote module resolves against that module's URL, so it stays remote.
+`.js`, `.mjs`, `.ts`, and `.mts` work, statically and dynamically, and TypeScript is type-stripped
+as it is locally. Only `https:` is accepted. A remote module cannot import a `file:` URL: there is
+no implicit transition from remote code to the local filesystem.
+
+When a redirect is followed, the final URL is the module's identity and the requested URL is an
+alias for it, as in a browser. `import.meta.url` is the final URL, relative imports resolve against
+it, and a later import of either spelling reaches the same module instance. Two URLs that differ
+only by query are two module instances. Each redirect is
+checked: the target must be credential-free HTTPS and within the redirect limit, so a downgrade to
+HTTP fails before the target is requested. Cross-origin HTTPS redirects are allowed because neojs
+sends no cookie, authorization header, or referrer, and reads no proxy settings from the
+environment. A URL with a username or password is rejected rather than forwarded.
+
+Downloaded modules are cached automatically in one user-profile package cache:
+`$XDG_CACHE_HOME/neojs/packages`, or `$HOME/.cache/neojs/packages` when `XDG_CACHE_HOME` is unset.
+The cache key is a hash of the canonical URL including its query, so secrets in a query do not
+appear as file names, and two inputs that differ by query are separate entries. Entries are written
+atomically, so concurrent processes cannot publish a half-written module. A fresh
+`Cache-Control: max-age` response is reused without a request; a stale entry is revalidated with
+`If-None-Match`/`If-Modified-Since` and a `304` reuses the cached body. `no-store` is not cached, and
+a response without a freshness lifetime is revalidated on the next run. There is no lockfile and no
+content hash, so the cache is not integrity protection and does not pin a version;
+`RemoteOptions::with_cache_dir` and `without_cache` control the directory.
+
+Remote loading is a capability switch, not a permission system. It is **not SSRF protection**: there
+is no host allowlist, private-address rejection, or DNS pinning, and neojs fetches whatever HTTPS URL
+the program names with the process's network authority. Remote code runs with the same authority as
+local code and is not sandboxed. The body limit, redirect limit, and deadline are resource bounds;
+see [`RemoteOptions`](neojs-core/src/remote.rs).
+
 **Send logs to the right stream.** `console.log`, `console.info`, and `console.debug` write to
 stdout. `console.warn` and `console.error` write to stderr.
 
@@ -1078,7 +1122,8 @@ thread that will use it; it is not `Send`.
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
-local module loading, imports of the `age`, `assert`, `chars`, `console`, `crypto`, `path`, `ssh`,
+local module loading, opt-in HTTPS module loading with explicit limits, imports of the `age`,
+`assert`, `chars`, `console`, `crypto`, `path`, `ssh`,
 `stdio`, and `strings` built-ins by their bare or `neo:` specifiers, console output, bounded
 in-memory byte streams, writes to the process's stdout and stderr, lexical POSIX and Windows path
 operations, SHA-2 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous
@@ -1093,8 +1138,9 @@ list are not implemented.
   rejected by extension. CommonJS is rejected by the `.cjs` and `.cts` extensions; a `.js` file
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
-- `node:`, `npm:`, `jsr:`, `http:`, `https:`, `data:`, and `blob:` imports are rejected. The
-  built-in modules are `age`, `assert`, `chars`, `console`, `crypto`, `path`, `ssh`, `stdio`, and
+- `node:`, `npm:`, `jsr:`, `http:`, `data:`, and `blob:` imports are rejected. `https:` imports are
+  rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`), and
+  `http:` is always rejected. The built-in modules are `age`, `assert`, `chars`, `console`, `crypto`, `path`, `ssh`, `stdio`, and
   `strings`, reached through `Neo.getBuiltInModule("age")`,
   `Neo.getBuiltInModule("assert")`, `Neo.getBuiltInModule("chars")`,
   `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("crypto")`,
