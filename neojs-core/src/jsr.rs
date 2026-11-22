@@ -2,15 +2,16 @@
 //!
 //! # Status
 //!
-//! This module is private and is not wired into [`crate::loader`]. Every `jsr:`
-//! import is still rejected with `jsr: modules are not implemented`; nothing
-//! here downloads, reads, caches, or executes a JSR package, and no public API
-//! is exposed. It is the deterministic part of a later loader integration:
-//! strict specifier parsing, registry-metadata parsing, version selection,
-//! entrypoint resolution, and per-file size and checksum verification.
-//! Fetching, transport, extraction, module loading, lockfiles, and cache policy
-//! are deliberately absent. A caller must not treat this module as evidence
-//! that native JSR imports work. Only the public registry's documented metadata
+//! This module is private and is not wired into [`crate::loader`] for a normal
+//! build. Every public `jsr:` import is still rejected with
+//! `jsr: modules are not implemented`; the test-only `jsr_loader` module
+//! exercises this core without exposing it. Nothing here downloads, reads,
+//! caches, or executes a JSR package, and no public API is exposed. It is the
+//! deterministic part of a loader integration: strict specifier parsing,
+//! registry-metadata parsing, version selection, entrypoint resolution, and
+//! per-file size and checksum verification. Fetching, transport, extraction,
+//! module loading, lockfiles, and cache policy are deliberately absent here. A
+//! caller must not treat this module as evidence that native JSR imports work. Only the public registry's documented metadata
 //! shape is modeled; private registries, authentication, credentials, and
 //! custom origins are out of scope.
 //!
@@ -77,13 +78,23 @@
 //!
 //! # Remaining integration
 //!
+//! The test-only `jsr_loader` module wires this core to deno_core's module
+//! loader for crate tests, using an injected in-memory registry. That proves
+//! the resolution, exact-version identity, relative-path containment, manifest
+//! verification, and file, byte, and metadata-document bounds through real V8
+//! evaluation. It is compiled only for tests and is not reachable from
+//! [`crate::Runtime::new`], so every public `jsr:` import is still rejected.
+//!
 //! A later change must fetch packages and metadata over HTTPS with an `Accept`
 //! header that does not include `text/html`, select and pin a version, fetch
 //! the selected version's metadata and module graph, verify each file, store
 //! bytes under the exact package/version identity, and only then teach the
-//! loader to resolve `jsr:` and stop rejecting it. Cache layout, lockfile
-//! format, offline and frozen policy, redirect and size and time limits, and
-//! permission reporting are undecided and deliberately not implemented here.
+//! loader to resolve `jsr:` and stop rejecting it. The loader's registry calls
+//! are synchronous because [`deno_core::ModuleLoader::resolve`] is synchronous;
+//! a real transport must prefetch metadata or use an asynchronous resolution
+//! stage instead of blocking the isolate thread. Cache layout, lockfile format,
+//! offline and frozen policy, redirect and time limits, and permission
+//! reporting are undecided and deliberately not implemented here.
 //!
 //! # Limits
 //!
@@ -193,6 +204,23 @@ pub(crate) struct PackageId {
     pub(crate) scope: String,
     /// The package name without a scope prefix.
     pub(crate) name: String,
+}
+
+impl PackageId {
+    /// Validates a scope and package name and builds an identity.
+    ///
+    /// The names use the registry's published rules: lowercase ASCII letters,
+    /// digits, and hyphens, with the documented length limits and no leading
+    /// hyphen. A caller that already has a validated [`PackageId`] must not
+    /// re-parse it through untrusted text.
+    pub(crate) fn new(scope: &str, name: &str) -> Result<Self, String> {
+        validate_scope(scope)?;
+        validate_package_name(name)?;
+        Ok(Self {
+            scope: scope.to_owned(),
+            name: name.to_owned(),
+        })
+    }
 }
 
 impl fmt::Display for PackageId {
@@ -757,6 +785,20 @@ impl VersionMetadata {
         })
     }
 
+    /// Returns the declared byte length of one manifest file.
+    ///
+    /// The path must be a manifest key with a leading `/`. A missing entry is a
+    /// [`Error::Manifest`]. A caller uses this to reject an oversized download
+    /// before fetching it; the length is checked again by
+    /// [`Self::verify_file`] against the actual bytes.
+    pub(crate) fn file_size(&self, path: &str) -> Result<u64, Error> {
+        validate_manifest_path(path).map_err(Error::Manifest)?;
+        self.manifest
+            .get(path)
+            .map(|entry| entry.size)
+            .ok_or_else(|| Error::Manifest(format!("`{path}` is not listed in the manifest")))
+    }
+
     /// Verifies downloaded bytes for one manifest path.
     ///
     /// The path must be a manifest key with a leading `/`. A missing entry is a
@@ -963,7 +1005,7 @@ fn normalize_export_target(target: &str) -> Result<String, String> {
     Ok(format!("./{rest}"))
 }
 
-fn validate_manifest_path(path: &str) -> Result<&str, String> {
+pub(crate) fn validate_manifest_path(path: &str) -> Result<&str, String> {
     let Some(rest) = path.strip_prefix('/') else {
         return Err(format!("the manifest path `{path}` must start with `/`"));
     };

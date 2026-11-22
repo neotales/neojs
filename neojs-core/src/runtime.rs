@@ -200,6 +200,19 @@ impl Runtime {
     /// [`Runtime`]'s `Drop`, which does not block. Building the runtimes is the
     /// only failure before a `Runtime` exists.
     fn with_shims(console: &'static str, builtins: String) -> Result<Self, Error> {
+        Self::with_module_loader(console, builtins, Rc::new(FileModuleLoader))
+    }
+
+    /// Creates a runtime with an explicit module loader.
+    ///
+    /// [`Runtime::new`] installs [`FileModuleLoader`]. The crate's JSR tests use
+    /// this to install a loader backed by an in-memory registry. It remains
+    /// crate-private: no public constructor can enable remote or `jsr:` loading.
+    fn with_module_loader(
+        console: &'static str,
+        builtins: String,
+        loader: Rc<dyn deno_core::ModuleLoader>,
+    ) -> Result<Self, Error> {
         let driver = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             // Bounded pool for `neo:crypto` asynchronous hashing and password
@@ -243,7 +256,7 @@ impl Runtime {
         let js = {
             let _guard = driver.enter();
             JsRuntime::new(RuntimeOptions {
-                module_loader: Some(Rc::new(FileModuleLoader)),
+                module_loader: Some(loader),
                 extensions,
                 ..Default::default()
             })
@@ -263,6 +276,19 @@ impl Runtime {
         js.execute_script("<neojs:builtins>", builtins)
             .map_err(|error| Error::Core(error.into()))?;
         Ok(runtime)
+    }
+
+    /// Creates a JSR test runtime with explicit resource limits.
+    ///
+    /// The module-graph tests use small limits to cross a bound through real
+    /// V8 loading. No production build compiles this constructor.
+    #[cfg(test)]
+    pub(crate) fn with_jsr_registry_limits(
+        registry: Rc<dyn crate::jsr_loader::Registry>,
+        limits: crate::jsr_loader::Limits,
+    ) -> Result<Self, Error> {
+        let loader = crate::jsr_loader::JsrModuleLoader::with_limits(registry, limits);
+        Self::with_module_loader(CONSOLE_SHIM, neo_shim(), Rc::new(loader))
     }
 
     /// Runs one entry module to completion and blocks until it finishes.

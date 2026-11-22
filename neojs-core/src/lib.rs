@@ -282,11 +282,16 @@ mod crypto_cipher;
 mod crypto_hash;
 mod crypto_shamir;
 mod error;
-// Private groundwork for native `jsr:` imports. It is not wired into the
-// loader, so every `jsr:` import is still rejected; see `src/jsr.rs` for the
-// implemented core and the work that remains.
+// Private groundwork for native `jsr:` imports. `Runtime::new` does not install
+// a JSR-capable loader, so every public `jsr:` import is still rejected; see
+// `src/jsr.rs` for the implemented core and the work that remains.
 #[allow(dead_code)]
 mod jsr;
+// Test-only loader wiring for the private JSR resolver. It is not compiled
+// into a normal build, and `Runtime::new` never installs it, so public `jsr:`
+// imports remain rejected until an HTTPS transport and cache policy land.
+#[cfg(test)]
+mod jsr_loader;
 mod loader;
 mod path;
 mod runtime;
