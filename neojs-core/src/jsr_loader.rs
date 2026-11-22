@@ -148,6 +148,8 @@ struct GraphState {
 pub(crate) struct JsrModuleLoader {
     registry: Rc<dyn Registry>,
     limits: Limits,
+    /// Delegate for built-in and local-file specifiers. Remote loading is off.
+    files: FileModuleLoader,
     packages: RefCell<BTreeMap<String, PackageMetadata>>,
     versions: RefCell<BTreeMap<String, VersionMetadata>>,
     graph: RefCell<GraphState>,
@@ -159,6 +161,7 @@ impl JsrModuleLoader {
         Self {
             registry,
             limits,
+            files: FileModuleLoader::new(None),
             packages: RefCell::new(BTreeMap::new()),
             versions: RefCell::new(BTreeMap::new()),
             graph: RefCell::new(GraphState::default()),
@@ -404,7 +407,7 @@ impl ModuleLoader for JsrModuleLoader {
                 )));
             }
         }
-        FileModuleLoader.resolve(specifier, referrer, kind)
+        self.files.resolve(specifier, referrer, kind)
     }
 
     fn load(
@@ -423,7 +426,7 @@ impl ModuleLoader for JsrModuleLoader {
             .unwrap_or("");
         match self.load_jsr(module_specifier, referrer) {
             Ok(Some(source)) => ModuleLoadResponse::Sync(Ok(source)),
-            Ok(None) => FileModuleLoader.load(module_specifier, maybe_referrer, options),
+            Ok(None) => self.files.load(module_specifier, maybe_referrer, options),
             Err(failure) => ModuleLoadResponse::Sync(Err(JsErrorBox::generic(failure.to_string()))),
         }
     }

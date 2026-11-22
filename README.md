@@ -102,6 +102,94 @@ TypeScript is reported with the parser's position and source excerpt. Erased tex
 spaces, so a stack trace from a `.ts` file points at the original line and column. `.tsx`, `.jsx`,
 `.cts`, `.d.ts`, `.d.mts`, and `.d.cts` files are not supported.
 
+**Run a remote module, explicitly.** Remote loading is off by default. Pass `--allow-remote` to
+run an `https:` entry or to let a local module import an absolute `https:` URL:
+
+```sh
+neojs --allow-remote https://example.com/main.js
+```
+
+```js
+// main.js, run with `neojs --allow-remote main.js`
+import { greet } from "https://example.com/greet.js";
+console.log(greet("world"));
+```
+
+A relative import inside a remote module resolves against that module's URL, so it stays remote.
+`.js`, `.mjs`, `.ts`, and `.mts` work, statically and dynamically, and TypeScript is type-stripped
+as it is locally. Only `https:` is accepted. A remote module cannot import a `file:` URL: there is
+no implicit transition from remote code to the local filesystem.
+
+When a redirect is followed, the final URL is the module's identity and the requested URL is an
+alias for it, as in a browser. `import.meta.url` is the final URL, relative imports resolve against
+it, and a later import of either spelling reaches the same module instance. Two URLs that differ
+only by query are two module instances. Each redirect is
+checked: the target must be credential-free HTTPS and within the redirect limit, so a downgrade to
+HTTP fails before the target is requested. Cross-origin HTTPS redirects are allowed because neojs
+sends no cookie, authorization header, or referrer, and reads no proxy settings from the
+environment. A URL with a username or password is rejected rather than forwarded.
+
+Downloaded modules are cached automatically in one user-profile package cache:
+`$XDG_CACHE_HOME/neojs/packages`, or `$HOME/.cache/neojs/packages` when `XDG_CACHE_HOME` is unset.
+The cache key is a hash of the canonical URL including its query, so secrets in a query do not
+appear as file names, and two inputs that differ by query are separate entries. Entries are written
+atomically, so concurrent processes cannot publish a half-written module, and each entry records and
+verifies its body length and SHA-256 digest. A fresh `Cache-Control: max-age` response is reused
+without a request; freshness includes the upstream `Age` and `Date`, so a response that was already
+old when it arrived is stale immediately. A stale entry is revalidated with
+`If-None-Match`/`If-Modified-Since`, and a `304` reuses the cached body. `no-store` does not store the
+body; it leaves an absent-entry tombstone so an older `200` cannot resurrect it. A response without a
+freshness lifetime is revalidated on the next run. Publications are serialized per key and use
+persistent monotonic revision files: a `200` loses to a newer entry or `no-store` tombstone, and a
+`304` uses its own request revision rather than a later completion token, so it cannot outrank a
+later-started `200` or `no-store`. Representation identity combines the validator, when present, with
+the actual body digest, so a weak ETag shared by different bytes is not treated as the same
+representation. It is tracked separately from the publication revision, so a newer `304` for the
+same bytes can supersede an older `304` without letting an older representation win. A newer `304`
+merges only headers it actually supplied, so omitting Cache-Control cannot undo an earlier
+`no-cache`. A newer `304` merges only fields it supplied and, without a usable `Date`/`Age`, derives
+age from the current cached metadata under the publication lock, so it cannot overwrite a more
+conservative age applied by an earlier `304`. Ordering does
+not depend on the wall clock. Lock waits are capped at 250 ms and the remaining fetch deadline; with a
+longer deadline a held or stale lock skips the cache operation and the fetch continues to the
+network, while a deadline at or below the cap may be consumed and the fetch times out before
+transport. Header and metadata lines are
+bounded, one file handle is used per read, the body length is checked before allocation, and
+appended bytes are rejected as a cache miss. There is no signature or content-addressed store, so the cache is not integrity
+protection against someone who can write it and does not pin a version;
+`RemoteOptions::with_cache_dir` and `without_cache` control the directory.
+
+A remote module's format follows its final URL after redirects, so `.js` to `.ts` is type-stripped
+and `.ts` to `.js` is run as JavaScript. The runtime also enforces a per-module body limit, an
+aggregate byte limit, and a remote module count limit. A module and its bytes are admitted before the
+network or cache is consulted, a body is read only up to the remaining aggregate allowance, and a
+rejected module is neither fetched nor cached. Each distinct requested URL consumes a module slot
+even when its fetch fails, so repeatedly caught oversized imports cannot grow the graph without
+bound. Retrying the same URL reuses its slot but repeats the I/O. A separate request limit counts
+every network request, including retries and each redirect hop, so repeating one failed URL cannot
+bypass the network bound. A failed entry preflight refunds its module, byte, and redaction charges
+but not the request it already spent; create a new `Runtime` for a fresh request budget. Idle
+connection pooling is disabled, so ureq cannot hide a retry of a request whose reused connection was
+closed. The redaction URL set is capped by the module limit. The
+deadline is per module, not a wall-clock bound on the whole program: running code can keep importing
+modules until the aggregate limits are reached. These are resource bounds, not a sandbox
+or a CPU or V8 heap bound.
+
+Generated V8 errors redact known remote module URLs from stack-frame locations and only from
+messages whose error name and prefix match a generated diagnostic shape. The module's identity and
+`import.meta.url` stay the final URL. A script-supplied exception message, including a quoted
+relative URL-like string, text shaped like "Cannot find module", or ` at <URL>:`, and a custom stack
+are preserved, so code can still expose a URL it puts in its own error. A user-thrown
+`SyntaxError`/`TypeError` that exactly copies a generated prefix and location shape is
+indistinguishable from V8's own text and may be redacted. Do not use module specifiers as secret
+storage.
+
+Remote loading is a capability switch, not a permission system. It is **not SSRF protection**: there
+is no host allowlist, private-address rejection, or DNS pinning, and neojs fetches whatever HTTPS URL
+the program names with the process's network authority. Remote code runs with the same authority as
+local code and is not sandboxed. The body limit, redirect limit, and deadline are resource bounds;
+see [`RemoteOptions`](neojs-core/src/remote.rs).
+
 **Send logs to the right stream.** `console.log`, `console.info`, and `console.debug` write to
 stdout. `console.warn` and `console.error` write to stderr.
 
@@ -1355,12 +1443,13 @@ database providers and a JavaScript/Node adapter are not yet wired in. See the
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
-local module loading, imports of the `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`,
-`slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid` built-ins by their bare or `neo:` specifiers,
-console output, `neojs test` over multiple files and globs, bounded in-memory byte streams, live
-mutable and read-only array and typed-array views, mutable and read-only Unicode code point buffers,
-writes to the process's stdout and stderr, lexical POSIX and Windows path operations,
-SHA-2 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous SSH command
+local module loading, opt-in HTTPS module loading with explicit limits, imports of the `age`,
+`assert`, `chars`, `console`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`,
+and `uuid` built-ins by their bare or `neo:` specifiers, console output, `neojs test` over multiple
+files and globs, bounded in-memory byte streams, live mutable and read-only array and typed-array
+views, mutable and read-only Unicode code point buffers, writes to the process's stdout and stderr,
+lexical POSIX and Windows path operations, SHA-2 hashing and HMAC (synchronous incremental and
+Promise-based one-shot), synchronous SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
 authentication, the built-in module registry, and the embedding API above. Features outside this
 list are not implemented.
@@ -1371,11 +1460,12 @@ list are not implemented.
   rejected by extension. CommonJS is rejected by the `.cjs` and `.cts` extensions; a `.js` file
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
-- `node:`, `npm:`, `jsr:`, `http:`, `https:`, `data:`, and `blob:` imports are rejected. In
-  particular, `node:test` is not an alias for the `test` built-in; a Node-module opt-in is not
-  implemented. The built-in modules are `age`, `assert`, `chars`, `console`, `crypto`, `os`,
-  `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid`, reached through
-  `Neo.getBuiltInModule("age")`,
+- `node:`, `npm:`, `jsr:`, `http:`, `data:`, and `blob:` imports are rejected. `https:` imports are
+  rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`), and
+  `http:` is always rejected. In particular, `node:test` is not an alias for the `test` built-in; a
+  Node-module opt-in is not implemented. The built-in modules are `age`, `assert`, `chars`,
+  `console`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid`,
+  reached through `Neo.getBuiltInModule("age")`,
   `Neo.getBuiltInModule("assert")`, `Neo.getBuiltInModule("chars")`,
   `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("crypto")`,
   `Neo.getBuiltInModule("os")`, `Neo.getBuiltInModule("path")`,

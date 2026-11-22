@@ -3,11 +3,11 @@
 mod test_command;
 
 use std::ffi::OsString;
-use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use neojs_core::Error;
+use neojs_core::RemoteOptions;
 use neojs_core::Runtime;
 use neojs_core::TestReport;
 
@@ -35,46 +35,73 @@ fn main() -> ExitCode {
             println!("neojs {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Command::Run(path) => run(&path),
+        Command::Run {
+            input,
+            allow_remote,
+        } => run(input, allow_remote),
         Command::Test(patterns) => run_tests(&patterns),
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
-    Run(PathBuf),
+    Run { input: Input, allow_remote: bool },
     Test(Vec<String>),
     Help,
     Version,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Input {
+    Path(PathBuf),
+    Url(String),
+}
+
 fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
-    let Some(first) = args.first() else {
+    let mut allow_remote = false;
+    let mut index = 0;
+    while let Some(argument) = args.get(index) {
+        match argument.to_str() {
+            Some("--allow-remote") => {
+                allow_remote = true;
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    let rest = &args[index..];
+    let Some(first) = rest.first() else {
         return Err("no input file".to_string());
     };
 
     if let Some(option) = first.to_str() {
         match option {
-            "-h" | "--help" if args.len() == 1 => return Ok(Command::Help),
-            "-V" | "--version" if args.len() == 1 => return Ok(Command::Version),
+            "-h" | "--help" if rest.len() == 1 => return Ok(Command::Help),
+            "-V" | "--version" if rest.len() == 1 => return Ok(Command::Version),
             "--" => {
-                if args.len() != 2 {
+                if rest.len() != 2 {
                     return Err("expected exactly one input file after `--`".to_string());
                 }
-                return Ok(Command::Run(PathBuf::from(&args[1])));
+                return Ok(Command::Run {
+                    input: classify_input(&rest[1]),
+                    allow_remote,
+                });
             }
-            "test" => return parse_test_args(&args[1..]),
+            "test" => return parse_test_args(&rest[1..]),
             _ => {}
         }
     }
 
-    if args.len() > 1 {
-        return Err(format!("expected one input file, got {}", args.len()));
+    if rest.len() > 1 {
+        return Err(format!("expected one input file, got {}", rest.len()));
     }
     if first.to_str().is_some_and(|arg| arg.starts_with('-')) {
         return Err(format!("unknown option `{}`", first.to_string_lossy()));
     }
-    Ok(Command::Run(PathBuf::from(first)))
+    Ok(Command::Run {
+        input: classify_input(first),
+        allow_remote,
+    })
 }
 
 /// Parses `neojs test <file-or-glob>...`.
@@ -107,8 +134,33 @@ fn parse_test_args(args: &[OsString]) -> Result<Command, String> {
     Ok(Command::Test(patterns))
 }
 
-fn run(path: &Path) -> ExitCode {
-    let mut runtime = match Runtime::new() {
+/// Decides whether an input names a local path or a remote URL.
+///
+/// Only `http:` and `https:` are treated as URLs. A Windows drive path such as
+/// `C:\work\main.js` parses as a one-letter URL scheme, and every other string
+/// is a path, so the existing path handling is unchanged.
+fn classify_input(input: &OsString) -> Input {
+    if let Some(text) = input.to_str() {
+        let https = text
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
+        let http = text
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"));
+        if https || http {
+            return Input::Url(text.to_string());
+        }
+    }
+    Input::Path(PathBuf::from(input))
+}
+
+fn run(input: Input, allow_remote: bool) -> ExitCode {
+    let runtime = if allow_remote {
+        Runtime::with_remote(RemoteOptions::new())
+    } else {
+        Runtime::new()
+    };
+    let mut runtime = match runtime {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("neojs: {error}");
@@ -116,7 +168,11 @@ fn run(path: &Path) -> ExitCode {
         }
     };
 
-    match runtime.run_file(path) {
+    let result = match &input {
+        Input::Path(path) => runtime.run_file(path),
+        Input::Url(url) => runtime.run_url(url),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("neojs: {error}");
@@ -127,7 +183,10 @@ fn run(path: &Path) -> ExitCode {
 
 fn exit_code(error: &Error) -> u8 {
     match error {
-        Error::Core(_) | Error::TypeScript { .. } | Error::TestRunner(_) => EXIT_RUNTIME_FAILURE,
+        Error::Core(_)
+        | Error::TypeScript { .. }
+        | Error::RemoteTypeScript { .. }
+        | Error::TestRunner(_) => EXIT_RUNTIME_FAILURE,
         _ => EXIT_STARTUP_FAILURE,
     }
 }
@@ -236,6 +295,7 @@ Run an ECMAScript module or erasable TypeScript file on V8, or run test files.
 
 Usage:
   neojs <file>
+  neojs --allow-remote <file-or-https-url>
   neojs test <file-or-glob>...
   neojs --help
   neojs --version
@@ -261,6 +321,18 @@ the import specifiers \"age\", \"neo:age\", \"assert\", \"neo:assert\",
 \"neo:slices\", \"ssh\", \"neo:ssh\", \"stdio\", \"neo:stdio\", \"strings\",
 \"neo:strings\", \"test\", \"neo:test\", \"uuid\", \"neo:uuid\", \"uuid/v4\",
 \"neo:uuid/v4\", \"uuid/v7\", and \"neo:uuid/v7\".
+Remote modules are disabled by default. --allow-remote enables an https: entry
+and explicit https: imports; relative imports in a remote module resolve against
+that module's URL. Only https: is accepted, remote modules cannot import file:
+URLs, redirects must stay credential-free https and within the limit, and no
+credentials or proxy settings are read. After a redirect the final URL is the
+module's identity and its relative-import base; the module format follows that
+final URL. Downloads are cached in $XDG_CACHE_HOME/neojs/packages, or
+$HOME/.cache/neojs/packages when XDG_CACHE_HOME is unset, with body length and
+SHA-256 checks and HTTP revalidation. Per-module body, aggregate byte, and
+module-count limits bound a remote graph; the deadline is per module, not a
+wall-clock bound on the program. This is not SSRF or permission protection and
+it is not a sandbox: remote code runs with the same authority as local code.
 The stdio module writes to this process's stdout and stderr and offers bounded
 in-memory byte streams; it adds no filesystem, process, environment, or stdin
 access. The os module reports the Rust build target's platform and arch; it
@@ -274,8 +346,8 @@ registers sync and async tests, treats a rejected Promise, a generator object,
 a pending test, a per-test timeout, an unhandled rejection, and event-loop work
 that remains after a bounded settle window as failures, and is not Node's
 node:test. node: modules, including node:test, are rejected while no explicit
-Node-module opt-in exists. .cjs files, other neo: imports, remote imports,
-module type attributes, and permissions are not.
+Node-module opt-in exists. .cjs files, other neo: imports, remote imports
+without --allow-remote, module type attributes, and permissions are not.
 
 The uuid module generates RFC 9562 version 4 and version 7 UUIDs as canonical
 lowercase text from the operating system CSPRNG, with no insecure fallback.

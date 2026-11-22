@@ -35,8 +35,16 @@ use crate::crypto_hash::neojs_crypto_hash;
 use crate::crypto_shamir::neojs_crypto_shamir;
 use crate::loader::FileModuleLoader;
 use crate::loader::ModuleFormat;
+use crate::loader::PreparedEntry;
 use crate::loader::module_format;
 use crate::path::neojs_path;
+use crate::remote::Redactions;
+use crate::remote::RemoteClient;
+use crate::remote::RemoteOptions;
+use crate::remote::diagnostic_url;
+use crate::remote::display_url;
+use crate::remote::redact_core_error;
+use crate::remote::validate_url;
 use crate::ssh::neojs_ssh;
 use crate::stdio::neojs_stdio;
 use crate::typescript;
@@ -82,12 +90,14 @@ const CONSOLE_SHIM: &str = r#"
 })();
 "#;
 
-/// An ECMAScript runtime with a local-file module loader.
+/// An ECMAScript runtime with a local-file module loader and optional HTTPS
+/// module loading.
 ///
 /// A runtime runs at most one entry module. Create a new [`Runtime`] for each
 /// entry module. `.ts` and `.mts` entry and imported files are type-stripped
-/// before V8 sees them. The loader reads any path the process can read and does
-/// not check permissions, so this type is not a sandbox.
+/// before V8 sees them. The loader reads any path the process can read and, when
+/// remote loading is enabled, fetches `https:` URLs. It does not check
+/// permissions, so this type is not a sandbox.
 pub struct Runtime {
     /// The isolate. It is an `Option` so `Drop` can destroy it before the
     /// drivers are stopped; it is `None` only while dropping.
@@ -95,6 +105,17 @@ pub struct Runtime {
     /// Whether entry-module loading has started. It is set before V8 sees the
     /// module, because a failed load can leave the module map in a partial state.
     consumed: bool,
+    /// The remote client, when [`Runtime::with_remote`] enabled HTTPS loading.
+    /// The loader holds a clone; entry loading uses this copy so both paths
+    /// apply the same limits.
+    remote: Option<RemoteClient>,
+    /// Module URLs whose queries must be redacted from generated V8
+    /// diagnostics. It is shared with the loader's remote client.
+    redactions: Option<Redactions>,
+    /// The file module loader, kept so a remote entry can be handed to it
+    /// before loading starts. It is `None` for the crate's test-only JSR
+    /// runtime, which installs a different loader.
+    loader: Option<Rc<FileModuleLoader>>,
     /// Services V8's delayed foreground tasks (GC memory-reducer work and other
     /// timer tasks) and supplies the bounded blocking pool for asynchronous
     /// hashing. deno_core records the Tokio handle that is current when the
@@ -188,6 +209,128 @@ impl Runtime {
         Self::with_shims(CONSOLE_SHIM, neo_shim())
     }
 
+    /// Creates a runtime that can also load modules from `https:` URLs.
+    ///
+    /// This is the explicit opt-in for remote loading. [`Runtime::new`] never
+    /// performs a network request, and a URL entry or HTTPS import there fails
+    /// with [`Error::RemoteDisabled`] or [`Error::Core`]. The returned runtime
+    /// accepts an HTTPS entry through [`Runtime::run_url`] or
+    /// [`Runtime::run_url_async`], and any running module may import an
+    /// absolute `https:` URL. Relative imports inside a remote module resolve
+    /// against that module's URL and therefore stay remote.
+    ///
+    /// Only `https:` is accepted. `http:`, `data:`, `blob:`, and `file:` are
+    /// not remote transports, and a remote module cannot import `file:`.
+    /// Redirects are followed one hop at a time: the target must be
+    /// credential-free HTTPS and within `options.max_redirects`; a downgrade to
+    /// HTTP or another scheme is refused before the target is requested.
+    /// Cross-origin HTTPS redirects are allowed because no cookie,
+    /// authorization header, or referrer is sent.
+    ///
+    /// When a fetch follows redirects, the module map registers the module
+    /// under the final URL and aliases the requested URL to it, as a browser
+    /// does. `import.meta.url` is the final URL, relative imports resolve
+    /// against it, and a later import of either spelling reaches the same
+    /// instance. Two URLs that differ only by query are two modules.
+    ///
+    /// The transport is the blocking `ureq` client over `rustls` with the
+    /// bundled Mozilla root store. It sends no ambient credentials, does not
+    /// read proxy settings from the environment, and does not accept a URL with
+    /// a username or password. Idle connection pooling is disabled so ureq cannot
+    /// hide a retry of a request whose reused connection was closed. Downloaded
+    /// modules are cached in one
+    /// user-profile package cache, `$XDG_CACHE_HOME/neojs/packages` or
+    /// `$HOME/.cache/neojs/packages`, keyed by the SHA-256 of the canonical URL
+    /// including its query. A fresh `Cache-Control: max-age` entry is reused;
+    /// freshness includes the upstream `Age` and `Date`; a stale entry is
+    /// revalidated with `If-None-Match` and `If-Modified-Since`; `no-store` does
+    /// not store the body and leaves an absent-entry tombstone. Writes are atomic
+    /// and concurrent processes cannot publish a
+    /// partial body. Each entry records and verifies the body length and SHA-256
+    /// digest, so corruption is a cache miss. A per-key lock and persistent
+    /// monotonic revision files make a `200` lose to a newer entry or no-store
+    /// tombstone, make a `304` use its request revision and not a later
+    /// completion token, and compare a representation (validator plus actual
+    /// body digest) separately from publication revisions, so a newer `304` for
+    /// the same bytes can supersede an older one while a weak ETag shared by
+    /// different bytes cannot. A newer `304` merges only headers it actually
+    /// supplied into the current representation, so it cannot undo an earlier
+    /// `no-cache` by omitting Cache-Control. A `304` without usable Date/Age
+    /// derives age from the current entry under the lock. Ordering is independent of the wall
+    /// clock. Lock waits are capped at 250 ms and the remaining fetch deadline.
+    /// With a longer deadline an unavailable lock skips the cache operation and
+    /// the fetch continues to the network; with a deadline at or below the cap,
+    /// the lock may consume it and the fetch times out before transport. There is
+    /// no signature or content-addressed store: the
+    /// cache is not integrity protection against someone who can write it and
+    /// pins no version. See [`RemoteOptions`] to change the directory or disable
+    /// it.
+    ///
+    /// One runtime's remote graph is bounded by per-module body, aggregate
+    /// byte, and module-count limits. A module and its bytes are admitted before
+    /// the network or cache is consulted, a body is read only up to the
+    /// remaining aggregate allowance, and a rejected module is neither fetched
+    /// nor published to the cache. Each distinct requested URL consumes one
+    /// module slot even when its fetch fails; retrying the same URL reuses that
+    /// slot but repeats the I/O. A separate request limit counts every network
+    /// request, including retries and redirect hops. A failed entry preflight
+    /// refunds module, byte, and redaction charges but not the request already
+    /// spent; create a new `Runtime` for a fresh request budget. The deadline is
+    /// per module, not for the whole wall-clock execution of a program. These are
+    /// resource bounds, not a sandbox or a CPU or V8 heap bound.
+    ///
+    /// Generated V8 errors redact known remote module URLs from frame locations
+    /// and only from messages whose name and prefix match a generated
+    /// diagnostic. Module identity and `import.meta.url` are unchanged, and a
+    /// script-supplied exception message, including text shaped like "Cannot
+    /// find module" or ` at <URL>:`, and a custom stack are preserved, so a
+    /// program can still expose a URL it puts in its own error. A user-thrown
+    /// `SyntaxError`/`TypeError` that exactly copies a generated prefix and
+    /// location shape is indistinguishable from V8's text and may be redacted.
+    /// Do not treat a module specifier as secret storage.
+    ///
+    /// Remote loading is not SSRF protection: there is no host allowlist,
+    /// private-address rejection, or DNS pinning, so the program can fetch any
+    /// HTTPS URL the process's network allows. Remote code runs with the same
+    /// authority as local code; this is not a sandbox.
+    ///
+    /// The fetch and its limits are applied synchronously on the isolate thread
+    /// when the entry future is polled or an imported module is loaded.
+    /// Cancelling [`Runtime::run_url_async`] before its first poll performs no
+    /// I/O and leaves the runtime unused; a fetch already in progress cannot be
+    /// interrupted, and cancelling after loading starts leaves the runtime
+    /// consumed.
+    pub fn with_remote(options: RemoteOptions) -> Result<Self, Error> {
+        Self::build(CONSOLE_SHIM, neo_shim(), Some(RemoteClient::new(options)))
+    }
+
+    /// Creates a runtime over an injected remote transport.
+    ///
+    /// This exists only with the off-by-default `test-support` feature, so a
+    /// test can drive remote loading without a network or a real host. It is not
+    /// part of the stable embedding API.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn with_remote_transport<F>(options: RemoteOptions, fetch: F) -> Result<Self, Error>
+    where
+        F: Fn(
+                &str,
+                std::time::Duration,
+                Option<&str>,
+                Option<&str>,
+            ) -> Result<crate::remote::TestRemoteResponse, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let transport = crate::remote::test_transport(fetch);
+        Self::build(
+            CONSOLE_SHIM,
+            neo_shim(),
+            Some(RemoteClient::with_transport(options, transport)),
+        )
+    }
+
     /// Creates a runtime and installs the given shim scripts.
     ///
     /// [`Runtime::new`] passes the production shims. The parameters exist so a
@@ -200,7 +343,7 @@ impl Runtime {
     /// [`Runtime`]'s `Drop`, which does not block. Building the runtimes is the
     /// only failure before a `Runtime` exists.
     fn with_shims(console: &'static str, builtins: String) -> Result<Self, Error> {
-        Self::with_module_loader(console, builtins, Rc::new(FileModuleLoader))
+        Self::with_module_loader(console, builtins, Rc::new(FileModuleLoader::new(None)))
     }
 
     /// Creates a runtime with an explicit module loader.
@@ -211,7 +354,31 @@ impl Runtime {
     fn with_module_loader(
         console: &'static str,
         builtins: String,
-        loader: Rc<dyn deno_core::ModuleLoader>,
+        module_loader: Rc<dyn deno_core::ModuleLoader>,
+    ) -> Result<Self, Error> {
+        Self::assemble(console, builtins, module_loader, None, None)
+    }
+
+    /// Creates a runtime with an optional remote client.
+    ///
+    /// The remote client's file loader is kept separately so a prepared remote
+    /// entry can be handed to it before loading starts.
+    fn build(
+        console: &'static str,
+        builtins: String,
+        remote: Option<RemoteClient>,
+    ) -> Result<Self, Error> {
+        let loader = Rc::new(FileModuleLoader::new(remote.clone()));
+        Self::assemble(console, builtins, loader.clone(), Some(loader), remote)
+    }
+
+    /// Builds the runtimes, isolate, extensions, and shims.
+    fn assemble(
+        console: &'static str,
+        builtins: String,
+        module_loader: Rc<dyn deno_core::ModuleLoader>,
+        loader: Option<Rc<FileModuleLoader>>,
+        remote: Option<RemoteClient>,
     ) -> Result<Self, Error> {
         let driver = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -253,10 +420,11 @@ impl Runtime {
         ];
         #[cfg(feature = "test-support")]
         extensions.push(crate::crypto_hash::test_support_extension());
+        let redactions = remote.as_ref().map(RemoteClient::redactions);
         let js = {
             let _guard = driver.enter();
             JsRuntime::new(RuntimeOptions {
-                module_loader: Some(loader),
+                module_loader: Some(module_loader),
                 extensions,
                 ..Default::default()
             })
@@ -264,6 +432,9 @@ impl Runtime {
         let mut runtime = Self {
             js: Some(js),
             consumed: false,
+            remote,
+            redactions,
+            loader,
             driver: Some(driver),
             ops: Some(ops),
         };
@@ -319,15 +490,93 @@ impl Runtime {
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(Error::BlockingInAsyncContext);
         }
+        let redactions = self.redactions.clone();
         let Self {
             js,
             consumed,
+            remote: _,
+            redactions: _,
+            loader: _,
             driver: _,
             ops,
         } = self;
         let js = js.as_mut().expect("the isolate is present until Drop");
         let ops = ops.as_ref().expect("the ops runtime is present until Drop");
         ops.block_on(run_entry(js, consumed, path.as_ref()))
+            .map_err(|error| redact_error(error, redactions.as_ref()))
+    }
+
+    /// Runs one remote entry module to completion and blocks until it finishes.
+    ///
+    /// This is [`Runtime::run_file`] for a URL. Remote loading must have been
+    /// enabled with [`Runtime::with_remote`]; otherwise it returns
+    /// [`Error::RemoteDisabled`] without a network request. The URL must be
+    /// `https:`, must have a host, and must not contain a username or password.
+    ///
+    /// Entry preparation follows the same single-use rule as [`Runtime::run_file`]:
+    /// a parse, scheme, fetch, limit, UTF-8, or unsupported-format failure
+    /// happens before V8 loads the module and leaves the runtime unused. A
+    /// TypeScript stripping failure is [`Error::RemoteTypeScript`]. Once loading
+    /// starts, the runtime is consumed.
+    ///
+    /// The fetch happens synchronously on the calling thread. If the response
+    /// redirects, the final URL becomes the module's identity and the requested
+    /// URL becomes an alias for it; relative imports resolve against the final
+    /// URL.
+    ///
+    /// This method blocks; calling it from inside a Tokio runtime returns
+    /// [`Error::BlockingInAsyncContext`]. Use [`Runtime::run_url_async`] there.
+    pub fn run_url(&mut self, url: &str) -> Result<(), Error> {
+        if self.consumed {
+            return Err(Error::RuntimeConsumed);
+        }
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(Error::BlockingInAsyncContext);
+        }
+        let remote = self.remote.clone().ok_or(Error::RemoteDisabled)?;
+        let loader = self.loader.clone().ok_or(Error::RemoteDisabled)?;
+        let redactions = self.redactions.clone();
+        let Self {
+            js,
+            consumed,
+            remote: _,
+            redactions: _,
+            loader: _,
+            driver: _,
+            ops,
+        } = self;
+        let js = js.as_mut().expect("the isolate is present until Drop");
+        let ops = ops.as_ref().expect("the ops runtime is present until Drop");
+        ops.block_on(run_remote_entry(
+            js,
+            consumed,
+            loader.as_ref(),
+            &remote,
+            url,
+        ))
+        .map_err(|error| redact_error(error, redactions.as_ref()))
+    }
+
+    /// Runs one remote entry module to completion on the caller's executor.
+    ///
+    /// This is the asynchronous form of [`Runtime::run_url`], with the same URL
+    /// policy, single-use rule, and identity rule. It can be polled on any
+    /// executor and does not need an ambient Tokio runtime.
+    ///
+    /// The fetch is not offloaded: it runs synchronously on the thread that
+    /// polls the future, before the runtime is marked consumed. Dropping the
+    /// future before its first poll performs no I/O and leaves the runtime
+    /// unused. A fetch already in progress cannot be cancelled. After loading
+    /// starts, dropping the future leaves the runtime consumed and the module
+    /// may already have run.
+    pub async fn run_url_async(&mut self, url: &str) -> Result<(), Error> {
+        let remote = self.remote.clone().ok_or(Error::RemoteDisabled)?;
+        let loader = self.loader.clone().ok_or(Error::RemoteDisabled)?;
+        let redactions = self.redactions.clone();
+        let js = self.js.as_mut().expect("the isolate is present until Drop");
+        run_remote_entry(js, &mut self.consumed, loader.as_ref(), &remote, url)
+            .await
+            .map_err(|error| redact_error(error, redactions.as_ref()))
     }
 
     /// Runs one entry module to completion on the caller's executor.
@@ -364,8 +613,11 @@ impl Runtime {
     /// a queued `crypto` job is aborted only when the [`Runtime`] is dropped,
     /// and a job already running on the blocking pool cannot be stopped.
     pub async fn run_file_async(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
+        let redactions = self.redactions.clone();
         let js = self.js.as_mut().expect("the isolate is present until Drop");
-        run_entry(js, &mut self.consumed, path.as_ref()).await
+        run_entry(js, &mut self.consumed, path.as_ref())
+            .await
+            .map_err(|error| redact_error(error, redactions.as_ref()))
     }
 
     /// Runs the tests registered through the `test` built-in and returns their
@@ -429,6 +681,14 @@ impl Runtime {
     }
 }
 
+/// Redacts remote module URLs from a V8 error when remote loading is enabled.
+fn redact_error(error: Error, redactions: Option<&Redactions>) -> Error {
+    match (error, redactions) {
+        (Error::Core(error), Some(redactions)) => Error::Core(redact_core_error(error, redactions)),
+        (other, _) => other,
+    }
+}
+
 impl Drop for Runtime {
     /// Stops the isolate and then the driver without blocking.
     ///
@@ -460,8 +720,45 @@ async fn run_entry(js: &mut JsRuntime, consumed: &mut bool, path: &Path) -> Resu
         return Err(Error::RuntimeConsumed);
     }
     let (specifier, source) = prepare_entry(path)?;
+    evaluate_entry(js, consumed, specifier, source).await
+}
+
+/// Loads and runs one remote entry module on an existing isolate.
+async fn run_remote_entry(
+    js: &mut JsRuntime,
+    consumed: &mut bool,
+    loader: &FileModuleLoader,
+    remote: &RemoteClient,
+    url: &str,
+) -> Result<(), Error> {
+    if *consumed {
+        return Err(Error::RuntimeConsumed);
+    }
+    let entry = prepare_url_entry(remote, url)?;
+    let specifier = entry.requested.clone();
+    loader.set_entry(entry);
+    *consumed = true;
+    let module = js.load_main_es_module(&specifier).await?;
+    finish_entry(js, module).await
+}
+
+/// Marks the runtime consumed, then loads, evaluates, and drains one module.
+///
+/// Preparation has already succeeded, so every failure from here on leaves the
+/// runtime consumed.
+async fn evaluate_entry(
+    js: &mut JsRuntime,
+    consumed: &mut bool,
+    specifier: Url,
+    source: String,
+) -> Result<(), Error> {
     *consumed = true;
     let module = js.load_main_es_module_from_code(&specifier, source).await?;
+    finish_entry(js, module).await
+}
+
+/// Evaluates a loaded main module and drains the event loop.
+async fn finish_entry(js: &mut JsRuntime, module: deno_core::ModuleId) -> Result<(), Error> {
     let evaluation = js.mod_evaluate(module);
     js.run_event_loop(PollEventLoopOptions::default()).await?;
     Ok(evaluation.await?)
@@ -608,6 +905,74 @@ fn prepare_entry(path: &Path) -> Result<(Url, String), Error> {
         }
     };
     Ok((specifier, source))
+}
+
+/// Fetches and prepares a remote entry module.
+///
+/// The returned [`PreparedEntry`] keeps the requested URL as the map alias and
+/// the final URL as the module's identity. Relative imports resolve against the
+/// final URL, and `import.meta.url` is the final URL. Errors describe a
+/// sanitized URL, so a password in a malformed input is not echoed.
+fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, Error> {
+    let requested = Url::parse(url).map_err(|error| Error::RemoteEntry {
+        url: "<invalid URL>".to_string(),
+        reason: format!("invalid URL: {error}"),
+    })?;
+    validate_url(&requested).map_err(|reason| Error::RemoteEntry {
+        url: display_url(&requested),
+        reason,
+    })?;
+
+    let fetched = remote
+        .fetch_entry(&requested)
+        .map_err(|reason| Error::RemoteEntry {
+            url: display_url(&requested),
+            reason,
+        })?;
+    let body_len = fetched.body.len();
+    let module_charged = fetched.module_charged;
+    // A redirect can change the extension. The format follows the final URL,
+    // just as the module identity and relative-import base do.
+    let format = match module_format(Path::new(fetched.final_url.path())) {
+        Ok(format) => format,
+        Err(reason) => {
+            remote.refund_entry(&requested, body_len, module_charged);
+            return Err(Error::RemoteEntry {
+                url: display_url(&requested),
+                reason,
+            });
+        }
+    };
+    let code = match String::from_utf8(fetched.body) {
+        Ok(code) => code,
+        Err(_) => {
+            remote.refund_entry(&requested, body_len, module_charged);
+            return Err(Error::RemoteEntry {
+                url: display_url(&requested),
+                reason: "the module is not valid UTF-8".to_string(),
+            });
+        }
+    };
+    let source = match format {
+        ModuleFormat::JavaScript => code,
+        ModuleFormat::TypeScript => {
+            match typescript::strip(&diagnostic_url(&fetched.final_url), code) {
+                Ok(source) => source,
+                Err(reason) => {
+                    remote.refund_entry(&requested, body_len, module_charged);
+                    return Err(Error::RemoteTypeScript {
+                        url: display_url(&requested),
+                        reason,
+                    });
+                }
+            }
+        }
+    };
+    Ok(PreparedEntry {
+        requested,
+        found: fetched.final_url,
+        code: source,
+    })
 }
 
 #[cfg(test)]

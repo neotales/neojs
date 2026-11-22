@@ -4,6 +4,23 @@
 //! and drains V8's event loop. A runtime is single-use; a second entry module
 //! returns [`Error::RuntimeConsumed`].
 //!
+//! [`Runtime::new`] is local-only. [`Runtime::with_remote`] adds an explicit
+//! opt-in for HTTPS modules: it accepts an HTTPS entry through
+//! [`Runtime::run_url`] and lets any module import an absolute `https:` URL.
+//! Remote modules keep the requested URL as their identity, resolve their
+//! relative imports against it, and cannot import `file:`. Only `https:` is a
+//! remote transport; redirects must stay credential-free HTTPS and within the
+//! configured limit. The client sends no ambient credentials and reads no proxy
+//! environment. It is not SSRF protection and not a sandbox: remote code runs
+//! with the process's authority. Downloads are cached in one user-profile
+//! package cache, `$XDG_CACHE_HOME/neojs/packages` or
+//! `$HOME/.cache/neojs/packages`, keyed by a hash of the canonical URL
+//! including its query; entries are written atomically, verify a body length
+//! and SHA-256 digest, and revalidate with HTTP validators and upstream
+//! `Age`/`Date`. There is no lockfile, signature, or content-addressed store.
+//! [`RemoteOptions`] sets the per-module deadline, body, aggregate byte,
+//! module-count, and redirect limits, and the cache directory.
+//!
 //! It provides the `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`,
 //! `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid` built-in modules
 //! through `Neo.getBuiltInModule(name)` and through the module specifiers `age`,
@@ -233,9 +250,9 @@
 //! whole `globalThis.console` property. It does not provide other `neo:` or
 //! `node:` import specifiers; `node:` modules, including `node:test`, remain
 //! rejected while no explicit Node-module opt-in exists. CommonJS (`.cjs` and
-//! `.cts` files), remote imports, module type attributes, and a permission
-//! system are not implemented. See the repository README for the full list of
-//! limits.
+//! `.cts` files), remote imports unless [`Runtime::with_remote`] enabled them,
+//! module type attributes, and a permission system are not implemented. See the
+//! repository README for the full list of limits.
 //!
 //! A [`Runtime`] owns two Tokio runtimes: a multi-thread driver with one worker
 //! thread for V8's delayed foreground tasks and `crypto`'s bounded blocking
@@ -259,8 +276,9 @@
 //! are rejected by extension. Erased text is replaced by spaces, so V8 stack
 //! traces point at the original TypeScript line and column.
 //!
-//! Module loading uses the process's filesystem authority. neojs is not a
-//! sandbox.
+//! Module loading uses the process's filesystem authority and, when remote
+//! loading is enabled, its network authority. neojs is not a sandbox and offers
+//! no host allowlist or private-address protection.
 //!
 //! # Example
 //!
@@ -294,6 +312,7 @@ mod jsr;
 mod jsr_loader;
 mod loader;
 mod path;
+mod remote;
 mod runtime;
 mod ssh;
 mod stdio;
@@ -301,6 +320,7 @@ mod typescript;
 mod uuid;
 
 pub use error::Error;
+pub use remote::RemoteOptions;
 pub use runtime::Runtime;
 pub use runtime::TestReport;
 
@@ -309,6 +329,12 @@ pub use runtime::TestReport;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod test_support {
+    /// A scripted response for the test-only remote transport hook.
+    ///
+    /// Pass this type to [`crate::Runtime::with_remote_transport`] to drive
+    /// remote loading without a network. It is not part of the stable API.
+    pub use crate::remote::TestRemoteResponse;
+
     /// Make the next required CLOSE reply fail as a transport error.
     ///
     /// This exercises the caller-facing path from `Connection::exec` through
