@@ -5,11 +5,12 @@
 //! returns [`Error::RuntimeConsumed`].
 //!
 //! It provides the `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`,
-//! `ssh`, `stdio`, and `strings` built-in modules through
+//! `slices`, `ssh`, `stdio`, and `strings` built-in modules through
 //! `Neo.getBuiltInModule(name)` and through the module specifiers `age`,
 //! `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
 //! `neo:console`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`,
-//! `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`, and `neo:strings`.
+//! `slices`, `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`,
+//! and `neo:strings`.
 //!
 //! `assert` is a synchronous assertion surface inspired by Node's
 //! `assert/strict` and Deno's `@std/assert`. The registry object is the
@@ -167,8 +168,9 @@
 //! provenance contracts.
 //!
 //! An ES module namespace object is not the registry object. For `age`,
-//! `assert`, `chars`, `crypto`, `os`, `path`, `ssh`, `stdio`, and `strings`,
-//! both paths expose the same classes, functions, and shared stream objects;
+//! `assert`, `chars`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, and
+//! `strings`, both paths expose the same classes, functions, and shared stream
+//! objects;
 //! the
 //! namespace is a separate container over them. For `assert`, the registry
 //! object is the callable function, and the module also has a default export

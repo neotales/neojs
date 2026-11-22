@@ -109,18 +109,21 @@ Usage:
 
 The file is read as an ECMAScript module, and relative imports resolve against
 it. ECMAScript modules, local .js, .mjs, .ts, and .mts imports, console output,
-top-level await, and the age, assert, chars, console, crypto, os, ssh, and stdio
-built-in modules are implemented. TypeScript is run by erasing type syntax: it
-is not type checked, constructs that need a transform (such as enum and
-namespace) are rejected, and .tsx, .jsx, .cts, and declaration files are not
-supported. The built-ins are available as Neo.getBuiltInModule(\"age\"),
+top-level await, and the age, assert, chars, console, crypto, os, path, slices,
+ssh, and stdio built-in modules are implemented. TypeScript is run by erasing
+type syntax: it is not type checked, constructs that need a transform (such as
+enum and namespace) are rejected, and .tsx, .jsx, .cts, and declaration files
+are not supported. The built-ins are available as Neo.getBuiltInModule(\"age\"),
 Neo.getBuiltInModule(\"assert\"), Neo.getBuiltInModule(\"chars\"),
 Neo.getBuiltInModule(\"console\"), Neo.getBuiltInModule(\"crypto\"),
-Neo.getBuiltInModule(\"os\"), Neo.getBuiltInModule(\"ssh\"), and
-Neo.getBuiltInModule(\"stdio\"), and as the import specifiers \"age\",
-\"neo:age\", \"assert\", \"neo:assert\", \"chars\", \"neo:chars\", \"console\",
-\"neo:console\", \"crypto\", \"neo:crypto\", \"os\", \"neo:os\", \"ssh\",
-\"neo:ssh\", \"stdio\", and \"neo:stdio\".
+Neo.getBuiltInModule(\"os\"), Neo.getBuiltInModule(\"path\"),
+Neo.getBuiltInModule(\"slices\"), Neo.getBuiltInModule(\"ssh\"),
+Neo.getBuiltInModule(\"stdio\"), and Neo.getBuiltInModule(\"strings\"), and as
+the import specifiers \"age\", \"neo:age\", \"assert\", \"neo:assert\",
+\"chars\", \"neo:chars\", \"console\", \"neo:console\", \"crypto\",
+\"neo:crypto\", \"os\", \"neo:os\", \"path\", \"neo:path\", \"slices\",
+\"neo:slices\", \"ssh\", \"neo:ssh\", \"stdio\", \"neo:stdio\", \"strings\",
+and \"neo:strings\".
 The stdio module writes to this process's stdout and stderr and offers bounded
 in-memory byte streams; it adds no filesystem, process, environment, or stdin
 access. The os module reports the Rust build target's platform and arch; it

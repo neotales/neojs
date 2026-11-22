@@ -924,6 +924,46 @@ console.log(`${os.platform}/${os.arch}`);
 }
 
 #[test]
+fn slices_built_in_is_available_from_the_cli() {
+    let project = Project::new();
+    let file = project.write(
+        "slices.js",
+        r#"
+import * as slices from "slices";
+import * as alias from "neo:slices";
+
+if (slices !== alias) throw new Error("slices and neo:slices namespaces differ");
+if (Neo.getBuiltInModule("slices").slice !== slices.slice) throw new Error("registry differs");
+
+const base = [1, 2, 3];
+const view = slices.slice(base, 1, 3);
+view.set(0, 20);
+const nested = view.slice(1, 2);
+nested.set(0, 30);
+
+const bytes = new Uint8Array([1, 2, 3, 4]);
+const bytesView = slices.slice(bytes, 1, 3);
+bytesView.set(0, 9);
+
+const text = slices.CharSlice.fromString("Hi");
+text.toUpper();
+
+console.log(base.join(","));
+console.log(view.at(0), nested.at(0));
+console.log(bytes.join(","));
+console.log(text.toString());
+console.log(typeof slices.readonlySlice(base).set);
+"#,
+    );
+
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "1,20,30\n20 30\n1,9,3,4\nHI\nundefined\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
 fn assert_builtin_passes_from_the_cli() {
     let project = Project::new();
     let file = project.write(
@@ -1120,7 +1160,7 @@ fn reports_an_unknown_neo_module_and_lists_the_implemented_ones() {
     assert!(message.contains("not implemented"), "{message}");
     assert!(
         message.contains(
-            "neojs implements age, neo:age, assert, neo:assert, chars, neo:chars, console, neo:console, crypto, neo:crypto, os, neo:os, path, neo:path, ssh, neo:ssh, stdio, neo:stdio, strings, neo:strings"
+            "neojs implements age, neo:age, assert, neo:assert, chars, neo:chars, console, neo:console, crypto, neo:crypto, os, neo:os, path, neo:path, slices, neo:slices, ssh, neo:ssh, stdio, neo:stdio, strings, neo:strings"
         ),
         "{message}"
     );
@@ -1505,7 +1545,8 @@ fn prints_help_and_version() {
     let help = run_args(&["--help"]);
     assert_eq!(help.status.code(), Some(0));
     assert!(stdout(&help).contains("Usage:"));
-    assert!(stdout(&help).contains("age, assert, chars, console, crypto, os, ssh, and stdio"));
+    assert!(stdout(&help).contains("age, assert, chars, console, crypto, os, path, slices"));
+    assert!(stdout(&help).contains("ssh, and stdio"));
     assert!(stdout(&help).contains("built-in modules are implemented"));
 
     let version = run_args(&["--version"]);

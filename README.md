@@ -566,6 +566,96 @@ for tests but not for huge collections. `Error` `cause` and `AggregateError.erro
 non-enumerable and are not compared. Proxies can run their traps during comparison and formatting;
 this is a test helper in the caller's realm, not an isolation boundary.
 
+**Use the slices built-in.** `Neo.getBuiltInModule("slices")` returns a frozen module object that is
+cached for the realm. `slices` is the canonical bare specifier and `neo:slices` is an alias for the
+same module instance. The exports are `Slice`, `ReadOnlySlice`, `CharSlice`, `ReadOnlyCharSlice`,
+`slice`, `readonlySlice`, `charSlice`, and `readonlyCharSlice`; each class or function is the same
+object as the matching registry property, and there is no default export. The module is plain
+ECMAScript: it calls no host op, adds no capability, and is not a sandbox or a cross-realm or
+cross-thread zero-copy bridge.
+
+```js
+import { slice, readonlySlice } from "slices";
+
+const base = [0, 1, 2, 3, 4];
+const view = slice(base, 1, 5); // [1, 2, 3, 4] as a live view
+const inner = view.slice(1, 3); // [2, 3], relative to `view`
+inner.set(0, 99);
+console.log(base[2]); // 99
+console.log(readonlySlice(base, 1, 3).at(1)); // 99
+```
+
+A view is a live alias of an Array or a genuine typed array. Construction, `slice`, `at`, `set`,
+`indexOf`, `includes`, and iteration do not copy. `copy` is the snapshot operation: it returns a new
+plain Array for an Array target, or a new intrinsic typed array of the same element type for a
+typed-array target, and the copy never aliases. Views do not subclass Array or typed-array classes,
+and `copy` builds its result directly, so `Symbol.species` is never consulted and cannot run user
+code or substitute a custom container. `indexOf` uses strict equality, so `NaN` is never found;
+`includes` uses SameValueZero, so `NaN` is found.
+
+Ranges are explicit half-open `[start, end)` bounds, defaulting to `0` and the target length. A bound
+must be a number and an integer; negative, reversed, and out-of-range bounds throw `RangeError`, and
+a non-number throws `TypeError`. Nothing is clamped, and negative indices are not supported. An
+empty view at the end of the target is valid. The view's `length` is fixed at construction. Splicing,
+truncating, or extending the target afterwards does not move or resize the view: it keeps addressing
+the same absolute indices. Reading an index the target no longer has returns `undefined`; writing it
+follows ordinary Array semantics and can extend the Array. A hole reads as `undefined` and becomes
+an own `undefined` element in `copy`. Ordinary prototype lookup applies to holes, so an inherited
+index can supply a value. Nested `slice` bounds are relative to the parent and stay aliases of the
+same target; they use the parent's fixed range rather than re-reading a target that may have shrunk.
+`ReadOnlySlice` has the same live reads, nested slicing, snapshot, search, and iteration without
+`set`.
+
+For typed arrays, the element type and the target's own offset and length are preserved, and every
+view shares the target's buffer, so overlapping views alias each other. `Int8Array`, `Uint8Array`,
+`Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`, `Float32Array`,
+`Float64Array`, `BigInt64Array`, and `BigUint64Array` are supported, plus `Float16Array` when the V8
+build provides it. BigInt element types require BigInt values; assigning a number throws the
+engine's `TypeError`. A detached or shrunk typed array leaves reads `undefined` and writes ignored;
+`copy` validates the fixed range and throws `RangeError` instead of inventing zeros. That check
+covers an empty range: an empty view at offset 0 still fits a zero-length target, while an empty
+view at a nonzero offset throws. A resizable `ArrayBuffer` that is grown back makes the fixed range
+readable again. A `SharedArrayBuffer` view aliases other views of the same
+buffer; this module provides no atomics and no synchronization guarantee. A `DataView`, a
+`Symbol.toStringTag` lookalike, and a Proxy of a typed array are rejected with `TypeError`; the brand
+comes from the engine's internal slot, not a replaceable property or `Symbol.hasInstance`. The
+internal-slot getters are captured and bound before user code runs, so replacing
+`Function.prototype.call` later cannot intercept a private typed-array argument. A Proxy of an Array
+is an Array and is accepted, and its traps run.
+
+A frozen Array makes writes throw `TypeError` and still reads. Accessor elements run their getter and
+setter. Those behaviours are inherent in aliasing a caller's object: a view is not a snapshot and is
+not an isolation boundary.
+
+**Character buffers.** `CharSlice` is a live view over a caller-owned `Uint32Array` of Unicode code
+points, and `ReadOnlyCharSlice` is its read-only form. `CharSlice.fromString(text)` allocates one
+buffer, combining surrogate pairs into one code point and preserving a lone surrogate as one code
+unit. `toString()` builds the result in bounded chunks, so a large buffer cannot overflow a function
+argument list; it allocates the result string and chunk temporaries, not a string per code point.
+`slice` allocates only a view/state object and no character buffer. The in-place
+`toUpper`/`toLower` transforms allocate no new character buffer, but their simple case mapping may
+allocate a temporary string per mapped code point; they avoid converting the whole buffer to a
+string. The transforms apply the same simple case mapping as `neo:chars`, so `ß` stays `ß` rather
+than expanding to `SS`; lone surrogates and values outside the Unicode range are left unchanged.
+`set` writes one code point through to the buffer. `toArray()` returns an independent `Uint32Array`
+snapshot. `ReadOnlyCharSlice` has no `set` or in-place transform: make a `CharSlice` over the same
+buffer to mutate it. JS strings are immutable, so no view can alias string storage; the buffer
+allocation at `fromString` and the result string at `toString` are the deliberate boundary
+conversions, and in-place transforms avoid repeated whole-string conversions. A `CharSlice`
+constructor does not scan its input buffer; writing an invalid value directly into the
+`Uint32Array` makes `toString` throw `RangeError`. Like a typed-array view, a character view whose
+buffer was detached or shrunk makes `toArray` and `toString` (and, for the mutable `CharSlice`,
+`toUpper` and `toLower`) throw `RangeError` when the fixed range no longer fits, including an empty
+range at a nonzero offset.
+
+This module is informed by `@neotales/slices` but is not a port and does not claim full or
+byte-for-byte parity with it. In particular, it does not copy that package's `Uint8Array`/`Uint16Array`
+character conversions, which reinterpret bytes without respecting a view's offset and length, and
+it uses explicit `[start, end)` bounds rather than the reference's offset/length confusion. The
+reference's `ReadonlyCharSlice` spelling and some method names differ; there is no
+`slices.Slice`-compatible `map`/`update`/`replace` surface in this slice. Views are aliases within
+one realm, not a Rust zero-copy bridge.
+
 **Use the age built-in.** `Neo.getBuiltInModule("age")` returns a frozen module object that is
 cached for the realm. `age` is the canonical bare specifier and `neo:age` is an alias for the same
 module instance. The named exports are `generateIdentity`, `identityToRecipient`, `encrypt`, and
@@ -1109,10 +1199,11 @@ thread that will use it; it is not `Send`.
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
 local module loading, imports of the `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`,
-`ssh`, `stdio`, and `strings` built-ins by their bare or `neo:` specifiers, console output, bounded
-in-memory byte streams, writes to the process's stdout and stderr, lexical POSIX and Windows path
-operations, SHA-2 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous
-SSH command
+`slices`, `ssh`, `stdio`, and `strings` built-ins by their bare or `neo:` specifiers, console
+output, bounded in-memory byte streams, live mutable and read-only array and typed-array views,
+mutable and read-only Unicode code point buffers, writes to the process's stdout and stderr, lexical
+POSIX and Windows path operations,
+SHA-2 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
 authentication, the built-in module registry, and the embedding API above. Features outside this
 list are not implemented.
@@ -1124,16 +1215,18 @@ list are not implemented.
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
 - `node:`, `npm:`, `jsr:`, `http:`, `https:`, `data:`, and `blob:` imports are rejected. The
-  built-in modules are `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`, `ssh`, `stdio`,
-  and `strings`, reached through `Neo.getBuiltInModule("age")`,
+  built-in modules are `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`, `slices`, `ssh`,
+  `stdio`, and `strings`, reached through `Neo.getBuiltInModule("age")`,
   `Neo.getBuiltInModule("assert")`, `Neo.getBuiltInModule("chars")`,
   `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("crypto")`,
   `Neo.getBuiltInModule("os")`, `Neo.getBuiltInModule("path")`,
-  `Neo.getBuiltInModule("ssh")`, `Neo.getBuiltInModule("stdio")`, and
+  `Neo.getBuiltInModule("slices")`, `Neo.getBuiltInModule("ssh")`,
+  `Neo.getBuiltInModule("stdio")`, and
   `Neo.getBuiltInModule("strings")`, or through the import
   specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
-  `neo:console`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`, `ssh`, `neo:ssh`,
-  `stdio`, `neo:stdio`, `strings`, and `neo:strings`. Other `neo:` modules are rejected by name.
+  `neo:console`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`, `slices`,
+  `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`, and `neo:strings`. Other
+  `neo:` modules are rejected by name.
   Bare module specifiers that are not a built-in, and import maps, are not supported.
 - Module type attributes are rejected. `with { type: "json" }`, `with { type: "text" }`, `with {
   type: "bytes" }`, and custom types fail with a reason on static and dynamic imports, including for
@@ -1142,9 +1235,11 @@ list are not implemented.
 - JSON and WebAssembly module files are rejected, both as the entry file and as imports. V8's
   `WebAssembly` global is present but untested.
 - There is no permission system. The loader reads any file the process can read. neojs is not a
-  sandbox. `chars`, `console`, `os`, and `strings` are plain ECMAScript and add no capability beyond
-  the globals they expose; `os` holds two build-target constants and reads no host state, and the
-  `console` module writes to the process streams already used by the global console. `assert` calls
+  sandbox. `chars`, `console`, `os`, `slices`, and `strings` are plain ECMAScript and add no
+  capability beyond the globals they expose; `os` holds two build-target constants and reads no
+  host state, the `console` module writes to the process streams already used by the global
+  console, and `slices` aliases Arrays and typed arrays the caller already has; it creates no
+  buffer, opens no file, and is not a snapshot or an isolation boundary. `assert` calls
   one host op that observes a genuine native Promise's settlement by
   attaching settlement handlers without reading a user `then` or consulting `Symbol.species`; it
   adds no other capability.
@@ -1208,7 +1303,10 @@ conventions are informed by the MIT-licensed `neo:io` and `neo:process` modules 
 its implementation and tests are original, so no additional notice is required for it. The `path`
 module adapts lexical algorithms from the MIT-licensed `neo:path` module in NeoLiteJS and from
 `@neotales/path`; `neojs-core/src/builtins/neo.js` removes the glob and file URL helpers, adds the
-two-namespace host-selection shape, validation, the NUL rule, and the cwd policy. The exact upstream
+two-namespace host-selection shape, validation, the NUL rule, and the cwd policy. The `slices`
+module's API shape is informed by the MIT-licensed `@neotales/slices` package; its implementation
+and tests are original and do not port that package's code, so no additional notice is required for
+it. The exact upstream
 revision, adapted-file list, and MIT notices are in `neojs-core/THIRD_PARTY_NOTICES.md`. The `os`
 built-in is original; its two constant names are informed by the MIT-licensed NeoLiteJS `neo:os`
 module, but no code is copied and no additional notice is required. The `age` format and X25519
