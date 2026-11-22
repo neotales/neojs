@@ -4,12 +4,12 @@
 //! and drains V8's event loop. A runtime is single-use; a second entry module
 //! returns [`Error::RuntimeConsumed`].
 //!
-//! It provides the `age`, `assert`, `chars`, `console`, `crypto`, `path`, `ssh`,
-//! `stdio`, and `strings` built-in modules through
+//! It provides the `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`,
+//! `ssh`, `stdio`, and `strings` built-in modules through
 //! `Neo.getBuiltInModule(name)` and through the module specifiers `age`,
 //! `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
-//! `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`,
-//! `stdio`, `neo:stdio`, `strings`, and `neo:strings`.
+//! `neo:console`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`,
+//! `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`, and `neo:strings`.
 //!
 //! `assert` is a synchronous assertion surface inspired by Node's
 //! `assert/strict` and Deno's `@std/assert`. The registry object is the
@@ -103,6 +103,16 @@
 //! accepts the bytes or reports an error. See `neojs-core/src/stdio.rs` for the
 //! ownership, partial-read, end-of-file, close, error, and size contracts.
 //!
+//! `os` is two frozen strings describing the target the runtime was compiled
+//! for: `platform` is `std::env::consts::OS` and `arch` is
+//! `std::env::consts::ARCH`. They use the compiler's vocabulary, not Node's
+//! (`macos`, not `darwin`; `x86_64` or `aarch64`, not `x64` or `arm64`), and
+//! describe the build target rather than probing the running host. The module
+//! calls no host op and reads no environment variable, OS-release file,
+//! registry, sysctl value, file, or process table. neojs installs no `os`
+//! global. `version`, `codename`, `variant`, user, keyring, and scheduler
+//! surfaces are not implemented.
+//!
 //! `strings` is plain ECMAScript: folded matching (`equalFold`,
 //! `startsWithFold`, `endsWithFold`, `indexOfFold`, `lastIndexOfFold`) and
 //! trimming of a caller-supplied code point set (`trim`, `trimStart`,
@@ -157,8 +167,9 @@
 //! provenance contracts.
 //!
 //! An ES module namespace object is not the registry object. For `age`,
-//! `assert`, `chars`, `crypto`, `path`, `ssh`, `stdio`, and `strings`, both
-//! paths expose the same classes, functions, and shared stream objects; the
+//! `assert`, `chars`, `crypto`, `os`, `path`, `ssh`, `stdio`, and `strings`,
+//! both paths expose the same classes, functions, and shared stream objects;
+//! the
 //! namespace is a separate container over them. For `assert`, the registry
 //! object is the callable function, and the module also has a default export
 //! whose value is that function. For `console`, the registry object is the

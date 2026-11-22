@@ -27,7 +27,7 @@ use deno_core::url::Url;
 use crate::Error;
 use crate::age::neojs_age;
 use crate::assert::neojs_assert;
-use crate::builtins::NEO_SHIM;
+use crate::builtins::neo_shim;
 use crate::crypto::neojs_crypto;
 use crate::crypto_cipher::neojs_crypto_cipher;
 use crate::crypto_hash::neojs_crypto_hash;
@@ -119,14 +119,13 @@ impl Runtime {
     /// Creates a runtime and installs the console and built-in module shims.
     ///
     /// The runtime has one realm. The `age`, `assert`, `chars`, `console`,
-    /// `crypto`, `path`, `ssh`, `stdio`, and `strings` built-in modules are
-    /// cached in that realm, and both bare and `neo:`-prefixed import
+    /// `crypto`, `os`, `path`, `ssh`, `stdio`, and `strings` built-in modules
+    /// are cached in that realm, and both bare and `neo:`-prefixed import
     /// specifiers resolve to them; a new `Runtime` creates a new realm, new
     /// functions, and new module instances. The `age`, `crypto`, `path`, `ssh`,
-    /// and `stdio` modules
-    /// register their private host ops in that realm before user code runs;
-    /// `chars` and `strings` are plain ECMAScript, and `assert` calls one
-    /// private Promise-observation host op. The `console`
+    /// and `stdio` modules register their private host ops in that realm before
+    /// user code runs; `chars`, `os`, and `strings` are plain ECMAScript, and
+    /// `assert` calls one private Promise-observation host op. The `console`
     /// module's object is the console object the runtime installed: its default
     /// export's value is that object, and its
     /// named exports are that object's method values when the module is
@@ -145,7 +144,7 @@ impl Runtime {
     /// which indicates a broken embedded script. V8 creates its isolate on a
     /// single thread; create one `Runtime` per thread and per entry module.
     pub fn new() -> Result<Self, Error> {
-        Self::with_shims(CONSOLE_SHIM, NEO_SHIM)
+        Self::with_shims(CONSOLE_SHIM, neo_shim())
     }
 
     /// Creates a runtime and installs the given shim scripts.
@@ -159,7 +158,7 @@ impl Runtime {
     /// error path drops the isolate first and then stops the driver through
     /// [`Runtime`]'s `Drop`, which does not block. Building the runtimes is the
     /// only failure before a `Runtime` exists.
-    fn with_shims(console: &'static str, builtins: &'static str) -> Result<Self, Error> {
+    fn with_shims(console: &'static str, builtins: String) -> Result<Self, Error> {
         let driver = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             // Bounded pool for `neo:crypto` asynchronous hashing and password
@@ -375,7 +374,7 @@ mod tests {
     use super::CONSOLE_SHIM;
     use super::Runtime;
     use crate::Error;
-    use crate::builtins::NEO_SHIM;
+    use crate::builtins::neo_shim;
 
     /// A failing shim must return its own error, even inside a Tokio context.
     ///
@@ -392,12 +391,12 @@ mod tests {
             let cases = [
                 (
                     "throw new Error(\"console shim failed\");",
-                    NEO_SHIM,
+                    neo_shim(),
                     "console shim failed",
                 ),
                 (
                     CONSOLE_SHIM,
-                    "throw new Error(\"builtin shim failed\");",
+                    "throw new Error(\"builtin shim failed\");".to_string(),
                     "builtin shim failed",
                 ),
             ];

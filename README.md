@@ -329,6 +329,36 @@ surfaces are not promised. The path algorithms are adapted from NeoLiteJS and `@
 the MIT license; see [`neojs-core/THIRD_PARTY_NOTICES.md`](neojs-core/THIRD_PARTY_NOTICES.md) for the
 exact revision, adapted files, and notices.
 
+**Use the os built-in.** `Neo.getBuiltInModule("os")` returns a frozen module object that is cached
+for the realm. `os` is the canonical bare specifier and `neo:os` is an alias for the same module
+instance. The named exports are `platform` and `arch`, and each is the same string as the matching
+registry property. There is no default export, and neojs installs no `os` global.
+
+```js
+import { arch, platform } from "os";
+
+console.log(platform); // e.g. "linux"
+console.log(arch);     // e.g. "x86_64"
+```
+
+The values are Rust's `std::env::consts::OS` and `std::env::consts::ARCH` for the target the runtime
+was compiled for. They describe that compilation target; they are not a probe of the machine the
+process is running on. The vocabulary is exactly the compiler's, and neojs does not map, normalize,
+or validate it against a list of its own. `platform` can therefore be `linux`, `macos`, `windows`,
+`freebsd`, `netbsd`, `openbsd`, `dragonfly`, `android`, `ios`, `illumos`, `solaris`, `fuchsia`,
+`haiku`, `redox`, `emscripten`, `wasi`, or another name Rust documents for the target, and `arch`
+can be `x86_64`, `x86`, `aarch64`, `arm`, `riscv64`, `powerpc64`, `s390x`, `loongarch64`, `wasm32`,
+or another name Rust documents. The exact set follows the Rust version that built the runtime; this
+workspace declares Rust 1.100 as its minimum. These are **not** Node's `process.platform` and
+`process.arch` values: macOS is `macos`, not `darwin`, and
+64-bit ARM is `aarch64`, not `arm64`. Code that needs another vocabulary must translate it itself.
+
+This module calls no host op and reads no environment variable, `/etc/os-release` file, registry,
+sysctl value, file, or process table. It adds no permission and is not a sandbox. `version`,
+`codename`, `variant`, user and keyring lookup, and scheduler generation are not part of this
+module. Only Linux x86-64 is verified in this repository; values on Windows, macOS, and other
+targets are the compiler's constants but those platforms are unverified.
+
 **Use the character built-in.** The global `Neo` object exposes the modules this runtime ships.
 `Neo.getBuiltInModule("chars")` returns a frozen module object that is cached for the realm, so
 repeated lookups return the same object. An unknown name returns `undefined`; a non-string name
@@ -1078,8 +1108,8 @@ thread that will use it; it is not `Send`.
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
-local module loading, imports of the `age`, `assert`, `chars`, `console`, `crypto`, `path`, `ssh`,
-`stdio`, and `strings` built-ins by their bare or `neo:` specifiers, console output, bounded
+local module loading, imports of the `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`,
+`ssh`, `stdio`, and `strings` built-ins by their bare or `neo:` specifiers, console output, bounded
 in-memory byte streams, writes to the process's stdout and stderr, lexical POSIX and Windows path
 operations, SHA-2 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous
 SSH command
@@ -1094,16 +1124,17 @@ list are not implemented.
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
 - `node:`, `npm:`, `jsr:`, `http:`, `https:`, `data:`, and `blob:` imports are rejected. The
-  built-in modules are `age`, `assert`, `chars`, `console`, `crypto`, `path`, `ssh`, `stdio`, and
-  `strings`, reached through `Neo.getBuiltInModule("age")`,
+  built-in modules are `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`, `ssh`, `stdio`,
+  and `strings`, reached through `Neo.getBuiltInModule("age")`,
   `Neo.getBuiltInModule("assert")`, `Neo.getBuiltInModule("chars")`,
   `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("crypto")`,
-  `Neo.getBuiltInModule("path")`, `Neo.getBuiltInModule("ssh")`,
-  `Neo.getBuiltInModule("stdio")`, and `Neo.getBuiltInModule("strings")`, or through the import
+  `Neo.getBuiltInModule("os")`, `Neo.getBuiltInModule("path")`,
+  `Neo.getBuiltInModule("ssh")`, `Neo.getBuiltInModule("stdio")`, and
+  `Neo.getBuiltInModule("strings")`, or through the import
   specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
-  `neo:console`, `crypto`, `neo:crypto`, `path`, `neo:path`, `ssh`, `neo:ssh`, `stdio`,
-  `neo:stdio`, `strings`, and `neo:strings`. Other `neo:` modules are rejected by name. Bare module
-  specifiers that are not a built-in, and import maps, are not supported.
+  `neo:console`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`, `ssh`, `neo:ssh`,
+  `stdio`, `neo:stdio`, `strings`, and `neo:strings`. Other `neo:` modules are rejected by name.
+  Bare module specifiers that are not a built-in, and import maps, are not supported.
 - Module type attributes are rejected. `with { type: "json" }`, `with { type: "text" }`, `with {
   type: "bytes" }`, and custom types fail with a reason on static and dynamic imports, including for
   built-in modules. Only untyped ECMAScript modules are loaded. Attributes that do not name a type
@@ -1111,9 +1142,10 @@ list are not implemented.
 - JSON and WebAssembly module files are rejected, both as the entry file and as imports. V8's
   `WebAssembly` global is present but untested.
 - There is no permission system. The loader reads any file the process can read. neojs is not a
-  sandbox. `chars`, `console`, and `strings` are plain ECMAScript and add no capability beyond the
-  globals they expose; the `console` module writes to the process streams already used by the
-  global console. `assert` calls one host op that observes a genuine native Promise's settlement by
+  sandbox. `chars`, `console`, `os`, and `strings` are plain ECMAScript and add no capability beyond
+  the globals they expose; `os` holds two build-target constants and reads no host state, and the
+  `console` module writes to the process streams already used by the global console. `assert` calls
+  one host op that observes a genuine native Promise's settlement by
   attaching settlement handlers without reading a user `then` or consulting `Symbol.species`; it
   adds no other capability.
   `age` calls four host ops for X25519 identity generation and binary age v1 encryption/decryption.
@@ -1177,8 +1209,10 @@ its implementation and tests are original, so no additional notice is required f
 module adapts lexical algorithms from the MIT-licensed `neo:path` module in NeoLiteJS and from
 `@neotales/path`; `neojs-core/src/builtins/neo.js` removes the glob and file URL helpers, adds the
 two-namespace host-selection shape, validation, the NUL rule, and the cwd policy. The exact upstream
-revision, adapted-file list, and MIT notices are in `neojs-core/THIRD_PARTY_NOTICES.md`. The `age` format and X25519 handling come
-from the MIT-licensed `neotales-age` crate, Copyright (c) 2026 Neotales and x0craft. The `ssh`
+revision, adapted-file list, and MIT notices are in `neojs-core/THIRD_PARTY_NOTICES.md`. The `os`
+built-in is original; its two constant names are informed by the MIT-licensed NeoLiteJS `neo:os`
+module, but no code is copied and no additional notice is required. The `age` format and X25519
+handling come from the MIT-licensed `neotales-age` crate, Copyright (c) 2026 Neotales and x0craft. The `ssh`
 built-in uses the MIT-licensed `neotales-ssh` crate, Copyright (c) 2026 Neotales and x0craft, for the
 SSH-2 protocol; `neojs-core/src/ssh.rs` adds only the JavaScript-facing slice and policy described in
 that crate's notice. The `crypto` hash and HMAC primitives use the RustCrypto `sha2` 0.11.1 and
