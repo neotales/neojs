@@ -516,6 +516,50 @@ if (CharSlice.fromString("a\u{1F600}b").toString() !== "a\u{1F600}b") {
 }
 
 #[test]
+fn char_from_string_does_not_use_a_replaceable_function_call() {
+    run_js(
+        r#"
+import { CharSlice, ReadOnlyCharSlice } from "slices";
+
+// `Function.prototype.call` is writable. If an intrinsic invocation used
+// `getter.call(value)` after initialization, this replacement would receive
+// the getter as `this` and the private code point buffer in `args`.
+const originalCall = Function.prototype.call;
+const seen = [];
+Function.prototype.call = function (...args) {
+    seen[seen.length] = { target: this, args };
+    return Reflect.apply(originalCall, this, args);
+};
+try {
+    const mutable = CharSlice.fromString("a\u{1F600}b");
+    const readonly = ReadOnlyCharSlice.fromString("a\u{1F600}b");
+    const bmp = CharSlice.fromString("ab");
+    const mutableText = mutable.toString();
+    const readonlyText = readonly.toString();
+    const bmpText = bmp.toString();
+    if (seen.length !== 0) {
+        throw new Error(`Function.prototype.call was invoked ${seen.length} times`);
+    }
+    if (mutableText !== "a\u{1F600}b" || readonlyText !== "a\u{1F600}b" || bmpText !== "ab") {
+        throw new Error("fromString results are wrong while Function.prototype.call is replaced");
+    }
+    if (mutable.length !== 3 || readonly.length !== 3 || bmp.length !== 2) {
+        throw new Error("fromString lengths are wrong while Function.prototype.call is replaced");
+    }
+} finally {
+    Function.prototype.call = originalCall;
+}
+if (Function.prototype.call !== originalCall) {
+    throw new Error("Function.prototype.call was not restored");
+}
+if (CharSlice.fromString("a\u{1F600}b").toString() !== "a\u{1F600}b") {
+    throw new Error("fromString broke after restoring Function.prototype.call");
+}
+"#,
+    );
+}
+
+#[test]
 fn empty_views_validate_detached_ranges() {
     run_js(
         r#"

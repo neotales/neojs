@@ -3857,10 +3857,18 @@
         const typedArrayBuffer = getOwnPropertyDescriptor(typedArrayPrototype, "buffer").get;
         const typedArrayTag = getOwnPropertyDescriptor(typedArrayPrototype, symbolToStringTag).get;
 
+        // Bind the getters now. Calling `getter.call(value)` later would resolve
+        // `Function.prototype.call` dynamically; user code can replace it to
+        // receive the getter and the private typed-array argument. A bound
+        // wrapper invokes the captured getter without that lookup.
+        const typedArrayLengthOf = Function.prototype.call.bind(typedArrayLength);
+        const typedArrayBufferOf = Function.prototype.call.bind(typedArrayBuffer);
+        const typedArrayTagOf = Function.prototype.call.bind(typedArrayTag);
+
         /** The intrinsic typed-array name, or `undefined` for a non-typed-array. */
         function typedArrayName(value) {
             try {
-                return typedArrayTag.call(value);
+                return typedArrayTagOf(value);
             } catch {
                 return undefined;
             }
@@ -3916,7 +3924,7 @@
                 }
                 return length;
             }
-            return typedArrayLength.call(target);
+            return typedArrayLengthOf(target);
         }
 
         /**
@@ -4042,7 +4050,7 @@
             // Check the fixed range as a whole, including an empty range. An
             // empty view at offset 0 still fits a detached (zero-length)
             // target; an empty view at a nonzero offset no longer does.
-            if (state.start + state.length > typedArrayLength.call(state.target)) {
+            if (state.start + state.length > typedArrayLengthOf(state.target)) {
                 throw makeRangeError("slices view no longer fits its typed array");
             }
             const out = new constructor(state.length);
@@ -4255,7 +4263,7 @@
                 if (typedArrayName(buffer) !== "Uint32Array") {
                     throw makeTypeError("CharSlice buffer must be a Uint32Array");
                 }
-                const length = typedArrayLength.call(buffer);
+                const length = typedArrayLengthOf(buffer);
                 const range = resolveRange(length, start, end);
                 this.buffer = buffer;
                 this.start = range.start;
@@ -4274,7 +4282,7 @@
         function charRequireBounds(state) {
             // Match `typedArrayCopy`: validate the fixed range even when it is
             // empty. An empty view at offset 0 still fits a detached buffer.
-            if (state.start + state.length > typedArrayLength.call(state.buffer)) {
+            if (state.start + state.length > typedArrayLengthOf(state.buffer)) {
                 throw makeRangeError("character slice no longer fits its buffer");
             }
         }
@@ -4372,7 +4380,7 @@
             // consults `Symbol.species`. Read the backing buffer through the
             // captured intrinsic getter, not `buffer.buffer`, whose prototype
             // getter later code can replace to capture this private allocation.
-            const backing = typedArrayBuffer.call(buffer);
+            const backing = typedArrayBufferOf(buffer);
             return new makeUint32Array(backing, 0, count);
         }
 

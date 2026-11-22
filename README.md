@@ -498,8 +498,10 @@ view at a nonzero offset throws. A resizable `ArrayBuffer` that is grown back ma
 readable again. A `SharedArrayBuffer` view aliases other views of the same
 buffer; this module provides no atomics and no synchronization guarantee. A `DataView`, a
 `Symbol.toStringTag` lookalike, and a Proxy of a typed array are rejected with `TypeError`; the brand
-comes from the engine's internal slot, not a replaceable property or `Symbol.hasInstance`. A Proxy of
-an Array is an Array and is accepted, and its traps run.
+comes from the engine's internal slot, not a replaceable property or `Symbol.hasInstance`. The
+internal-slot getters are captured and bound before user code runs, so replacing
+`Function.prototype.call` later cannot intercept a private typed-array argument. A Proxy of an Array
+is an Array and is accepted, and its traps run.
 
 A frozen Array makes writes throw `TypeError` and still reads. Accessor elements run their getter and
 setter. Those behaviours are inherent in aliasing a caller's object: a view is not a snapshot and is
