@@ -46,10 +46,11 @@
 //! `neojs-builtins`: case-insensitive folded matching (`equalFold`,
 //! `startsWithFold`, `endsWithFold`, `indexOfFold`, `lastIndexOfFold`) and
 //! trimming of a caller-supplied code point set. It operates on UTF-16 code
-//! units and preserves lone surrogates. The search functions are linear in the
-//! text plus the needle and use O(needle) extra memory plus one fixed window;
+//! units and preserves lone surrogates. The search scan examines the text plus
+//! the needle linearly and uses O(needle) extra memory plus one fixed window;
 //! `lastIndexOfFold` also stops once no match can begin at or before its limit,
-//! so a small limit does not copy the whole text. It calls no host op
+//! so a small limit does not copy the whole text. The binding bounds copied
+//! units and retained memory, not V8's internal rope traversal time. It calls no host op
 //! and adds no capability. Folding is Unicode 16.0 simple case folding from a
 //! fixed table in the shared crate, so it is locale-independent and both
 //! engines agree instead of following their own Unicode release.

@@ -248,11 +248,13 @@
 //! equals U+212A KELVIN SIGN, `"s"` equals U+017F LONG S, `"I"` does not equal
 //! U+0131 DOTLESS I, and `"ss"` does not equal `"ß"`. Indices are UTF-16 code
 //! unit offsets like `String.prototype.indexOf`, and overlapping occurrences
-//! are found. Searching is linear in the text plus the search string (KMP over
-//! simple-fold equivalence) and uses O(search) extra memory plus one fixed
-//! 1024-code-unit window, so a repeated prefix cannot make it quadratic and a
-//! small `fromIndex` does not copy the whole text. `lastIndexOfFold` stops as
-//! soon as no match
+//! are found. The KMP scan examines the text plus the search string linearly
+//! over simple-fold equivalence and uses O(search) extra memory plus one fixed
+//! 1024-code-unit window, so a repeated prefix cannot make the scan quadratic
+//! and a small `fromIndex` does not copy the whole text. This is algorithmic
+//! scan work: the binding bounds copied units and retained window memory, not
+//! V8's internal time for traversing a rope inside `write_v2`.
+//! `lastIndexOfFold` stops as soon as no match
 //! can begin at or before its limit, so a small limit does not scan a long tail.
 //! A lone surrogate is compared as itself and never matches half of a pair.
 //! With no `chars`, trimming is exactly `String.prototype.trim`, so it uses

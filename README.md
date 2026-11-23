@@ -679,10 +679,12 @@ engines classify the same input the same way, and it is not a `toLowerCase()` co
 while `equalFold("I", "\u0131")` is `false` (dotless i) and `equalFold("ss", "ß")` is `false` (that
 is full folding). Indices are UTF-16 code unit offsets, like `String.prototype.indexOf`, not code
 point offsets; `indexOfFold` and `lastIndexOfFold` find overlapping occurrences, and an empty search
-returns the clamped start index or the string length. Searching is linear in the text plus the
-search string and uses O(search) extra memory plus one fixed 1024-code-unit window: a repeated prefix
-cannot make it quadratic. Both engines read that window on demand instead of copying the whole
-string, so a small `fromIndex` copies only a bounded prefix.
+returns the clamped start index or the string length. The KMP scan examines the text plus the search
+string and uses O(search) extra memory plus one fixed 1024-code-unit window: a repeated prefix cannot
+make the scan quadratic. Both engines read that window on demand instead of copying the whole
+string, so a small `fromIndex` copies only a bounded prefix. The binding claims bounded copied units
+and retained window memory; it does not claim a time bound for V8's internal rope traversal inside
+`write_v2`.
 `lastIndexOfFold` also stops as soon as no match can begin at or before `fromIndex`, so a small limit
 does not scan a long tail. A lone surrogate
 is compared as itself and never matches half of a surrogate pair. Argument values are not coerced:

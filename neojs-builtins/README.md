@@ -105,7 +105,9 @@ U+017F LONG S, `"I"` does not equal U+0131 DOTLESS I, and `"ss"` does not equal
 `RangeError`, while `Infinity` and `-Infinity` clamp. `indexOfFold` and
 `lastIndexOfFold` stream through a fixed 1024-code-unit engine window instead
 of copying the whole text; a small `fromIndex` reads only the prefix the scan
-needs. The module calls no host op and adds no capability.
+needs. The binding bounds copied units and retained window memory; it does not
+claim a time bound for V8's internal rope traversal inside `write_v2`. The
+module calls no host op and adds no capability.
 
 ## Precise limits
 
