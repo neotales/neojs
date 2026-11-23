@@ -941,6 +941,174 @@ if (first.value !== 1) throw new Error(`bad value ${{first.value}}`);
     .expect("a direct import of an already verified JSR URL must reuse the module");
 }
 
+// Integration test: a verified JSR module may import GitHub specifiers. The
+// GitHub files are ordinary remote modules, while the JSR file keeps its
+// manifest verification. An exact request budget and the full request list
+// prove the shared request accounting is charged once per request.
+#[test]
+fn a_verified_jsr_module_can_import_github_specifiers() {
+    let root = b"import { a } from \"gh:acme/a@v1/a.js\";\nimport { b } from \"github:acme/b@v2/b.js\";\nexport const joined: string = a + b;\n";
+    let raw_a = "https://raw.githubusercontent.com/acme/a/v1/a.js";
+    let raw_b = "https://raw.githubusercontent.com/acme/b/v2/b.js";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(
+                    &[("/root.ts", root.as_slice())],
+                    &[(".", "./root.ts")],
+                )),
+            )
+            .with(
+                file_url("scope", "pkg", "1.0.0", "/root.ts"),
+                Reply::ok(root.as_slice()),
+            )
+            .with(
+                raw_a.to_string(),
+                Reply::ok(b"export const a = \"a\";\n".as_slice()),
+            )
+            .with(
+                raw_b.to_string(),
+                Reply::ok(b"export const b = \"b\";\n".as_slice()),
+            ),
+    );
+
+    run_with(
+        &server,
+        RemoteOptions::new().without_cache().with_max_requests(5),
+        "import { joined } from \"jsr:@scope/pkg@1\";\nif (joined !== \"ab\") throw new Error(`bad value ${joined}`);\n",
+    )
+    .expect("a verified JSR module may import GitHub specifiers");
+
+    assert_eq!(
+        server.seen(),
+        vec![
+            meta_url("scope", "pkg"),
+            version_url("scope", "pkg", "1.0.0"),
+            file_url("scope", "pkg", "1.0.0", "/root.ts"),
+            raw_a.to_string(),
+            raw_b.to_string(),
+        ],
+        "each metadata, verified file, and GitHub file must be requested exactly once"
+    );
+}
+
+// Integration test: a GitHub raw URL that redirects to an identity already
+// verified through `jsr:` is refused before V8 can replace or duplicate that
+// module. The verified module stays intact, and the exact request counts plus
+// an exact budget preserve the request and integrity rules.
+#[test]
+fn a_github_redirect_to_an_already_verified_jsr_identity_is_refused() {
+    let raw = "https://raw.githubusercontent.com/acme/widgets/v1/entry.js";
+    let target = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let body = b"export const value = 1;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", body)], &[(".", "./mod.js")])),
+            )
+            .with(target.clone(), Reply::ok(body.as_slice()))
+            .with(
+                raw.to_string(),
+                Reply::redirect("https://jsr.io/@scope/pkg/1.0.0/mod.js"),
+            ),
+    );
+
+    run_with(
+        &server,
+        RemoteOptions::new().without_cache().with_max_requests(5),
+        r#"
+const verified = await import("jsr:@scope/pkg@1");
+let caught = null;
+try {
+    await import("gh:acme/widgets@v1/entry.js");
+} catch (error) {
+    caught = error;
+}
+if (verified.value !== 1) throw new Error("the verified module was replaced");
+if (caught === null) throw new Error("the GitHub redirect was not refused");
+if (!String(caught).includes("already a verified JSR module")) {
+    throw new Error(`unexpected refusal: ${caught}`);
+}
+"#,
+    )
+    .expect("a GitHub redirect must not replace a verified JSR module");
+
+    assert_eq!(
+        server.request_count(&target),
+        2,
+        "the verified load and the refused redirect each fetch the target once"
+    );
+    assert_eq!(
+        server.request_count(raw),
+        1,
+        "the GitHub redirect must be fetched once"
+    );
+}
+
+// Integration test: the reverse order is also safe. A GitHub raw URL that
+// redirects to a not-yet-verified canonical jsr.io URL is registered as an
+// ordinary module under that identity, so a later `jsr:` import is refused
+// instead of reusing the unverified redirect body. The file is not fetched a
+// second time, and the exact budget preserves request accounting.
+#[test]
+fn a_github_redirect_to_an_unverified_registry_url_cannot_be_reused_by_jsr() {
+    let raw = "https://raw.githubusercontent.com/acme/widgets/v1/entry.js";
+    let target = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let body = b"export const value = 1;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                raw.to_string(),
+                Reply::redirect("https://jsr.io/@scope/pkg/1.0.0/mod.js"),
+            )
+            .with(target.clone(), Reply::ok(body.as_slice()))
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", body)], &[(".", "./mod.js")])),
+            ),
+    );
+
+    run_with(
+        &server,
+        RemoteOptions::new().without_cache().with_max_requests(4),
+        r#"
+const direct = await import("gh:acme/widgets@v1/entry.js");
+if (direct.value !== 1) throw new Error("the GitHub redirect did not load");
+let caught = null;
+try {
+    await import("jsr:@scope/pkg@1");
+} catch (error) {
+    caught = error;
+}
+if (caught === null) throw new Error("the jsr: import reused an unverified redirect");
+if (!String(caught).includes("already loaded as an ordinary HTTPS module")) {
+    throw new Error(`unexpected refusal: ${caught}`);
+}
+"#,
+    )
+    .expect("a GitHub redirect must not let jsr: reuse an unverified identity");
+
+    assert_eq!(
+        server.request_count(&target),
+        1,
+        "the jsr: import must not fetch the unverified redirect target again"
+    );
+}
+
 // Integration test: an ordinary HTTPS module that redirects to a canonical
 // jsr.io URL is registered under the final URL. A later `jsr:` import of that
 // identity is refused, so it cannot reuse the unverified redirect body.
