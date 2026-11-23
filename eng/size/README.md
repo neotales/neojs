@@ -104,10 +104,11 @@ The default refuses a dirty tree because a dirty record is not attributable to
 the commit alone. `--allow-dirty` records it with
 `source.git_canonical: false`, and the report shows `canonical no`.
 
-The script fingerprints the source state before and after each build. If the
-commit or dirty-state hash changes while a build runs, the measurement is
-refused: a binary that cannot be attributed to the captured state is not
-recorded.
+The script fingerprints the source state before and after each build. The
+fingerprint covers the status, the tracked diff (including binary content) and
+the contents of untracked files, with the ledger excluded. If the commit or that
+fingerprint changes while a build runs, the measurement is refused: a binary
+that cannot be attributed to the captured state is not recorded.
 
 For a claimed **release** measurement, check out the release tag, verify the
 tree is clean, and record the tag. A measurement from `dev` is a commit

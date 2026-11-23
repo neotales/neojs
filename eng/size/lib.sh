@@ -213,8 +213,26 @@ size_git_status_text() {
     git -C "$root" status --porcelain -- "${paths[@]}"
 }
 
-size_git_status_sha256() {
-    printf '%s' "$(size_git_status_text "$1" "$2")" | size_sha256_stream
+# A content-aware source-state fingerprint: status, tracked diff (including
+# binary) and the contents of untracked files. The ledger is excluded. This is
+# deliberately stronger than the status text used for the dirty decision so a
+# build that rewrites an already-dirty file is still detected.
+size_git_state_sha256() {
+    local root=$1 ledger=$2
+    local paths=(.) ledger_rel file
+    ledger_rel=$(realpath -m --relative-to="$root" "$ledger" 2>/dev/null || true)
+    case "$ledger_rel" in
+        "" | /* | ../*) ;;
+        *) paths+=(":(exclude)$ledger_rel") ;;
+    esac
+    {
+        git -C "$root" status --porcelain -- "${paths[@]}"
+        git -C "$root" diff --binary -- "${paths[@]}"
+        while IFS= read -r -d '' file; do
+            printf 'untracked %s\n' "$file"
+            sha256sum "$root/$file"
+        done < <(git -C "$root" ls-files --others --exclude-standard -z -- "${paths[@]}")
+    } | size_sha256_stream
 }
 
 # Add the derived identity fields. Keys are derived from the record, never

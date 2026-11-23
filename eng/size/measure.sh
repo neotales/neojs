@@ -275,7 +275,7 @@ GIT_BRANCH=$(git -C "$ROOT" symbolic-ref -q --short HEAD 2>/dev/null || echo det
 GIT_DESCRIBE=$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo unknown)
 GIT_TAGS_JSON=$(git -C "$ROOT" tag --points-at HEAD | jq -R -s 'split("\n") | map(select(length > 0))')
 
-GIT_STATUS_SHA256=$(size_git_status_sha256 "$ROOT" "$LEDGER")
+GIT_STATE_SHA256=$(size_git_state_sha256 "$ROOT" "$LEDGER")
 if size_git_dirty "$ROOT" "$LEDGER"; then
     GIT_DIRTY=true
 else
@@ -293,7 +293,7 @@ else
     GIT_CANONICAL=false
 fi
 STATE_STATUS=captured
-STATE_SHA256=$GIT_STATUS_SHA256
+STATE_SHA256=$GIT_STATE_SHA256
 if [ "$(jq 'length' <<<"$GIT_TAGS_JSON")" -gt 0 ]; then
     SOURCE_KIND=tag
 else
@@ -538,14 +538,14 @@ measure_package() {
     command=${command% }
     log="$TARGET_DIR/build-$package.log"
     before_commit=$(git -C "$ROOT" rev-parse HEAD)
-    before_state=$(size_git_status_sha256 "$ROOT" "$LEDGER")
+    before_state=$(size_git_state_sha256 "$ROOT" "$LEDGER")
     printf 'size: building %s (%s)\n' "$package" "$TARGET" >&2
     if ! (cd -- "$ROOT" && "${build_cmd[@]}") >"$log" 2>&1; then
         tail -n 50 "$log" >&2
         size_die "build failed for $package; full log: $log"
     fi
     after_commit=$(git -C "$ROOT" rev-parse HEAD)
-    after_state=$(size_git_status_sha256 "$ROOT" "$LEDGER")
+    after_state=$(size_git_state_sha256 "$ROOT" "$LEDGER")
     if [ "$before_commit" != "$after_commit" ] || [ "$before_state" != "$after_state" ]; then
         size_die "source commit or dirty state changed while building $package; refusing to record a binary that cannot be attributed to the captured source state"
     fi

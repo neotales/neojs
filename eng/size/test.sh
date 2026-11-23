@@ -370,6 +370,16 @@ else
     fail "source changes are excluded from the dirty check"
 fi
 
+printf 'one\n' >"$REPO/source.txt"
+STATE_ONE=$(size_git_state_sha256 "$REPO" "$REPO/ledger.jsonl")
+printf 'two\n' >"$REPO/source.txt"
+STATE_TWO=$(size_git_state_sha256 "$REPO" "$REPO/ledger.jsonl")
+if [ "$STATE_ONE" != "$STATE_TWO" ]; then
+    ok "state fingerprint detects content changes behind the same dirty status"
+else
+    fail "state fingerprint ignored a content change"
+fi
+
 # The build lock must exclude a second process for the same target directory.
 ( size_lock_target_dir "$TMP/build.lock"; : >"$TMP/lock-held"; sleep 1 ) &
 LOCK_PID=$!
