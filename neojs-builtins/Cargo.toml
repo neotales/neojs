@@ -11,10 +11,13 @@ readme = "README.md"
 
 [features]
 default = []
-# The shared `neo:chars` implementation, canonical wrapper, and descriptor.
-# The V8 runtime enables it so a default V8 build keeps `chars`; the QuickJS
-# runtime enables it explicitly. Cargo features are additive across the
-# dependency graph, so a module is present whenever any dependent enables it.
-chars = []
+# The shared `neo:chars` Rust implementation and descriptor. The V8 runtime
+# enables it so a default V8 build keeps `chars`; the QuickJS runtime enables it
+# explicitly. Cargo features are additive across the dependency graph, so a
+# module is present whenever any dependent enables it.
+chars = ["dep:unicode-general-category"]
 
 [dependencies]
+# Unicode General_Category lookup for the `chars` classifier. Version 1.1.0
+# ships the Unicode 16.0 tables and has no dependencies of its own.
+unicode-general-category = { workspace = true, optional = true }

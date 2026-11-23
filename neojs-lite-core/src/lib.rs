@@ -8,9 +8,8 @@
 //! default `cargo build` in this workspace does not compile it and does not put
 //! QuickJS or `rquickjs` in the V8 graph. Both runtimes share the engine-neutral
 //! module policy in `neojs-module-policy`, so extension handling and failure
-//! reasons agree, and the shared `neo:chars` implementation and wrapper in
-//! `neojs-builtins`, so module behavior and imports agree where the module is
-//! implemented.
+//! reasons agree, and the shared `neo:chars` Rust logic in `neojs-builtins`, so
+//! module behavior and imports agree where the module is implemented.
 //!
 //! # What works
 //!
@@ -38,12 +37,13 @@
 //!   object. A bare name or another scheme returns `undefined`; a non-string
 //!   name throws `TypeError`. With `default-features = false` the registry and
 //!   list are empty and no module source is compiled in. The implementation
-//!   comes from the engine-neutral `neojs-builtins` crate, which the V8 runtime
-//!   also uses.
+//!   comes from the engine-neutral `neojs-builtins` crate, bound as a native
+//!   QuickJS module; the V8 runtime uses the same Rust logic.
 //! * With the off-by-default `node-compat` feature and
 //!   [`Runtime::with_node_compat`], the exact specifier `node:child_process`
-//!   loads a synchronous `spawnSync`/`execFileSync` module. It is not added to
-//!   the `Neo` registry and has no bare alias. The default runtime rejects it.
+//!   loads a native synchronous `spawnSync`/`execFileSync` module. It is not
+//!   added to the `Neo` registry and has no bare alias. The default runtime
+//!   rejects it.
 //!
 //! # What is not implemented yet
 //!
@@ -66,6 +66,10 @@
 
 mod loader;
 mod runtime;
+
+#[cfg(feature = "neo-chars")]
+mod chars;
+mod neo;
 
 pub use runtime::{Error, Runtime};
 

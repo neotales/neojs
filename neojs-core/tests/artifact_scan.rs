@@ -1,9 +1,9 @@
 //! Artifact-level checks for feature-selected built-in implementation bytes.
 //!
-//! Each needle is a distinctive sequence from the actual implementation, not a
-//! marker added only for testing. A disabled build must not contain it; an
-//! enabled build must. Reintroducing the original inline implementation into
-//! the monolith would therefore fail the disabled check even without any marker.
+//! The `chars` needle is the Rust error text used by the native binding, not a
+//! marker added only for testing. A disabled build does not link the binding, so
+//! the text is absent; an enabled build must contain it. The `slices` needles are
+//! from its JavaScript implementation, which is still JavaScript.
 //!
 //! The needles are decoded from hex at runtime. They never appear contiguously
 //! in this test's own data, so the test source cannot satisfy its own scan.
@@ -12,12 +12,9 @@ use std::fs;
 
 use neojs_core::Runtime;
 
-/// `const DECIMAL_DIGIT = /\p{Nd}/u;` from the shared `chars` implementation.
+/// `NON_SCALAR_MESSAGE` from the Rust `chars` implementation and binding.
 const CHARS_SEQUENCE_ONE_HEX: &str =
-    "636f6e737420444543494d414c5f4449474954203d202f5c707b4e647d2f753b";
-/// `throw new makeRangeError(\`${name} must be a Unicode scalar value\`);` from
-/// the shared `chars` implementation.
-const CHARS_SEQUENCE_TWO_HEX: &str = "7468726f77206e6577206d616b6552616e67654572726f722860247b6e616d657d206d757374206265206120556e69636f6465207363616c61722076616c756560293b";
+    "76616c7565206d757374206265206120556e69636f6465207363616c61722076616c7565";
 
 /// `const CHAR_STATE = Symbol("charSliceState");` from `slices.impl.js`.
 const SLICES_SEQUENCE_ONE_HEX: &str =
@@ -67,7 +64,7 @@ fn embedded_implementation_bytes_follow_the_features() {
         "artifact scan control is missing; the scan is not reading shim source bytes"
     );
 
-    let chars = [CHARS_SEQUENCE_ONE_HEX, CHARS_SEQUENCE_TWO_HEX];
+    let chars = [CHARS_SEQUENCE_ONE_HEX];
     #[cfg(feature = "neo-chars")]
     assert_sequences(&artifact, &chars, true, "chars is enabled");
     #[cfg(not(feature = "neo-chars"))]

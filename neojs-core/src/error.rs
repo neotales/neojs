@@ -103,6 +103,14 @@ pub enum Error {
         reason: String,
     },
 
+    /// The native built-in surface could not be installed.
+    ///
+    /// This is an internal construction failure (for example a V8 allocation
+    /// failure while creating the native `neo:chars` functions), not a problem
+    /// in the program being run. The runtime cannot be used.
+    #[error("cannot install the native built-in surface: {0}")]
+    NativeBuiltins(String),
+
     /// V8 rejected the module while loading, linking, or evaluating it.
     ///
     /// This covers module resolution, import loading, syntax errors, uncaught

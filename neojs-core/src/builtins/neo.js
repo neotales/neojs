@@ -6,8 +6,9 @@
 // `Neo.getBuiltInModulesList` returns every canonical `neo:` module specifier
 // as one frozen array. `Neo.getBuiltInModule` takes the canonical specifier; a
 // bare registry name is not a module key and returns `undefined`. `assert`
-// calls one private host op that observes a genuine native Promise; `chars` and
-// `console` are plain ECMAScript; `crypto` calls thirty-two private host ops:
+// calls one private host op that observes a genuine native Promise; `console`
+// is plain ECMAScript and `chars` is a native Rust binding installed before this
+// shim; `crypto` calls thirty-two private host ops:
 // four use the operating system CSPRNG and AES-256-GCM in
 // `neojs-core/src/crypto.rs`; eight implement bounded AES-256-CBC/AES-256-GCM
 // ciphers in `neojs-core/src/crypto_cipher.rs`; seven implement SHA-2 hashing and HMAC in
@@ -51,15 +52,12 @@
 // module calls no host op, reads no environment or operating-system file, and
 // installs no global.
 //
-// The `chars` module is an independent implementation shared with NeoJS Lite
-// through the engine-neutral `neojs-builtins` crate. That crate holds the
-// implementation expression and the canonical wrapper; this shim splices the
-// expression in so the V8 object, its `slices` dependency, the registry, and
-// the module namespace all see one set of function objects. Character
-// classification uses the Unicode property tables compiled into V8, so the exact
-// Unicode version follows the V8 build. It is informed by `@neotales/chars` and
-// the QuickJS `neo:chars` module, but it does not port their lookup tables and
-// does not claim compatibility with them.
+// The `chars` module is a native Rust binding shared with NeoJS Lite through the
+// engine-neutral `neojs-builtins` crate. The runtime creates the function objects
+// and registers the native V8 module before this shim runs, so the registry,
+// `slices`, and the module namespace all see one set of function objects.
+// Character classification uses the crate's Unicode 16.0 tables, not V8's, so
+// both engines classify the same input the same way.
 (() => {
     "use strict";
 
@@ -111,12 +109,10 @@
     // go through the native slice op instead.
     const typedArraySet = Function.prototype.call.bind(Uint8Array.prototype.set);
 
-    // The `chars` implementation is engine-neutral and lives in
-    // `neojs-builtins`. The token below is replaced with that expression when
-    // the shim is assembled, so V8 and QuickJS evaluate the same source and
-    // capture the same intrinsics. The object is defined before `slices`
-    // evaluates: `CharSlice` captures `chars.toUpper` and `chars.toLower`.
-    // __NEO_CHARS_DECLARATION__
+    // The shared `chars` module is a native V8 object installed by Rust before
+    // this shim runs. The registry entry below spreads that object in; the
+    // object and every function are native V8 values. `slices` reads the same
+    // object from the internal entries global at evaluation time.
 
     // `strings` is plain ECMAScript: folded matching and set-based trimming.
     // It calls no host op and adds no capability beyond the strings it is
@@ -6538,7 +6534,7 @@
     const modules = new Map([
         ["neo:age", age],
         ["neo:assert", assert],
-        // __NEO_CHARS_REGISTRY_ENTRY__
+        // __NEO_NATIVE_ENTRIES__
         ["neo:console", consoleModule],
         ["neo:cron", cron],
         ["neo:crypto", crypto],

@@ -366,6 +366,8 @@
 mod age;
 mod assert;
 mod builtins;
+#[cfg(feature = "neo-chars")]
+mod chars;
 mod cron;
 mod crypto;
 mod crypto_cipher;

@@ -17,16 +17,16 @@ readme = "README.md"
 # dependency graph: a module is present whenever any dependent enables it.
 # Selection is compile-time surface selection, not a sandbox.
 default = ["neo-chars"]
-# The shared `chars` implementation, canonical registry object, loader entry,
-# and introspection list entry. This enables the optional `neojs-builtins`
-# dependency and its `chars` module.
+# The shared `chars` Rust logic, native registry object, native module
+# declaration, and introspection list entry. This enables the optional
+# `neojs-builtins` dependency and its `chars` module.
 neo-chars = ["dep:neojs-builtins", "neojs-builtins/chars"]
 # Opt-in Node compatibility. It is compiled only when this feature is enabled
 # and is installed only by `Runtime::with_node_compat`.
 node-compat = ["dep:neojs-lite-node"]
 
 [dependencies]
-# The shared `neo:chars` implementation is enabled by the `neo-chars` feature.
+# The shared `neo:chars` Rust logic is enabled by the `neo-chars` feature.
 neojs-builtins = { workspace = true, optional = true }
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
 neojs-lite-node = { version = "0.1.0", path = "../neojs-lite-node", optional = true }

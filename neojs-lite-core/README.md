@@ -55,7 +55,7 @@ frozen array of canonical specifiers, and
 `Neo.getBuiltInModule("neo:chars")` returns the frozen registry object whose
 named functions are the same function objects the `neo:chars` namespace exports.
 The namespace itself is a distinct object. With `default-features = false` the
-registry and list are empty and no module source is compiled in. A bare `chars`
+registry and list are empty and no native module is compiled in. A bare `chars`
 name, another scheme, a query or fragment, or any unimplemented specifier returns
 `undefined`; a non-string name throws `TypeError`. The `Neo` object and the
 global property are frozen and non-writable, and the list is the same array for
@@ -70,9 +70,9 @@ console.log(Neo.getBuiltInModule("chars")); // undefined
 
 This is not the V8 runtime's full built-in surface. Only `neo:chars` is
 implemented, and the list does not claim another module exists or will exist.
-The implementation and wrapper come from the engine-neutral `neojs-builtins`
-crate, which the V8 runtime also uses, so the module contract is shared. The
-Unicode tables still belong to each engine; see
+The Rust logic comes from the engine-neutral `neojs-builtins` crate and is
+bound as a native QuickJS module; the V8 runtime uses the same logic. The
+Unicode version is fixed by the crate's tables rather than each engine; see
 [`neojs-builtins/README.md`](../neojs-builtins/README.md) for the precise
 limits.
 

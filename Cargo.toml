@@ -1,9 +1,5 @@
 [workspace]
 resolver = "3"
-# The vendored `rquickjs-sys` patch is resolved through `[patch.crates-io]`; it
-# is deliberately not a workspace member so its own build settings stay with
-# the upstream crate.
-exclude = ["vendor/rquickjs-sys"]
 members = [
     "neojs-builtins",
     "neojs-core",
@@ -17,6 +13,11 @@ members = [
     "neojs-node",
     "neojs-lite-node",
 ]
+# Vendored crates are path dependencies and standalone packages; they must not
+# inherit this workspace's manifest or lint configuration. They are separate
+# patches: `vendor/deno_core` is the V8 synthetic-module seam and
+# `vendor/rquickjs-sys` is the QuickJS bounded-enumeration seam.
+exclude = ["vendor/deno_core", "vendor/rquickjs-sys"]
 # The V8 runtime is the default build. QuickJS crates and the opt-in Node
 # compatibility crates are excluded from `default-members`, so `cargo build`,
 # `cargo test`, and `cargo clippy` without a package selection do not compile
@@ -42,6 +43,20 @@ repository = "https://github.com/neotales/neojs"
 # with the lower toolchain.
 rust-version = "1.100.0"
 authors = ["NeoTales", "x0craft"]
+
+# A pinned copy of `deno_core` 0.413.0 with one added public seam:
+# `JsRuntime::register_native_module`, which lets the V8 runtime register an
+# eager synthetic module with explicit named exports instead of serving an
+# ECMAScript facade. The exact revision, checksum, and diff are documented in
+# `vendor/deno_core/PATCH.md`. Remove both this section and the directory when
+# an upstream release exposes the same seam.
+[patch.crates-io]
+deno_core = { path = "vendor/deno_core" }
+# The vendored `rquickjs-sys` 0.14.0 adds the bounded QuickJS enumeration and
+# atom-conversion helpers used by `neojs-lite-node`. Provenance, licence and
+# the exact diff intent are recorded in `vendor/rquickjs-sys/VENDOR.md`. This
+# patch is separate from the `deno_core` patch above.
+rquickjs-sys = { path = "vendor/rquickjs-sys" }
 
 [workspace.dependencies]
 aes = { version = "0.9.4", default-features = false }
@@ -111,12 +126,6 @@ uuid = { version = "1.26.1", default-features = false, features = ["std"] }
 # native certificate store, decompression, cookie jar, or environment proxy.
 ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
 url = "2"
-
-# Single, audited source patch for the opt-in Node adapter. The vendored
-# `rquickjs-sys` 0.14.0 adds two bounded C helpers used only by
-# `neojs-lite-node`: `JS_GetOwnEnumerableStringKeysBounded` and
-# `JS_AtomToCStringLenBounded`. It changes no existing QuickJS behaviour, adds
-# no callbacks and runs no Proxy/exotic traps. Provenance, licence and the
-# exact diff intent are recorded in `vendor/rquickjs-sys/VENDOR.md`.
-[patch.crates-io]
-rquickjs-sys = { path = "vendor/rquickjs-sys" }
+# Unicode General_Category lookup for `neojs-builtins::chars`. The crate ships
+# the Unicode 16.0 tables, is `no_std`, and has no dependencies of its own.
+unicode-general-category = "1.1.0"
