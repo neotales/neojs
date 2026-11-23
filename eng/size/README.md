@@ -258,11 +258,17 @@ Rules:
   **`family_id`** covers the intended artifact family.
 - **`build.target_dir`** records the cooperative lock and the ownership/safety
   contract. It is not an artifact control and is not part of either id.
-- **Conflicts are evidence, not poison.** If one strict series, commit and
-  source state produce two different digests, the records are kept. Strict
-  `validate.sh` fails; `validate.sh --allow-conflicts` and `report.sh` still
-  work and mark the series `conflict yes`. `measure.sh` records a conflicting
-  measurement with a warning instead of hiding or overwriting it.
+- **Conflicts are classified, not assumed.** If one strict series, commit and
+  source state produce two different digests, the records are kept. A group
+  where every record has complete controls is a **confirmed reproducibility
+  conflict**: strict `validate.sh` fails it, `validate.sh --allow-conflicts`
+  and `report.sh` still render it. A group with any uncaptured control is only
+  a **possible conflict with incomplete controls**: an unknown effective
+  feature/linker, Cargo config, target environment, source state or V8 input may
+  explain it, so strict validation warns and exits 0. The report's `conflict`
+  column is `confirmed`, `possible` or `no`; the trend's delta-kind is
+  `conflict` or `possible-conflict`. `measure.sh` records a differing digest
+  with a warning instead of hiding or overwriting it.
 - **The ledger is not a source change.** When the ledger is inside the
   repository, it is excluded from the `git_dirty`/state fingerprint; otherwise
   appending the first measurement would make every later run look dirty. Other
@@ -289,8 +295,9 @@ That runs:
   staged binary state changes, source-state change and checkout race during
   build, Cargo config capture, environment override refusal, missing package
   handling, dry-run behaviour, controls-complete versus controls-incomplete,
-  offline/locked trend reasons, package/target columns, target-dir contract,
-  trend/report rendering and idempotent append, all in a temporary directory;
+  possible versus confirmed conflicts, offline/locked trend reasons,
+  package/target columns, target-dir contract, trend/report rendering and
+  idempotent append, all in a temporary directory;
 - `validate.sh` — strict schema, integrity, unique keys and conflict detection
   for the committed ledger.
 
@@ -364,7 +371,8 @@ delta has a known origin.
 - A V8 input with unknown provenance/use: a delta with it is
   `controls-incomplete`, never `strict`.
 - A duplicate entry after re-running: deduplicated by `key`.
-- A conflicting rebuild poisoning the report: kept, marked, and still
-  reportable under `--allow-conflicts`.
+- A conflicting rebuild poisoning the report: kept, classified as confirmed
+  or possible from the captured controls, and still reportable under
+  `--allow-conflicts`.
 - A machine-specific binary in git: the ledger is JSONL and `target/` is
   ignored.

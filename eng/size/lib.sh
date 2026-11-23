@@ -260,7 +260,7 @@ size_validate_ledger() {
     local ledger=$1
     local allow_empty=${2:-0}
     local mode=${3:-strict}
-    local line line_no=0 error key expected series_id family_id
+    local line line_no=0 error key expected series_id family_id conflict kind detail
     local keys_file errors=0 conflicts
 
     [ -f "$ledger" ] || size_die "ledger not found: $ledger"
@@ -330,27 +330,34 @@ size_validate_ledger() {
     rm -f "$keys_file"
 
     if [ "$errors" -eq 0 ]; then
-        conflicts=$(jq -s -r '
-          map(select(.status == "ok"))
-          | group_by([
-              .series_id,
-              .source.git_commit,
-              .source.git_dirty,
-              (.source.state_sha256 // .source.state_status)
-            ])
-          | map(select((map(.measurement.sha256) | unique | length) > 1))
-          | map("conflicting digests for series \(.[0].series_id[0:12]) at commit \(.[0].source.git_commit[0:12]): \(map(.measurement.sha256[0:12]) | join(","))")
-          | .[]
-        ' "$ledger" 2>/dev/null || true)
+        conflicts=$(jq -s -r -L "$(dirname -- "${BASH_SOURCE[0]}")" \
+            -f "$(dirname -- "${BASH_SOURCE[0]}")/conflict_check.jq" \
+            "$ledger" 2>/dev/null || true)
         if [ -n "$conflicts" ]; then
-            while IFS= read -r error; do
-                [ -n "$error" ] || continue
-                if [ "$mode" = "strict" ]; then
-                    printf 'size: %s: %s\n' "$ledger" "$error" >&2
-                    errors=$((errors + 1))
-                else
-                    size_warn "$error"
-                fi
+            while IFS= read -r conflict; do
+                [ -n "$conflict" ] || continue
+                kind=${conflict%%$'\t'*}
+                detail=${conflict#*$'\t'}
+                case "$kind" in
+                    confirmed)
+                        if [ "$mode" = "strict" ]; then
+                            printf 'size: %s: confirmed reproducibility conflict: %s\n' \
+                                "$ledger" "$detail" >&2
+                            errors=$((errors + 1))
+                        else
+                            size_warn "confirmed reproducibility conflict (allowed by mode): $detail"
+                        fi
+                        ;;
+                    possible)
+                        # A differing digest with uncaptured controls is not a
+                        # confirmed conflict: an unknown effective feature,
+                        # linker, config or V8 input may explain it.
+                        size_warn "possible conflict with incomplete controls: $detail"
+                        ;;
+                    *)
+                        size_warn "unrecognised conflict classification: $conflict"
+                        ;;
+                esac
             done <<<"$conflicts"
         fi
     fi
@@ -402,7 +409,7 @@ size_append_record() {
                   ) | .key
                 ' "$ledger" | head -n 1)
             if [ -n "$conflict_key" ]; then
-                size_warn "same strict series, commit and source state already recorded with a different digest ($conflict_key); recording the conflict instead of hiding or overwriting it"
+                size_warn "same series, commit and source state already recorded with a different digest ($conflict_key); validation will classify it as confirmed or possible from the captured controls"
             fi
         fi
     fi
@@ -414,7 +421,8 @@ size_append_record() {
 
 size_report_ledger() {
     local ledger=$1 mode=${2:-latest}
-    jq -r -s -f "$(dirname -- "${BASH_SOURCE[0]}")/report.jq" \
+    jq -r -s -L "$(dirname -- "${BASH_SOURCE[0]}")" \
+        -f "$(dirname -- "${BASH_SOURCE[0]}")/report.jq" \
         --arg mode "$mode" "$ledger" | column -t -s $'\t'
 }
 

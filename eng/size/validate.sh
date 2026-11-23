@@ -22,9 +22,11 @@ Usage: eng/size/validate.sh [options]
 Options:
   --ledger PATH       Validate PATH instead of eng/size/measurements.jsonl.
   --allow-empty       Accept a zero-length ledger.
-  --allow-conflicts   Report reproducibility conflicts as warnings instead of
-                      failing. Schema and integrity errors still fail.
-  --strict            Fail on reproducibility conflicts (default).
+  --allow-conflicts   Report confirmed reproducibility conflicts as warnings
+                      instead of failing. Possible conflicts with incomplete
+                      controls are warnings in either mode. Schema and integrity
+                      errors still fail.
+  --strict            Fail on confirmed reproducibility conflicts (default).
   -h, --help          Show this help.
 USAGE
 }

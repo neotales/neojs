@@ -1,3 +1,5 @@
+include "controls";
+
 def short: .[0:12];
 def feature_text($r):
   if ($r.build.requested_features | length) == 0 then "-"
@@ -26,19 +28,9 @@ def target_lock($r):
   else
     "unknown"
   end;
-# A strict comparison needs every control to be observed. Effective features
-# and linker are not captured by this version; a V8 archive with unknown
-# provenance/use is not observed either. Do not call a comparison strict when
-# any of those is unknown.
-def controls_complete($r):
-  ($r.build.effective_features.status == "captured") and
-  ($r.build.effective_linker.status == "captured") and
-  ($r.build.cargo_config.status == "captured") and
-  ($r.build.target_specific_env.status != "not-captured") and
-  ($r.build.target_dir.lock == "cooperating-measure-script-only") and
-  ($r.source.state_status == "captured") and
-  ($r.build.v8_archive_status != "supplied-provenance-unknown") and
-  ($r.build.v8_archive_status != "not-supplied-not-captured");
+# A strict comparison needs every control to be observed. The definition is
+# shared with the conflict validator in controls.jq.
+def controls_complete($r): $r | controls_complete;
 def controls_text($r):
   if controls_complete($r) then "complete" else "incomplete" end;
 # Reasons derived from the controls that define series_id. Offline and locked
@@ -100,7 +92,7 @@ def same_source_state($p; $r):
   ($p.source.git_commit == $r.source.git_commit) and
   (($p.source.state_sha256 // $p.source.state_status) ==
    ($r.source.state_sha256 // $r.source.state_status));
-def conflict_series($all):
+def conflict_groups($all):
   [$all[] | select(.status == "ok")]
   | group_by([
       .series_id,
@@ -109,11 +101,21 @@ def conflict_series($all):
       (.source.state_sha256 // .source.state_status)
     ])
   | map(select((map(.measurement.sha256) | unique | length) > 1))
-  | map(.[0].series_id)
-  | unique;
+  | map({
+      complete: (map(controls_complete) | index(false) == null),
+      records: .
+    });
+def conflict_status($groups; $id):
+  if ($groups | any(.[]; .complete and (.records[0].series_id == $id))) then
+    "confirmed"
+  elif ($groups | any(.[]; (.complete | not) and (.records[0].series_id == $id))) then
+    "possible"
+  else
+    "no"
+  end;
 
 . as $all
-| (conflict_series($all)) as $conflicts
+| (conflict_groups($all)) as $conflicts
 | if $mode == "trend" then
     (["family", "package", "target", "measured_at", "commit", "canonical",
       "target-lock", "controls", "bytes", "delta", "delta-kind",
@@ -133,7 +135,9 @@ def conflict_series($all):
         elif $p.status == "missing" then "resumed"
         elif ($r.series_id == $p.series_id and
               same_source_state($p; $r) and
-              $r.measurement.sha256 != $p.measurement.sha256) then "conflict"
+              $r.measurement.sha256 != $p.measurement.sha256) then
+          (if (controls_complete($p) and controls_complete($r))
+           then "conflict" else "possible-conflict" end)
         elif ($r.series_id == $p.series_id and
               ((controls_complete($p) and controls_complete($r)) | not)) then
           "controls-incomplete"
@@ -164,7 +168,7 @@ def conflict_series($all):
          $changed,
          $source_changed,
          ($r.series_id | short),
-         (if ($conflicts | index($r.series_id)) then "yes" else "no" end)
+         (conflict_status($conflicts; $r.series_id))
        ] | @tsv)
   elif $mode == "all" then
     (["measured_at", "status", "source", "family", "series", "package",
@@ -215,6 +219,6 @@ def conflict_series($all):
          ($r.source.git_commit | short),
          (if $r.source.git_canonical then "yes" else "no" end),
          $r.build.v8_archive_status,
-         (if ($conflicts | index($r.series_id)) then "yes" else "no" end)
+         (conflict_status($conflicts; $r.series_id))
        ] | @tsv)
   end

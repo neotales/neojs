@@ -287,20 +287,18 @@ DRIFT=$(rewrite_with_ids '
   | .measurement.sha256 = ("d" * 64)
 ' "$VALID")
 printf '%s\n%s\n' "$VALID" "$DRIFT" >"$TMP/drift.jsonl"
-expect_validation_failure "same series and state with a different digest rejected under strict validation" "$TMP/drift.jsonl"
-if (size_validate_ledger "$TMP/drift.jsonl" 0 allow-conflicts) >/dev/null 2>&1; then
-    ok "conflicts are warnings when requested"
-else
-    fail "allow-conflicts rejected a conflicting ledger"
-fi
-expect_status 1 "validate fails a conflict by default" \
+expect_status 0 "incomplete controls make a differing digest only a possible conflict" \
     bash "$SCRIPT_DIR/validate.sh" --ledger "$TMP/drift.jsonl"
-expect_status 0 "validate allows a conflict when asked" \
+assert_contains "$TMP/stderr" "possible conflict with incomplete controls" \
+    "validator distinguishes incomplete possible conflict"
+expect_status 0 "allow-conflicts still reports the possible conflict" \
     bash "$SCRIPT_DIR/validate.sh" --ledger "$TMP/drift.jsonl" --allow-conflicts
-expect_status 0 "report still renders a conflicting ledger" \
+assert_contains "$TMP/stderr" "possible conflict with incomplete controls" \
+    "allow-conflicts names the possible conflict"
+expect_status 0 "report still renders a possible-conflict ledger" \
     bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/drift.jsonl"
 assert_contains "$TMP/stdout" "conflict" "report names the conflict column"
-assert_contains "$TMP/stdout" "yes" "report marks the conflicted series"
+assert_contains "$TMP/stdout" "possible" "report marks the incomplete-control conflict as possible"
 
 TOOL2=$(rewrite_with_ids '
   .toolchain.requested = "1.101.0"
@@ -367,6 +365,25 @@ expect_status 0 "complete controls can be strict" \
 assert_contains "$TMP/stdout" "strict" "trend calls a complete same-series comparison strict"
 assert_contains "$TMP/stdout" "complete" "trend shows the complete controls label"
 assert_contains "$TMP/stdout" "+1" "trend shows the strict delta"
+
+CONFIRMED=$(rewrite_with_ids '
+  .measurement.bytes = 12345680
+  | .measurement.sha256 = ("f" * 64)
+  | .measured_at = "2026-11-23T04:30:00Z"
+' "$COMPLETE")
+printf '%s\n%s\n' "$COMPLETE" "$CONFIRMED" >"$TMP/confirmed.jsonl"
+expect_status 1 "complete controls make a differing digest a confirmed conflict" \
+    bash "$SCRIPT_DIR/validate.sh" --ledger "$TMP/confirmed.jsonl"
+assert_contains "$TMP/stderr" "confirmed reproducibility conflict" \
+    "validator names a confirmed reproducibility conflict"
+expect_status 0 "allow-conflicts permits a confirmed conflict for reporting" \
+    bash "$SCRIPT_DIR/validate.sh" --ledger "$TMP/confirmed.jsonl" --allow-conflicts
+assert_contains "$TMP/stderr" "confirmed reproducibility conflict (allowed by mode)" \
+    "allow-conflicts labels the confirmed conflict"
+expect_status 0 "report renders a confirmed conflict" \
+    bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/confirmed.jsonl" --trend
+assert_contains "$TMP/stdout" "confirmed" "report marks the confirmed conflict"
+assert_contains "$TMP/stdout" "conflict" "trend labels the confirmed conflict delta"
 
 UNTRACKED_COMPLETE=$(rewrite_with_ids '
   .build.target_dir = {
@@ -564,7 +581,7 @@ if (size_append_record "$DRIFT_LEDGER" "$TOOL2") >/dev/null 2>&1; then
 else
     fail "existing conflict blocked a new measurement"
 fi
-assert_contains "$TMP/drift.log" "same strict series" "non-reproducible build is warned about"
+assert_contains "$TMP/drift.log" "same series" "different digest is warned about"
 
 expect_status 0 "dry run succeeds" \
     bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs --ledger "$TMP/dry.jsonl"
