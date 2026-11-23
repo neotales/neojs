@@ -380,8 +380,9 @@ impl Runtime {
     /// Creates a runtime with an explicit module loader.
     ///
     /// [`Runtime::new`] installs [`FileModuleLoader`]. The crate's JSR tests use
-    /// this to install a loader backed by an in-memory registry. It remains
-    /// crate-private: no public constructor can enable remote or `jsr:` loading.
+    /// this to install a loader backed by an in-memory registry. This method is
+    /// crate-private; [`Runtime::with_remote`] is the public constructor that
+    /// enables remote and `jsr:` loading.
     fn with_module_loader(
         console: &'static str,
         builtins: String,

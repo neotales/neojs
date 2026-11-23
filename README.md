@@ -906,7 +906,7 @@ of a clock change rather than making scheduling monotonic.
 
 **Run tests.** `neojs test` takes one or more files or shell-style globs, expands them
 deterministically, sorts the selected files by canonical path, removes duplicates, and runs each
-file in a fresh runtime. `test` and `neo:test` import the same built-in module.
+file in a fresh runtime. Only `neo:test` is a module specifier; the bare name `test` is rejected.
 `test(name, fn)` accepts a synchronous or async callback; `test(name)` registers a
 pending test, which fails the run.
 
@@ -1679,9 +1679,11 @@ controls-incomplete rather than strict. The directory is self-contained: see
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
-local module loading, opt-in HTTPS module loading with explicit limits, imports of the `age`,
-`assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`,
-`test`, and `uuid` built-ins by their canonical `neo:` specifiers, console output, `neojs test` over
+local module loading, opt-in HTTPS module loading with explicit limits, opt-in `jsr:` resolution
+through the public JSR registry with manifest length and SHA-256 verification, imports of the
+`age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
+`strings`, `test`, and `uuid` built-ins by their canonical `neo:` specifiers, console output,
+`neojs test` over
 multiple files and globs, bounded in-memory byte streams, live mutable and read-only array and
 typed-array views, mutable and read-only Unicode code point buffers, UTC five-field cron parsing and
 in-process scheduling, writes to the process's stdout and stderr, lexical POSIX and Windows path
