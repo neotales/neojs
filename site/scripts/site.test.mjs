@@ -7,6 +7,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { parse } from "node-html-parser";
 
 const siteRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(siteRoot, "dist");
@@ -72,6 +73,19 @@ function plainDecode(value) {
   }
 }
 
+function sidebarHrefs(html) {
+  const root = parse(html);
+  const sidebar = root.querySelector('nav.sidebar[aria-label="Main"]');
+  assert.ok(sidebar, "the rendered Starlight sidebar nav is missing");
+
+  return new Set(
+    sidebar
+      .querySelectorAll("a[href]")
+      .map((link) => link.getAttribute("href"))
+      .filter((href) => typeof href === "string"),
+  );
+}
+
 async function resolveInternalHref(href) {
   if (!href.startsWith("/") || href.startsWith("//")) return true;
   const withoutHash = href.split("#")[0].split("?")[0];
@@ -129,15 +143,17 @@ test("every expected page is built", async () => {
   }
 });
 
-test("the sidebar links every expected page", async () => {
+test("the rendered sidebar links every expected page", async () => {
   // A regular documentation page carries Starlight's full sidebar. The splash
-  // home page deliberately does not, so check a content page.
+  // home page deliberately does not, so check a content page. Parse only
+  // <nav class="sidebar" aria-label="Main">, so a content link cannot mask a
+  // missing navigation entry.
   const html = await readFile(path.join(dist, "getting-started", "index.html"), "utf8");
-  const links = new Set([...html.matchAll(/\shref="([^"]+)"/g)].map((match) => match[1]));
+  const links = sidebarHrefs(html);
 
   for (const route of expectedPages) {
     const href = `/${route}`;
-    assert.ok(links.has(href), `the sidebar does not link to ${href}`);
+    assert.ok(links.has(href), `the rendered sidebar does not link to ${href}`);
   }
 });
 
