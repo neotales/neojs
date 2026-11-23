@@ -314,7 +314,7 @@ Neo.getBuiltInModulesList();
 ```
 
 The list is a snapshot of the current runtime, not a promise of a future module, and it lists no
-Node modules: a `node:` opt-in is not implemented. The same frozen array is returned for every call,
+Node modules: Node support is a separate opt-in and never enters this registry. The same frozen array is returned for every call,
 so a caller cannot change later results; a new `Runtime` allocates a new array. `Neo.getBuiltInModule`
 takes the bare names in the list. The `neo:` entries are the canonical import specifiers; the bare
 entries are registry names and import aliases, so `Neo.getBuiltInModule("neo:age")` returns
@@ -989,8 +989,8 @@ ops, dynamic imports, and rejection events. If deno_core still reports pending w
 marked unsettled and fails; an unrefed task that the event loop does not report is outside this
 guarantee. Work scheduled at module top level is part of module evaluation, so a refed top-level
 timer can keep `run_file` waiting before the test runner starts; keep detached work inside test
-callbacks or do not schedule it. `node:` modules, including `node:test`, remain rejected while no
-explicit Node-module opt-in exists.
+callbacks or do not schedule it. `node:` modules, including `node:test`, remain rejected by default;
+the off-by-default `node-compat` opt-in adds only `node:child_process`.
 
 A failed file does not stop later files, and each file gets its own isolate so globals, module state,
 and the queue do not leak. A literal file, a malformed glob, and a glob that selects no regular file
@@ -1687,10 +1687,15 @@ surface, not the built-in modules: `Neo.engine` is `"neo-lite"`, its built-in mo
   rejected by extension. CommonJS is rejected by the `.cjs` and `.cts` extensions; a `.js` file
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
-- `node:`, `npm:`, `jsr:`, `http:`, `data:`, and `blob:` imports are rejected. `https:` imports are
-  rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`, or
-  `NEOJS_ALLOW_REMOTE=1`), and `http:` is always rejected. In particular, `node:test` is not an
-  alias for the `test` built-in; a Node-module opt-in is not implemented. The built-in modules are
+- `node:`, `npm:`, `jsr:`, `http:`, `data:`, and `blob:` imports are rejected by default. `https:`
+  imports are rejected unless the runtime is created with remote loading enabled
+  (`neojs --allow-remote`, or `NEOJS_ALLOW_REMOTE=1`), and `http:` is always rejected. With the
+  off-by-default `node-compat` feature, a runtime created with
+  `Runtime::with_node_compat` accepts only `node:child_process`, and only its synchronous
+  `spawnSync` and `execFileSync` with `encoding: "utf8"`; other `node:` modules and every other
+  form are rejected with a reason. Node modules are not added to the `Neo` registry, no bare
+  `child_process` alias exists, and `node:test` is never an alias for the `test` built-in. See
+  [`docs/node-compat.md`](docs/node-compat.md). The built-in modules are
   `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
   `strings`, `test`, and `uuid`,
   reached through `Neo.getBuiltInModule("age")`,

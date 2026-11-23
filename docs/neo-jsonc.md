@@ -210,8 +210,9 @@ loading is not tested. The status is unsupported, not a claim that the URL will 
 #### `node:`
 
 Recognized so the rejection is explicit. `node:fs`, `node:fs/promises`, and similar names are
-normalized and marked unsupported. Node built-ins and a Node compatibility transform are not
-implemented.
+normalized and marked unsupported. This manifest layer does not load Node built-ins. Runtime Node
+compatibility is a separate, off-by-default opt-in and currently implements only
+`node:child_process`; see `docs/node-compat.md`.
 
 ### `workspaces`
 
@@ -231,7 +232,7 @@ instead of a generic unknown field:
 
 | Field | Reason |
 | --- | --- |
-| `node` | Node compatibility transform not implemented |
+| `node` | manifest Node compatibility transform not implemented |
 | `nodeModulesDir` | `node_modules` layout not implemented |
 | `type` | CommonJS/package type selection not implemented; exports are ESM |
 | `main` | use `exports`; no `main` fallback |
@@ -253,7 +254,9 @@ instead of a generic unknown field:
   lifecycle scripts, or native addons.
 - JSR metadata, checksums, module graphs, or cache policy.
 - GitHub fetching, redirects, or authentication.
-- Node built-ins, a Node compatibility transform, or `package.json` generation.
+- Loading Node built-ins from a manifest, a Node compatibility transform in the manifest layer, or
+  `package.json` generation. Runtime Node compatibility is a separate opt-in and implements only
+  `node:child_process`; see `docs/node-compat.md`.
 - Conditional exports, export wildcards, `null` export exclusions, or a `main` fallback.
 - Lockfiles, offline/frozen modes, and package publishing.
 
