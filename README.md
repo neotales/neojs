@@ -1658,7 +1658,12 @@ list are not implemented.
 - `node:`, `npm:`, `gh:`, `http:`, `data:`, and `blob:` imports are rejected. `jsr:` imports are
   rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`, or
   `NEOJS_ALLOW_REMOTE=1`); when enabled they resolve through the public JSR registry, and each file
-  is checked against the version manifest's length and SHA-256 before it runs. JSR support covers
+  is checked against the version manifest's length and SHA-256 before it runs. The checksum proves
+  consistency with the retrieved metadata, not publisher identity; the cache is mutable local state,
+  so an attacker who rewrites both the cached manifest and the cached body can keep them consistent.
+  A direct `https://jsr.io/...` import from a local or ordinary remote module is an ordinary HTTPS
+  module, not a `jsr:` import, and does not use registry metadata or checksums; an explicit jsr.io
+  URL imported inside a JSR graph is verified against the manifest. JSR support covers
   exported entrypoints and the relative modules they import; `npm:`, `node:`, `gh:`, dist-tags,
   private registries, authentication, import maps and `neo.jsonc`, lockfiles, offline policy, and
   publisher signatures are not implemented. A JSR package that imports one of those fails at
