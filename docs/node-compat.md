@@ -52,6 +52,40 @@ This slice has no command-line flag. The opt-in is the embedding constructor
 above; the `neojs` and `neojs-lite` commands do not expose a Node switch and
 continue to reject `node:` imports.
 
+## Rust-native module status
+
+The `node:child_process` method implementations and policy are in Rust
+(`neojs-node-builtins`), but the current ES module exports are still delivered
+through `child_process.js`, which marshals arguments over the JSON bridge and
+defines the named/default exports. That JS facade does **not** satisfy the
+no-JavaScript-built-in-modules requirement; it is a migration item, not a
+completed native module.
+
+The V8 adapter is blocked by the public `deno_core` 0.413.0 module seam:
+
+* `ModuleMap` is `pub(crate)`, and `JsRuntime::module_map()` is `pub(crate)` and
+  test-only. The public `ModuleMap::new_synthetic_module_from_exports_object`
+  therefore cannot be reached by this crate.
+* `ModuleLoader::load` can return only a `ModuleSource`/`ModuleSourceCode`, which
+  is source text; it cannot return a Rust-created module object.
+* `Extension::synthetic_esm_modules` maps a specifier to a **backing script
+  specifier**; building it calls `load_ext_script` and requires that script to
+  return an object. The only public path is another JS source file, i.e. the
+  facade this requirement excludes.
+
+The QuickJS binding does expose a native C-module seam (`Module::declare_def`,
+`ModuleDef`, and `Module::exports`), so the Lite adapter could be made
+Rust-native. It has not been done because the requirement is both adapters and
+the V8 side has no safe public named synthetic-module registration. The current
+JS facade remains only until that seam is available or a deliberate
+deno_core fork/extension design is approved.
+
+This change also does not migrate the existing NeoJS built-ins that are still
+implemented in JavaScript (`age`, `assert`, `chars`, `console`, `cron`, `crypto`,
+`os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid`). A
+repo-wide Rust-native built-ins migration is separate work and is not claimed
+here.
+
 ## Implemented surface
 
 Only `node:child_process` is implemented. The module exports:
