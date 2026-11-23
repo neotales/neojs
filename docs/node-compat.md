@@ -134,7 +134,10 @@ most the bounded key set it receives, and rethrows a pending V8 exception (for
 example an allocation failure) unchanged. It does **not** claim a
 pre-materialization bound for an ordinary object with a very large own-property
 set. A bounded V8 `KeyAccumulator` seam or an equivalent vendored binding is
-required for that claim.
+required for that claim. The API, toolchain, and patch-plan findings are in
+[`v8-bounded-enumeration-handoff.md`](v8-bounded-enumeration-handoff.md); the
+branch does not claim a complete V8 Node-compatibility bound until that seam is
+available.
 
 ## Implemented surface
 
