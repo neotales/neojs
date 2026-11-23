@@ -19,10 +19,12 @@ This directory is `rquickjs-sys` 0.14.0 from crates.io, pinned exactly.
   instead of constructing a new error, so an allocation failure cannot be
   reported as a Node input error. No atom table exists on that path; the normal
   RAII guard still runs.
-- `JS_GetOwnEnumerableStringKeysBoundedAllocFailureForTest` is a test-only entry
-  point that follows the same bounds and cleanup but forces the table allocation
-  to fail, producing a normal `out of memory` exception. It is not part of the
-  adapter API and runs no JavaScript.
+- Two test-only entry points force allocation failure without a guest surface:
+  `JS_GetOwnEnumerableStringKeysBoundedAllocFailureForTest` fails the table
+  allocation, and `JS_AtomToCStringLenBoundedAllocFailureForTest` fails an atom
+  conversion after the table and its atoms already exist. Both produce a normal
+  `out of memory` exception through the same bounds and cleanup paths. They are
+  not part of the adapter API and run no JavaScript.
 - The generated bindings in `src/bindings/` carry the same declarations for
   every supported target so the ABI is identical on all bundled platforms. The
   C side is target-independent, but only `x86_64-unknown-linux-gnu` has been

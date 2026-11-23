@@ -457,6 +457,14 @@ enum BoundedKeysError {
     Exception,
 }
 
+/// Which atom conversion entry point `finish_bounded_keys` uses.
+#[derive(Clone, Copy)]
+enum KeyConversion {
+    Normal,
+    #[cfg(test)]
+    FailAllocation,
+}
+
 /// Returns the own enumerable string keys of a plain QuickJS object.
 ///
 /// The work happens in the vendored `rquickjs-sys` helper
@@ -501,7 +509,7 @@ fn bounded_string_keys<'js>(
             &mut scanned,
         )
     };
-    finish_bounded_keys(ctx, status, tab, len, max_key_len)
+    finish_bounded_keys(ctx, status, tab, len, max_key_len, KeyConversion::Normal)
 }
 
 /// Test-only entry point that forces the table allocation to fail.
@@ -535,7 +543,47 @@ fn bounded_string_keys_with_alloc_failure<'js>(
             &mut scanned,
         )
     };
-    finish_bounded_keys(ctx, status, tab, len, max_key_len)
+    finish_bounded_keys(ctx, status, tab, len, max_key_len, KeyConversion::Normal)
+}
+
+/// Test-only entry point that enumerates normally, then fails the first atom
+/// conversion. The table and every duplicated atom exist when the failure is
+/// reported, so this exercises the RAII cleanup path.
+#[cfg(test)]
+#[allow(unsafe_code)]
+fn bounded_string_keys_with_key_conversion_failure<'js>(
+    ctx: &Ctx<'js>,
+    object: &Object<'js>,
+    max_keys: u32,
+    max_scan: u32,
+    max_key_len: u32,
+) -> std::result::Result<Vec<String>, BoundedKeysError> {
+    use rquickjs::qjs;
+
+    let mut tab: *mut qjs::JSPropertyEnum = std::ptr::null_mut();
+    let mut len = 0u32;
+    let mut scanned = 0u32;
+
+    // SAFETY: as in `bounded_string_keys`; the table allocation succeeds.
+    let status = unsafe {
+        qjs::JS_GetOwnEnumerableStringKeysBounded(
+            ctx.as_raw().as_ptr(),
+            object.as_raw(),
+            max_keys,
+            max_scan,
+            &mut tab,
+            &mut len,
+            &mut scanned,
+        )
+    };
+    finish_bounded_keys(
+        ctx,
+        status,
+        tab,
+        len,
+        max_key_len,
+        KeyConversion::FailAllocation,
+    )
 }
 
 /// Maps a bounded-enumeration status to keys, freeing the atom table on every
@@ -547,6 +595,7 @@ fn finish_bounded_keys<'js>(
     tab: *mut rquickjs::qjs::JSPropertyEnum,
     len: u32,
     max_key_len: u32,
+    conversion: KeyConversion,
 ) -> std::result::Result<Vec<String>, BoundedKeysError> {
     use rquickjs::qjs;
 
@@ -598,7 +647,21 @@ fn finish_bounded_keys<'js>(
         // `byte_len` are valid stack locations. The helper checks the key's
         // UTF-16 length before it allocates the UTF-8 string.
         let status = unsafe {
-            qjs::JS_AtomToCStringLenBounded(raw, &mut byte_len, atom, max_key_len, &mut ptr)
+            match conversion {
+                KeyConversion::Normal => {
+                    qjs::JS_AtomToCStringLenBounded(raw, &mut byte_len, atom, max_key_len, &mut ptr)
+                }
+                #[cfg(test)]
+                KeyConversion::FailAllocation => {
+                    qjs::JS_AtomToCStringLenBoundedAllocFailureForTest(
+                        raw,
+                        &mut byte_len,
+                        atom,
+                        max_key_len,
+                        &mut ptr,
+                    )
+                }
+            }
         };
         match status {
             OK => {}
@@ -972,7 +1035,7 @@ fn js_string<'js>(ctx: &Ctx<'js>, text: &str) -> Result<rquickjs::String<'js>> {
 mod bounded_key_tests {
     use super::{
         BoundedKeysError, bounded_env_error, bounded_option_error, bounded_string_keys,
-        bounded_string_keys_with_alloc_failure,
+        bounded_string_keys_with_alloc_failure, bounded_string_keys_with_key_conversion_failure,
     };
     use rquickjs::{Context, Exception, Runtime, Value};
 
@@ -1255,6 +1318,63 @@ mod bounded_key_tests {
         );
         context.with(|ctx| {
             let answer: i32 = ctx.eval("6 * 7").expect("eval after failures");
+            assert_eq!(answer, 42);
+        });
+    }
+
+    #[test]
+    fn a_key_conversion_failure_frees_the_snapshot_and_rethrows() {
+        let runtime = Runtime::new().expect("runtime");
+        let context = Context::full(&runtime).expect("context");
+
+        // First failure: the property table and its duplicated atoms exist when
+        // the first atom conversion fails.
+        context.with(|ctx| {
+            let value: Value = ctx.eval(r#"({ A: "1", B: "2", C: "3" })"#).expect("object");
+            let object = value.as_object().expect("object");
+            let error =
+                bounded_string_keys_with_key_conversion_failure(&ctx, object, 128, 4096, 4096)
+                    .expect_err("conversion failure");
+            assert_eq!(error, BoundedKeysError::Exception);
+
+            let mapped = bounded_env_error(&ctx, error);
+            assert!(matches!(mapped, rquickjs::Error::Exception));
+
+            let caught = ctx.catch();
+            let exception =
+                Exception::from_object(caught.as_object().expect("error object").clone())
+                    .expect("error instance");
+            let message = exception.message().unwrap_or_default();
+            assert!(message.contains("out of memory"), "{message}");
+            assert!(!message.contains("ERR_NODE_"), "{message}");
+
+            let answer: i32 = ctx.eval("6 * 7").expect("eval after failure");
+            assert_eq!(answer, 42);
+            ctx.run_gc();
+        });
+
+        // Repeated failures must free the table and all three atoms.
+        runtime.run_gc();
+        let before = runtime.memory_usage().malloc_size;
+        for _ in 0..64 {
+            context.with(|ctx| {
+                let value: Value = ctx.eval(r#"({ A: "1", B: "2", C: "3" })"#).expect("object");
+                let object = value.as_object().expect("object");
+                let error =
+                    bounded_string_keys_with_key_conversion_failure(&ctx, object, 128, 4096, 4096)
+                        .expect_err("conversion failure");
+                let _ = bounded_env_error(&ctx, error);
+                let _ = ctx.catch();
+            });
+        }
+        runtime.run_gc();
+        let after = runtime.memory_usage().malloc_size;
+        assert!(
+            after <= before,
+            "runtime heap grew from {before} to {after}"
+        );
+        context.with(|ctx| {
+            let answer: i32 = ctx.eval("40 + 2").expect("eval after failures");
             assert_eq!(answer, 42);
         });
     }

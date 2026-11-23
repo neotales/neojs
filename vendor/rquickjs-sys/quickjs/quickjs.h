@@ -1054,6 +1054,12 @@ JS_EXTERN int JS_AtomToCStringLenBounded(JSContext *ctx, size_t *plen,
                                          JSAtom atom, uint32_t max_len,
                                          const char **out);
 
+/* Test-only entry point: identical conversion, but fails after the length check
+   with a QuickJS out-of-memory exception. Not part of the supported API. */
+JS_EXTERN int JS_AtomToCStringLenBoundedAllocFailureForTest(
+    JSContext *ctx, size_t *plen, JSAtom atom, uint32_t max_len,
+    const char **out);
+
 JS_EXTERN JSValue JS_Call(JSContext *ctx, JSValueConst func_obj,
                           JSValueConst this_obj, int argc, JSValueConst *argv);
 JS_EXTERN JSValue JS_Invoke(JSContext *ctx, JSValueConst this_val, JSAtom atom,

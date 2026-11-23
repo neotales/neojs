@@ -9842,8 +9842,10 @@ int JS_GetOwnEnumerableStringKeysBoundedAllocFailureForTest(
         ctx, obj, max_keys, max_scan, true, ptab, plen, pscanned);
 }
 
-int JS_AtomToCStringLenBounded(JSContext *ctx, size_t *plen, JSAtom atom,
-                               uint32_t max_len, const char **out)
+static int js_atom_to_cstring_len_bounded(JSContext *ctx, size_t *plen,
+                                          JSAtom atom, uint32_t max_len,
+                                          bool force_alloc_failure,
+                                          const char **out)
 {
     JSValue str;
     JSString *strp;
@@ -9869,12 +9871,33 @@ int JS_AtomToCStringLenBounded(JSContext *ctx, size_t *plen, JSAtom atom,
         JS_FreeValue(ctx, str);
         return JS_BOUNDED_KEYS_TOO_MANY_KEYS;
     }
+    if (force_alloc_failure) {
+        /* Deterministic fault injection after the property table exists. */
+        JS_FreeValue(ctx, str);
+        JS_ThrowOutOfMemory(ctx);
+        return JS_BOUNDED_KEYS_EXCEPTION;
+    }
     ptr = JS_ToCStringLen(ctx, plen, str);
     JS_FreeValue(ctx, str);
     if (!ptr)
         return JS_BOUNDED_KEYS_EXCEPTION;
     *out = ptr;
     return JS_BOUNDED_KEYS_OK;
+}
+
+int JS_AtomToCStringLenBounded(JSContext *ctx, size_t *plen, JSAtom atom,
+                               uint32_t max_len, const char **out)
+{
+    return js_atom_to_cstring_len_bounded(ctx, plen, atom, max_len, false, out);
+}
+
+/* Test-only: fails after the atom's length check, so the caller still owns the
+   property table and every atom in it. */
+int JS_AtomToCStringLenBoundedAllocFailureForTest(JSContext *ctx, size_t *plen,
+                                                  JSAtom atom, uint32_t max_len,
+                                                  const char **out)
+{
+    return js_atom_to_cstring_len_bounded(ctx, plen, atom, max_len, true, out);
 }
 
 /* Return -1 if exception,

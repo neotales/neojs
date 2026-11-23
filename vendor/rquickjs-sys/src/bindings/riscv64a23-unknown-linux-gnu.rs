@@ -1225,6 +1225,16 @@ unsafe extern "C" {
 }
 
 unsafe extern "C" {
+    pub fn JS_AtomToCStringLenBoundedAllocFailureForTest(
+        ctx: *mut JSContext,
+        plen: *mut usize,
+        atom: JSAtom,
+        max_len: u32,
+        out: *mut *const ::core::ffi::c_char,
+    ) -> ::core::ffi::c_int;
+}
+
+unsafe extern "C" {
     pub fn JS_Call(
         ctx: *mut JSContext,
         func_obj: JSValue,
