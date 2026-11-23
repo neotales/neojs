@@ -31,9 +31,12 @@
 //! # Precise limits
 //!
 //! * Character classification uses the Unicode General_Category tables in the
-//!   [`unicode_general_category`] crate (Unicode 16.0). Case mapping uses Rust's
-//!   `char::to_lowercase` and `char::to_uppercase`. This fixes the Unicode data
-//!   version for both engines instead of following each engine's tables.
+//!   [`unicode_general_category`] crate, fixed at Unicode 16.0. Case mapping
+//!   uses the Rust compiler's `char::to_lowercase` and `char::to_uppercase`
+//!   tables. Those tables are not tied to the category table's release: a
+//!   compiler upgrade can change a case mapping without changing
+//!   classification, and either can differ from the engine tables used by the
+//!   previous JavaScript implementation.
 //! * The module has no host op, no capability, and no I/O. It is not a sandbox.
 //! * The Rust functions are not a stable ABI. The public contract is the
 //!   JavaScript module behavior; this crate's exact Rust signatures are

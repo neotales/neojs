@@ -37,7 +37,8 @@ pub(crate) fn install(js: &mut JsRuntime) -> Result<(), String> {
         install_entries_global(scope, &object)?;
         exports
     };
-    js.register_native_module(logic::SPECIFIER, exports);
+    js.register_native_module(logic::SPECIFIER, exports)
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 

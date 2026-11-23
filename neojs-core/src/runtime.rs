@@ -1031,6 +1031,31 @@ mod tests {
     use crate::Error;
     use crate::builtins::neo_shim;
 
+    #[cfg(feature = "neo-chars")]
+    fn noop<'s>(
+        _scope: &mut deno_core::v8::PinScope<'s, '_>,
+        _args: deno_core::v8::FunctionCallbackArguments<'s>,
+        _rv: deno_core::v8::ReturnValue<'s, deno_core::v8::Value>,
+    ) {
+    }
+
+    #[cfg(feature = "neo-chars")]
+    fn native_export(
+        js: &mut deno_core::JsRuntime,
+        name: deno_core::FastStaticString,
+    ) -> (
+        deno_core::FastStaticString,
+        deno_core::v8::Global<deno_core::v8::Value>,
+    ) {
+        let context = js.main_context();
+        deno_core::v8::scope!(let scope, js.v8_isolate());
+        let context = deno_core::v8::Local::new(scope, context);
+        let scope = &mut deno_core::v8::ContextScope::new(scope, context);
+        let function = deno_core::v8::Function::new(scope, noop).expect("native function");
+        let value: deno_core::v8::Local<deno_core::v8::Value> = function.into();
+        (name, deno_core::v8::Global::new(scope, value))
+    }
+
     /// A failing shim must return its own error, even inside a Tokio context.
     ///
     /// `Runtime::new` used to install the shims before adopting the isolate, so
@@ -1068,5 +1093,72 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[cfg(feature = "neo-chars")]
+    #[test]
+    fn duplicate_native_module_registration_keeps_the_original_chars_module() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let js = runtime.js.as_mut().expect("the isolate is present");
+        let replacement = native_export(js, deno_core::ascii_str!("isLetter"));
+        assert!(
+            js.register_native_module("neo:chars", vec![replacement])
+                .is_err(),
+            "a duplicate specifier must be rejected"
+        );
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("main.js");
+        std::fs::write(
+            &file,
+            r#"
+import * as chars from "neo:chars";
+const registry = Neo.getBuiltInModule("neo:chars");
+if (chars.isLetter !== registry.isLetter) {
+    throw new Error("the namespace and registry no longer share a function");
+}
+if (chars.isLetter(0x41) !== true) {
+    throw new Error("the original native function was replaced");
+}
+const dynamic = await import("neo:chars");
+if (dynamic.isLetter !== chars.isLetter) {
+    throw new Error("the original module identity was replaced");
+}
+"#,
+        )
+        .expect("write source");
+        runtime
+            .run_file(&file)
+            .expect("the original chars module remains intact");
+    }
+
+    #[cfg(feature = "neo-chars")]
+    #[test]
+    fn duplicate_native_export_names_are_rejected_before_registration() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let js = runtime.js.as_mut().expect("the isolate is present");
+        let first = native_export(js, deno_core::ascii_str!("x"));
+        let second = native_export(js, deno_core::ascii_str!("x"));
+        assert!(
+            js.register_native_module("neo:probe-native", vec![first, second])
+                .is_err(),
+            "duplicate export names must be rejected"
+        );
+
+        // The rejected call must not have inserted the specifier. If it had,
+        // this registration would fail as a duplicate and the map would be
+        // permanently poisoned.
+        let third = native_export(js, deno_core::ascii_str!("x"));
+        assert!(
+            js.register_native_module("neo:probe-native", vec![third])
+                .is_ok(),
+            "the rejected registration mutated the module map"
+        );
+        let fourth = native_export(js, deno_core::ascii_str!("y"));
+        assert!(
+            js.register_native_module("neo:probe-native", vec![fourth])
+                .is_err(),
+            "a second registration of the same specifier must be rejected"
+        );
     }
 }

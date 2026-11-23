@@ -6,10 +6,12 @@
 //! JavaScript implementation and no JavaScript module wrapper in this crate.
 //!
 //! Character classification uses the Unicode General_Category tables from
-//! [`unicode_general_category`] (Unicode 16.0). Case mapping uses Rust's
-//! `char::to_lowercase` and `char::to_uppercase`; a mapping that expands to more
-//! than one code point leaves the input unchanged, because the API returns one
-//! code point.
+//! [`unicode_general_category`], fixed at Unicode 16.0. Case mapping uses Rust's
+//! `char::to_lowercase` and `char::to_uppercase`; that is the Unicode data shipped
+//! with the Rust compiler, which is not guaranteed to be the same release as the
+//! category table and can differ from the tables the engines used before this
+//! binding. A mapping that expands to more than one code point leaves the input
+//! unchanged, because the API returns one code point.
 //!
 //! Every predicate is total: a non-number, a non-integer, a surrogate, an
 //! out-of-range value, or `NaN` is not a Unicode scalar value and returns
@@ -406,6 +408,42 @@ mod tests {
         assert_eq!(to_upper(scalar(0x03B1)), 0x0391);
         assert_eq!(to_lower(scalar(0x1E9E)), 0x00DF);
         assert_eq!(to_lower(scalar(0x0130)), 0x0130);
+        assert_eq!(to_upper(scalar(0x00DF)), 0x00DF);
+    }
+
+    #[test]
+    fn unicode_16_category_boundary_pins_the_intended_contract() {
+        use unicode_general_category::{UNICODE_VERSION, get_general_category};
+
+        assert_eq!(UNICODE_VERSION, (16, 0, 0));
+        assert_eq!(
+            get_general_category(char::from_u32(0x1C89).expect("scalar")),
+            GeneralCategory::UppercaseLetter
+        );
+        assert_eq!(
+            get_general_category(char::from_u32(0x1C8A).expect("scalar")),
+            GeneralCategory::LowercaseLetter
+        );
+        assert_eq!(
+            get_general_category(char::from_u32(0x0378).expect("scalar")),
+            GeneralCategory::Unassigned
+        );
+        assert!(is_letter(0x1C89 as f64));
+        assert!(is_upper(0x1C89 as f64));
+        assert!(is_lower(0x1C8A as f64));
+        assert!(!is_letter(0x0378 as f64));
+    }
+
+    #[test]
+    fn case_mapping_documents_the_compiler_table_dependency() {
+        // These code points are classified by the Unicode 16.0 category table.
+        // The mappings here come from the Rust compiler's case tables, which are
+        // a separate release stream. If a compiler upgrade changes them, update
+        // this test and the documented limitation rather than the category
+        // table.
+        assert_eq!(to_lower(scalar(0x1C89)), 0x1C8A);
+        assert_eq!(to_upper(scalar(0x1C8A)), 0x1C89);
+        // An expanding mapping still returns the input unchanged.
         assert_eq!(to_upper(scalar(0x00DF)), 0x00DF);
     }
 

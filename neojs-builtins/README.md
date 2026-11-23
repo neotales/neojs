@@ -80,14 +80,16 @@ capability. It is not a sandbox.
 
 ## Precise limits
 
-* **Unicode version is fixed by the Rust tables.** Classification uses the
-  Unicode 16.0 General_Category tables from `unicode-general-category`; case
-  mapping uses Rust's `char::to_lowercase` and `char::to_uppercase`. Both
-  engines therefore classify the same input the same way instead of following
-  their own engine tables. The contract tests use long-assigned code points and
-  do not claim behavior for code points assigned after Unicode 16.0.
-  `isSpace` is intentionally Go's `unicode.IsSpace` contract, not JavaScript
-  `\s`: U+FEFF is not whitespace.
+* **Category data is Unicode 16.0; case data follows the Rust compiler.**
+  Classification uses the Unicode 16.0 General_Category tables from
+  `unicode-general-category`. Case mapping uses Rust's `char::to_lowercase` and
+  `char::to_uppercase`, whose Unicode release is the compiler's and is not
+  guaranteed to match the category table. A compiler upgrade can therefore
+  change a case mapping without changing classification. Both can differ from
+  the previous JavaScript implementation's engine tables. The contract tests
+  pin the intended one-code-point behavior and a Unicode 16 classification
+  boundary. `isSpace` is intentionally Go's `unicode.IsSpace` contract, not
+  JavaScript `\s`: U+FEFF is not whitespace.
 * **Captured native functions.** The engine creates the function objects once,
   before user code runs. Replacing a JavaScript intrinsic afterwards does not
   change the module. Code that replaces a realm intrinsic before the runtime is

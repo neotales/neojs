@@ -4,6 +4,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::future::Future;
@@ -1441,18 +1442,61 @@ impl JsRuntime {
   /// the usual caching applies. It is not a synthetic ESM facade and has no
   /// default export unless one is listed.
   ///
-  /// The specifier must not already name a module. Each export name must be
-  /// ASCII. Evaluation cannot fail because the module has no imports; a failure
-  /// here is a programming error and panics.
+  /// The specifier must not already name a module, and each export name must be
+  /// ASCII and unique. A duplicate specifier, an existing `synthetic_esm`
+  /// mapping, or a duplicate export name returns an error before the module map
+  /// is touched, so a rejected call cannot replace or partially register the
+  /// original. Evaluation cannot fail because the module has no imports; a
+  /// failure there is a programming error and panics.
   ///
-  /// This method is the only change in the vendored copy of `deno_core`
+  /// This method is the only Rust change in the vendored copy of `deno_core`
   /// 0.413.0; see `vendor/deno_core/PATCH.md`.
   pub fn register_native_module(
     &mut self,
     specifier: impl IntoModuleName,
     exports: Vec<(FastStaticString, v8::Global<v8::Value>)>,
-  ) -> ModuleId {
+  ) -> Result<ModuleId, CoreError> {
+    let name = specifier.into_module_name();
     let module_map = self.inner.main_realm.0.module_map();
+
+    // Refuse before touching the module map. `create_module_info` inserts into
+    // the name table without checking, so a second registration would silently
+    // replace the existing mapping.
+    if module_map
+      .get_id(name.as_str(), RequestedModuleType::None)
+      .is_some()
+    {
+      return Err(
+        CoreErrorKind::JsBox(JsErrorBox::type_error(format!(
+          "module `{}` is already registered",
+          name.as_str()
+        )))
+        .into_box(),
+      );
+    }
+    if module_map.has_synthetic_esm_module(name.as_str()) {
+      return Err(
+        CoreErrorKind::JsBox(JsErrorBox::type_error(format!(
+          "module `{}` already has a synthetic_esm mapping",
+          name.as_str()
+        )))
+        .into_box(),
+      );
+    }
+    let mut names = HashSet::with_capacity(exports.len());
+    for (export, _) in &exports {
+      if !names.insert(export.as_str()) {
+        return Err(
+          CoreErrorKind::JsBox(JsErrorBox::type_error(format!(
+            "native module `{}` has a duplicate export `{}`",
+            name.as_str(),
+            export.as_str()
+          )))
+          .into_box(),
+        );
+      }
+    }
+
     let context = self.inner.main_realm.0.context().clone();
     let isolate = &mut *self.inner.v8_isolate;
     v8::scope!(let scope, isolate);
@@ -1464,7 +1508,7 @@ impl JsRuntime {
       .collect();
     let id = module_map.new_synthetic_module(
       scope,
-      specifier,
+      name,
       ModuleType::JavaScript,
       exports,
     );
@@ -1479,7 +1523,7 @@ impl JsRuntime {
       module.evaluate(scope).is_some(),
       "a native synthetic module with no imports failed to evaluate"
     );
-    id
+    Ok(id)
   }
 
   #[cfg(test)]
