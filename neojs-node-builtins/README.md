@@ -19,12 +19,20 @@ Process execution is disabled by default: a `ChildProcessPolicy` starts with no
 allowed programs. An embedding application adds exact canonical executable
 paths. There is no `PATH` lookup, no shell, no inherited environment, and no
 `stdio: inherit`. Time, input, output, argument count/bytes, and environment
-size are bounded.
+size are bounded. The serialized bridge request is capped before parsing.
+
+On Unix, pipes are non-blocking and driven by `poll` on the calling thread; no
+reader or writer threads are created. A timeout, output overflow, or an
+inherited pipe left after the direct child exits triggers a bounded drain and a
+process-group SIGKILL, so a descendant cannot keep a join blocked. A descendant
+that creates a new process group and escapes is not tracked or killed. Other
+platforms return `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` rather than using an
+unbounded join.
 
 This is not a sandbox. An allowed executable runs with the authority of the
-NeoJS process. The timeout kills the direct child only; descendants are not
-tracked or killed. It is a permission gate and a resource bound, not
-containment.
+NeoJS process. The allowlist matches canonical paths, not inodes or contents:
+protect the executable and every ancestor directory from untrusted writes. It
+is a permission gate and a resource bound, not containment.
 
 The engine adapters are not part of the default V8 or QuickJS graph. The
 workspace's `default-members` excludes this crate and both adapters.

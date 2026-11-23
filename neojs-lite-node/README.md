@@ -15,8 +15,11 @@ bare specifier that is a familiar Node module name is rejected rather than
 resolved as a Neo module; use the `neo:` prefix for any future Neo module.
 Process execution requires an explicit `ChildProcessPolicy` allowlist; an empty
 policy denies every execution. There is no shell, `PATH` lookup, inherited
-environment, or `stdio: inherit`, and all resources are bounded. An allowed
-executable still runs with the full authority of the process; this is not a
-sandbox.
+environment, or `stdio: inherit`, and all resources are bounded. The allowlist
+matches canonical paths, not inodes: protect the executable and every ancestor
+directory from untrusted writes. A timeout, overflow, or inherited pipe left
+after the direct child exits triggers a bounded drain and a process-group kill;
+no reader thread is left waiting. An allowed executable still runs with the full
+authority of the process; this is not a sandbox.
 
 See `neojs-node-builtins` for the shared support matrix and limits.

@@ -71,6 +71,13 @@ Supported options are exactly `cwd`, `env`, `input` (a string), `timeout`,
 `maxBuffer`, and `encoding`. Every other option, including `shell` and `stdio`,
 throws `ERR_NODE_UNSUPPORTED`.
 
+The serialized bridge request has a hard 4 MiB cap before JSON parsing. The
+guest wrapper also caps input at 1,048,576 code units, arguments at 256 and
+64 KiB total, environment at 128 entries and 64 KiB total, and each path at
+4,096 code units. The V8 op checks the V8 string length before copying it to
+Rust. The QuickJS wrapper checks length before calling the raw host function,
+which is held only in a closure and removed from the global object.
+
 Other `node:` modules are rejected with `the Node module ... is not
 implemented`. Resolution never falls through to a `neo:` module.
 
@@ -83,6 +90,8 @@ implemented`. Resolution never falls through to a `neo:` module.
 | `ERR_NODE_CHILD_PROCESS_DENIED` | The canonical executable is not in the policy. |
 | `ERR_NODE_COMMAND_NOT_ABSOLUTE` | The program name was relative; there is no `PATH` lookup. |
 | `ERR_NODE_LIMIT` | A requested timeout, `maxBuffer`, or other size exceeds the policy. |
+| `ERR_NODE_REQUEST_TOO_LARGE` | The serialized bridge request, or a guest-side normalized field, exceeds the hard cap. |
+| `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` | Bounded child-process completion is not implemented on this platform. |
 | `ETIMEDOUT` | The child was killed at the timeout. |
 | `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` | An output stream exceeded `maxBuffer`. |
 | `ERR_NODE_CHILD_PROCESS_EXIT` | `execFileSync`'s child exited non-zero; `status`, `stdout`, and `stderr` are attached. |
@@ -106,12 +115,29 @@ resource bound, not a sandbox.
   input, 256 arguments and 64 KiB of argument bytes, and 128 environment entries
   and 64 KiB of environment bytes. The policy caps every request; a larger
   `timeout` or `maxBuffer` is rejected rather than clamped.
-* A timeout or output overflow kills the direct child, returns any captured
-  prefix, and reports `timedOut` or `limitExceeded`.
-* The timeout kills only the direct child. Descendants are not tracked or
-  killed, and an allowed executable keeps the full authority of the NeoJS
-  process: filesystem, network, and further process creation permitted by the
-  operating system.
+* A timeout or output overflow kills the child's process group after a short
+  bounded drain, returns any captured prefix, and reports `timedOut` or
+  `limitExceeded`.
+* Bounded pipe completion is implemented on Unix with non-blocking pipes and
+  `poll`; no reader or writer threads are created. If the direct child exits
+  while a descendant still holds an inherited pipe, the runner drains for a
+  short grace and then kills the child's process group, so the pipe cannot
+  extend the deadline. A descendant that creates a new process group and escapes
+  is not tracked or killed. Another platform returns
+  `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` rather than using an unbounded
+  reader-thread join.
+* The allowlist matches canonical paths, not inodes or contents. Protect the
+  executable **and every ancestor directory** from untrusted writes; otherwise
+  a replacement under the same canonical path can run. This is a path gate, not
+  object pinning.
+* The serialized bridge request is capped before JSON parsing, the V8 op checks
+  the V8 string length before copying it to Rust, and the guest wrapper caps
+  input, argument, environment, and path copies. The QuickJS bridge captures the
+  raw host function in a closure and deletes its global, so guest code can only
+  reach the length-checking wrapper.
+* An allowed executable keeps the full authority of the NeoJS process:
+  filesystem, network, and further process creation permitted by the operating
+  system.
 
 The V8 op is synchronous and blocks the isolate thread, as Node's sync APIs do.
 QuickJS has no host-asynchrony loop in this runtime, so the lite adapter offers
@@ -121,5 +147,7 @@ only the synchronous surface.
 
 The shared core tests use real absolute system programs and fail if one is
 missing; they do not skip. Both adapters run the same real-operation, denial,
-registry-separation, unsupported-surface, timeout, and overflow cases through
-their public `Runtime` constructors.
+registry-separation, unsupported-surface, timeout, overflow, inherited-pipe,
+pre-import bridge-replacement, and huge-request cases through their public
+`Runtime` constructors. The shared suite also verifies that a descendant left
+holding the pipes is killed after the direct child exits.
