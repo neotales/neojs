@@ -14,5 +14,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Safe wrappers for poll, non-blocking pipe I/O, and process-group termination.
+# The version is already in the workspace lock graph through `tempfile`.
+rustix = { version = "1.1.6", default-features = false, features = ["event", "fs", "process", "std"] }
+
 [dev-dependencies]
 tempfile.workspace = true

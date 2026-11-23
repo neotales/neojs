@@ -430,7 +430,9 @@ impl Runtime {
     /// programs, so importing the module is safe but every execution is denied.
     /// The policy permits exact canonical executable paths only: there is no
     /// `PATH` lookup, shell, inherited environment, or `stdio: inherit`, and
-    /// time, input, output, argument, and environment sizes are bounded.
+    /// time, input, output, argument, and environment sizes are bounded. The
+    /// allowlist is a path match, not an inode or content pin; protect the
+    /// executable and every ancestor directory from untrusted writes.
     ///
     /// The host bridge is synchronous because this runtime has no host
     /// asynchronous event loop. No asynchronous `ChildProcess` surface is
@@ -438,8 +440,11 @@ impl Runtime {
     ///
     /// This is **not a sandbox**. An allowed executable runs with the authority
     /// of the neojs-lite process, including filesystem, network, and further
-    /// process creation permitted by the operating system. The timeout kills
-    /// the direct child only.
+    /// process creation permitted by the operating system. A timeout, output
+    /// overflow, or inherited pipe left after the direct child exits triggers a
+    /// bounded drain and a group SIGKILL; a descendant that creates a new
+    /// process group and escapes is not tracked. Bounded completion is Unix-only;
+    /// another platform returns `ERR_NODE_CHILD_PROCESS_UNSUPPORTED`.
     #[cfg(feature = "node-compat")]
     pub fn with_node_compat(options: neojs_lite_node::NodeOptions) -> Result<Self, Error> {
         Self::create(Some(options))

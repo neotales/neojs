@@ -35,22 +35,34 @@
 //! `stdio: inherit`.
 //!
 //! The policy also caps wall-clock time, input, output per stream, argument
-//! count and bytes, and environment size. A timeout or an output overflow kills
-//! the direct child and returns partial output with a flag; the JavaScript
-//! wrapper turns that into the documented Node-shaped error.
+//! count and bytes, and environment size. On Unix, pipes are non-blocking and
+//! driven by `poll` on the calling thread; no reader or writer thread is
+//! created. A timeout or output overflow kills the child's process group after
+//! a short bounded drain. A direct child that exits while a descendant still
+//! holds a piped descriptor gets the same bounded drain and group kill, so an
+//! inherited pipe cannot defeat the deadline. A descendant that creates a new
+//! process group and escapes is not tracked. The request bridge also has a hard
+//! serialized-size cap before parsing. Bounded child-process completion is
+//! implemented on Unix; another platform returns
+//! `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` instead of using an unbounded join.
 //!
 //! This is **not a sandbox**. An allowed executable runs with the authority of
 //! the neojs process. It can read and write files, use the network, and start
 //! its own descendants according to the operating system's permissions. The
-//! timeout kills the direct child only; a descendant that outlives it is not
-//! tracked or killed. The policy is an explicit permission gate and a resource
-//! bound, not containment.
+//! timeout and inherited-pipe cleanup target the child's process group; a
+//! descendant that escapes that group is not tracked or killed. The allowlist
+//! matches canonical paths, not inodes or contents: the embedding application
+//! must protect the executable and every ancestor directory from untrusted
+//! writes. The policy is an explicit permission gate and a resource bound, not
+//! containment.
 
 mod child_process;
 mod module;
 mod protocol;
 
-pub use child_process::{ChildProcessError, ChildProcessPolicy, Limits, NodeOptions, PolicyError};
+pub use child_process::{
+    ChildProcessError, ChildProcessPolicy, Limits, MAX_REQUEST_BYTES, NodeOptions, PolicyError,
+};
 pub use module::{
     CHILD_PROCESS_SPECIFIER, SUPPORTED_MODULES, is_known_node_bare_name, module_source,
     unsupported_module_reason,

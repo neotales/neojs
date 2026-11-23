@@ -386,9 +386,19 @@ impl Runtime {
     /// until the embedding application calls
     /// [`neojs_node::ChildProcessPolicy::allow_program`].
     ///
+    /// The allowlist is a path match, not an inode or content pin. The
+    /// embedding application must protect the executable and every ancestor
+    /// directory from untrusted writes; see
+    /// [`neojs_node::ChildProcessPolicy::allow_program`].
+    ///
     /// The op is synchronous: it blocks the isolate thread until the direct
-    /// child exits or the policy timeout kills it. A timeout or output overflow
-    /// returns partial output and an error flag. Descendants are not tracked.
+    /// child exits or the policy timeout kills it. The child gets its own
+    /// process group. A timeout, output overflow, or a direct-child exit that
+    /// leaves an inherited pipe open triggers a bounded drain and a group
+    /// SIGKILL; the runner never joins a reader thread that a descendant could
+    /// keep blocked. A descendant that creates a new process group and escapes
+    /// the group is not tracked. Bounded completion is Unix-only; another
+    /// platform returns `ERR_NODE_CHILD_PROCESS_UNSUPPORTED`.
     ///
     /// This is **not a sandbox**. An allowed program runs with the authority of
     /// the neojs process, including filesystem, network, and further process

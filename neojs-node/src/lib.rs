@@ -14,10 +14,11 @@
 
 use deno_core::OpState;
 use deno_core::op2;
+use deno_core::v8;
 
 pub use neojs_node_builtins::{
-    CHILD_PROCESS_SPECIFIER, ChildProcessError, ChildProcessPolicy, Limits, NodeOptions,
-    PolicyError, SUPPORTED_MODULES, is_known_node_bare_name, module_source,
+    CHILD_PROCESS_SPECIFIER, ChildProcessError, ChildProcessPolicy, Limits, MAX_REQUEST_BYTES,
+    NodeOptions, PolicyError, SUPPORTED_MODULES, is_known_node_bare_name, module_source,
     unsupported_module_reason,
 };
 
@@ -45,16 +46,43 @@ struct NodeState {
     options: NodeOptions,
 }
 
+/// The response for a direct bridge call whose argument is not a string.
+const NOT_A_STRING: &str = r#"{"ok":false,"error":{"code":"ERR_INVALID_ARG_TYPE","message":"the node:child_process request must be a string"}}"#;
+
+/// The response for a direct bridge call above the hard request bound.
+const TOO_LARGE: &str = r#"{"ok":false,"error":{"code":"ERR_NODE_REQUEST_TOO_LARGE","message":"the node:child_process request exceeds the hard size limit"}}"#;
+
+/// Returns a JavaScript string value for `text`.
+fn js_string<'s>(scope: &mut v8::PinScope<'s, '_>, text: &str) -> v8::Local<'s, v8::Value> {
+    match v8::String::new(scope, text) {
+        Some(value) => value.into(),
+        None => v8::undefined(scope).into(),
+    }
+}
+
 /// Runs one JSON request through the shared, engine-neutral child-process core.
 ///
 /// This is a synchronous op, so it blocks the isolate thread. The response is a
 /// JSON string built by the shared crate; the JavaScript wrapper converts it to
-/// Node-shaped results and errors.
+/// Node-shaped results and errors. The argument is inspected as a V8 string
+/// before it is copied to Rust, so a direct `Deno.core.ops` call cannot make the
+/// host copy an unbounded string.
 #[op2]
-#[string]
-fn op_neojs_node_child_process_run(state: &mut OpState, #[string] request: String) -> String {
+fn op_neojs_node_child_process_run<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    state: &mut OpState,
+    value: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Value> {
+    let Ok(string) = v8::Local::<v8::String>::try_from(value) else {
+        return js_string(scope, NOT_A_STRING);
+    };
+    if string.utf8_length(scope) > MAX_REQUEST_BYTES {
+        return js_string(scope, TOO_LARGE);
+    }
+    let request = string.to_rust_string_lossy(scope);
     let options = state.borrow::<NodeState>().options.clone();
-    neojs_node_builtins::handle_request(&request, &options)
+    let response = neojs_node_builtins::handle_request(&request, &options);
+    js_string(scope, &response)
 }
 
 deno_core::extension!(

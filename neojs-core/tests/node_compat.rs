@@ -9,6 +9,8 @@
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
 
 use neojs_core::ChildProcessPolicy;
 use neojs_core::NodeOptions;
@@ -247,6 +249,75 @@ if (!overflow || overflow.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
 "#,
     )
     .expect("bounded failures");
+}
+
+#[test]
+fn an_inherited_pipe_cannot_extend_completion() {
+    require("/bin/sh");
+    require("/bin/sleep");
+    let started = Instant::now();
+    run(
+        policy(&["/bin/sh", "/bin/sleep"]),
+        r#"
+import { spawnSync } from "node:child_process";
+const result = spawnSync("/bin/sh", ["-c", "(/bin/sleep 5) & exit 0"], {
+    encoding: "utf8",
+});
+if (result.status !== 0) throw new Error(`status: ${result.status}`);
+if (result.error) throw new Error(`error: ${result.error.code}`);
+"#,
+    )
+    .expect("bounded inherited-pipe completion");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "an inherited pipe extended completion for {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn the_bridge_cannot_be_replaced_before_import_and_huge_requests_are_capped() {
+    run(
+        policy(&[]),
+        r#"
+let replaced = false;
+try {
+    globalThis.__neojsNodeChildProcess = {
+        runSync() {
+            replaced = true;
+            return "{}";
+        },
+    };
+} catch {
+}
+if (replaced) throw new Error("the bridge replacement succeeded");
+const before = globalThis.__neojsNodeChildProcess;
+const childProcess = await import("node:child_process");
+if (globalThis.__neojsNodeChildProcess !== before) {
+    throw new Error("the bridge changed during import");
+}
+
+const huge = Deno.core.ops.op_neojs_node_child_process_run("x".repeat(4194305));
+const parsed = JSON.parse(huge);
+if (!parsed.error || parsed.error.code !== "ERR_NODE_REQUEST_TOO_LARGE") {
+    throw new Error(`direct bridge cap: ${huge.slice(0, 80)}`);
+}
+
+let code = null;
+try {
+    childProcess.execFileSync("/bin/echo", [], {
+        encoding: "utf8",
+        input: "x".repeat(1048577),
+    });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_REQUEST_TOO_LARGE") {
+    throw new Error(`normalization cap: ${code}`);
+}
+"#,
+    )
+    .expect("bridge hardening");
 }
 
 #[test]

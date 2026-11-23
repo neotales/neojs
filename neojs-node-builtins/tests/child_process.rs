@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use neojs_node_builtins::ChildProcessPolicy;
 use neojs_node_builtins::Limits;
+use neojs_node_builtins::MAX_REQUEST_BYTES;
 use neojs_node_builtins::NodeOptions;
 use neojs_node_builtins::handle_request;
 use serde_json::Value;
@@ -193,6 +194,57 @@ fn simultaneous_stdin_and_stdout_do_not_deadlock() {
 }
 
 #[test]
+fn a_descendant_holding_pipes_cannot_extend_the_deadline() {
+    require("/bin/sh");
+    require("/bin/sleep");
+    let policy = policy(&["/bin/sh", "/bin/sleep"]);
+    let started = Instant::now();
+    let response = request(
+        &policy,
+        "spawnSync",
+        "/bin/sh",
+        &["-c", "(/bin/sleep 5) & exit 0"],
+        serde_json::json!({}),
+    );
+    let elapsed = started.elapsed();
+    let result = ok_result(&response);
+    assert_eq!(result["status"], 0);
+    assert_eq!(result["timedOut"], false);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "an inherited pipe extended completion for {elapsed:?}"
+    );
+}
+
+#[test]
+fn a_descendant_left_holding_pipes_is_killed_after_the_direct_child_exits() {
+    require("/bin/sh");
+    require("/bin/sleep");
+    require("/bin/touch");
+    let directory = tempfile::tempdir().expect("temp dir");
+    let marker = directory.path().join("descendant-survived");
+    let script = format!(
+        "(/bin/sleep 0.2; /bin/touch '{}') & exit 0",
+        marker.display()
+    );
+    let policy = policy(&["/bin/sh", "/bin/sleep", "/bin/touch"]);
+    let response = request(
+        &policy,
+        "spawnSync",
+        "/bin/sh",
+        &["-c", &script],
+        serde_json::json!({}),
+    );
+    let result = ok_result(&response);
+    assert_eq!(result["status"], 0);
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(
+        !marker.exists(),
+        "a descendant in the child's process group survived cleanup"
+    );
+}
+
+#[test]
 fn an_output_overflow_is_bounded_and_reported() {
     require("/bin/sh");
     let policy = policy(&["/bin/sh"]);
@@ -267,6 +319,18 @@ fn only_the_two_synchronous_operations_are_accepted() {
     let response = request(&policy, "spawn", "/bin/echo", &[], json!({}));
     assert_eq!(response["ok"], false, "{response}");
     assert_eq!(response["error"]["code"], "ERR_NODE_UNSUPPORTED");
+}
+
+#[test]
+fn an_oversized_request_is_rejected_before_parsing() {
+    let policy = ChildProcessPolicy::new();
+    let request = "x".repeat(MAX_REQUEST_BYTES + 1);
+    let response = handle_request(&request, &NodeOptions::new(policy));
+    assert!(
+        response.contains("ERR_NODE_REQUEST_TOO_LARGE"),
+        "{response}"
+    );
+    assert!(!response.contains("malformed"), "{response}");
 }
 
 #[test]

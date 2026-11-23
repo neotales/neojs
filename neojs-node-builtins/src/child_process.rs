@@ -13,19 +13,60 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
-use std::io::Read;
-use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::thread;
 use std::time::Duration;
+#[cfg(unix)]
 use std::time::Instant;
+
+#[cfg(unix)]
+use rustix::event::PollFd;
+#[cfg(unix)]
+use rustix::event::PollFlags;
+#[cfg(unix)]
+use rustix::event::Timespec;
+#[cfg(unix)]
+use rustix::event::poll;
+#[cfg(unix)]
+use rustix::fs::OFlags;
+#[cfg(unix)]
+use rustix::fs::fcntl_getfl;
+#[cfg(unix)]
+use rustix::fs::fcntl_setfl;
+#[cfg(unix)]
+use rustix::io::Errno;
+#[cfg(unix)]
+use rustix::io::read;
+#[cfg(unix)]
+use rustix::io::write;
+#[cfg(unix)]
+use rustix::process::Pid;
+#[cfg(unix)]
+use rustix::process::Signal;
+#[cfg(unix)]
+use rustix::process::kill_process_group;
+
+/// The hard cap on one serialized bridge request, before parsing.
+///
+/// The guest wrapper uses the same value as its code-unit cap; the V8 op checks
+/// a V8 string's UTF-8 length against it before copying the string to Rust.
+pub const MAX_REQUEST_BYTES: usize = 4_194_304;
+
+/// How long a killed or exited direct child's pipes may still be drained.
+///
+/// A descendant that inherited a piped descriptor can keep it open after the
+/// direct child exits. Unix completion polls for this grace period, then kills
+/// the direct child's process group and stops. It never joins a blocked reader
+/// thread, so a descendant cannot defeat the deadline.
+#[cfg(unix)]
+const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(50);
+
+/// The longest single poll wait, so `try_wait` and the deadline are checked.
+#[cfg(unix)]
+const POLL_SLICE: Duration = Duration::from_millis(10);
 
 /// The default maximum wall-clock time for one child process.
 pub const DEFAULT_MAX_TIMEOUT: Duration = Duration::from_secs(10);
@@ -149,7 +190,9 @@ pub enum PolicyError {
 /// exactly; a relative name, a bare name, and a `PATH` search are all rejected.
 ///
 /// Adding a program grants it the full authority of the neojs process. This is
-/// a permission gate, not a sandbox.
+/// a permission gate, not a sandbox. The allowlist matches paths, not inodes:
+/// protect the executable and every ancestor directory from untrusted writes.
+/// See [`Self::allow_program`] for the required permission prerequisite.
 #[derive(Clone, Debug, Default)]
 pub struct ChildProcessPolicy {
     allowed_programs: BTreeSet<PathBuf>,
@@ -166,10 +209,18 @@ impl ChildProcessPolicy {
     ///
     /// The path is canonicalised now and must name an existing regular file.
     /// The runner canonicalises the requested path again before comparing, so a
-    /// symlink to an allowed file reaches the same entry. Two canonicalisations
-    /// cannot remove the operating system race between the check and `exec`;
-    /// the allowlist identifies the file that was approved, it does not pin its
-    /// contents.
+    /// symlink to an allowed file reaches the same entry.
+    ///
+    /// # Permission prerequisite
+    ///
+    /// This is a path allowlist, not an object pin. It does not pin the file's
+    /// inode, ownership, or contents. An attacker who can replace the executable
+    /// or any ancestor directory entry after this call can change what runs
+    /// under the same allowed canonical path. The embedding application must
+    /// protect the executable **and every ancestor directory** with ownership
+    /// and permissions that only trusted principals can modify. The
+    /// canonicalisation and regular-file check reduce accidental mistakes; they
+    /// cannot close the operating system race between the check and `exec`.
     pub fn allow_program(mut self, program: impl AsRef<Path>) -> Result<Self, PolicyError> {
         let canonical = std::fs::canonicalize(program.as_ref())
             .map_err(|source| PolicyError::Program { source })?;
@@ -404,91 +455,306 @@ pub(crate) fn run(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Give the child its own process group so a bounded cleanup can signal
+        // descendants that inherited its pipes.
+        command.process_group(0);
+    }
 
     let mut child = command.spawn().map_err(ChildProcessError::spawn)?;
     let pid = child.id();
-    let overflow = Arc::new(AtomicBool::new(false));
+    let execution = execute(&mut child, &input, timeout, max_buffer)?;
 
-    let stdout_reader = reader_thread(
-        child.stdout.take().expect("stdout is piped"),
-        max_buffer,
-        Arc::clone(&overflow),
-    );
-    let stderr_reader = reader_thread(
-        child.stderr.take().expect("stderr is piped"),
-        max_buffer,
-        Arc::clone(&overflow),
-    );
-    let writer = if input.is_empty() {
-        // Dropping the handle closes standard input, which is the signal a
-        // child reading until EOF expects.
-        drop(child.stdin.take());
-        None
-    } else {
-        let mut stdin = child.stdin.take().expect("stdin is piped");
-        Some(thread::spawn(move || {
-            // A child that exits early closes the pipe. A failed write is not a
-            // separate failure: the exit status and captured output are the
-            // authoritative result.
-            let _ = stdin.write_all(&input);
-        }))
-    };
+    Ok(SyncResult {
+        pid,
+        status: execution.status,
+        signal_name: execution.signal_name,
+        stdout: execution.stdout,
+        stderr: execution.stderr,
+        timed_out: execution.timed_out,
+        limit_exceeded: execution.limit_exceeded,
+    })
+}
 
-    let started = Instant::now();
+/// The result of one bounded execution attempt.
+struct Execution {
+    status: Option<i32>,
+    signal_name: Option<&'static str>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    timed_out: bool,
+    limit_exceeded: bool,
+}
+
+/// Runs a spawned child to a bounded completion on Unix.
+///
+/// Pipes are non-blocking and driven by `poll` on the calling thread. No reader
+/// or writer thread is created, so a descendant that inherits a pipe and keeps
+/// it open cannot make a join unbounded. After the direct child exits, or after
+/// a timeout or output overflow, the runner drains for [`PIPE_DRAIN_GRACE`],
+/// kills the child's process group, and returns. An escaped descendant in a new
+/// process group may still hold a pipe, but the runner has already stopped
+/// polling and drops its ends; there is no thread left waiting for it.
+#[cfg(unix)]
+fn execute(
+    child: &mut std::process::Child,
+    input: &[u8],
+    timeout: Duration,
+    max_buffer: usize,
+) -> Result<Execution, ChildProcessError> {
+    let pid = child.id();
+    let pgid = Pid::from_raw(pid as i32).ok_or_else(|| {
+        ChildProcessError::new("ERR_NODE_CHILD_PROCESS_SPAWN", "invalid child pid")
+    })?;
+    let mut stdin = child.stdin.take();
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+
+    if let Some(stdin) = &stdin {
+        set_nonblocking(stdin)?;
+    }
+    set_nonblocking(&stdout)?;
+    set_nonblocking(&stderr)?;
+
+    let mut stdin_open = !input.is_empty() && stdin.is_some();
+    if !stdin_open {
+        // Closing the handle is what tells a child reading until EOF that the
+        // input is complete.
+        drop(stdin.take());
+    }
+    let mut stdin_offset = 0usize;
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
     let mut timed_out = false;
     let mut limit_exceeded = false;
+    let mut killed = false;
+    let mut direct_status = None;
+
+    let started = Instant::now();
+    let hard_deadline = started + timeout;
+    // A natural direct-child exit gets the same small drain window as a kill.
+    let mut stop_at = hard_deadline;
+
+    let mut read_buffer = [0u8; 8192];
     loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {}
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                join_quietly(writer);
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(ChildProcessError::spawn(error));
+        if direct_status.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    direct_status = Some(status);
+                    stdin_open = false;
+                    stop_at = stop_at.min(Instant::now() + PIPE_DRAIN_GRACE);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    kill_child_group(child, pgid);
+                    let _ = child.wait();
+                    return Err(ChildProcessError::spawn(error));
+                }
             }
         }
 
-        if overflow.load(Ordering::SeqCst) {
-            limit_exceeded = true;
-        } else if started.elapsed() >= timeout {
+        let now = Instant::now();
+        if direct_status.is_none() && now >= hard_deadline && !timed_out {
             timed_out = true;
-        } else {
-            thread::sleep(Duration::from_millis(2));
+            stdin_open = false;
+            if !killed {
+                kill_child_group(child, pgid);
+                killed = true;
+            }
+            stop_at = now + PIPE_DRAIN_GRACE;
+        }
+        if now >= stop_at {
+            if killed {
+                break;
+            }
+            kill_child_group(child, pgid);
+            killed = true;
+            stdin_open = false;
+            stop_at = now + PIPE_DRAIN_GRACE;
+        }
+
+        if direct_status.is_some() && !stdout_open && !stderr_open && !stdin_open {
+            break;
+        }
+
+        let wait = stop_at
+            .saturating_duration_since(Instant::now())
+            .min(POLL_SLICE);
+        if wait.is_zero() {
             continue;
         }
 
-        let _ = child.kill();
-        break;
+        let mut fds = Vec::with_capacity(3);
+        if stdin_open {
+            fds.push(PollFd::new(
+                stdin.as_ref().expect("open stdin has a handle"),
+                PollFlags::OUT,
+            ));
+        }
+        if stdout_open {
+            fds.push(PollFd::new(&stdout, PollFlags::IN));
+        }
+        if stderr_open {
+            fds.push(PollFd::new(&stderr, PollFlags::IN));
+        }
+        let timeout_spec = Timespec::try_from(wait).unwrap_or(Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000,
+        });
+        let ready = match poll(&mut fds, Some(&timeout_spec)) {
+            Ok(ready) => ready,
+            Err(error) if error == Errno::INTR => continue,
+            Err(error) => {
+                kill_child_group(child, pgid);
+                let _ = child.wait();
+                return Err(ChildProcessError::spawn(io::Error::from_raw_os_error(
+                    error.raw_os_error(),
+                )));
+            }
+        };
+        if ready == 0 {
+            continue;
+        }
+
+        let mut index = 0usize;
+        if stdin_open {
+            if fds[index]
+                .revents()
+                .intersects(PollFlags::OUT | PollFlags::ERR | PollFlags::HUP)
+            {
+                let stdin_handle = stdin.as_ref().expect("open stdin has a handle");
+                match write(stdin_handle, &input[stdin_offset..]) {
+                    Ok(0) => stdin_open = false,
+                    Ok(written) => {
+                        stdin_offset = stdin_offset.saturating_add(written);
+                        if stdin_offset >= input.len() {
+                            stdin_open = false;
+                        }
+                    }
+                    Err(error) if error == Errno::AGAIN || error == Errno::INTR => {}
+                    Err(_) => stdin_open = false,
+                }
+            }
+            index += 1;
+        }
+        if stdout_open {
+            if fds[index]
+                .revents()
+                .intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP)
+            {
+                match read(&stdout, &mut read_buffer) {
+                    Ok(0) => stdout_open = false,
+                    Ok(read) => {
+                        if append_capped(&mut stdout_bytes, &read_buffer[..read], max_buffer) {
+                            limit_exceeded = true;
+                            stdout_open = false;
+                        }
+                    }
+                    Err(error) if error == Errno::AGAIN || error == Errno::INTR => {}
+                    Err(_) => stdout_open = false,
+                }
+            }
+            index += 1;
+        }
+        if stderr_open
+            && fds[index]
+                .revents()
+                .intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP)
+        {
+            match read(&stderr, &mut read_buffer) {
+                Ok(0) => stderr_open = false,
+                Ok(read) => {
+                    if append_capped(&mut stderr_bytes, &read_buffer[..read], max_buffer) {
+                        limit_exceeded = true;
+                        stderr_open = false;
+                    }
+                }
+                Err(error) if error == Errno::AGAIN || error == Errno::INTR => {}
+                Err(_) => stderr_open = false,
+            }
+        }
+        if limit_exceeded && !killed {
+            let now = Instant::now();
+            kill_child_group(child, pgid);
+            killed = true;
+            stdin_open = false;
+            stop_at = now + PIPE_DRAIN_GRACE;
+        }
+        if !stdin_open {
+            drop(stdin.take());
+        }
     }
 
-    // Reap the direct child even when it was killed. On Unix a SIGKILL cannot be
-    // ignored, so this does not wait for a cooperating process.
+    // The direct child is killed or already reaped; wait only for it. A
+    // descendant that escaped the process group is not tracked.
     let status = child.wait().ok();
-    join_quietly(writer);
-    let stdout = join_reader(stdout_reader);
-    let stderr = join_reader(stderr_reader);
-    if overflow.load(Ordering::SeqCst) {
-        limit_exceeded = true;
-    }
-
     let (status_code, signal_name) = match status {
         Some(status) if !timed_out && !limit_exceeded => (status.code(), exit_signal_name(&status)),
         Some(status) => (None, exit_signal_name(&status)),
         None => (None, None),
     };
 
-    Ok(SyncResult {
-        pid,
+    Ok(Execution {
         status: status_code,
         signal_name,
-        stdout,
-        stderr,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
         timed_out,
         limit_exceeded,
     })
+}
+
+/// Non-Unix completion is refused rather than emulated with unbounded joins.
+///
+/// The bounded runner uses POSIX poll and process groups. A platform without
+/// that implementation gets a clear failure, not a reader thread that a
+/// descendant can keep blocked forever.
+#[cfg(not(unix))]
+fn execute(
+    child: &mut std::process::Child,
+    _input: &[u8],
+    _timeout: Duration,
+    _max_buffer: usize,
+) -> Result<Execution, ChildProcessError> {
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(ChildProcessError::new(
+        "ERR_NODE_CHILD_PROCESS_UNSUPPORTED",
+        "bounded child-process completion is implemented on Unix only",
+    ))
+}
+
+#[cfg(unix)]
+fn set_nonblocking(fd: impl std::os::fd::AsFd) -> Result<(), ChildProcessError> {
+    let flags = fcntl_getfl(&fd).map_err(|error| {
+        ChildProcessError::spawn(io::Error::from_raw_os_error(error.raw_os_error()))
+    })?;
+    fcntl_setfl(&fd, flags | OFlags::NONBLOCK).map_err(|error| {
+        ChildProcessError::spawn(io::Error::from_raw_os_error(error.raw_os_error()))
+    })
+}
+
+#[cfg(unix)]
+fn kill_child_group(child: &mut std::process::Child, pgid: Pid) {
+    let _ = kill_process_group(pgid, Signal::KILL);
+    let _ = child.kill();
+}
+
+/// Appends at most `limit` total bytes and reports whether the input overflowed.
+#[cfg(any(unix, test))]
+fn append_capped(output: &mut Vec<u8>, bytes: &[u8], limit: usize) -> bool {
+    let remaining = limit.saturating_sub(output.len());
+    if bytes.len() > remaining {
+        output.extend_from_slice(&bytes[..remaining]);
+        true
+    } else {
+        output.extend_from_slice(bytes);
+        false
+    }
 }
 
 /// Validates argument shape before a child exists.
@@ -547,47 +813,6 @@ fn check_environment(request: &RunRequest, limits: Limits) -> Result<(), ChildPr
     Ok(())
 }
 
-/// Reads at most `limit` bytes and records an overflow.
-fn read_capped(mut reader: impl Read, limit: usize, overflow: Arc<AtomicBool>) -> Vec<u8> {
-    let mut output = Vec::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => {
-                let remaining = limit.saturating_sub(output.len());
-                if read > remaining {
-                    output.extend_from_slice(&buffer[..remaining]);
-                    overflow.store(true, Ordering::SeqCst);
-                    break;
-                }
-                output.extend_from_slice(&buffer[..read]);
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
-        }
-    }
-    output
-}
-
-fn reader_thread(
-    reader: impl Read + Send + 'static,
-    limit: usize,
-    overflow: Arc<AtomicBool>,
-) -> thread::JoinHandle<Vec<u8>> {
-    thread::spawn(move || read_capped(reader, limit, overflow))
-}
-
-fn join_reader(handle: thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
-    handle.join().unwrap_or_default()
-}
-
-fn join_quietly(handle: Option<thread::JoinHandle<()>>) {
-    if let Some(handle) = handle {
-        let _ = handle.join();
-    }
-}
-
 #[cfg(unix)]
 fn exit_signal_name(status: &ExitStatus) -> Option<&'static str> {
     use std::os::unix::process::ExitStatusExt;
@@ -620,24 +845,21 @@ fn signal_name(number: i32) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_capped;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
+    use super::append_capped;
 
     #[test]
-    fn a_reader_stops_one_byte_past_the_limit_and_records_it() {
-        let overflow = Arc::new(AtomicBool::new(false));
-        let bytes = read_capped(&b"abcdef"[..], 3, Arc::clone(&overflow));
+    fn a_capped_append_stops_at_the_limit_and_reports_overflow() {
+        let mut bytes = Vec::new();
+        assert!(!append_capped(&mut bytes, b"abc", 3));
         assert_eq!(bytes, b"abc");
-        assert!(overflow.load(Ordering::SeqCst));
+        assert!(append_capped(&mut bytes, b"d", 3));
+        assert_eq!(bytes, b"abc");
     }
 
     #[test]
-    fn a_reader_accepts_exactly_the_limit() {
-        let overflow = Arc::new(AtomicBool::new(false));
-        let bytes = read_capped(&b"abc"[..], 3, Arc::clone(&overflow));
+    fn a_capped_append_keeps_the_allowed_prefix_of_an_oversized_read() {
+        let mut bytes = Vec::new();
+        assert!(append_capped(&mut bytes, b"abcdef", 3));
         assert_eq!(bytes, b"abc");
-        assert!(!overflow.load(Ordering::SeqCst));
     }
 }

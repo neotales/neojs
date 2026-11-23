@@ -17,6 +17,24 @@ if (!bridge || typeof bridge.runSync !== "function") {
     throw new Error("node:child_process is not installed in this runtime");
 }
 const runSync = bridge.runSync;
+const hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+
+// Hard ceilings before guest normalization and before the bridge. The Rust
+// policy may be stricter; these bound copies and the serialized request.
+const MAX_REQUEST_CHARS = 4_194_304;
+const MAX_INPUT_CHARS = 1_048_576;
+const MAX_ARGS = 256;
+const MAX_ARG_CHARS = 65_536;
+const MAX_ENV_ENTRIES = 128;
+const MAX_ENV_CHARS = 65_536;
+const MAX_PATH_CHARS = 4_096;
+
+function requestTooLarge() {
+    return makeError(
+        "ERR_NODE_REQUEST_TOO_LARGE",
+        "the node:child_process request exceeds the hard size limit",
+    );
+}
 
 const SUPPORTED_OPTIONS = ["cwd", "env", "input", "timeout", "maxBuffer", "encoding"];
 
@@ -75,7 +93,8 @@ function normalizeOptions(options) {
     if (options === null || typeof options !== "object" || Array.isArray(options)) {
         throw makeError("ERR_INVALID_ARG_TYPE", "options must be an object");
     }
-    for (const key of Object.keys(options)) {
+    for (const key in options) {
+        if (!hasOwn(options, key)) continue;
         if (!SUPPORTED_OPTIONS.includes(key)) {
             throw makeError(
                 "ERR_NODE_UNSUPPORTED",
@@ -95,6 +114,7 @@ function normalizeOptions(options) {
     const normalized = {};
     if (options.cwd !== undefined) {
         const cwd = requireString(options.cwd, "options.cwd");
+        if (cwd.length > MAX_PATH_CHARS) throw requestTooLarge();
         if (cwd.includes("\0")) {
             throw invalid("options.cwd must not contain a NUL byte");
         }
@@ -105,11 +125,17 @@ function normalizeOptions(options) {
         if (env === null || typeof env !== "object" || Array.isArray(env)) {
             throw makeError("ERR_INVALID_ARG_TYPE", "options.env must be an object");
         }
+        let count = 0;
+        let total = 0;
         const copy = Object.create(null);
-        for (const name of Object.keys(env)) {
+        for (const name in env) {
+            if (!hasOwn(env, name)) continue;
+            count += 1;
+            if (count > MAX_ENV_ENTRIES) throw requestTooLarge();
             if (name.length === 0 || name.includes("=") || name.includes("\0")) {
                 throw invalid("an environment name is not valid");
             }
+            if (name.length > MAX_PATH_CHARS) throw requestTooLarge();
             const value = env[name];
             if (typeof value !== "string") {
                 throw makeError("ERR_INVALID_ARG_TYPE", "environment values must be strings");
@@ -117,6 +143,8 @@ function normalizeOptions(options) {
             if (value.includes("\0")) {
                 throw invalid("an environment value must not contain a NUL byte");
             }
+            total += name.length + value.length;
+            if (total > MAX_ENV_CHARS) throw requestTooLarge();
             copy[name] = value;
         }
         normalized.env = copy;
@@ -129,6 +157,7 @@ function normalizeOptions(options) {
                 "node:child_process input must be a string in this opt-in slice",
             );
         }
+        if (input.length > MAX_INPUT_CHARS) throw requestTooLarge();
         normalized.input = input;
     }
     if (options.timeout !== undefined) {
@@ -153,25 +182,31 @@ function normalizeArgs(args) {
     if (!Array.isArray(args)) {
         throw makeError("ERR_INVALID_ARG_TYPE", "arguments must be an array");
     }
-    return args.map((argument) => {
+    if (args.length > MAX_ARGS) throw requestTooLarge();
+    let total = 0;
+    const normalized = [];
+    for (let index = 0; index < args.length; index += 1) {
+        const argument = args[index];
         if (typeof argument === "string") {
             if (argument.includes("\0")) {
                 throw invalid("an argument must not contain a NUL byte");
             }
-            return argument;
+            total += argument.length;
+            if (total > MAX_ARG_CHARS) throw requestTooLarge();
+            normalized.push(argument);
+        } else if (typeof argument === "number" || typeof argument === "boolean") {
+            const text = String(argument);
+            total += text.length;
+            if (total > MAX_ARG_CHARS) throw requestTooLarge();
+            normalized.push(text);
+        } else {
+            throw makeError(
+                "ERR_INVALID_ARG_TYPE",
+                "arguments must be strings, numbers, or booleans",
+            );
         }
-        if (
-            typeof argument === "number" ||
-            typeof argument === "boolean" ||
-            typeof argument === "bigint"
-        ) {
-            return String(argument);
-        }
-        throw makeError(
-            "ERR_INVALID_ARG_TYPE",
-            "arguments must be strings, numbers, booleans, or bigints",
-        );
-    });
+    }
+    return normalized;
 }
 
 function normalizeCall(file, args, options) {
@@ -179,6 +214,7 @@ function normalizeCall(file, args, options) {
     if (program.length === 0) {
         throw invalid("file must not be empty");
     }
+    if (program.length > MAX_PATH_CHARS) throw requestTooLarge();
     if (program.includes("\0")) {
         throw invalid("file must not contain a NUL byte");
     }
@@ -196,7 +232,16 @@ function call(operation, call_) {
     };
     let text;
     try {
-        text = runSync(JSON.stringify(request));
+        text = JSON.stringify(request);
+    } catch {
+        throw makeError(
+            "ERR_INVALID_ARG_VALUE",
+            "the node:child_process request could not be serialized",
+        );
+    }
+    if (text.length > MAX_REQUEST_CHARS) throw requestTooLarge();
+    try {
+        text = runSync(text);
     } catch {
         throw makeError(
             "ERR_NODE_BRIDGE_FAILURE",

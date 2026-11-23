@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::child_process::MAX_REQUEST_BYTES;
 use crate::child_process::NodeOptions;
 use crate::child_process::RunRequest;
 use crate::child_process::run;
@@ -42,6 +43,12 @@ struct Options {
 /// as a result or thrown. Unknown operations are rejected rather than treated
 /// as an alias for a supported one.
 pub fn handle_request(request: &str, options: &NodeOptions) -> String {
+    if request.len() > MAX_REQUEST_BYTES {
+        return error_response(
+            "ERR_NODE_REQUEST_TOO_LARGE",
+            "the node:child_process request exceeds the hard size limit",
+        );
+    }
     let parsed: Request = match serde_json::from_str(request) {
         Ok(parsed) => parsed,
         Err(_) => {
