@@ -244,6 +244,17 @@ else
     fail "dry run created a ledger"
 fi
 
+: >"$TMP/fake-v8.a.gz"
+expect_status 0 "dry run attributes the V8 archive to neojs" \
+    env RUSTY_V8_ARCHIVE="$TMP/fake-v8.a.gz" \
+    bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs --ledger "$TMP/dry.jsonl"
+assert_contains "$TMP/stdout" "v8 archive input: {" "neojs records the V8 archive"
+
+expect_status 0 "dry run omits the V8 archive for neojs-lite" \
+    env RUSTY_V8_ARCHIVE="$TMP/fake-v8.a.gz" \
+    bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs-lite --ledger "$TMP/dry.jsonl"
+assert_contains "$TMP/stdout" "v8 archive input: null" "neojs-lite does not record an unused V8 archive"
+
 expect_status 3 "missing package exits 3" \
     bash "$SCRIPT_DIR/measure.sh" --dry-run --package not-a-package --ledger "$TMP/missing-dry.jsonl"
 assert_contains "$TMP/stderr" "package-not-in-workspace" "missing package names the reason"

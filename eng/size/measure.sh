@@ -280,6 +280,7 @@ make_record() {
     local missing_reason=$9
     local measured_at=${10}
     local notes_json=${11}
+    local v8_archive_json=${12-'null'}
 
     jq -n \
         --arg status "$status" \
@@ -315,7 +316,7 @@ make_record() {
         --argjson offline "$OFFLINE_JSON" \
         --arg lock_sha256 "$LOCK_SHA256" \
         --arg workspace_path_sha256 "$WORKSPACE_PATH_SHA256" \
-        --argjson v8_archive "$V8_ARCHIVE_JSON" \
+        --argjson v8_archive "$v8_archive_json" \
         --argjson env_overrides "$ENV_OVERRIDES" \
         '{
           schema: 1,
@@ -374,6 +375,18 @@ make_record() {
         }'
 }
 
+# RUSTY_V8_ARCHIVE is an environment input only for a package whose dependency
+# graph actually contains V8. Recording it for neojs-lite would claim an input
+# the artifact never used and would split an otherwise identical series.
+package_uses_v8() {
+    local package=$1 tree
+    if ! tree=$(cargo "+$TOOLCHAIN" tree -p "$package" --prefix none \
+        --locked "${METADATA_NETWORK[@]}" 2>/dev/null); then
+        size_die "cargo tree failed for $package; cannot attribute the V8 archive"
+    fi
+    grep -Eq '^(v8|deno_v8) v' <<<"$tree"
+}
+
 record_missing() {
     local package=$1
     local reason=$2
@@ -382,7 +395,7 @@ record_missing() {
     measured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     notes_json=$(jq -Rn --arg note "$NOTE" 'if $note == "" then null else $note end')
     record=$(make_record "missing" "$package" "$bin" "$bin" "null" "" "" "" \
-        "$reason" "$measured_at" "$notes_json")
+        "$reason" "$measured_at" "$notes_json" "null")
     if [ "$NO_RECORD" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
         printf '%s\n' "$record"
     else
@@ -397,7 +410,7 @@ measure_package() {
     local build_cmd
     local command
     local log
-    local bytes sha256 file_type measured_at notes_json record
+    local bytes sha256 file_type measured_at notes_json record v8_json="null"
 
     build_cmd=(cargo "+$TOOLCHAIN" build --release --locked --target "$TARGET" -p "$package")
     if [ "${#BUILD_NETWORK[@]}" -gt 0 ]; then
@@ -411,9 +424,13 @@ measure_package() {
     fi
 
     binary="$TARGET_DIR/$TARGET/release/$bin"
+    if package_uses_v8 "$package"; then
+        v8_json=$V8_ARCHIVE_JSON
+    fi
     if [ "$DRY_RUN" -eq 1 ]; then
         printf 'size: dry run: %s %s\n' "$package" "$(printf '%q ' "${build_cmd[@]}")"
         printf 'size: dry run: artifact would be %s\n' "$binary"
+        printf 'size: dry run: v8 archive input: %s\n' "$v8_json"
         return 0
     fi
 
@@ -437,7 +454,7 @@ measure_package() {
     measured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     notes_json=$(jq -Rn --arg note "$NOTE" 'if $note == "" then null else $note end')
     record=$(make_record "ok" "$package" "$bin" "$bin" "$bytes" "$sha256" \
-        "$file_type" "$command" "" "$measured_at" "$notes_json")
+        "$file_type" "$command" "" "$measured_at" "$notes_json" "$v8_json")
 
     MEASURED_COUNT=$((MEASURED_COUNT + 1))
     if [ "$NO_RECORD" -eq 1 ]; then
