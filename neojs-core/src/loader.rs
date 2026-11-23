@@ -25,8 +25,11 @@
 //!
 //! Each built-in module has exactly one canonical `neo:` specifier. The URL
 //! scheme is matched case-insensitively, as URL schemes are, so `NEO:age` is
-//! the same module as `neo:age`; the path is matched exactly. The engine caches
-//! one instance per canonical URL. Built-in modules are never read from disk.
+//! the same module as `neo:age`. The path is matched against the original
+//! specifier, not a URL-normalized one: embedded tab/newline characters and
+//! leading or trailing whitespace or control characters are rejected rather
+//! than trimmed. The engine caches one instance per canonical URL. Built-in
+//! modules are never read from disk.
 //!
 //! A `.ts` or `.mts` module is read as text and type-stripped before V8 sees it
 //! ([`crate::typescript`]). A file that cannot be reduced to ECMAScript fails
@@ -220,15 +223,10 @@ impl ModuleLoader for FileModuleLoader {
             return builtin_url(canonical);
         }
         // A URL scheme is case-insensitive, so `NEO:chars` reaches the same
-        // canonical module as `neo:chars`. Only a path with no query or
-        // fragment is a module name; anything else falls through to the
-        // diagnostic that says the specifier must be exact.
-        if let Ok(url) = Url::parse(specifier)
-            && url.scheme() == "neo"
-            && url.query().is_none()
-            && url.fragment().is_none()
-            && let Some(canonical) = builtins::resolve_name(url.path())
-        {
+        // canonical module as `neo:chars`. The path is read from the original
+        // string: `Url::parse` trims whitespace and removes embedded
+        // tab/newline characters, which would make `neo:ch\nars` resolve.
+        if let Some(canonical) = case_insensitive_builtin(specifier) {
             return builtin_url(canonical);
         }
 
@@ -405,6 +403,32 @@ impl FileModuleLoader {
             None,
         )))
     }
+}
+
+/// Resolves a built-in specifier whose scheme differs only in ASCII case.
+///
+/// Only the `neo` scheme is case-insensitive; the path is matched byte for
+/// byte against the registry. The specifier is split directly instead of passed
+/// through [`Url::parse`], because the URL parser trims leading and trailing C0
+/// controls and spaces and removes embedded tab, line feed, and carriage return
+/// characters. Accepting those transformations would make a malformed spelling
+/// such as `neo:ch\nars` reach `neo:chars`.
+///
+/// The path must contain no ASCII space or control character at all. Registry
+/// names never do, so this rejects the trimmed forms even if one were added
+/// later. Query and fragment text stays part of the path and cannot match.
+fn case_insensitive_builtin(specifier: &str) -> Option<&'static str> {
+    let (scheme, path) = specifier.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("neo") {
+        return None;
+    }
+    if path
+        .chars()
+        .any(|character| character == ' ' || character.is_ascii_control())
+    {
+        return None;
+    }
+    builtins::resolve_name(path)
 }
 
 /// Resolves a built-in specifier to its canonical URL.

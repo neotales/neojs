@@ -820,6 +820,67 @@ if (!bareRejected) throw new Error("bare chars import was accepted");
 }
 
 #[test]
+fn malformed_builtin_specifiers_do_not_resolve_or_import() {
+    run_js(
+        r#"
+// The URL parser trims leading/trailing C0 controls and space and removes
+// embedded tab/newline characters. A module specifier must not inherit that:
+// only the scheme is case-insensitive and the path is matched byte for byte.
+const malformed = [
+    " neo:chars",
+    "neo:chars ",
+    " neo:chars ",
+    "\tneo:chars",
+    "neo:chars\t",
+    "\nneo:chars",
+    "neo:chars\n",
+    "\rneo:chars",
+    "neo:chars\r",
+    "neo:ch ars",
+    "neo:ch\tars",
+    "neo:ch\nars",
+    "neo:ch\rars",
+    "neo:\u0000chars",
+    "neo:ch\u0001ars",
+    "neo:chars?x",
+    "neo:chars#x",
+];
+
+for (const specifier of malformed) {
+    let resolved;
+    try {
+        resolved = import.meta.resolve(specifier);
+    } catch {
+        resolved = undefined;
+    }
+    if (resolved !== undefined) {
+        throw new Error(`resolve accepted malformed ${JSON.stringify(specifier)} as ${resolved}`);
+    }
+
+    let imported = false;
+    try {
+        await import(specifier);
+        imported = true;
+    } catch {
+        imported = false;
+    }
+    if (imported) {
+        throw new Error(`dynamic import accepted malformed ${JSON.stringify(specifier)}`);
+    }
+}
+
+// Scheme-only case folding is still supported, and it reaches the one module.
+if (import.meta.resolve("NEO:chars") !== "neo:chars") {
+    throw new Error("NEO:chars did not resolve canonically");
+}
+const upper = await import("NEO:chars");
+const lower = await import("neo:chars");
+if (upper !== lower) throw new Error("NEO:chars and neo:chars are not one module");
+"#,
+    );
+}
+
+#[test]
 fn built_in_module_namespace_and_registry_are_immutable() {
     run_js(
         r#"

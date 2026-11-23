@@ -563,7 +563,9 @@ Identity and mutation semantics:
 - `Neo.getBuiltInModule` takes the canonical `neo:` specifier: `Neo.getBuiltInModule("neo:chars")`
   returns the module, and `Neo.getBuiltInModule("chars")` returns `undefined`. The `neo:` scheme is
   matched case-insensitively, as URL schemes are, so `NEO:chars` imports the same module; the path
-  `chars` is matched exactly. A bare `chars` import is rejected with a message naming `neo:chars`.
+  `chars` is matched exactly. Leading or trailing whitespace and embedded ASCII control characters
+  are rejected rather than trimmed by URL parsing. A bare `chars` import is rejected with a message
+  naming `neo:chars`.
 - There is no default export. `import chars from "neo:chars"` fails to link, as does importing a name
   the module does not export.
 
