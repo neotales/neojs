@@ -185,7 +185,9 @@ pub trait Utf16Source {
 pub enum SearchError<E> {
     /// The clamped index argument is invalid.
     Index(IndexError),
-    /// The engine adapter could not read the text.
+    /// The engine adapter could not read the text. The adapter's error is
+    /// carried unchanged; a binding must propagate it without substituting one
+    /// of its own, so a pending engine exception is preserved.
     Source(E),
 }
 
@@ -438,7 +440,11 @@ pub fn index_of_fold(
 ///
 /// # Errors
 ///
-/// Returns [`IndexError`] under the same conditions as [`index_of_fold`].
+/// Returns [`SearchError::Index`] under the same conditions as
+/// [`index_of_fold`], and [`SearchError::Source`] with the adapter's error
+/// unchanged when a text read fails. A read failure stops the scan
+/// immediately. A binding must propagate either variant unchanged rather than
+/// replacing it with a generic error.
 pub fn index_of_fold_source<S: Utf16Source>(
     text: &mut S,
     search: &[u16],
@@ -520,8 +526,11 @@ pub fn last_index_of_fold(
 ///
 /// # Errors
 ///
-/// Returns [`IndexError`] under the same conditions as
-/// [`last_index_of_fold`].
+/// Returns [`SearchError::Index`] under the same conditions as
+/// [`last_index_of_fold`], and [`SearchError::Source`] with the adapter's
+/// error unchanged when a text read fails. A read failure stops the scan
+/// immediately. A binding must propagate either variant unchanged rather than
+/// replacing it with a generic error.
 pub fn last_index_of_fold_source<S: Utf16Source>(
     text: &mut S,
     search: &[u16],
@@ -976,6 +985,7 @@ mod tests {
         units: &'a [u16],
         reads: usize,
         max_index: Option<usize>,
+        hint: Option<usize>,
     }
 
     impl<'a> TrackingSource<'a> {
@@ -984,6 +994,7 @@ mod tests {
                 units,
                 reads: 0,
                 max_index: None,
+                hint: None,
             }
         }
     }
@@ -995,9 +1006,39 @@ mod tests {
             self.units.len()
         }
 
+        fn set_read_limit(&mut self, end: usize) -> Result<(), Self::Error> {
+            self.hint = Some(end);
+            Ok(())
+        }
+
         fn unit(&mut self, index: usize) -> Result<u16, Self::Error> {
             self.reads += 1;
             self.max_index = Some(self.max_index.map_or(index, |max| max.max(index)));
+            Ok(self.units[index])
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct InjectedFailure;
+
+    struct FailingSource<'a> {
+        units: &'a [u16],
+        fail_at: usize,
+        attempts: usize,
+    }
+
+    impl Utf16Source for FailingSource<'_> {
+        type Error = InjectedFailure;
+
+        fn len(&self) -> usize {
+            self.units.len()
+        }
+
+        fn unit(&mut self, index: usize) -> Result<u16, Self::Error> {
+            self.attempts += 1;
+            if self.attempts >= self.fail_at {
+                return Err(InjectedFailure);
+            }
             Ok(self.units[index])
         }
     }
@@ -1025,6 +1066,7 @@ mod tests {
         );
         assert_eq!(source.reads, 1, "a zero limit read {} units", source.reads);
         assert_eq!(source.max_index, Some(0));
+        assert_eq!(source.hint, Some(10), "the zero-limit read hint changed");
 
         let mut source = TrackingSource::new(&text);
         assert_eq!(
@@ -1037,6 +1079,7 @@ mod tests {
             source.reads
         );
         assert!(source.max_index.is_some_and(|index| index <= 10_001));
+        assert_eq!(source.hint, Some(10_010), "the 10000 read hint changed");
 
         let astral = units(&"\u{1F600}a".repeat(100_000));
         let mut source = TrackingSource::new(&astral);
@@ -1060,6 +1103,25 @@ mod tests {
             source.reads, 2,
             "a mid-pair limit read {} units",
             source.reads
+        );
+    }
+
+    #[test]
+    fn a_source_error_stops_the_scan_immediately() {
+        let text = units(&"a".repeat(1_000_000));
+        let mut source = FailingSource {
+            units: &text,
+            fail_at: 2,
+            attempts: 0,
+        };
+        assert_eq!(
+            last_index_of_fold_source(&mut source, &units("q"), Some(1.0)),
+            Err(SearchError::Source(InjectedFailure))
+        );
+        assert_eq!(
+            source.attempts, 2,
+            "the scan attempted {} reads including the failed one",
+            source.attempts
         );
     }
 
