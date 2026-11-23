@@ -1,0 +1,325 @@
+--- a/v8/src/objects/keys.h
++++ b/v8/src/objects/keys.h
+@@ -32,6 +32,30 @@
+       static_cast<int>(v8::KeyCollectionMode::kIncludePrototypes)
+ };
+ 
++// Status returned by the narrow bounded own-key collector. The numeric values
++// are part of the private Rusty V8 bridge ABI used by neojs-node.
++enum class BoundedOwnKeysStatus : int {
++  kOk = 0,
++  kTooManyKeys = 1,
++  kScanLimit = 2,
++  kUnsupported = 3,
++  kMemory = 4,
++  kException = -1,
++};
++
++// Collects own enumerable string keys of a narrow ordinary object.
++//
++// Supported: JS_OBJECT_TYPE with fast properties, no access check and no
++// interceptors, and either no elements or fast (non-double) elements.
++// Dictionary properties, dictionary elements, double elements, proxies, exotic
++// objects and all non-JS_OBJECT instances fail closed. `scanned` counts every
++// descriptor/element capacity slot inspected against `max_scan`; `keys`
++// contains at most `max_keys` strings. No JavaScript runs and no output is
++// allocated until both bounds pass.
++BoundedOwnKeysStatus GetOwnEnumerableStringKeysBounded(
++    Isolate* isolate, DirectHandle<JSReceiver> receiver, uint32_t max_keys,
++    uint32_t max_scan, Handle<FixedArray>* keys, uint32_t* scanned);
++
+ // This is a helper class for JSReceiver::GetKeys which collects and sorts keys.
+ // GetKeys needs to sort keys per prototype level, first showing the integer
+ // indices from elements then the strings from the properties. However, this
+--- a/v8/src/objects/keys.cc
++++ b/v8/src/objects/keys.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "src/objects/keys.h"
+ 
++#include <algorithm>
++#include <limits>
++#include <vector>
+ #include <optional>
+ 
+ #include "src/api/api-arguments-inl.h"
+@@ -1459,6 +1462,213 @@
+   return result;
+ }
+ 
++
++namespace {
++
++uint32_t OwnFastElementKeys(Tagged<FixedArrayBase> elements,
++                            ElementsKind kind, uint32_t* scanned) {
++  const uint32_t capacity = elements->length().value();
++  *scanned = capacity;
++  if (capacity == 0) return 0;
++  if (!IsFastElementsKind(kind) || !IsFixedArray(elements)) {
++    // Capacity is still reported, but the path is unsupported. Double
++    // elements, dictionary elements and custom element kinds fail closed.
++    return UINT32_MAX;
++  }
++  Tagged<FixedArray> array = Cast<FixedArray>(elements);
++  uint32_t count = 0;
++  for (uint32_t i = 0; i < capacity; i++) {
++    if (!IsTheHole(array->get(i))) count++;
++  }
++  return count;
++}
++
++template <typename Dictionary>
++uint32_t CountDictionaryStringKeys(Isolate* isolate,
++                                   DirectHandle<Dictionary> dictionary) {
++  ReadOnlyRoots roots(isolate);
++  uint32_t count = 0;
++  for (InternalIndex i : dictionary->IterateEntries()) {
++    Tagged<Object> key;
++    if (!dictionary->ToKey(roots, i, &key)) continue;
++    if (IsSymbol(key)) continue;
++    if (dictionary->DetailsAt(i).IsDontEnum()) continue;
++    count++;
++  }
++  return count;
++}
++
++template <typename Dictionary>
++BoundedOwnKeysStatus FillDictionaryStringKeys(
++    Isolate* isolate, DirectHandle<Dictionary> dictionary,
++    Handle<FixedArray> result, uint32_t start, uint32_t* produced) {
++  ReadOnlyRoots roots(isolate);
++  std::vector<int> indices;
++  indices.reserve(static_cast<size_t>(result->length().value()) - start);
++  for (InternalIndex i : dictionary->IterateEntries()) {
++    Tagged<Object> key;
++    if (!dictionary->ToKey(roots, i, &key)) continue;
++    if (IsSymbol(key)) continue;
++    if (dictionary->DetailsAt(i).IsDontEnum()) continue;
++    indices.push_back(i.as_int());
++  }
++  if (!Dictionary::kIsOrderedDictionaryType) {
++    std::sort(indices.begin(), indices.end(), [&](int left, int right) {
++      return dictionary->DetailsAt(InternalIndex(left)).dictionary_index() <
++             dictionary->DetailsAt(InternalIndex(right)).dictionary_index();
++    });
++  }
++  uint32_t position = start;
++  for (int index : indices) {
++    result->set(static_cast<int>(position++),
++                dictionary->NameAt(InternalIndex(index)));
++  }
++  *produced = position;
++  return BoundedOwnKeysStatus::kOk;
++}
++
++}  // namespace
++
++BoundedOwnKeysStatus GetOwnEnumerableStringKeysBounded(
++    Isolate* isolate, DirectHandle<JSReceiver> receiver, uint32_t max_keys,
++    uint32_t max_scan, Handle<FixedArray>* out_keys, uint32_t* out_scanned) {
++  *out_keys = Handle<FixedArray>();
++  *out_scanned = 0;
++  if (!IsJSObject(*receiver)) return BoundedOwnKeysStatus::kUnsupported;
++
++  DirectHandle<JSObject> object = Cast<JSObject>(receiver);
++  DirectHandle<Map> map(object->map(), isolate);
++  if (map->instance_type() != JS_OBJECT_TYPE) {
++    return BoundedOwnKeysStatus::kUnsupported;
++  }
++  if (IsAccessCheckNeeded(*object) || object->HasNamedInterceptor() ||
++      object->HasIndexedInterceptor() ||
++      IsCustomElementsReceiverMap(*map)) {
++    return BoundedOwnKeysStatus::kUnsupported;
++  }
++
++  uint64_t scanned = 0;
++  uint64_t key_count = 0;
++  const bool fast_properties = object->HasFastProperties();
++  uint32_t descriptor_count = 0;
++  uint32_t dictionary_capacity = 0;
++
++  ElementsKind elements_kind = object->GetElementsKind();
++  Tagged<FixedArrayBase> raw_elements = object->elements();
++  uint32_t element_scan = 0;
++  uint32_t element_keys =
++      OwnFastElementKeys(raw_elements, elements_kind, &element_scan);
++  scanned += element_scan;
++  if (scanned > max_scan) {
++    *out_scanned = static_cast<uint32_t>(std::min<uint64_t>(scanned, UINT32_MAX));
++    return BoundedOwnKeysStatus::kScanLimit;
++  }
++  if (element_keys == UINT32_MAX) {
++    return BoundedOwnKeysStatus::kUnsupported;
++  }
++  key_count += element_keys;
++
++  if (fast_properties) {
++    descriptor_count = static_cast<uint32_t>(map->NumberOfOwnDescriptors());
++    scanned += descriptor_count;
++    *out_scanned =
++        static_cast<uint32_t>(std::min<uint64_t>(scanned, UINT32_MAX));
++    if (scanned > max_scan) return BoundedOwnKeysStatus::kScanLimit;
++
++    DirectHandle<DescriptorArray> descriptors(map->instance_descriptors(),
++                                              isolate);
++    for (InternalIndex i : InternalIndex::Range(descriptor_count)) {
++      Tagged<Name> key = descriptors->GetKey(i);
++      if (IsNull(key) || IsSymbol(key)) continue;
++      if (descriptors->GetDetails(i).IsDontEnum()) continue;
++      key_count++;
++    }
++  } else {
++#if V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL
++    DirectHandle<SwissNameDictionary> dictionary(
++        object->property_dictionary_swiss(), isolate);
++#else
++    DirectHandle<NameDictionary> dictionary(object->property_dictionary(),
++                                            isolate);
++#endif
++    dictionary_capacity = static_cast<uint32_t>(dictionary->Capacity());
++    scanned += dictionary_capacity;
++    *out_scanned =
++        static_cast<uint32_t>(std::min<uint64_t>(scanned, UINT32_MAX));
++    if (scanned > max_scan) return BoundedOwnKeysStatus::kScanLimit;
++    key_count += CountDictionaryStringKeys(isolate, dictionary);
++  }
++
++  if (key_count > max_keys) return BoundedOwnKeysStatus::kTooManyKeys;
++  if (key_count > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
++    return BoundedOwnKeysStatus::kTooManyKeys;
++  }
++
++  Handle<FixedArray> result =
++      isolate->factory()->NewFixedArray(static_cast<int>(key_count));
++  if (result.is_null()) return BoundedOwnKeysStatus::kException;
++
++  // No JavaScript runs, but allocation can collect. Re-read through handles and
++  // verify the shape/dictionary/element capacity did not change.
++  DirectHandle<FixedArrayBase> elements(object->elements(), isolate);
++  if (elements->length().value() != element_scan) {
++    return BoundedOwnKeysStatus::kUnsupported;
++  }
++  if (fast_properties) {
++    if (map->NumberOfOwnDescriptors() !=
++        static_cast<int>(descriptor_count)) {
++      return BoundedOwnKeysStatus::kUnsupported;
++    }
++  } else {
++#if V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL
++    DirectHandle<SwissNameDictionary> dictionary(
++        object->property_dictionary_swiss(), isolate);
++#else
++    DirectHandle<NameDictionary> dictionary(object->property_dictionary(),
++                                            isolate);
++#endif
++    if (static_cast<uint32_t>(dictionary->Capacity()) != dictionary_capacity) {
++      return BoundedOwnKeysStatus::kUnsupported;
++    }
++  }
++
++  uint32_t produced = 0;
++  if (element_keys != 0) {
++    DirectHandle<FixedArray> array(Cast<FixedArray>(*elements), isolate);
++    for (uint32_t i = 0; i < element_scan; i++) {
++      if (IsTheHole(array->get(i))) continue;
++      DirectHandle<String> key = isolate->factory()->Uint32ToString(i);
++      if (key.is_null()) return BoundedOwnKeysStatus::kException;
++      result->set(static_cast<int>(produced++), *key);
++    }
++  }
++
++  if (fast_properties) {
++    DirectHandle<DescriptorArray> final_descriptors(
++        map->instance_descriptors(), isolate);
++    for (InternalIndex i : InternalIndex::Range(descriptor_count)) {
++      Tagged<Name> key = final_descriptors->GetKey(i);
++      if (IsNull(key) || IsSymbol(key)) continue;
++      if (final_descriptors->GetDetails(i).IsDontEnum()) continue;
++      result->set(static_cast<int>(produced++), key);
++    }
++  } else {
++#if V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL
++    DirectHandle<SwissNameDictionary> dictionary(
++        object->property_dictionary_swiss(), isolate);
++#else
++    DirectHandle<NameDictionary> dictionary(object->property_dictionary(),
++                                            isolate);
++#endif
++    BoundedOwnKeysStatus status =
++        FillDictionaryStringKeys(isolate, dictionary, result, produced, &produced);
++    if (status != BoundedOwnKeysStatus::kOk) return status;
++  }
++  if (produced != key_count) return BoundedOwnKeysStatus::kUnsupported;
++  *out_keys = result;
++  return BoundedOwnKeysStatus::kOk;
++}
++
+ #undef RETURN_NOTHING_IF_NOT_SUCCESSFUL
+ #undef RETURN_FAILURE_IF_NOT_SUCCESSFUL
+ }  // namespace v8::internal
+--- a/v8/src/api/api.cc
++++ b/v8/src/api/api.cc
+@@ -101,6 +101,7 @@
+ #include "src/objects/js-array-inl.h"
+ #include "src/objects/js-collection-inl.h"
+ #include "src/objects/js-objects.h"
++#include "src/objects/keys.h"
+ #include "src/objects/js-promise-inl.h"
+ #include "src/objects/js-regexp-inl.h"
+ #include "src/objects/js-weak-refs-inl.h"
+@@ -4991,6 +4992,55 @@
+                           v8::IndexFilter::kIncludeIndices, key_conversion);
+ }
+ 
++namespace {
++template <typename T>
++Local<T> LocalFromRawHandle(const T* ptr) {
++  static_assert(sizeof(Local<T>) == sizeof(T*));
++  return *reinterpret_cast<const Local<T>*>(&ptr);
++}
++}  // namespace
++
++// Narrow C ABI for the opt-in neojs Node adapter. Returns the status values of
++// i::BoundedOwnKeysStatus, the total scan count, and on success a JS array of
++// own enumerable string keys. The bounds are applied before output allocation.
++extern "C" V8_EXPORT int
++neojs_v8_get_own_enumerable_string_keys_bounded(
++    const Object* self, const Context* context, uint32_t max_keys,
++    uint32_t max_scan, const Array** out_array, uint32_t* out_len,
++    uint32_t* out_scanned) {
++  if (out_array) *out_array = nullptr;
++  if (out_len) *out_len = 0;
++  if (out_scanned) *out_scanned = 0;
++  if (self == nullptr || context == nullptr || out_array == nullptr ||
++      out_len == nullptr || out_scanned == nullptr) {
++    return static_cast<int>(i::BoundedOwnKeysStatus::kUnsupported);
++  }
++
++  PrepareForExecutionScope api_scope{
++      LocalFromRawHandle(context), RCCId::kAPI_Object_GetPropertyNames};
++  i::Isolate* i_isolate = api_scope.i_isolate();
++  i::DirectHandle<i::JSReceiver> receiver =
++      i::Cast<i::JSReceiver>(Utils::OpenDirectHandle(self));
++  i::Handle<i::FixedArray> keys;
++  uint32_t scanned = 0;
++  i::BoundedOwnKeysStatus status = i::GetOwnEnumerableStringKeysBounded(
++      i_isolate, receiver, max_keys, max_scan, &keys, &scanned);
++  *out_scanned = scanned;
++  if (status != i::BoundedOwnKeysStatus::kOk) {
++    return static_cast<int>(status);
++  }
++  const uint32_t length = keys->ulength().value();
++  i::Handle<i::JSArray> array = i_isolate->factory()->NewJSArrayWithElements(
++      keys, i::PACKED_ELEMENTS, length);
++  if (array.is_null()) {
++    return static_cast<int>(i::BoundedOwnKeysStatus::kException);
++  }
++  Local<Array> local = Utils::ToLocal(array);
++  *out_array = *local;
++  *out_len = length;
++  return static_cast<int>(i::BoundedOwnKeysStatus::kOk);
++}
++
+ MaybeLocal<String> v8::Object::ObjectProtoToString(Local<Context> context) {
+   PrepareForExecutionScope api_scope{context,
+                                      RCCId::kAPI_Object_ObjectProtoToString};
