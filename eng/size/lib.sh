@@ -448,7 +448,7 @@ size_append_record() {
         other_key=$(jq -r --arg context_key "$context_key" --arg key "$key" \
             'select(.context_key == $context_key and .key != $key and .status == "ok") | .key' \
             "$ledger" | head -n 1)
-        if [ -n "$other_key" ]; then
+        if [ -n "$other_key" ] && [ "$(jq -r '.status' <<<"$record")" = "ok" ]; then
             size_warn "same build context already recorded with a different digest ($other_key); this build is not reproducing itself and both measurements are being kept"
         fi
     fi
