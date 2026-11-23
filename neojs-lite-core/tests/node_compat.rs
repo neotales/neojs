@@ -176,6 +176,13 @@ if (explicit !== "explicit") throw new Error(`explicit environment is wrong: ${e
 
 const literal = execFileSync("/bin/echo", ["a;b"], { encoding: "utf8" });
 if (literal !== "a;b\n") throw new Error(`shell interpretation: ${JSON.stringify(literal)}`);
+
+const undefinedArgs = execFileSync("/bin/echo", undefined, { encoding: "utf8" });
+if (undefinedArgs !== "\n") throw new Error(`undefined args: ${String(undefinedArgs)}`);
+const undefinedSpawn = spawnSync("/bin/echo", undefined, { encoding: "utf8" });
+if (undefinedSpawn.status !== 0 || undefinedSpawn.stdout !== "\n") {
+    throw new Error(`undefined spawn args: ${undefinedSpawn.status} ${String(undefinedSpawn.stdout)}`);
+}
 "#,
     )
     .expect("real child processes");
@@ -211,6 +218,17 @@ try {
 if (!overflow || overflow.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
     throw new Error(`maxBuffer error: ${overflow && overflow.code}`);
 }
+
+let signalled = null;
+try {
+    execFileSync("/bin/sh", ["-c", "kill -TERM $$"], { encoding: "utf8" });
+} catch (error) {
+    signalled = error;
+}
+if (!signalled || signalled.code !== "ERR_NODE_CHILD_PROCESS_EXIT") {
+    throw new Error(`signal failure: ${signalled && signalled.code}`);
+}
+if (signalled.status !== null) throw new Error(`signal status: ${signalled.status}`);
 "#,
     )
     .expect("bounded failures");
@@ -279,17 +297,28 @@ if (denied !== "ERR_NODE_CHILD_PROCESS_DENIED") {
     throw new Error(`actual denied call: ${denied}`);
 }
 
-let code = null;
-try {
-    childProcess.execFileSync("/bin/echo", [], {
+const oversized = [
+    () => childProcess.execFileSync("x".repeat(8192), [], { encoding: "utf8" }),
+    () => childProcess.execFileSync("/bin/echo", ["x".repeat(100000)], { encoding: "utf8" }),
+    () => childProcess.execFileSync("/bin/echo", [], {
         encoding: "utf8",
-        input: "x".repeat(1048577),
-    });
-} catch (error) {
-    code = error && error.code;
-}
-if (code !== "ERR_NODE_REQUEST_TOO_LARGE") {
-    throw new Error(`normalization cap: ${code}`);
+        env: { NEOJS_OVERSIZED: "x".repeat(100000) },
+    }),
+    () => childProcess.execFileSync("/bin/echo", [], {
+        encoding: "utf8",
+        input: "x".repeat(8 * 1024 * 1024),
+    }),
+];
+for (const call of oversized) {
+    let code = null;
+    try {
+        call();
+    } catch (error) {
+        code = error && error.code;
+    }
+    if (code !== "ERR_NODE_REQUEST_TOO_LARGE") {
+        throw new Error(`normalization cap: ${code}`);
+    }
 }
 "#,
     )

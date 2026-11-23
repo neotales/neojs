@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 //! QuickJS adapter for opt-in Node compatibility.
 //!
 //! This crate exposes `node:child_process` as a native QuickJS C module. The
@@ -15,6 +15,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::ffi::c_char;
 
 use rquickjs::Array;
 use rquickjs::Ctx;
@@ -180,6 +181,7 @@ fn sync_function<'js>(
 
             let (args, options_value) = match arguments.get(1) {
                 None => (Vec::new(), None),
+                Some(value) if value.is_undefined() => (Vec::new(), arguments.get(2)),
                 Some(value) if value.is_array() || value.is_proxy() => {
                     let Some(object) = value.as_object() else {
                         return Err(invalid(&ctx, "arguments must be an array"));
@@ -392,7 +394,7 @@ fn read_array_arguments<'js>(
 
 fn read_argument<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Result<String> {
     if value.is_string() {
-        let text = value.as_string().expect("checked string").to_string()?;
+        let text = read_string(ctx, value, "argument", MAX_ARG_BYTES)?;
         if text.contains('\0') {
             return Err(invalid(ctx, "an argument must not contain a NUL byte"));
         }
@@ -461,11 +463,55 @@ fn read_string<'js>(
     if !value.is_string() {
         return Err(invalid(ctx, &format!("{what} must be a string")));
     }
+    // QuickJS's public property API returns the code-unit length without
+    // copying the string. UTF-8 length is not smaller than the UTF-16 length for
+    // any scalar, so this rejects a clearly oversized string before the host
+    // copies or converts it.
+    let units = string_length(ctx, value).ok_or_else(|| {
+        coded_error(
+            ctx,
+            "ERR_INVALID_ARG_VALUE",
+            &format!("{what} length could not be read"),
+        )
+    })?;
+    if units > max_bytes {
+        return Err(request_too_large(ctx));
+    }
     let text = value.as_string().expect("checked string").to_string()?;
     if text.len() > max_bytes {
+        // A UTF-16 length below the bound can still exceed it in UTF-8; the
+        // conversion allocation is bounded by four times the pre-check bound.
         return Err(request_too_large(ctx));
     }
     Ok(text)
+}
+
+/// Returns a string's UTF-16 code-unit length without converting it to Rust.
+///
+/// QuickJS's `JS_GetPropertyStr(..., "length")` handles primitive strings
+/// directly and returns an integer; it does not copy the string. The returned
+/// value is freed exactly once. This is the only unsafe function in this crate:
+/// the context and value are live QuickJS handles, the property name is a
+/// static C string, and the returned value is released exactly once.
+#[allow(unsafe_code)]
+fn string_length(ctx: &Ctx<'_>, value: &Value<'_>) -> Option<usize> {
+    let raw_ctx = ctx.as_raw().as_ptr();
+    let length = unsafe {
+        rquickjs::qjs::JS_GetPropertyStr(
+            raw_ctx,
+            value.as_raw(),
+            c"length".as_ptr() as *const c_char,
+        )
+    };
+    let mut units = 0i32;
+    let status = unsafe { rquickjs::qjs::JS_ToInt32(raw_ctx, &mut units, length) };
+    unsafe { rquickjs::qjs::JS_FreeValue(raw_ctx, length) };
+    if status < 0 || units < 0 {
+        let _ = ctx.catch();
+        None
+    } else {
+        usize::try_from(units).ok()
+    }
 }
 
 fn read_u64<'js>(ctx: &Ctx<'js>, value: &Value<'js>, what: &str, positive: bool) -> Result<u64> {
@@ -544,10 +590,10 @@ fn spawn_error_parts(result: &SyncResult) -> Option<(&'static str, &'static str)
 
 fn result_error_parts(result: &SyncResult) -> Option<(&'static str, &'static str)> {
     spawn_error_parts(result).or_else(|| {
-        if result.status.unwrap_or(0) != 0 {
+        if result.status != Some(0) {
             Some((
                 "ERR_NODE_CHILD_PROCESS_EXIT",
-                "child process exited with a non-zero status",
+                "child process did not exit with status 0",
             ))
         } else {
             None
