@@ -404,7 +404,7 @@ record_missing() {
     record=$(make_record "missing" "$package" "$bin" "$bin" "null" "" "" "" \
         "$reason" "$measured_at" "$notes_json" "null")
     if [ "$NO_RECORD" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-        printf '%s\n' "$record"
+        jq -c . <<<"$record"
     else
         size_append_record "$LEDGER" "$record"
     fi
@@ -419,7 +419,7 @@ measure_package() {
     local log
     local bytes sha256 file_type measured_at notes_json record v8_json="null"
 
-    build_cmd=(cargo "+$TOOLCHAIN" build --manifest-path "$ROOT/Cargo.toml" \
+    build_cmd=(cargo "+$TOOLCHAIN" build \
         --release --locked --target "$TARGET" -p "$package")
     if [ "${#BUILD_NETWORK[@]}" -gt 0 ]; then
         build_cmd+=("${BUILD_NETWORK[@]}")
@@ -445,8 +445,8 @@ measure_package() {
     command=$(printf '%q ' "${build_cmd[@]}")
     command=${command% }
     log="$TARGET_DIR/build-$package.log"
-    printf 'size: building %s (%s)\n' "$package" "$TARGET"
-    if ! "${build_cmd[@]}" >"$log" 2>&1; then
+    printf 'size: building %s (%s)\n' "$package" "$TARGET" >&2
+    if ! (cd -- "$ROOT" && "${build_cmd[@]}") >"$log" 2>&1; then
         tail -n 50 "$log" >&2
         size_die "build failed for $package; full log: $log"
     fi
@@ -466,7 +466,7 @@ measure_package() {
 
     MEASURED_COUNT=$((MEASURED_COUNT + 1))
     if [ "$NO_RECORD" -eq 1 ]; then
-        printf '%s\n' "$record"
+        jq -c . <<<"$record"
     else
         size_append_record "$LEDGER" "$record"
     fi
@@ -519,7 +519,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
-printf 'size: measured %d package(s), missing %d\n' "$MEASURED_COUNT" "$MISSING_COUNT"
+printf 'size: measured %d package(s), missing %d\n' "$MEASURED_COUNT" "$MISSING_COUNT" >&2
 if [ "$MISSING_COUNT" -gt 0 ] && [ "$ALLOW_MISSING" -ne 1 ]; then
     exit 3
 fi

@@ -440,7 +440,7 @@ size_append_record() {
         existing_key=$(jq -r --arg key "$key" 'select(.key == $key) | .key' \
             "$ledger" | head -n 1)
         if [ -n "$existing_key" ]; then
-            printf 'size: already recorded: %s\n' "$key"
+            printf 'size: already recorded: %s\n' "$key" >&2
             flock -u 200
             exec 200>&-
             return 0
@@ -455,7 +455,7 @@ size_append_record() {
     printf '%s\n' "$record" >&200
     flock -u 200
     exec 200>&-
-    printf 'size: recorded: %s\n' "$key"
+    printf 'size: recorded: %s\n' "$key" >&2
 }
 
 size_report_ledger() {

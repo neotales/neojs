@@ -264,6 +264,11 @@ expect_status 0 "dry run succeeds" \
     bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs --ledger "$TMP/dry.jsonl"
 assert_contains "$TMP/stdout" "--release" "dry run prints the release command"
 assert_contains "$TMP/stdout" "dry run complete" "dry run reports completion"
+if grep -Fq -- "--manifest-path" "$TMP/stdout"; then
+    fail "recorded build command contains a machine-specific manifest path"
+else
+    ok "recorded build command has no machine-specific manifest path"
+fi
 
 expect_status 0 "dry run honours an explicit target directory" \
     bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs --target-dir "$TMP/size-build" \
