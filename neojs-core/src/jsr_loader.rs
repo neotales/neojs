@@ -987,7 +987,7 @@ mod tests {
                 "pkg",
                 "1.1.0",
                 "/mod.ts",
-                b"import { isDigit } from \"chars\";\nimport { helper } from \"./lib/helper.ts\";\ninterface Box { value: number }\nexport const value: number = helper();\nexport const label: string = \"typed\";\nexport const builtin: boolean = isDigit(55);\n",
+                b"import { isDigit } from \"neo:chars\";\nimport { helper } from \"./lib/helper.ts\";\ninterface Box { value: number }\nexport const value: number = helper();\nexport const label: string = \"typed\";\nexport const builtin: boolean = isDigit(55);\n",
             )
             .file(
                 "scope",

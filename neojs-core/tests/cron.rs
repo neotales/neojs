@@ -30,26 +30,31 @@ fn run_js(source: &str) {
 fn cron_module_identity_and_exports() {
     run_js(
         r#"
-import * as cron from "cron";
-import * as alias from "neo:cron";
+import * as cron from "neo:cron";
 import * as upper from "NEO:cron";
 
-const registry = Neo.getBuiltInModule("cron");
-if (registry !== Neo.getBuiltInModule("cron")) {
+const registry = Neo.getBuiltInModule("neo:cron");
+if (registry !== Neo.getBuiltInModule("neo:cron")) {
     throw new Error("cron lookup is not cached");
 }
 if (!Object.isFrozen(registry)) throw new Error("cron is not frozen");
-if (Neo.getBuiltInModule("neo:cron") !== undefined) {
-    throw new Error("the registry accepted the prefixed spelling");
+if (Neo.getBuiltInModule("cron") !== undefined) {
+    throw new Error("the registry accepted a bare name");
 }
-if (alias !== cron) throw new Error("cron and neo:cron differ");
 if (upper !== cron) throw new Error("the scheme is not case-insensitive");
-if (import.meta.resolve("cron") !== "neo:cron") {
+if (import.meta.resolve("neo:cron") !== "neo:cron") {
     throw new Error("cron did not resolve canonically");
 }
-if (import.meta.resolve("neo:cron") !== "neo:cron") {
-    throw new Error("neo:cron did not resolve canonically");
+if (import.meta.resolve("NEO:cron") !== "neo:cron") {
+    throw new Error("the scheme is not case-insensitive");
 }
+let bareRejected = false;
+try {
+    await import("cron");
+} catch (error) {
+    bareRejected = error instanceof TypeError;
+}
+if (!bareRejected) throw new Error("bare cron import was accepted");
 
 const exported = Object.keys(cron).sort();
 const registered = Object.keys(registry).sort();

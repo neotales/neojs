@@ -1,10 +1,10 @@
-// The `chars` built-in module as seen by `import ... from "chars"` or
+// The `chars` built-in module as seen by
 // `import ... from "neo:chars"`.
 //
 // The implementations live in `neo.js`, which the runtime evaluates once per
 // realm. This file only re-exports them, so every named export is the same
 // function object as the matching property of
-// `Neo.getBuiltInModule("chars")`. Nothing here reaches the private module
+// `Neo.getBuiltInModule("neo:chars")`. Nothing here reaches the private module
 // registry: it reads the public module object and binds its properties.
 //
 // The exported list must match the properties of the `chars` object in
@@ -15,7 +15,7 @@
 // object behind it is frozen, so neither path can replace a function. Adding a
 // property to an exported function object is visible through both paths
 // because they share the same function.
-const chars = Neo.getBuiltInModule("chars");
+const chars = Neo.getBuiltInModule("neo:chars");
 
 export const isChar = chars.isChar;
 export const isAscii = chars.isAscii;

@@ -1759,7 +1759,7 @@ deno_core::extension!(
         op_neo_crypto_shamir_async_join,
         op_neo_crypto_shamir_take_result
     ],
-    docs = "GF(256) Shamir secret sharing ops behind `Neo.getBuiltInModule(\"crypto\")`."
+    docs = "GF(256) Shamir secret sharing ops behind `Neo.getBuiltInModule(\"neo:crypto\")`."
 );
 
 #[cfg(test)]

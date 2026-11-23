@@ -32,7 +32,7 @@ fn run_js_error(source: &str) -> String {
 ///
 /// They use only the language, not the module under test.
 const HELPERS: &str = r#"
-import { Readable, Writable, stdout, stderr, MAX_BYTES } from "stdio";
+import { Readable, Writable, stdout, stderr, MAX_BYTES } from "neo:stdio";
 
 function expectCode(code, action) {
     let error;
@@ -519,10 +519,10 @@ console.log("stdio-console-after-close");
 fn registry_and_import_share_classes_constants_and_streams() {
     run_js(
         r#"
-import * as namespace from "stdio";
-import { Readable as StaticReadable, stdout as staticStdout } from "stdio";
+import * as namespace from "neo:stdio";
+import { Readable as StaticReadable, stdout as staticStdout } from "neo:stdio";
 
-const registry = Neo.getBuiltInModule("stdio");
+const registry = Neo.getBuiltInModule("neo:stdio");
 const dynamic = await import("neo:stdio");
 
 if (!Object.isFrozen(registry)) throw new Error("the registry module is not frozen");
@@ -545,8 +545,16 @@ if (JSON.stringify(exported) !== JSON.stringify(registered)) {
 }
 if ("default" in namespace) throw new Error("stdio must not have a default export");
 
-if (import.meta.resolve("stdio") !== "neo:stdio") throw new Error("stdio resolves canonically");
-if (import.meta.resolve("neo:stdio") !== "neo:stdio") throw new Error("neo:stdio resolves canonically");
+if (import.meta.resolve("neo:stdio") !== "neo:stdio") throw new Error("stdio resolves canonically");
+if (import.meta.resolve("NEO:stdio") !== "neo:stdio") throw new Error("scheme is not case-insensitive");
+if (Neo.getBuiltInModule("stdio") !== undefined) throw new Error("registry accepted a bare name");
+let bareRejected = false;
+try {
+    await import("stdio");
+} catch (error) {
+    bareRejected = error instanceof TypeError;
+}
+if (!bareRejected) throw new Error("bare stdio import was accepted");
 
 const reader = new registry.Readable(Uint8Array.from([1]));
 if (reader.remaining !== 1) throw new Error("a class from the registry did not construct");
@@ -558,8 +566,8 @@ if (reader.remaining !== 1) throw new Error("a class from the registry did not c
 fn built_in_namespace_and_registry_are_immutable() {
     run_js(
         r#"
-import * as namespace from "stdio";
-const registry = Neo.getBuiltInModule("stdio");
+import * as namespace from "neo:stdio";
+const registry = Neo.getBuiltInModule("neo:stdio");
 
 let rejections = 0;
 try {
@@ -642,7 +650,7 @@ if (reader.remaining !== 0) throw new Error("remaining after the roundtrip");
 fn importing_an_unknown_name_from_stdio_fails_to_link() {
     let message = run_js_error(
         r#"
-import { stdin } from "stdio";
+import { stdin } from "neo:stdio";
 console.log(stdin);
 "#,
     );

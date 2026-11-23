@@ -248,13 +248,13 @@ console.error("err");
 ```
 
 **Use the console module.** The `console` built-in exports the console object the runtime installed
-in the realm. A module can import it instead of relying on the global, and `console` and
-`neo:console` are the same module instance. `Neo.getBuiltInModule("console")` returns that object,
+in the realm. A module can import it instead of relying on the global, and `neo:console` is the
+canonical and only module specifier. `Neo.getBuiltInModule("neo:console")` returns that object,
 and the default export's value is that same object. It is the object `globalThis.console` named
 before user code can replace the whole global property.
 
 ```js
-import console from "console";
+import console from "neo:console";
 import { warn } from "neo:console";
 
 console.log("stdout");
@@ -298,27 +298,25 @@ Identity and mutation semantics:
   new capability.
 
 **Inspect the runtime.** `Neo.engine` names the engine that installed the global. This V8 runtime
-reports `"neo"`. `Neo.getBuiltInModulesList()` returns one frozen array of every implemented built-in
-module specifier, in registration order. Each built-in contributes its bare registry name and its
-canonical `neo:` specifier, so the `uuid/v4` and `uuid/v7` subpaths appear in both forms.
+reports `"neo"`. `Neo.getBuiltInModulesList()` returns one frozen array of the canonical `neo:`
+specifiers of every implemented built-in module, in registration order. The `uuid/v4` and `uuid/v7`
+subpaths appear as their canonical specifiers too.
 
 ```js
 Neo.engine; // "neo"
 Neo.getBuiltInModulesList();
-// ["age", "neo:age", "assert", "neo:assert", "chars", "neo:chars",
-//  "console", "neo:console", "cron", "neo:cron", "crypto", "neo:crypto",
-//  "os", "neo:os", "path", "neo:path", "slices", "neo:slices",
-//  "ssh", "neo:ssh", "stdio", "neo:stdio", "strings", "neo:strings",
-//  "test", "neo:test", "uuid", "neo:uuid", "uuid/v4", "neo:uuid/v4",
-//  "uuid/v7", "neo:uuid/v7"]
+// ["neo:age", "neo:assert", "neo:chars", "neo:console",
+//  "neo:cron", "neo:crypto", "neo:os", "neo:path", "neo:slices",
+//  "neo:ssh", "neo:stdio", "neo:strings", "neo:test", "neo:uuid",
+//  "neo:uuid/v4", "neo:uuid/v7"]
 ```
 
 The list is a snapshot of the current runtime, not a promise of a future module, and it lists no
 Node modules: Node support is a separate opt-in and never enters this registry. The same frozen array is returned for every call,
 so a caller cannot change later results; a new `Runtime` allocates a new array. `Neo.getBuiltInModule`
-takes the bare names in the list. The `neo:` entries are the canonical import specifiers; the bare
-entries are registry names and import aliases, so `Neo.getBuiltInModule("neo:age")` returns
-`undefined`.
+takes the same canonical `neo:` specifier: `Neo.getBuiltInModule("neo:age")` returns the module, and
+`Neo.getBuiltInModule("age")` returns `undefined`. Imports follow the same rule; the bare name `age`
+is not a built-in module specifier.
 
 The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"`.
 `Neo.getBuiltInModulesList()` is one frozen empty array because that runtime implements no built-in
@@ -326,14 +324,14 @@ modules, and `Neo.getBuiltInModule(name)` returns `undefined` for every string n
 throws `TypeError`. That empty list is not a claim that a module is planned or available; `neo:`
 imports remain rejected there.
 
-**Use the stdio built-in.** `Neo.getBuiltInModule("stdio")` returns a frozen module object cached
-for the realm. `stdio` is the canonical bare specifier and `neo:stdio` is an alias for the same
-module instance. It exports `Readable`, `Writable`, `stdout`, `stderr`, and `MAX_BYTES`; there is no
-default export. It is a synchronous byte-stream foundation, not Node's `stream` or `process` module
-and not the WHATWG Streams API. No Node or Web compatibility is promised.
+**Use the stdio built-in.** `Neo.getBuiltInModule("neo:stdio")` returns a frozen module object cached
+for the realm. `neo:stdio` is the canonical and only module specifier. It exports `Readable`,
+`Writable`, `stdout`, `stderr`, and `MAX_BYTES`; there is no default export. It is a synchronous
+byte-stream foundation, not Node's `stream` or `process` module and not the WHATWG Streams API. No
+Node or Web compatibility is promised.
 
 ```js
-import { Readable, Writable, stdout, stderr } from "stdio";
+import { Readable, Writable, stdout, stderr } from "neo:stdio";
 
 const writer = new Writable();
 writer.writeSync(Uint8Array.from([0x00, 0xff]));
@@ -410,13 +408,13 @@ will be additive, `Promise`-based, and will perform its work on a real asynchron
 no `pipe`, `on`, event, backpressure, or `Buffer` surface, and none is promised. The module is not a
 permission, sandbox, or isolation boundary; `Deno.core` remains reachable, as noted below.
 
-**Use the path built-in.** `Neo.getBuiltInModule("path")` returns a frozen module object cached for
-the realm. `path` is the canonical bare specifier and `neo:path` is an alias for the same module
-instance. It exports frozen `posix` and `win32` namespaces plus host-selected functions, so the same
-code can use an explicit syntax on any host.
+**Use the path built-in.** `Neo.getBuiltInModule("neo:path")` returns a frozen module object cached
+for the realm. `neo:path` is the canonical and only module specifier. It exports frozen `posix` and
+`win32` namespaces plus host-selected functions, so the same code can use an explicit syntax on any
+host.
 
 ```js
-import { posix, win32, SEPARATOR, SEPARATOR_PATTERN } from "path";
+import { posix, win32, SEPARATOR, SEPARATOR_PATTERN } from "neo:path";
 
 posix.join("/srv", "app", "..", "data"); // "/srv/data"
 posix.parse("/srv/data/file.txt");
@@ -495,13 +493,13 @@ surfaces are not promised. The path algorithms are adapted from NeoLiteJS and `@
 the MIT license; see [`neojs-core/THIRD_PARTY_NOTICES.md`](neojs-core/THIRD_PARTY_NOTICES.md) for the
 exact revision, adapted files, and notices.
 
-**Use the os built-in.** `Neo.getBuiltInModule("os")` returns a frozen module object that is cached
-for the realm. `os` is the canonical bare specifier and `neo:os` is an alias for the same module
-instance. The named exports are `platform` and `arch`, and each is the same string as the matching
-registry property. There is no default export, and neojs installs no `os` global.
+**Use the os built-in.** `Neo.getBuiltInModule("neo:os")` returns a frozen module object that is
+cached for the realm. `neo:os` is the canonical and only module specifier. The named exports are
+`platform` and `arch`, and each is the same string as the matching registry property. There is no
+default export, and neojs installs no `os` global.
 
 ```js
-import { arch, platform } from "os";
+import { arch, platform } from "neo:os";
 
 console.log(platform); // e.g. "linux"
 console.log(arch);     // e.g. "x86_64"
@@ -526,16 +524,15 @@ module. Only Linux x86-64 is verified in this repository; values on Windows, mac
 targets are the compiler's constants but those platforms are unverified.
 
 **Use the character built-in.** The global `Neo` object exposes the modules this runtime ships.
-`Neo.getBuiltInModule("chars")` returns a frozen module object that is cached for the realm, so
+`Neo.getBuiltInModule("neo:chars")` returns a frozen module object that is cached for the realm, so
 repeated lookups return the same object. An unknown name returns `undefined`; a non-string name
 throws `TypeError`.
 
-The same module is importable as an ECMAScript module. `chars` is the canonical bare specifier, and
-`neo:chars` is an alias for the same module instance. Static imports, dynamic imports, and the
-registry all expose the same function objects.
+The same module is importable as an ECMAScript module. `neo:chars` is the canonical and only module
+specifier. Static imports, dynamic imports, and the registry all expose the same function objects.
 
 ```js
-import { isLetter, isDigit, toUpper } from "chars";
+import { isLetter, isDigit, toUpper } from "neo:chars";
 
 console.log(isLetter("λ".codePointAt(0))); // true
 console.log(isDigit("٣".codePointAt(0))); // true
@@ -545,29 +542,31 @@ console.log(toUpper("a".codePointAt(0))); // 65
 ```js
 import { isLetter } from "neo:chars";
 
-const registry = Neo.getBuiltInModule("chars");
-const dynamic = await import("chars");
+const registry = Neo.getBuiltInModule("neo:chars");
+const dynamic = await import("neo:chars");
 
 console.log(isLetter === registry.isLetter); // true
 console.log(dynamic === await import("neo:chars")); // true
-console.log(import.meta.resolve("chars")); // neo:chars
+console.log(import.meta.resolve("neo:chars")); // neo:chars
 ```
 
 Identity and mutation semantics:
 
 - Every named export is the same function object as the matching property of
-  `Neo.getBuiltInModule("chars")`. They are shared, not copies, so adding a property to an exported
+  `Neo.getBuiltInModule("neo:chars")`. They are shared, not copies, so adding a property to an exported
   function is visible through both paths. The namespace object and the registry object are different
   containers over those shared functions, not the same object.
 - The module object is frozen and the module namespace bindings cannot be assigned, so neither path
   can replace a function. In module code, assigning to a namespace property throws `TypeError`.
 - The module is cached per realm, so every importer in one `Runtime` sees one module namespace. A
   new `Runtime` creates a new realm and new function objects.
-- `Neo.getBuiltInModule` takes bare module names: `Neo.getBuiltInModule("neo:chars")` returns
-  `undefined`, and the import specifier `neo:chars` is the way to use the prefixed form. The
-  `neo:` scheme is matched case-insensitively, as URL schemes are, so `NEO:chars` also works; the
-  bare name `chars` is matched exactly.
-- There is no default export. `import chars from "chars"` fails to link, as does importing a name
+- `Neo.getBuiltInModule` takes the canonical `neo:` specifier: `Neo.getBuiltInModule("neo:chars")`
+  returns the module, and `Neo.getBuiltInModule("chars")` returns `undefined`. The `neo:` scheme is
+  matched case-insensitively, as URL schemes are, so `NEO:chars` imports the same module; the path
+  `chars` is matched exactly. Leading or trailing whitespace and embedded ASCII control characters
+  are rejected rather than trimmed by URL parsing. A bare `chars` import is rejected with a message
+  naming `neo:chars`.
+- There is no default export. `import chars from "neo:chars"` fails to link, as does importing a name
   the module does not export.
 
 Implemented functions:
@@ -600,15 +599,15 @@ U+0085 and U+00A0 but excludes U+FEFF. This module is an independent implementat
 `@neotales/chars` and the QuickJS `neo:chars` module. It does not port their lookup tables, and it
 does not claim compatibility with either API.
 
-**Use the strings built-in.** `Neo.getBuiltInModule("strings")` returns a frozen module object that
-is cached for the realm. `strings` is the canonical bare specifier and `neo:strings` is an alias for
-the same module instance. The named exports are `equalFold`, `startsWithFold`, `endsWithFold`,
-`indexOfFold`, `lastIndexOfFold`, `trim`, `trimStart`, and `trimEnd`; each is the same function
-object as the matching registry property, and there is no default export. The module is plain
-ECMAScript: it calls no host op and adds no capability beyond the strings it is given.
+**Use the strings built-in.** `Neo.getBuiltInModule("neo:strings")` returns a frozen module object
+that is cached for the realm. `neo:strings` is the canonical and only module specifier. The named
+exports are `equalFold`, `startsWithFold`, `endsWithFold`, `indexOfFold`, `lastIndexOfFold`, `trim`,
+`trimStart`, and `trimEnd`; each is the same function object as the matching registry property, and
+there is no default export. The module is plain ECMAScript: it calls no host op and adds no
+capability beyond the strings it is given.
 
 ```js
-import { equalFold, indexOfFold, lastIndexOfFold, trim } from "strings";
+import { equalFold, indexOfFold, lastIndexOfFold, trim } from "neo:strings";
 
 console.log(equalFold("Hello WÖrLD", "hello wörld")); // true
 console.log(indexOfFold("😀a", "A")); // 2 (UTF-16 code units)
@@ -642,16 +641,16 @@ Folding and trimming are independent implementations informed by `@neotales/stri
 `@neotales/slices`. They do not port those packages' tables and do not claim compatibility with
 their code point indexing or their `Uint8Array`/`Uint16Array` buffer forms.
 
-**Use the assert built-in.** `Neo.getBuiltInModule("assert")` returns the frozen callable `assert`
-function itself, cached for the realm. `assert` is the canonical bare specifier and `neo:assert` is
-an alias for the same module instance. The default export is that function, and the named exports
+**Use the assert built-in.** `Neo.getBuiltInModule("neo:assert")` returns the frozen callable `assert`
+function itself, cached for the realm. `neo:assert` is the canonical and only module specifier. The
+default export is that function, and the named exports
 `assert`, `AssertionError`, `ok`, `equals`, `notEquals`, `strictEquals`, `notStrictEquals`, `fail`,
 `throws`, `doesNotThrow`, `rejects`, and `doesNotReject` are its own properties. `assert.ok` is the
 callable itself. The module calls one private host op to observe a genuine native Promise; it adds
 no filesystem, network, environment, or permission capability.
 
 ```js
-import assert, { equals, strictEquals } from "assert";
+import assert, { equals, strictEquals } from "neo:assert";
 
 const value = 1;
 assert(value, "optional message");
@@ -732,16 +731,15 @@ for tests but not for huge collections. `Error` `cause` and `AggregateError.erro
 non-enumerable and are not compared. Proxies can run their traps during comparison and formatting;
 this is a test helper in the caller's realm, not an isolation boundary.
 
-**Use the slices built-in.** `Neo.getBuiltInModule("slices")` returns a frozen module object that is
-cached for the realm. `slices` is the canonical bare specifier and `neo:slices` is an alias for the
-same module instance. The exports are `Slice`, `ReadOnlySlice`, `CharSlice`, `ReadOnlyCharSlice`,
-`slice`, `readonlySlice`, `charSlice`, and `readonlyCharSlice`; each class or function is the same
-object as the matching registry property, and there is no default export. The module is plain
-ECMAScript: it calls no host op, adds no capability, and is not a sandbox or a cross-realm or
-cross-thread zero-copy bridge.
+**Use the slices built-in.** `Neo.getBuiltInModule("neo:slices")` returns a frozen module object that
+is cached for the realm. `neo:slices` is the canonical and only module specifier. The exports are
+`Slice`, `ReadOnlySlice`, `CharSlice`, `ReadOnlyCharSlice`, `slice`, `readonlySlice`, `charSlice`,
+and `readonlyCharSlice`; each class or function is the same object as the matching registry
+property, and there is no default export. The module is plain ECMAScript: it calls no host op, adds
+no capability, and is not a sandbox or a cross-realm or cross-thread zero-copy bridge.
 
 ```js
-import { slice, readonlySlice } from "slices";
+import { slice, readonlySlice } from "neo:slices";
 
 const base = [0, 1, 2, 3, 4];
 const view = slice(base, 1, 5); // [1, 2, 3, 4] as a live view
@@ -822,9 +820,9 @@ reference's `ReadonlyCharSlice` spelling and some method names differ; there is 
 `slices.Slice`-compatible `map`/`update`/`replace` surface in this slice. Views are aliases within
 one realm, not a Rust zero-copy bridge.
 
-**Use the cron built-in.** `Neo.getBuiltInModule("cron")` returns a frozen module object cached for
-the realm. `cron`, `neo:cron`, and the matching bare and prefixed imports expose the same
-`cron`, `next`, and `CronError` values.
+**Use the cron built-in.** `Neo.getBuiltInModule("neo:cron")` returns a frozen module object cached for
+the realm. The canonical `neo:cron` import and the registry expose the same `cron`, `next`, and
+`CronError` values.
 
 ```js
 import { cron, next } from "neo:cron";
@@ -914,8 +912,8 @@ pending test, which fails the run.
 `math.test.js`:
 
 ```js
-import test from "test";
-import assert from "assert";
+import test from "neo:test";
+import assert from "neo:assert";
 
 test("adds", () => {
     assert.equals(1 + 1, 2);
@@ -999,14 +997,14 @@ no retries, no subtests, hooks, mocks, or snapshots, and no full Node compatibil
 run with the process's full filesystem authority; this is not a sandbox. A synchronous callback that
 blocks the isolate forever still hangs the process.
 
-**Use the age built-in.** `Neo.getBuiltInModule("age")` returns a frozen module object that is
-cached for the realm. `age` is the canonical bare specifier and `neo:age` is an alias for the same
-module instance. The named exports are `generateIdentity`, `identityToRecipient`, `encrypt`, and
-`decrypt`, and each is the same function object as the matching registry property. There is no
-default export. The module is available in every runtime; there is no secure-context or TLS gate.
+**Use the age built-in.** `Neo.getBuiltInModule("neo:age")` returns a frozen module object that is
+cached for the realm. `neo:age` is the canonical and only module specifier. The named exports are
+`generateIdentity`, `identityToRecipient`, `encrypt`, and `decrypt`, and each is the same function
+object as the matching registry property. There is no default export. The module is available in
+every runtime; there is no secure-context or TLS gate.
 
 ```js
-import { decrypt, encrypt, generateIdentity } from "age";
+import { decrypt, encrypt, generateIdentity } from "neo:age";
 
 const pair = generateIdentity(); // { identity, recipient }
 const plaintext = Uint8Array.from([0x68, 0x65, 0x6c, 0x6c, 0x6f]);
@@ -1104,16 +1102,16 @@ reclaimed normally but not guaranteed to be erased first. It does not store, der
 or persist keys, and it is not a sandbox or a permission boundary. It performs no filesystem or
 network access.
 
-**Use the crypto built-in.** `Neo.getBuiltInModule("crypto")` returns a frozen module object that is
-cached for the realm. `crypto` is the canonical bare specifier and `neo:crypto` is an alias for the
-same module instance. The named exports are `generateEnvelopeKey`, `randomBytes`, `encrypt`,
-`decrypt`, `createHash`, `createHmac`, `hashAsync`, `hmacAsync`, `pbkdf2`, `pbkdf2Async`,
+**Use the crypto built-in.** `Neo.getBuiltInModule("neo:crypto")` returns a frozen module object that
+is cached for the realm. `neo:crypto` is the canonical and only module specifier. The named exports
+are `generateEnvelopeKey`, `randomBytes`, `encrypt`, `decrypt`, `createHash`, `createHmac`,
+`hashAsync`, `hmacAsync`, `pbkdf2`, `pbkdf2Async`,
 `bcryptHash`, `bcryptHashAsync`, `bcryptVerify`, and `bcryptVerifyAsync`, and each is the same
 function object as the matching registry property. There is no default export. The module is
 available in every runtime; there is no secure-context or TLS gate.
 
 ```js
-import { decrypt, encrypt, generateEnvelopeKey } from "crypto";
+import { decrypt, encrypt, generateEnvelopeKey } from "neo:crypto";
 
 const key = generateEnvelopeKey();
 const plaintext = Uint8Array.from([0x68, 0x65, 0x6c, 0x6c, 0x6f]);
@@ -1499,17 +1497,17 @@ Tokio runtime gets `NEO_CRYPTO_NO_EXECUTOR` instead. The synchronous API works o
 `Runtime::run_file` drives the async-op driver, so asynchronous hashing works there. There is no
 secure-context or TLS condition: the module is available in every runtime.
 
-**UUID generation.** `Neo.getBuiltInModule("uuid")` returns a frozen module object that is cached for
-the realm. `uuid` is the canonical bare specifier and `neo:uuid` is an alias for the same module
-instance. The named exports are `v4` and `v7`, and each is the same function object as the matching
-registry property. There is no default export on the aggregate module.
+**UUID generation.** `Neo.getBuiltInModule("neo:uuid")` returns a frozen module object that is cached
+for the realm. `neo:uuid` is the canonical and only module specifier. The named exports are `v4`
+and `v7`, and each is the same function object as the matching registry property. There is no
+default export on the aggregate module.
 
-The subpath modules `uuid/v4` and `uuid/v7` (aliases `neo:uuid/v4` and `neo:uuid/v7`) each expose one
-generator as both the named export and the default export. Their `v4`/`v7` named value and default
+The subpath modules `neo:uuid/v4` and `neo:uuid/v7` each expose one generator as both the named
+export and the default export. Their `v4`/`v7` named value and default
 value are the same function objects as `uuid.v4` and `uuid.v7`, not wrappers:
 
 ```js
-import { v4 as aggregateV4, v7 as aggregateV7 } from "uuid";
+import { v4 as aggregateV4, v7 as aggregateV7 } from "neo:uuid";
 import v4 from "neo:uuid/v4";
 import { v7 } from "neo:uuid/v7";
 
@@ -1663,12 +1661,25 @@ whose engine is `"neo-lite"` and whose built-in module list is empty; `Neo.getBu
 `neojs-module-policy` for executable-extension decisions and rejection reasons, so `.cjs`, JSX/TSX,
 declaration files, JSON, WebAssembly, and native addons fail with the same explanation in either.
 
+### Binary size tracking
+
+`eng/size/` measures the release-profile `neojs` and `neojs-lite` executables and
+appends each result to an append-only JSONL ledger. A record carries the exact
+bytes and SHA-256, the source state, artifact, target, toolchain, requested
+features, Cargo and lockfile inputs, and explicitly labels effective features,
+linker and V8-archive provenance as captured or unknown. Strict comparison
+series and a labelled trend report keep a toolchain or config change from being
+read as a source-code delta; a comparison with any uncaptured control is marked
+controls-incomplete rather than strict. The directory is self-contained: see
+[`eng/size/README.md`](eng/size/README.md) for the methodology and
+`eng/size/check.sh` for the deterministic checks.
+
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
 local module loading, opt-in HTTPS module loading with explicit limits, imports of the `age`,
 `assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`,
-`test`, and `uuid` built-ins by their bare or `neo:` specifiers, console output, `neojs test` over
+`test`, and `uuid` built-ins by their canonical `neo:` specifiers, console output, `neojs test` over
 multiple files and globs, bounded in-memory byte streams, live mutable and read-only array and
 typed-array views, mutable and read-only Unicode code point buffers, UTC five-field cron parsing and
 in-process scheduling, writes to the process's stdout and stderr, lexical POSIX and Windows path
@@ -1698,22 +1709,20 @@ surface, not the built-in modules: `Neo.engine` is `"neo-lite"`, its built-in mo
   [`docs/node-compat.md`](docs/node-compat.md). The built-in modules are
   `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
   `strings`, `test`, and `uuid`,
-  reached through `Neo.getBuiltInModule("age")`,
-  `Neo.getBuiltInModule("assert")`, `Neo.getBuiltInModule("chars")`,
-  `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("cron")`,
-  `Neo.getBuiltInModule("crypto")`, `Neo.getBuiltInModule("os")`,
-  `Neo.getBuiltInModule("path")`, `Neo.getBuiltInModule("slices")`,
-  `Neo.getBuiltInModule("ssh")`, `Neo.getBuiltInModule("stdio")`,
-  `Neo.getBuiltInModule("strings")`, `Neo.getBuiltInModule("test")`,
-  `Neo.getBuiltInModule("uuid")`,
-  `Neo.getBuiltInModule("uuid/v4")`, and `Neo.getBuiltInModule("uuid/v7")`, or
-  through the import
-  specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
-  `neo:console`, `cron`, `neo:cron`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`,
-  `slices`, `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`, `neo:strings`,
-  `test`, `neo:test`, `uuid`, `neo:uuid`, `uuid/v4`, `neo:uuid/v4`, `uuid/v7`, and
-  `neo:uuid/v7`. Other `neo:` modules are rejected by name.
-  Bare module specifiers that are not a built-in, and import maps, are not supported.
+  reached through `Neo.getBuiltInModule("neo:age")`,
+  `Neo.getBuiltInModule("neo:assert")`, `Neo.getBuiltInModule("neo:chars")`,
+  `Neo.getBuiltInModule("neo:console")`, `Neo.getBuiltInModule("neo:cron")`,
+  `Neo.getBuiltInModule("neo:crypto")`, `Neo.getBuiltInModule("neo:os")`,
+  `Neo.getBuiltInModule("neo:path")`, `Neo.getBuiltInModule("neo:slices")`,
+  `Neo.getBuiltInModule("neo:ssh")`, `Neo.getBuiltInModule("neo:stdio")`,
+  `Neo.getBuiltInModule("neo:strings")`, `Neo.getBuiltInModule("neo:test")`,
+  `Neo.getBuiltInModule("neo:uuid")`,
+  `Neo.getBuiltInModule("neo:uuid/v4")`, and `Neo.getBuiltInModule("neo:uuid/v7")`, or
+  through the import specifiers `neo:age`, `neo:assert`, `neo:chars`, `neo:console`,
+  `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`, `neo:stdio`,
+  `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`. Other `neo:` modules
+  are rejected by name. Bare module specifiers, including a bare built-in name such as `age`, are
+  rejected; the message names the canonical `neo:` form. Import maps are not supported.
 - Module type attributes are rejected. `with { type: "json" }`, `with { type: "text" }`, `with {
   type: "bytes" }`, and custom types fail with a reason on static and dynamic imports, including for
   built-in modules. Only untyped ECMAScript modules are loaded. Attributes that do not name a type

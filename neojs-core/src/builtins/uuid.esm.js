@@ -1,10 +1,10 @@
-// The `uuid` built-in module as seen by `import ... from "uuid"` or
+// The `uuid` built-in module as seen by
 // `import ... from "neo:uuid"`.
 //
 // The implementations live in `neo.js`, which the runtime evaluates once per
 // realm, and call private host ops registered by `neojs-core/src/uuid.rs`.
 // This file only re-exports them, so every named export is the same function
-// object as the matching property of `Neo.getBuiltInModule("uuid")`. Nothing
+// object as the matching property of `Neo.getBuiltInModule("neo:uuid")`. Nothing
 // here reaches the private module registry: it reads the public module object
 // and binds its properties.
 //
@@ -23,7 +23,7 @@
 //
 // The module namespace object is immutable by the language, and the module
 // object behind it is frozen, so neither path can replace a function.
-const uuid = Neo.getBuiltInModule("uuid");
+const uuid = Neo.getBuiltInModule("neo:uuid");
 
 export const v4 = uuid.v4;
 export const v7 = uuid.v7;

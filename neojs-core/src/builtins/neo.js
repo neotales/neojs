@@ -3,8 +3,9 @@
 // This script is evaluated once per realm before the entry module. It installs
 // the global `Neo` object and the module objects that object caches.
 // `Neo.engine` is `"neo"` for this V8 runtime, and
-// `Neo.getBuiltInModulesList` returns every implemented bare and canonical
-// `neo:` module specifier as one frozen array. `assert`
+// `Neo.getBuiltInModulesList` returns every canonical `neo:` module specifier
+// as one frozen array. `Neo.getBuiltInModule` takes the canonical specifier; a
+// bare registry name is not a module key and returns `undefined`. `assert`
 // calls one private host op that observes a genuine native Promise; `chars` and
 // `console` are plain ECMAScript; `crypto` calls thirty-two private host ops:
 // four use the operating system CSPRNG and AES-256-GCM in
@@ -7519,38 +7520,42 @@
         TestFailureError,
     });
 
+    // The key is the canonical `neo:` specifier the loader serves. A bare
+    // registry name is never a key: bare imports are not built-in modules.
     const modules = new Map([
-        ["age", age],
-        ["assert", assert],
-        ["chars", chars],
-        ["console", consoleModule],
-        ["cron", cron],
-        ["crypto", crypto],
-        ["os", os],
-        ["path", path],
-        ["slices", slices],
-        ["ssh", ssh],
-        ["stdio", stdio],
-        ["strings", strings],
-        ["test", testModule],
-        ["uuid", uuid],
-        ["uuid/v4", uuidV4Module],
-        ["uuid/v7", uuidV7Module],
+        ["neo:age", age],
+        ["neo:assert", assert],
+        ["neo:chars", chars],
+        ["neo:console", consoleModule],
+        ["neo:cron", cron],
+        ["neo:crypto", crypto],
+        ["neo:os", os],
+        ["neo:path", path],
+        ["neo:slices", slices],
+        ["neo:ssh", ssh],
+        ["neo:stdio", stdio],
+        ["neo:strings", strings],
+        ["neo:test", testModule],
+        ["neo:uuid", uuid],
+        ["neo:uuid/v4", uuidV4Module],
+        ["neo:uuid/v7", uuidV7Module],
     ]);
 
-    // One registry name and one canonical `neo:` specifier per built-in, in
-    // the registry's insertion order. Building this from `modules` keeps the
-    // public list aligned with what `getBuiltInModule` and the loader actually
-    // implement, including the `uuid/v4` and `uuid/v7` subpaths.
+    // One canonical `neo:` specifier per built-in, in the registry's insertion
+    // order. Building this from `modules` keeps the public list aligned with
+    // what `getBuiltInModule` and the loader actually implement, including the
+    // `neo:uuid/v4` and `neo:uuid/v7` subpaths.
     const builtInModuleList = [];
-    mapForEachEntry(modules, (_module, name) => {
-        builtInModuleList.push(name, `neo:${name}`);
+    mapForEachEntry(modules, (_module, specifier) => {
+        builtInModuleList.push(specifier);
     });
     freeze(builtInModuleList);
 
     /**
-     * Return a built-in module by name, or `undefined` when the name is not
-     * implemented. The same module object is returned for every lookup.
+     * Return a built-in module by its canonical `neo:` specifier, or
+     * `undefined` when the specifier is not implemented. The same module
+     * object is returned for every lookup. A bare registry name such as
+     * `"age"` is not a key and returns `undefined`.
      *
      * @throws {TypeError} when the name is not a string.
      */
@@ -7558,19 +7563,19 @@
         if (typeof name !== "string") {
             throw new makeTypeError("module name must be a string");
         }
-        if (name === "test") testEnsureHandler();
+        if (name === "neo:test") testEnsureHandler();
         return mapGet(modules, name);
     }
 
     /**
      * Return every implemented built-in module specifier as one frozen array.
      *
-     * Entries are in registration order. Each built-in contributes its bare
-     * registry name followed by its canonical `neo:` specifier, so the
-     * `uuid/v4` and `uuid/v7` subpaths and both spellings of every module are
-     * present. The array is frozen and the same array is returned for every
-     * call, so a caller cannot change later results. It lists no Node modules:
-     * Node support is a separate opt-in and never enters this registry.
+     * Entries are in registration order and are the canonical `neo:`
+     * specifiers only, including the `uuid/v4` and `uuid/v7` subpaths. The
+     * array is frozen and the same array is returned for every call, so a
+     * caller cannot change later results. It lists no bare names and no Node
+     * modules: bare imports are not built-in modules, and Node support is a
+     * separate opt-in that never enters this registry.
      */
     function getBuiltInModulesList() {
         return builtInModuleList;

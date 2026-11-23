@@ -26,26 +26,31 @@ fn run_js(source: &str) {
 fn slices_module_identity_and_exports() {
     run_js(
         r#"
-import * as slices from "slices";
-import * as alias from "neo:slices";
+import * as slices from "neo:slices";
 import * as upper from "NEO:slices";
 
-const registry = Neo.getBuiltInModule("slices");
-if (registry !== Neo.getBuiltInModule("slices")) {
+const registry = Neo.getBuiltInModule("neo:slices");
+if (registry !== Neo.getBuiltInModule("neo:slices")) {
     throw new Error("slices lookup is not cached");
 }
 if (!Object.isFrozen(registry)) throw new Error("slices is not frozen");
-if (Neo.getBuiltInModule("neo:slices") !== undefined) {
-    throw new Error("the registry accepted the prefixed spelling");
+if (Neo.getBuiltInModule("slices") !== undefined) {
+    throw new Error("the registry accepted a bare name");
 }
-if (alias !== slices) throw new Error("slices and neo:slices differ");
 if (upper !== slices) throw new Error("the scheme is not case-insensitive");
-if (import.meta.resolve("slices") !== "neo:slices") {
+if (import.meta.resolve("neo:slices") !== "neo:slices") {
     throw new Error("slices did not resolve canonically");
 }
-if (import.meta.resolve("neo:slices") !== "neo:slices") {
-    throw new Error("neo:slices did not resolve canonically");
+if (import.meta.resolve("NEO:slices") !== "neo:slices") {
+    throw new Error("the scheme is not case-insensitive");
 }
+let bareRejected = false;
+try {
+    await import("slices");
+} catch (error) {
+    bareRejected = error instanceof TypeError;
+}
+if (!bareRejected) throw new Error("bare slices import was accepted");
 
 const exported = Object.keys(slices).sort();
 const registered = Object.keys(registry).sort();
@@ -96,7 +101,7 @@ if (slices.slice([1], 0, 1).at(0) !== 1) throw new Error("slice was replaced");
 fn array_views_alias_and_nest_without_copying() {
     run_js(
         r#"
-import { ReadOnlySlice, Slice, readonlySlice, slice } from "slices";
+import { ReadOnlySlice, Slice, readonlySlice, slice } from "neo:slices";
 
 const base = [0, 1, 2, 3, 4];
 const outer = slice(base, 1, 5);
@@ -205,7 +210,7 @@ for (const [fn, type] of failures) {
 fn array_holes_accessors_frozen_and_splice_semantics() {
     run_js(
         r#"
-import { slice } from "slices";
+import { slice } from "neo:slices";
 
 // Holes read as undefined and become own undefined elements in a copy.
 const holes = [1, , 3];
@@ -299,7 +304,7 @@ if (evilCopy.constructor !== Array || evilCopy.length !== 2) {
 fn typed_array_views_preserve_type_offset_and_alias() {
     run_js(
         r#"
-import { slice } from "slices";
+import { slice } from "neo:slices";
 
 // Two outer views of one buffer, and a nested view of one of them.
 const buffer = new ArrayBuffer(8);
@@ -398,7 +403,7 @@ for (const [fn, type] of failures) {
 fn typed_array_detachment_resizable_and_shared_buffers() {
     run_js(
         r#"
-import { slice } from "slices";
+import { slice } from "neo:slices";
 
 // Detaching after construction leaves the fixed range readable as undefined
 // and writable as a no-op; copying refuses to invent zeros.
@@ -468,7 +473,7 @@ if (typeof SharedArrayBuffer === "function") {
 fn char_from_string_uses_the_captured_intrinsic_buffer_getter() {
     run_js(
         r#"
-import { CharSlice, ReadOnlyCharSlice } from "slices";
+import { CharSlice, ReadOnlyCharSlice } from "neo:slices";
 
 // `Uint32Array.prototype.buffer` is replaceable after the shim runs. The
 // astral string takes the trimming branch, which is the branch that needs the
@@ -519,7 +524,7 @@ if (CharSlice.fromString("a\u{1F600}b").toString() !== "a\u{1F600}b") {
 fn char_from_string_does_not_use_a_replaceable_function_call() {
     run_js(
         r#"
-import { CharSlice, ReadOnlyCharSlice } from "slices";
+import { CharSlice, ReadOnlyCharSlice } from "neo:slices";
 
 // `Function.prototype.call` is writable. If an intrinsic invocation used
 // `getter.call(value)` after initialization, this replacement would receive
@@ -563,7 +568,7 @@ if (CharSlice.fromString("a\u{1F600}b").toString() !== "a\u{1F600}b") {
 fn empty_views_validate_detached_ranges() {
     run_js(
         r#"
-import { charSlice, readonlyCharSlice, slice } from "slices";
+import { charSlice, readonlyCharSlice, slice } from "neo:slices";
 
 function detach(buffer) {
     if (typeof buffer.transfer === "function") {
@@ -636,7 +641,7 @@ if (charSlice(codePoints, 0, 0).toArray().length !== 0) {
 fn char_slices_roundtrip_and_transform_in_place() {
     run_js(
         r#"
-import { CharSlice, ReadOnlyCharSlice, charSlice, readonlyCharSlice } from "slices";
+import { CharSlice, ReadOnlyCharSlice, charSlice, readonlyCharSlice } from "neo:slices";
 
 const chars = CharSlice.fromString("Hello, 😀!");
 if (chars.length !== 9) throw new Error(`code point length is ${chars.length}`);

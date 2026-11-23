@@ -109,8 +109,8 @@
 //! # JavaScript contract
 //!
 //! The module object is installed in the realm before user code runs and is
-//! exposed as `Neo.getBuiltInModule("crypto")`, `import ... from "crypto"`,
-//! and `import ... from "neo:crypto"`. All three paths share one frozen
+//! exposed as `Neo.getBuiltInModule("neo:crypto")` and
+//! `import ... from "neo:crypto"`. Both paths share one frozen
 //! module object and one set of function objects. The module is available in
 //! every runtime; there is no secure-context or TLS gate. Every function is
 //! synchronous, takes `Uint8Array` values or, for `randomBytes`, one number,
@@ -830,7 +830,7 @@ deno_core::extension!(
         op_neo_crypto_encrypt,
         op_neo_crypto_decrypt
     ],
-    docs = "Synchronous AES-256-GCM ops behind `Neo.getBuiltInModule(\"crypto\")`."
+    docs = "Synchronous AES-256-GCM ops behind `Neo.getBuiltInModule(\"neo:crypto\")`."
 );
 
 #[cfg(test)]

@@ -444,9 +444,10 @@ only erasable syntax is accepted (no enum, namespace, or other transforms), and
 
 The age, assert, chars, console, cron, crypto, os, path,
 slices, ssh, stdio, strings, test, and uuid built-in modules are implemented,
-including the uuid/v4 and uuid/v7 subpaths. Import one by bare name or with the
-`neo:` prefix, or use `Neo.getBuiltInModule(\"test\")` and
-`Neo.getBuiltInModule(\"uuid\")`; the README lists every specifier.
+including the uuid/v4 and uuid/v7 subpaths. Import one by its canonical `neo:`
+specifier, such as `neo:age` and `neo:test`; a bare name is not a built-in
+module. `Neo.getBuiltInModule` takes the same canonical specifier, such as
+`Neo.getBuiltInModule(\"neo:test\")`; the README lists every specifier.
 
 Remote loading is disabled by default. `--allow-remote` enables an https:
 entry and absolute https: imports; `--no-allow-remote` forces it off. Either flag

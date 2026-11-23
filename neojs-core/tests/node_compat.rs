@@ -86,20 +86,29 @@ if (typeof randomBytes !== "function") throw new Error("neo:crypto is missing");
 }
 
 #[test]
-fn a_default_runtime_keeps_bare_neo_aliases_in_a_node_compat_build() {
+fn a_default_runtime_requires_canonical_neo_specifiers_in_a_node_compat_build() {
     let dir = tempfile::tempdir().expect("temp dir");
     let file = write_module(
         &dir,
         "main.js",
         r#"
-import { randomBytes } from "crypto";
-if (typeof randomBytes !== "function") throw new Error("bare neo:crypto alias is missing");
+import { randomBytes } from "neo:crypto";
+if (typeof randomBytes !== "function") throw new Error("neo:crypto is missing");
+let bare = null;
+try {
+    await import("crypto");
+} catch (error) {
+    bare = error;
+}
+if (!bare) throw new Error("bare crypto resolved");
+const message = String(bare);
+if (!message.includes("canonical `neo:`")) throw new Error(message);
 "#,
     );
     let mut runtime = Runtime::new().expect("runtime");
     runtime
         .run_file(&file)
-        .expect("a default runtime keeps bare Neo aliases");
+        .expect("a default runtime requires canonical Neo specifiers");
 }
 
 #[test]

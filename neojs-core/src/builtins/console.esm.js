@@ -1,4 +1,4 @@
-// The `console` built-in module as seen by `import ... from "console"` or
+// The `console` built-in module as seen by
 // `import ... from "neo:console"`.
 //
 // The default export is the console object the runtime installed: the object
@@ -13,7 +13,7 @@
 // first evaluation is what the named export captures; a replacement made later
 // is not followed by the named binding. Replacing a property on the console
 // object later is visible through the default export and
-// `Neo.getBuiltInModule("console")`, because they are the same object.
+// `Neo.getBuiltInModule("neo:console")`, because they are the same object.
 // Replacing the whole `globalThis.console` property does not change the
 // captured object: this module reads the registry, not the global.
 //
@@ -27,7 +27,7 @@
 // Read the registry rather than `globalThis.console`. The registry holds the
 // console object the runtime installed, so replacing the global property before
 // this module is evaluated cannot swap the module's default export.
-const consoleObject = Neo.getBuiltInModule("console");
+const consoleObject = Neo.getBuiltInModule("neo:console");
 
 export default consoleObject;
 

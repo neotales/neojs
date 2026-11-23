@@ -1,11 +1,11 @@
-// The `stdio` built-in module as seen by `import ... from "stdio"` or
+// The `stdio` built-in module as seen by
 // `import ... from "neo:stdio"`.
 //
 // The implementations live in `neo.js`, which the runtime evaluates once per
 // realm, and call private host ops registered by `neojs-core/src/stdio.rs`.
 // This file only re-exports them, so every named export is the same class,
 // constant, or shared stream object as the matching property of
-// `Neo.getBuiltInModule("stdio")`. Nothing here reaches the private module
+// `Neo.getBuiltInModule("neo:stdio")`. Nothing here reaches the private module
 // registry: it reads the public module object and binds its properties.
 //
 // The exported list must match the properties of the `stdio` object in
@@ -22,7 +22,7 @@
 // object behind it is frozen, so neither path can replace a class or a stream.
 // The stream objects themselves are mutable by design: `close()` retires the
 // shared wrapper without closing the process descriptor.
-const stdio = Neo.getBuiltInModule("stdio");
+const stdio = Neo.getBuiltInModule("neo:stdio");
 
 export const Readable = stdio.Readable;
 export const Writable = stdio.Writable;

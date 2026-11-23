@@ -1703,7 +1703,7 @@ deno_core::extension!(
     state = |state| {
         state.put(CryptoExecutor::capture());
     },
-    docs = "SHA-2, HMAC, PBKDF2, and bcrypt ops behind `Neo.getBuiltInModule(\"crypto\")`."
+    docs = "SHA-2, HMAC, PBKDF2, and bcrypt ops behind `Neo.getBuiltInModule(\"neo:crypto\")`."
 );
 
 /// The off-by-default test-support extension, used to prove that asynchronous

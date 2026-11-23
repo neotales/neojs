@@ -81,15 +81,14 @@ function expectCode(action, expected) {
 fn imports_are_cached_frozen_and_identity_shared() {
     run_js(&with_helpers(
         r#"
-import * as path from "path";
-import * as alias from "neo:path";
+import * as path from "neo:path";
+import * as alias from "NEO:path";
 
-const registry = Neo.getBuiltInModule("path");
+const registry = Neo.getBuiltInModule("neo:path");
 
-if (path !== alias) throw new Error("path and neo:path namespaces differ");
-if (alias !== (await import("path"))) throw new Error("dynamic path namespace differs");
-if (alias !== (await import("neo:path"))) throw new Error("dynamic neo:path namespace differs");
-if (registry !== Neo.getBuiltInModule("path")) throw new Error("registry lookup is not cached");
+if (path !== alias) throw new Error("path and NEO:path namespaces differ");
+if (alias !== (await import("neo:path"))) throw new Error("dynamic path namespace differs");
+if (registry !== Neo.getBuiltInModule("neo:path")) throw new Error("registry lookup is not cached");
 if (Object.isFrozen(registry) !== true) throw new Error("registry is not frozen");
 if (Object.isFrozen(path.posix) !== true) throw new Error("posix is not frozen");
 if (Object.isFrozen(path.win32) !== true) throw new Error("win32 is not frozen");
@@ -114,8 +113,16 @@ equal(path.posix.sep, "/", "posix sep");
 equal(path.posix.delimiter, ":", "posix delimiter");
 equal(path.win32.sep, "\\", "win32 sep");
 equal(path.win32.delimiter, ";", "win32 delimiter");
-equal(import.meta.resolve("path"), "neo:path", "canonical path");
-equal(import.meta.resolve("neo:path"), "neo:path", "canonical neo:path");
+equal(import.meta.resolve("neo:path"), "neo:path", "canonical path");
+equal(import.meta.resolve("NEO:path"), "neo:path", "scheme is case-insensitive");
+if (Neo.getBuiltInModule("path") !== undefined) throw new Error("registry accepted a bare name");
+let bareRejected = false;
+try {
+    await import("path");
+} catch (error) {
+    bareRejected = error instanceof TypeError;
+}
+if (!bareRejected) throw new Error("bare path import was accepted");
 
 for (const name of ["path", "posix", "win32", "SEPARATOR", "DELIMITER", "__neoPath", "__neoPathCwd"]) {
     if (name in globalThis) throw new Error(`${name} leaked onto globalThis`);
@@ -150,7 +157,7 @@ equal(second.base, "b.txt", "parse result was shared");
 fn posix_vectors() {
     run_js(&with_helpers(
         r#"
-import { posix } from "path";
+import { posix } from "neo:path";
 
 equal(posix.normalize(""), ".", "normalize empty");
 equal(posix.normalize("//"), "/", "normalize slashes");
@@ -222,7 +229,7 @@ equal(posix.toNamespacedPath("/a"), "/a", "toNamespacedPath identity");
 fn win32_vectors() {
     run_js(&with_helpers(
         r#"
-import { win32 } from "path";
+import { win32 } from "neo:path";
 
 equal(win32.normalize("C:/foo/.."), "C:\\", "normalize drive");
 equal(win32.normalize("C:"), "C:.", "normalize bare drive");
@@ -289,7 +296,7 @@ equal(win32.toNamespacedPath("\\\\?\\C:\\foo"), "\\\\?\\C:\\foo", "namespaced al
 fn argument_errors_are_type_errors_and_do_not_echo_input() {
     run_js(&with_helpers(
         r#"
-import { posix, win32 } from "path";
+import { posix, win32 } from "neo:path";
 
 for (const value of [undefined, null, 1, true, {}, [], new String("a"), Symbol("a")]) {
     expectTypeError(() => posix.normalize(value), "posix normalize");
@@ -349,7 +356,7 @@ expectTypeError(() => posix.format(new Proxy({}, {
 fn errors_have_own_codes_and_tampered_intrinsics_do_not_change_results() {
     run_js(&with_helpers(
         r#"
-import { posix, win32, SEPARATOR } from "path";
+import { posix, win32, SEPARATOR } from "neo:path";
 
 // A path error must not lose its code through an inherited accessor.
 const originalCode = Object.getOwnPropertyDescriptor(Object.prototype, "code");
@@ -380,7 +387,7 @@ try {
     equal(posix.normalize("/a//b/../c"), "/a/c", "normalize after tamper");
     equal(posix.common(["/a/b", "/a/c"]), "/a/", "common after tamper");
     equal(win32.relative("C:\\Base", "c:\\base\\File"), "File", "relative after tamper");
-    equal(Neo.getBuiltInModule("path"), Neo.getBuiltInModule("path"), "registry after tamper");
+    equal(Neo.getBuiltInModule("neo:path"), Neo.getBuiltInModule("neo:path"), "registry after tamper");
 } finally {
     String.prototype.charCodeAt = originalCharCodeAt;
     String.prototype.split = originalSplit;
@@ -417,7 +424,7 @@ if (posix.normalize("a/../../b") === "b") throw new Error("containment was assum
 fn cwd_operations_use_the_native_dialect_only_when_needed() {
     run_js(&with_helpers(
         r#"
-import { posix, win32, SEPARATOR } from "path";
+import { posix, win32, SEPARATOR } from "neo:path";
 
 const native = SEPARATOR === "\\" ? win32 : posix;
 const foreign = native === posix ? win32 : posix;
@@ -460,7 +467,7 @@ fn relative_uses_one_lazy_cwd_snapshot_per_call() {
         || {
             run_js(&with_helpers(
                 r#"
-import { posix, win32, SEPARATOR } from "path";
+import { posix, win32, SEPARATOR } from "neo:path";
 
 const native = SEPARATOR === "\\" ? win32 : posix;
 const expected = SEPARATOR === "\\" ? "..\\b" : "../b";
@@ -483,9 +490,9 @@ equal(native.relative(from, to), expectedAbsolute, "absolute endpoints avoid cwd
 
 #[test]
 fn unknown_neo_path_names_are_rejected() {
-    let bare = run_js_error("import { nope } from \"path\";\n");
-    assert!(bare.contains("path"), "{bare}");
-    assert!(bare.contains("nope"), "{bare}");
+    let bare = run_js_error("import { posix } from \"path\";\n");
+    assert!(bare.contains("canonical `neo:` specifier"), "{bare}");
+    assert!(bare.contains("neo:path"), "{bare}");
 
     let alias = run_js_error("import { nope } from \"neo:path\";\n");
     assert!(alias.contains("neo:path"), "{alias}");

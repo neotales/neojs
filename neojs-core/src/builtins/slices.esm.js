@@ -1,10 +1,10 @@
-// The `slices` built-in module as seen by `import ... from "slices"` or
+// The `slices` built-in module as seen by
 // `import ... from "neo:slices"`.
 //
 // The implementations live in `neo.js`, which the runtime evaluates once per
 // realm. This file only re-exports them, so every named export is the same
 // class or function object as the matching property of
-// `Neo.getBuiltInModule("slices")`. Nothing here reaches the private module
+// `Neo.getBuiltInModule("neo:slices")`. Nothing here reaches the private module
 // registry: it reads the public module object and binds its properties.
 //
 // The exported list must match the properties of the `slices` object in
@@ -16,7 +16,7 @@
 // Adding a property to an exported class or function is visible through both
 // paths because they share the same object. View instances themselves are live
 // aliases of the caller's Array or typed array, not copies.
-const slices = Neo.getBuiltInModule("slices");
+const slices = Neo.getBuiltInModule("neo:slices");
 
 export const CharSlice = slices.CharSlice;
 export const ReadOnlyCharSlice = slices.ReadOnlyCharSlice;

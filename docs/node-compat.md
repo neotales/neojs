@@ -42,10 +42,10 @@ specifier such as `child_process` is rejected with a request to use the
 
 While Node compatibility is enabled, a bare specifier that is a familiar Node
 module name (including `assert`, `console`, `crypto`, `fs`, `os`, and `path`) is
-rejected instead of resolving to the NeoJS module of that name. Use `neo:` for a
-Neo module and `node:` for a Node module. This prevents a Node import from
-silently executing a Neo API. The default runtime keeps its existing bare Neo
-aliases; only the Node opt-in applies the ambiguity rule.
+rejected instead of resolving to a NeoJS module of that name. Neo built-ins are
+canonical-only in every runtime, so use `neo:` for a Neo module and `node:` for a
+Node module. A Node import is therefore never silently executed as a Neo API,
+and a bare Node name is never a Node alias.
 
 This slice has no command-line flag. The opt-in is the embedding constructor
 above; the `neojs` and `neojs-lite` commands do not expose a Node switch and

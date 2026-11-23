@@ -1,4 +1,4 @@
-// The `crypto` built-in module as seen by `import ... from "crypto"` or
+// The `crypto` built-in module as seen by
 // `import ... from "neo:crypto"`.
 //
 // The implementations live in `neo.js`, which the runtime evaluates once per
@@ -6,7 +6,7 @@
 // `neojs-core/src/crypto_cipher.rs`, `neojs-core/src/crypto_hash.rs`, and
 // `neojs-core/src/crypto_shamir.rs`. This file only re-exports them, so every
 // named export is the same function
-// object as the matching property of `Neo.getBuiltInModule("crypto")`. Nothing
+// object as the matching property of `Neo.getBuiltInModule("neo:crypto")`. Nothing
 // here reaches the private module registry: it reads the public module object
 // and binds its properties.
 //
@@ -33,7 +33,7 @@
 // object behind it is frozen, so neither path can replace a function. Adding a
 // property to an exported function object is visible through both paths
 // because they share the same function.
-const crypto = Neo.getBuiltInModule("crypto");
+const crypto = Neo.getBuiltInModule("neo:crypto");
 
 export const bcryptHash = crypto.bcryptHash;
 export const bcryptHashAsync = crypto.bcryptHashAsync;

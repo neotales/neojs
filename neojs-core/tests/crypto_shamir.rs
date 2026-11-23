@@ -462,7 +462,7 @@ for (const name of Object.values(Deno.core.resources())) {
 fn shamir_exports_are_the_registry_functions_and_resolve_canonically() {
     run_js(
         r#"
-import * as crypto from "crypto";
+import * as crypto from "neo:crypto";
 import {
     shamirCombine as combine,
     shamirCombineAsync as combineAsync,
@@ -470,7 +470,7 @@ import {
     shamirSplitAsync as splitAsync,
 } from "neo:crypto";
 
-const registry = Neo.getBuiltInModule("crypto");
+const registry = Neo.getBuiltInModule("neo:crypto");
 const names = ["shamirSplit", "shamirSplitAsync", "shamirCombine", "shamirCombineAsync"];
 for (const name of names) {
     if (typeof registry[name] !== "function") throw new Error(name + " missing");
@@ -481,7 +481,7 @@ if (splitAsync !== registry.shamirSplitAsync) throw new Error("named splitAsync 
 if (combine !== registry.shamirCombine) throw new Error("named combine identity");
 if (combineAsync !== registry.shamirCombineAsync) throw new Error("named combineAsync identity");
 if ("default" in crypto) throw new Error("crypto must not have a default export");
-if (import.meta.resolve("crypto") !== "neo:crypto") throw new Error("resolve");
+if (import.meta.resolve("neo:crypto") !== "neo:crypto") throw new Error("resolve");
 if (import.meta.resolve("neo:crypto") !== "neo:crypto") throw new Error("alias resolve");
 "#,
     );

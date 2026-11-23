@@ -199,12 +199,12 @@ impl Runtime {
     /// The runtime has one realm. The `age`, `assert`, `chars`, `console`,
     /// `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`,
     /// `test`, and `uuid`
-    /// built-in modules are cached in that realm, and both bare and
-    /// `neo:`-prefixed import specifiers resolve to them; a new `Runtime`
-    /// creates a new realm, new functions, and new module instances. The global
-    /// `Neo` reports `engine` `"neo"`, and `Neo.getBuiltInModulesList` returns
-    /// one frozen array of each bare name and canonical `neo:` specifier in
-    /// registration order. The
+    /// built-in modules are cached in that realm, and only their canonical
+    /// `neo:` import specifiers resolve to them; a bare name such as `age` is
+    /// not a built-in module specifier. A new `Runtime` creates a new realm,
+    /// new functions, and new module instances. The global `Neo` reports
+    /// `engine` `"neo"`, and `Neo.getBuiltInModulesList` returns one frozen
+    /// array of the canonical `neo:` specifiers in registration order. The
     /// `age`, `cron`, `crypto`, `path`, `ssh`, `stdio`, and `uuid` modules
     /// register their private host ops in that realm before user code runs;
     /// `chars`, `os`, `slices`, `strings`, and `test` are plain ECMAScript, and
@@ -894,7 +894,7 @@ async fn finish_entry(js: &mut JsRuntime, module: deno_core::ModuleId) -> Result
 /// failed; the host decides the exit status. `Neo` and its module registry are
 /// installed as non-writable globals before user code runs.
 const TEST_RUN_SCRIPT: &str =
-    r#"Neo.getBuiltInModule("test").run({ throwOnFailure: false, settle: true })"#;
+    r#"Neo.getBuiltInModule("neo:test").run({ throwOnFailure: false, settle: true })"#;
 
 /// Runs the `test` built-in and reads its cumulative report.
 async fn run_tests(js: &mut JsRuntime) -> Result<TestReport, Error> {
