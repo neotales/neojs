@@ -18,6 +18,9 @@ use neojs_core::test_support::CronTestClock;
 /// boundary rather than the starting value.
 const START_MS: f64 = 1_700_000_000_000.0;
 
+/// The last instant a JavaScript `Date` represents.
+const MAX_DATE_MS: f64 = 8.64e15;
+
 fn write_module(dir: &tempfile::TempDir, name: &str, source: &str) -> PathBuf {
     let path = dir.path().join(name);
     if let Some(parent) = path.parent() {
@@ -33,9 +36,14 @@ fn write_module(dir: &tempfile::TempDir, name: &str, source: &str) -> PathBuf {
 /// the runtime live. An undisposed job must not be left behind, because the
 /// deadline would then fail the test instead of hanging it.
 fn run_with_clock(source: &str) {
+    run_with_clock_at(source, START_MS);
+}
+
+/// Runs a module with the deterministic clock installed at `start_ms`.
+fn run_with_clock_at(source: &str, start_ms: f64) {
     let dir = tempfile::tempdir().expect("temp dir");
     let file = write_module(&dir, "main.js", source);
-    let clock = CronTestClock::install(START_MS);
+    let clock = CronTestClock::install(start_ms);
     let mut runtime = Runtime::new().expect("runtime");
     let caller = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -95,6 +103,28 @@ if (ticks !== 3) throw new Error(`expected 3 ticks, got ${{ticks}}`);
 "#
     );
     run_with_clock(&source);
+}
+
+#[test]
+fn dispatches_the_last_representable_occurrence_then_stops() {
+    let source = format!(
+        r#"
+import {{ cron }} from "neo:cron";
+{PRELUDE}
+let ticks = 0;
+const job = cron("* * * * *", () => {{
+    ticks += 1;
+}});
+move(60_000);
+await until("final tick", () => ticks === 1);
+// The job has no following occurrence, so it must release the event loop
+// instead of waiting again. More turns must not produce a second tick.
+await turn();
+await turn();
+if (ticks !== 1) throw new Error(`expected 1 tick, got ${{ticks}}`);
+"#
+    );
+    run_with_clock_at(&source, MAX_DATE_MS - 60_000.0);
 }
 
 #[test]
@@ -187,6 +217,7 @@ import {{ cron }} from "neo:cron";
 {PRELUDE}
 let ticks = 0;
 const messages = [];
+const fatal = [];
 let finish;
 const done = new Promise((resolve) => {{ finish = resolve; }});
 const job = cron(
@@ -204,7 +235,9 @@ const job = cron(
         onEvent(event) {{
             if (event.type === "error") {{
                 messages.push(`${{event.error.name}}: ${{event.error.message}}`);
-                if (event.fatal) throw new Error("a callback error must not be fatal");
+                // An observer throw is discarded by the module, so this
+                // value is asserted outside the callback instead.
+                fatal.push(event.fatal);
             }}
         }},
     }},
@@ -217,6 +250,9 @@ move(60_000);
 await until("third tick", () => ticks === 3);
 await done;
 if (messages.length !== 2) throw new Error(`unexpected errors: ${{messages}}`);
+if (fatal.length !== 2 || fatal.some((value) => value !== false)) {{
+    throw new Error(`a callback error must not be fatal: ${{fatal}}`);
+}}
 "#
     );
     run_with_clock(&source);
@@ -230,6 +266,7 @@ import {{ cron }} from "neo:cron";
 {PRELUDE}
 let ticks = 0;
 let observed = 0;
+const observedTypes = [];
 let finish;
 const done = new Promise((resolve) => {{ finish = resolve; }});
 const job = cron(
@@ -247,7 +284,9 @@ const job = cron(
     {{
         onEvent(event) {{
             observed += 1;
-            if (event.type !== "error") throw new Error("unexpected event");
+            // Record before throwing. The throw is the behaviour under test
+            // and is discarded by the module, so assertions are outside.
+            observedTypes.push(event.type);
             throw new Error("observer failure");
         }},
     }},
@@ -258,6 +297,9 @@ move(60_000);
 await until("second tick", () => ticks === 2);
 await done;
 if (observed !== 1) throw new Error(`the observer ran ${{observed}} times`);
+if (observedTypes.length !== 1 || observedTypes[0] !== "error") {{
+    throw new Error(`unexpected observer events: ${{observedTypes}}`);
+}}
 "#
     );
     run_with_clock(&source);

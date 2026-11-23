@@ -685,7 +685,9 @@ deliberately absent.
 first occurrence strictly after `after`, or `null` when a valid expression has no occurrence in the
 100-year search window, as with `0 0 31 2 *`, or when the next occurrence would fall outside the
 JavaScript `Date` range of ±8.64e15 milliseconds. The returned value is therefore always a valid
-`Date`, and the last representable instant has no successor.
+`Date`, and the last representable instant has no successor. A job whose next occurrence is the
+last representable minute still dispatches that occurrence once; it then stops and releases its host
+resource.
 
 The grammar is `minute hour day-of-month month day-of-week`. Each field accepts `*`, a value, a
 `start-end` range, and comma-separated lists, with an optional `/step`; a step on a bare value runs

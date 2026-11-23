@@ -2978,7 +2978,9 @@
     // previous callback is still running is skipped and reported as `overlap`.
     // A wake-up so late that the following occurrence is already due is
     // reported as `missed`; the stale occurrence is not run, and the schedule
-    // continues from the current time. The host wait re-reads the wall clock at
+    // continues from the current time. When `due` is the last occurrence the
+    // `Date` range can represent, it is dispatched once and the job then stops
+    // and releases its host resource. The host wait re-reads the wall clock at
     // least once a minute and resolves only once the clock reaches the due
     // time; the scheduler also re-reads it before dispatch, so a backward clock
     // adjustment postpones a tick instead of running it early. A forward jump
@@ -3089,7 +3091,9 @@
          * `options.onEvent(event)` receives `{ type: "overlap" | "missed" |
          * "error", ... }` events. The callback is called with no arguments; a
          * returned Promise is awaited before the next tick is considered
-         * available. Throws `TypeError` for bad arguments and `CronError` for an
+         * available. If the next occurrence is the last minute the `Date` range
+         * represents, it runs once and the job then stops and releases its host
+         * resource. Throws `TypeError` for bad arguments and `CronError` for an
          * invalid expression or one with no future occurrence.
          */
         function cronJob(expression, callback, options) {
@@ -3189,9 +3193,12 @@
                             continue;
                         }
 
+                        // No following occurrence means `due` is the last
+                        // representable one. It is still due and must run;
+                        // the lookup after the callback stops the loop and
+                        // releases the job.
                         const following = opFollowing(token, due);
-                        if (cronIsNaN(following)) break;
-                        if (following <= now) {
+                        if (!cronIsNaN(following) && following <= now) {
                             emit({
                                 type: "missed",
                                 scheduledTime: new cronDate(due),

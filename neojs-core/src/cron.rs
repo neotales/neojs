@@ -57,6 +57,8 @@
 //! occurrence after the last representable instant has none, so it yields
 //! `None` and `neo:cron`'s `next` returns `null` rather than an invalid `Date`.
 //! An `after` argument outside the range is treated as the nearest boundary.
+//! A job whose next occurrence is the last representable minute dispatches it
+//! once and then stops, releasing its host resource.
 //!
 //! # Scheduling and liveness
 //!
