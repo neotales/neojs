@@ -391,7 +391,7 @@ impl Runtime {
     /// feature. It changes three things and nothing else:
     ///
     /// * the module loader accepts the exact specifier `node:child_process`;
-    /// * the runtime installs the synchronous `node:child_process` bridge;
+    /// * the runtime registers the native synchronous `node:child_process` module;
     /// * [`neojs_node::NodeOptions`] supplies the process policy.
     ///
     /// The default [`Runtime::new`] rejects every `node:` import with
@@ -589,10 +589,6 @@ impl Runtime {
         extensions.push(crate::cron::test_support_extension());
         #[cfg(feature = "test-support")]
         extensions.push(crate::crypto_hash::test_support_extension());
-        #[cfg(feature = "node-compat")]
-        if let Some(options) = node.options.clone() {
-            extensions.push(neojs_node::extension(options));
-        }
         let redactions = remote.as_ref().map(RemoteClient::redactions);
         let js = {
             let _guard = driver.enter();
@@ -624,9 +620,10 @@ impl Runtime {
         #[cfg(feature = "neo-chars")]
         crate::chars::remove_entries_global(js).map_err(Error::NativeBuiltins)?;
         #[cfg(feature = "node-compat")]
-        if node.enabled {
-            js.execute_script("<neojs:node>", neojs_node::BRIDGE_SHIM)
-                .map_err(|error| Error::Core(error.into()))?;
+        if node.enabled
+            && let Some(options) = node.options.clone()
+        {
+            neojs_node::install(js, options).map_err(Error::NativeBuiltins)?;
         }
         Ok(runtime)
     }

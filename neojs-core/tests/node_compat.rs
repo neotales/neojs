@@ -307,79 +307,136 @@ if (!execError || execError.code !== "ERR_NODE_CHILD_PROCESS_INCOMPLETE") {
 }
 
 #[test]
-fn the_bridge_cannot_be_replaced_before_import_and_huge_requests_are_capped() {
+fn the_native_module_is_not_global_and_caps_large_inputs() {
     run(
         policy(&[]),
         r#"
-const original = globalThis.__neojsNodeChildProcess;
-let replaced = false;
-try {
-    globalThis.__neojsNodeChildProcess = {
-        runSync() {
-            replaced = true;
-            return "{}";
-        },
-    };
-} catch {
+const first = await import("node:child_process");
+const second = await import("node:child_process");
+if (first !== second) throw new Error("the module identity changed");
+if (first.spawnSync !== second.spawnSync) throw new Error("the export identity changed");
+if (typeof first.default !== "object" || first.default.spawnSync !== first.spawnSync) {
+    throw new Error("the default export is not the frozen api object");
 }
-if (replaced) throw new Error("the bridge replacement succeeded");
-if (globalThis.__neojsNodeChildProcess !== original) {
-    throw new Error("the bridge identity changed before import");
-}
-const childProcess = await import("node:child_process");
-if (globalThis.__neojsNodeChildProcess !== original) {
-    throw new Error("the bridge identity changed during import");
-}
-
-let denied = null;
-try {
-    childProcess.execFileSync("/bin/echo", ["x"], { encoding: "utf8" });
-} catch (error) {
-    denied = error && error.code;
-}
-if (denied !== "ERR_NODE_CHILD_PROCESS_DENIED") {
-    throw new Error(`actual denied call: ${denied}`);
-}
-
-const huge = Deno.core.ops.op_neojs_node_child_process_run("x".repeat(4194305));
-const parsed = JSON.parse(huge);
-if (!parsed.error || parsed.error.code !== "ERR_NODE_REQUEST_TOO_LARGE") {
-    throw new Error(`direct bridge cap: ${huge.slice(0, 80)}`);
+if (globalThis.__neojsNodeChildProcess !== undefined) {
+    throw new Error("a bridge global exists");
 }
 
 let code = null;
 try {
-    childProcess.execFileSync("/bin/echo", [], {
+    first.execFileSync("/bin/echo", [], {
         encoding: "utf8",
         input: "x".repeat(1048577),
     });
 } catch (error) {
     code = error && error.code;
 }
-if (code !== "ERR_NODE_REQUEST_TOO_LARGE") {
-    throw new Error(`normalization cap: ${code}`);
+if (code !== "ERR_NODE_REQUEST_TOO_LARGE") throw new Error(`input cap: ${code}`);
+
+code = null;
+try {
+    first.execFileSync("/bin/echo", ["x".repeat(65537)], { encoding: "utf8" });
+} catch (error) {
+    code = error && error.code;
 }
+if (code !== "ERR_NODE_REQUEST_TOO_LARGE") throw new Error(`argument cap: ${code}`);
+
+code = null;
+try {
+    first.execFileSync("x".repeat(4097), [], { encoding: "utf8" });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_REQUEST_TOO_LARGE") throw new Error(`file cap: ${code}`);
+
+code = null;
+try {
+    first.execFileSync("/bin/echo", [], {
+        encoding: "utf8",
+        env: { NEOJS_EXPANSION: "x".repeat(65537) },
+    });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_REQUEST_TOO_LARGE") throw new Error(`environment value cap: ${code}`);
+
+code = null;
+try {
+    first.execFileSync("/bin/echo", [], {
+        encoding: "utf8",
+        ["x".repeat(100000)]: true,
+    });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_REQUEST_TOO_LARGE") throw new Error(`option key cap: ${code}`);
 "#,
     )
-    .expect("bridge hardening");
+    .expect("native module bounds");
 }
 
 #[test]
-fn the_bridge_identity_survives_import_and_allows_execution() {
+fn proxy_options_and_environment_are_rejected_before_enumeration() {
+    run(
+        policy(&[]),
+        r#"
+import { spawnSync } from "node:child_process";
+let ownKeysCalls = 0;
+const options = new Proxy({}, {
+    ownKeys() {
+        ownKeysCalls += 1;
+        return [];
+    },
+});
+let code = null;
+try {
+    spawnSync("/bin/echo", [], options);
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_UNSUPPORTED") throw new Error(`Proxy options: ${code}`);
+if (ownKeysCalls !== 0) throw new Error(`Proxy options invoked ownKeys ${ownKeysCalls} time(s)`);
+
+const environment = new Proxy({}, {
+    ownKeys() {
+        ownKeysCalls += 1;
+        return [];
+    },
+});
+code = null;
+try {
+    spawnSync("/bin/echo", [], { encoding: "utf8", env: environment });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_UNSUPPORTED") throw new Error(`Proxy env: ${code}`);
+if (ownKeysCalls !== 0) throw new Error(`Proxy env invoked ownKeys ${ownKeysCalls} time(s)`);
+"#,
+    )
+    .expect("Proxy rejection");
+}
+
+#[test]
+fn static_and_dynamic_imports_share_the_native_module() {
     require("/bin/echo");
     run(
         policy(&["/bin/echo"]),
         r#"
-const original = globalThis.__neojsNodeChildProcess;
-const childProcess = await import("node:child_process");
-if (globalThis.__neojsNodeChildProcess !== original) {
-    throw new Error("the bridge identity changed during import");
+import * as staticModule from "node:child_process";
+const dynamicModule = await import("node:child_process");
+if (staticModule !== dynamicModule) throw new Error("the namespace identity changed");
+if (staticModule.spawnSync !== dynamicModule.spawnSync) {
+    throw new Error("the spawnSync identity changed");
 }
-const output = childProcess.execFileSync("/bin/echo", ["ok"], { encoding: "utf8" });
+if (staticModule.default.spawnSync !== staticModule.spawnSync) {
+    throw new Error("the default export shares no function identity");
+}
+if (!Object.isFrozen(staticModule.default)) throw new Error("the api object is not frozen");
+const output = staticModule.execFileSync("/bin/echo", ["ok"], { encoding: "utf8" });
 if (output !== "ok\n") throw new Error(`allowed output: ${String(output)}`);
 "#,
     )
-    .expect("bridge identity and allowed call");
+    .expect("native module identity");
 }
 
 #[test]

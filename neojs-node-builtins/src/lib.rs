@@ -8,7 +8,7 @@
 //! * which Node module specifiers are implemented;
 //! * how a child-process program is authorised;
 //! * the bounded synchronous process runner and its error codes;
-//! * the JSON protocol used by both JavaScript module wrappers.
+//! * the bounded JSON request protocol used by the shared protocol tests.
 //!
 //! # Support, exactly
 //!
@@ -43,12 +43,11 @@
 //! output may be incomplete, that case is reported as an explicit incomplete
 //! error, never a successful status. An unexpected pipe read error is reported
 //! as an explicit I/O error, never treated as end-of-file. A descendant that
-//! creates a new process group and escapes is not tracked. The request bridge also has a hard
-//! serialized-size cap before parsing, and the guest builds null-prototype
-//! records and arrays from intrinsics captured before user code so inherited
-//! `toJSON` hooks or a replaced `JSON.stringify` are not used. Bounded
-//! child-process completion is implemented on Unix; another platform rejects
-//! before spawning rather than using an unbounded join.
+//! creates a new process group and escapes is not tracked. The optional JSON
+//! protocol used by the shared tests has a hard serialized-size cap before
+//! parsing; neither engine adapter uses it. Bounded child-process completion is
+//! implemented on Unix; another platform rejects before spawning rather than
+//! using an unbounded join.
 //!
 //! This is **not a sandbox**. An allowed executable runs with the authority of
 //! the neojs process. It can read and write files, use the network, and start
@@ -69,7 +68,6 @@ pub use child_process::{
     SyncRequest, SyncResult, run_sync,
 };
 pub use module::{
-    CHILD_PROCESS_SPECIFIER, SUPPORTED_MODULES, is_known_node_bare_name, module_source,
-    unsupported_module_reason,
+    CHILD_PROCESS_SPECIFIER, SUPPORTED_MODULES, is_known_node_bare_name, unsupported_module_reason,
 };
 pub use protocol::handle_request;

@@ -39,9 +39,11 @@
 //! modules are never read from disk.
 //!
 //! Only a runtime built with `Runtime::with_node_compat` (feature
-//! `node-compat`) accepts the exact `node:child_process` specifier; it is served
-//! from the shared Node adapter and is not added to the `Neo` registry or given
-//! a bare alias. Every default runtime rejects `node:` imports with a reason.
+//! `node-compat`) accepts the exact `node:child_process` specifier. That module
+//! is registered as a native synthetic module before user code runs, so the
+//! loader never produces a source for it. It is not added to the `Neo` registry
+//! or given a bare alias. Every default runtime rejects `node:` imports with a
+//! reason.
 //!
 //! A `.ts` or `.mts` module is read as text and type-stripped before V8 sees it
 //! ([`crate::typescript`]). A file that cannot be reduced to ECMAScript fails
@@ -384,19 +386,8 @@ impl ModuleLoader for FileModuleLoader {
             ))));
         }
         if module_specifier.scheme() == "node" {
-            #[cfg(feature = "node-compat")]
-            if self.node
-                && let Some(source) = neojs_node::module_source(module_specifier.as_str())
-            {
-                return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
-                    ModuleType::JavaScript,
-                    ModuleSourceCode::String(source.to_string().into()),
-                    module_specifier,
-                    None,
-                )));
-            }
             let reason = if self.node {
-                node_unsupported(module_specifier.as_str())
+                "the native node:child_process module is not registered in this runtime".to_string()
             } else {
                 node_disabled(module_specifier.as_str())
             };

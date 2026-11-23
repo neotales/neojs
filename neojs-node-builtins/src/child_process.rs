@@ -55,10 +55,10 @@ use rustix::process::Signal;
 #[cfg(unix)]
 use rustix::process::kill_process_group;
 
-/// The hard cap on one serialized bridge request, before parsing.
+/// The hard cap on one serialized JSON request, before parsing.
 ///
-/// The guest wrapper uses the same value as its code-unit cap; the V8 op checks
-/// a V8 string's UTF-8 length against it before copying the string to Rust.
+/// This belongs to the optional JSON protocol used by the shared protocol
+/// tests. The V8 and QuickJS adapters build typed requests and do not serialize.
 pub const MAX_REQUEST_BYTES: usize = 4_194_304;
 
 /// How long a killed or exited direct child's pipes may still be drained.
