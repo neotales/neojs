@@ -18,7 +18,7 @@ DEFAULT_LEDGER="$ROOT/eng/size/measurements.jsonl"
 DEFAULT_TARGET_DIR="$ROOT/target/size"
 TOOLCHAIN_FILE="$SCRIPT_DIR/toolchain"
 
-size_require jq sha256sum flock git cargo rustc cc c++ realpath
+size_require jq sha256sum flock git cargo rustc cc c++ realpath mktemp
 
 usage() {
     cat <<'USAGE'

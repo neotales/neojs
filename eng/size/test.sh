@@ -224,6 +224,13 @@ else
     cat "$TMP/raw.err" >&2
 fi
 
+printf '{"schema":2}\n' >"$TMP/bad-append.jsonl"
+if (size_append_record "$TMP/bad-append.jsonl" "$RAW") >/dev/null 2>&1; then
+    fail "append refuses an already-invalid ledger"
+else
+    ok "append refuses an already-invalid ledger"
+fi
+
 SECOND=$(jq -c '
   .artifact.package = "neojs-lite"
   | .artifact.bin = "neojs-lite"

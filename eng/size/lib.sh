@@ -435,8 +435,9 @@ size_append_record() {
     exec 200>>"$ledger"
     flock 200
     if [ -s "$ledger" ]; then
-        jq -e . "$ledger" >/dev/null 2>&1 ||
-            size_die "ledger is not valid JSONL: $ledger"
+        # Refuse to append to a ledger that is already invalid: an append must
+        # not deepen corruption or silently mix incompatible records.
+        size_validate_ledger "$ledger" 0
         existing_key=$(jq -r --arg key "$key" 'select(.key == $key) | .key' \
             "$ledger" | head -n 1)
         if [ -n "$existing_key" ]; then
