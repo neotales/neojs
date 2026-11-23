@@ -1956,6 +1956,26 @@ fn github_imports_are_refused_without_the_flag() {
     );
 }
 
+/// `NEOJS_ALLOW_REMOTE` is the persistent form of the same opt-in: a malformed
+/// GitHub entry is parsed instead of being refused as disabled, while an
+/// explicit `0` keeps it disabled.
+#[test]
+fn the_environment_opt_in_reaches_github_entries() {
+    let output = run_args_with_env(&["gh:acme/widgets@v1"], &[("NEOJS_ALLOW_REMOTE", "1")]);
+    assert_eq!(output.status.code(), Some(2));
+    let message = stderr(&output);
+    assert!(message.contains("GitHub specifier is invalid"), "{message}");
+    assert!(!message.contains("disabled"), "{message}");
+
+    let output = run_args_with_env(&["gh:acme/widgets@v1"], &[("NEOJS_ALLOW_REMOTE", "0")]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("remote module loading is disabled"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 #[test]
 fn help_documents_remote_loading_without_promising_isolation() {
     let help = run_args(&["--help"]);
