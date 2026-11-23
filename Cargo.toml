@@ -1,5 +1,9 @@
 [workspace]
 resolver = "3"
+# The vendored `rquickjs-sys` patch is resolved through `[patch.crates-io]`; it
+# is deliberately not a workspace member so its own build settings stay with
+# the upstream crate.
+exclude = ["vendor/rquickjs-sys"]
 members = [
     "neojs-builtins",
     "neojs-core",
@@ -107,3 +111,12 @@ uuid = { version = "1.26.1", default-features = false, features = ["std"] }
 # native certificate store, decompression, cookie jar, or environment proxy.
 ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
 url = "2"
+
+# Single, audited source patch for the opt-in Node adapter. The vendored
+# `rquickjs-sys` 0.14.0 adds two bounded C helpers used only by
+# `neojs-lite-node`: `JS_GetOwnEnumerableStringKeysBounded` and
+# `JS_AtomToCStringLenBounded`. It changes no existing QuickJS behaviour, adds
+# no callbacks and runs no Proxy/exotic traps. Provenance, licence and the
+# exact diff intent are recorded in `vendor/rquickjs-sys/VENDOR.md`.
+[patch.crates-io]
+rquickjs-sys = { path = "vendor/rquickjs-sys" }
