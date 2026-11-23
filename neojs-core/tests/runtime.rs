@@ -1543,7 +1543,7 @@ fn an_async_preflight_failure_leaves_the_runtime_unused() {
 fn strings_folded_matching_uses_es_simple_folding() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const cases = [
     // [text, other, expected, description]
@@ -1602,7 +1602,7 @@ if (strings.endsWithFold("a\r\n", "a")) throw new Error("endsWithFold matched be
 fn strings_indices_are_utf16_and_last_index_finds_overlaps() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const cases = [
     // [text, search, fromIndex, expected, description]
@@ -1665,7 +1665,7 @@ for (let limit = -1; limit <= overlapText.length + 1; limit += 1) {
 fn strings_trim_removes_a_code_point_set_and_defaults_to_js_whitespace() {
     run_js(
         r###"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const trimCases = [
     ["...hi...", ".", "hi", "one character"],
@@ -1711,7 +1711,7 @@ if (strings.trimEnd("  a  ") !== "  a") throw new Error("trimEnd default failed"
 fn strings_reject_non_string_and_bad_index_arguments() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const typeErrors = [
     () => strings.equalFold(1, "a"),
@@ -1767,7 +1767,7 @@ if (!coerced) throw new Error("indexOfFold coerced a number to a string");
 fn strings_survive_replaced_intrinsics() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const baseline = [
     strings.equalFold("K", "\u212A"),
@@ -1848,7 +1848,7 @@ if (globalThis.RegExp !== originals.regexp) throw new Error("RegExp was not rest
 fn strings_handle_long_input() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const long = "a".repeat(1000000);
 const tail = long + "needle";
@@ -1883,7 +1883,7 @@ if (!strings.equalFold(accented, "\u00C9".repeat(200000))) {
 fn strings_module_named_exports_are_the_registry_functions() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 const registry = Neo.getBuiltInModule("strings");
 if (registry !== Neo.getBuiltInModule("strings")) {
     throw new Error("strings lookup is not cached");
@@ -1911,8 +1911,8 @@ const alias = await import("neo:strings");
 const upper = await import("NEO:strings");
 if (alias !== strings) throw new Error("neo:strings is not the same module instance");
 if (upper !== strings) throw new Error("the scheme is not matched case-insensitively");
-if (import.meta.resolve("strings") !== "neo:strings") {
-    throw new Error("strings did not resolve canonically");
+if (import.meta.resolve("neo:strings") !== "neo:strings") {
+    throw new Error("the canonical strings specifier did not resolve to itself");
 }
 
 let rejected = false;
@@ -1932,7 +1932,7 @@ if (strings.trim("...x...", ".") !== "x") throw new Error("trim was replaced");
 fn strings_folded_search_stays_linear_on_repeated_prefixes() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 // A per-position retry of the whole needle performs about 10^10 comparisons
 // for the ASCII case and about 2.5 * 10^9 for the astral case at these sizes,
@@ -1979,7 +1979,7 @@ if (strings.lastIndexOfFold(foldedHit, foldedNeedle) !== 50000) {
 fn strings_folded_search_keeps_unicode_and_overlap_semantics() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const indexCases = [
     ["aaaa", "aa", 0, "overlapping first match"],
@@ -2033,7 +2033,7 @@ for (let limit = -1; limit <= overlapText.length + 1; limit += 1) {
 fn strings_last_index_stops_at_a_small_limit() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 // One million code points with no match. With fromIndex 0 the scan must stop
 // as soon as no pending or future match can start at or before 0; a scan that
