@@ -95,6 +95,7 @@ implemented`. Resolution never falls through to a `neo:` module.
 | `ETIMEDOUT` | The child was killed at the timeout. |
 | `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` | An output stream exceeded `maxBuffer`. |
 | `ERR_NODE_CHILD_PROCESS_INCOMPLETE` | The direct child exited while a descendant still held a piped stream; the result is an explicit error, not a success with possibly truncated output. |
+| `ERR_NODE_CHILD_PROCESS_IO` | A pipe read failed unexpectedly; output may be incomplete. |
 | `ERR_NODE_CHILD_PROCESS_EXIT` | `execFileSync`'s child exited non-zero; `status`, `stdout`, and `stderr` are attached. |
 | `ENOENT`, `EACCES` | The program could not be started. `spawnSync` returns these in `error`; `execFileSync` throws. |
 
@@ -125,6 +126,8 @@ resource bound, not a sandbox.
   `ERR_NODE_CHILD_PROCESS_INCOMPLETE` error, not a success with a status. A
   descendant that creates a new process group and escapes is not tracked or
   killed.
+* An unexpected pipe read error is `ERR_NODE_CHILD_PROCESS_IO`; it is never
+  treated as end-of-file or a successful exit.
 * The guest uses intrinsics captured at bridge installation for `JSON.stringify`,
   record/array creation, `Array.isArray`, and own-property checks. Serialized
   request records and arrays have null prototypes, so inherited `toJSON`
@@ -157,5 +160,7 @@ registry-separation, unsupported-surface, timeout, overflow, inherited-pipe,
 pre-import bridge-replacement, hostile-serialization, and huge-request cases
 through their public `Runtime` constructors. The shared suite also verifies that
 a descendant left holding the pipes is killed after the direct child exits, that
-an unsupported-platform seam rejects before spawning, and that an injected
-post-spawn setup failure reaps the child.
+an unsupported-platform seam rejects before spawning, that an injected
+post-spawn setup failure kills and reaps the child group, and that an injected
+pipe read error is not treated as success. Adapter tests cover changing option
+getters and a changing Proxy array length.

@@ -26,7 +26,8 @@ reader or writer threads are created. A timeout, output overflow, or an
 inherited pipe left after the direct child exits triggers a bounded drain and a
 process-group SIGKILL, so a descendant cannot keep a join blocked. That case is
 reported as an explicit incomplete error, never a successful status with
-possibly truncated output. A descendant that creates a new process group and
+possibly truncated output. An unexpected pipe read error is an explicit I/O
+error, never end-of-file. A descendant that creates a new process group and
 escapes is not tracked or killed. Other platforms return
 `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` before spawning. The guest serializes
 null-prototype records and arrays with intrinsics captured at bridge
