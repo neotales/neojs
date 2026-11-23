@@ -9,17 +9,17 @@ rust-version.workspace = true
 authors.workspace = true
 
 [features]
-# A default V8 build keeps the existing surface: the shared `neo:chars`
-# implementation and `neo:slices`, which depends on it. `neo-slices` implies
+# A default V8 build keeps the existing surface: the native `neo:chars`
+# binding and `neo:slices`, which depends on it. `neo-slices` implies
 # `neo-chars` because `CharSlice` captures `chars.toUpper`/`chars.toLower`.
-# With default features off, both public modules, their source files, their
-# registry entries, and their loader entries are absent. The `slices`
+# With default features off, both public modules, the native registration, the
+# registry entries, and the loader entries are absent. The `slices`
 # implementation is a separate file included only under `neo-slices`, so it is
 # not embedded in a disabled binary. Features are additive and unify across the
 # dependency graph; this is surface selection, not a sandbox.
 default = ["neo-chars", "neo-slices"]
-# The shared `chars` implementation and its bare/canonical V8 adapter. This
-# enables the optional `neojs-builtins` dependency and its `chars` module.
+# The native `chars` binding and its bare/canonical V8 adapter. This enables
+# the optional `neojs-builtins` dependency and its `chars` module.
 neo-chars = ["dep:neojs-builtins", "neojs-builtins/chars"]
 # `slices` and its loader/registry entries. It cannot be built without `chars`:
 # `CharSlice` captures `chars.toUpper` and `chars.toLower`.
@@ -56,6 +56,9 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Enables the vendored deno_core test-only seam for the lazy-ESM collision
+# test. Normal builds do not enable this feature.
+deno_core = { workspace = true, features = ["native_module_testing"] }
 ed25519-dalek = { version = "3.0.0", features = ["pkcs8"] }
 rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

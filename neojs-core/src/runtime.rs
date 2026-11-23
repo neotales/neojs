@@ -493,10 +493,14 @@ impl Runtime {
             .js
             .as_mut()
             .expect("the isolate is present until Drop");
+        #[cfg(feature = "neo-chars")]
+        crate::chars::install(js).map_err(Error::NativeBuiltins)?;
         js.execute_script("<neojs:console>", console)
             .map_err(|error| Error::Core(error.into()))?;
         js.execute_script("<neojs:builtins>", builtins)
             .map_err(|error| Error::Core(error.into()))?;
+        #[cfg(feature = "neo-chars")]
+        crate::chars::remove_entries_global(js).map_err(Error::NativeBuiltins)?;
         Ok(runtime)
     }
 
@@ -1044,6 +1048,57 @@ mod tests {
     use super::Runtime;
     use crate::Error;
     use crate::builtins::neo_shim;
+    use std::rc::Rc;
+
+    struct IdentityLoader;
+
+    impl deno_core::ModuleLoader for IdentityLoader {
+        fn resolve(
+            &self,
+            specifier: &str,
+            _referrer: &str,
+            _kind: deno_core::ResolutionKind,
+        ) -> deno_core::ModuleResolveResponse {
+            deno_core::ModuleSpecifier::parse(specifier)
+                .map_err(|error| deno_error::JsErrorBox::generic(error.to_string()))
+        }
+
+        fn load(
+            &self,
+            _specifier: &deno_core::ModuleSpecifier,
+            _maybe_referrer: Option<&deno_core::ModuleLoadReferrer>,
+            _options: deno_core::ModuleLoadOptions,
+        ) -> deno_core::ModuleLoadResponse {
+            deno_core::ModuleLoadResponse::Sync(Err(deno_error::JsErrorBox::generic(
+                "the collision test does not expect a file load",
+            )))
+        }
+    }
+
+    #[cfg(feature = "neo-chars")]
+    fn noop<'s>(
+        _scope: &mut deno_core::v8::PinScope<'s, '_>,
+        _args: deno_core::v8::FunctionCallbackArguments<'s>,
+        _rv: deno_core::v8::ReturnValue<'s, deno_core::v8::Value>,
+    ) {
+    }
+
+    #[cfg(feature = "neo-chars")]
+    fn native_export(
+        js: &mut deno_core::JsRuntime,
+        name: deno_core::FastStaticString,
+    ) -> (
+        deno_core::FastStaticString,
+        deno_core::v8::Global<deno_core::v8::Value>,
+    ) {
+        let context = js.main_context();
+        deno_core::v8::scope!(let scope, js.v8_isolate());
+        let context = deno_core::v8::Local::new(scope, context);
+        let scope = &mut deno_core::v8::ContextScope::new(scope, context);
+        let function = deno_core::v8::Function::new(scope, noop).expect("native function");
+        let value: deno_core::v8::Local<deno_core::v8::Value> = function.into();
+        (name, deno_core::v8::Global::new(scope, value))
+    }
 
     /// A failing shim must return its own error, even inside a Tokio context.
     ///
@@ -1082,5 +1137,179 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[cfg(feature = "neo-chars")]
+    #[test]
+    fn duplicate_native_module_registration_keeps_the_original_chars_module() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let js = runtime.js.as_mut().expect("the isolate is present");
+        let replacement = native_export(js, deno_core::ascii_str!("isLetter"));
+        assert!(
+            js.register_native_module("neo:chars", vec![replacement])
+                .is_err(),
+            "a duplicate specifier must be rejected"
+        );
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("main.js");
+        std::fs::write(
+            &file,
+            r#"
+import * as chars from "neo:chars";
+const registry = Neo.getBuiltInModule("neo:chars");
+if (chars.isLetter !== registry.isLetter) {
+    throw new Error("the namespace and registry no longer share a function");
+}
+if (chars.isLetter(0x41) !== true) {
+    throw new Error("the original native function was replaced");
+}
+const dynamic = await import("neo:chars");
+if (dynamic.isLetter !== chars.isLetter) {
+    throw new Error("the original module identity was replaced");
+}
+"#,
+        )
+        .expect("write source");
+        runtime
+            .run_file(&file)
+            .expect("the original chars module remains intact");
+    }
+
+    #[cfg(feature = "neo-chars")]
+    #[test]
+    fn duplicate_native_export_names_are_rejected_before_registration() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let js = runtime.js.as_mut().expect("the isolate is present");
+        let first = native_export(js, deno_core::ascii_str!("x"));
+        let second = native_export(js, deno_core::ascii_str!("x"));
+        assert!(
+            js.register_native_module("neo:probe-native", vec![first, second])
+                .is_err(),
+            "duplicate export names must be rejected"
+        );
+
+        // The rejected call must not have inserted the specifier. If it had,
+        // this registration would fail as a duplicate and the map would be
+        // permanently poisoned.
+        let third = native_export(js, deno_core::ascii_str!("x"));
+        assert!(
+            js.register_native_module("neo:probe-native", vec![third])
+                .is_ok(),
+            "the rejected registration mutated the module map"
+        );
+        let fourth = native_export(js, deno_core::ascii_str!("y"));
+        assert!(
+            js.register_native_module("neo:probe-native", vec![fourth])
+                .is_err(),
+            "a second registration of the same specifier must be rejected"
+        );
+    }
+
+    #[test]
+    fn native_module_registration_rejects_a_lazy_esm_collision() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let js = runtime.js.as_mut().expect("the isolate is present");
+        let specifier = "ext:test/native-lazy-collision.js";
+        let source = "export const value = 7;";
+        js.add_lazy_loaded_esm_source_for_test(specifier, source);
+
+        let export = js
+            .execute_script("<native-export>", "(function value() { return 7; })")
+            .expect("export value");
+        let result =
+            js.register_native_module(specifier, vec![(deno_core::ascii_str!("value"), export)]);
+        assert!(
+            result.is_err(),
+            "a native registration must reject a known lazy ESM collision"
+        );
+
+        // Load through the ordinary lazy-module path, not with source bytes
+        // supplied by the test. Two independent lazy loaders must return the
+        // one original namespace, with the original export.
+        js.execute_script(
+            "<lazy-collision>",
+            format!(
+                r#"
+const specifier = "{specifier}";
+const loadA = Deno.core.createLazyLoader(specifier);
+const loadB = Deno.core.createLazyLoader(specifier);
+const first = loadA();
+const again = loadA();
+const other = loadB();
+if (first !== again || first !== other) {{
+    throw new Error("the lazy module identity changed");
+}}
+if (first.value !== 7) {{
+    throw new Error("the original lazy export changed");
+}}
+"#
+            ),
+        )
+        .expect("the remaining lazy source loads and evaluates");
+    }
+
+    #[test]
+    fn native_module_registration_rejects_typed_and_alias_collisions() {
+        let mut js = deno_core::JsRuntime::new(deno_core::RuntimeOptions {
+            module_loader: Some(Rc::new(IdentityLoader)),
+            ..Default::default()
+        });
+
+        // A JSON module lives under RequestedModuleType::Json, not None.
+        js.add_json_module_for_test("https://test/typed.json", r#"{"ok":true}"#);
+        let export = js
+            .execute_script("<native-export>", "(function value() { return 7; })")
+            .expect("export value");
+        assert!(
+            js.register_native_module(
+                "https://test/typed.json",
+                vec![(deno_core::ascii_str!("value"), export)],
+            )
+            .is_err(),
+            "a native registration must reject a typed module name"
+        );
+
+        // The alias is also under RequestedModuleType::Json, so a None lookup
+        // alone would miss it; has_name_any_type must catch it.
+        js.add_json_alias_for_test("https://test/alias.json", "https://test/typed.json");
+        let export = js
+            .execute_script("<native-export>", "(function value() { return 7; })")
+            .expect("export value");
+        assert!(
+            js.register_native_module(
+                "https://test/alias.json",
+                vec![(deno_core::ascii_str!("value"), export)],
+            )
+            .is_err(),
+            "a native registration must reject a typed alias name"
+        );
+
+        // Resolve and import both names through the real module graph. The
+        // JSON module and its typed alias must still exist, carry the original
+        // value, and resolve to one module identity after both rejections.
+        let main =
+            deno_core::ModuleSpecifier::parse("https://test/main.js").expect("main specifier");
+        let main_id = deno_core::futures::executor::block_on(js.load_main_es_module_from_code(
+            &main,
+            r#"
+import typed from "https://test/typed.json" with { type: "json" };
+import alias from "https://test/alias.json" with { type: "json" };
+if (typed.ok !== true) throw new Error("the typed JSON value changed");
+if (typed !== alias) throw new Error("the typed alias lost module identity");
+"#,
+        ))
+        .expect("the typed module and alias resolve and load");
+        // `mod_evaluate` alone can return Ok while a top-level rejection is
+        // thrown into V8. Drive the event loop, as the runtime does for a real
+        // entry, and assert both the event-loop result and the evaluation
+        // result.
+        let evaluation = js.mod_evaluate(main_id);
+        deno_core::futures::executor::block_on(
+            js.run_event_loop(deno_core::PollEventLoopOptions::default()),
+        )
+        .expect("the typed import graph's event loop completes");
+        deno_core::futures::executor::block_on(evaluation)
+            .expect("the typed import graph evaluates");
     }
 }

@@ -1,10 +1,11 @@
 // The engine-independent implementation of the `slices` built-in module.
 //
 // This file is spliced into the V8 realm shim only when `neo-slices` is
-// enabled. It is not a module and has no imports or exports. It follows the
-// shared `chars` declaration in `neo.js`, because `CharSlice` captures
-// `chars.toUpper` and `chars.toLower`; the Cargo feature dependency makes that
-// ordering mandatory.
+// enabled. It is not a module and has no imports or exports. It reads the
+// native `chars` entries installed before `neo.js` evaluates, because
+// `CharSlice` captures `chars.toUpper` and `chars.toLower`; the Cargo feature
+// dependency makes that ordering mandatory. The `chars` object is native V8
+// code; this JavaScript module only reads its functions.
 //
 // The implementation captures the intrinsics it uses at evaluation time. A
 // disabled `neo-slices` build does not compile this file into the binary at all,
@@ -615,8 +616,11 @@
         }
 
         const CHAR_STATE = Symbol("charSliceState");
-        const charToUpper = chars.toUpper;
-        const charToLower = chars.toLower;
+        const nativeChars = globalThis.__neoNativeBuiltins.find(
+            (entry) => entry[0] === "neo:chars",
+        )[1];
+        const charToUpper = nativeChars.toUpper;
+        const charToLower = nativeChars.toLower;
 
         /**
          * A mutable live view over Unicode code points in a caller-owned

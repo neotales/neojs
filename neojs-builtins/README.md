@@ -1,16 +1,17 @@
 # neojs-builtins
 
-Engine-independent Neo built-in module implementations shared by the V8
-runtime (`neojs-core`) and the QuickJS runtime (`neojs-lite-core`).
+Engine-independent Rust implementations of Neo built-in modules shared by the
+V8 runtime (`neojs-core`) and the QuickJS runtime (`neojs-lite-core`).
 
-The crate contains ECMAScript source and metadata only. It has no `deno_core`
-dependency, no `rquickjs` dependency, and no dependencies at all, so it can sit
-in both dependency graphs without moving an engine across the separation
-boundary. It performs no I/O.
+The crate contains Rust logic and metadata only. It has no `deno_core`
+dependency, no `rquickjs` dependency, and performs no I/O, so it can sit in both
+dependency graphs without moving an engine across the separation boundary. Each
+engine binds the same Rust functions with its own native function and module
+objects; there is no ECMAScript implementation source in this crate.
 
 ```sh
+cargo test -p neojs-builtins --all-features
 cargo test -p neojs-builtins
-cargo test -p neojs-builtins --no-default-features
 cargo tree -p neojs-builtins -e normal
 ```
 
@@ -18,16 +19,16 @@ cargo tree -p neojs-builtins -e normal
 
 Each module contributes:
 
-* an **implementation** expression that evaluates to the frozen public module
-  object and captures the intrinsics it uses;
-* a **canonical module wrapper** that re-exports that object from
-  `Neo.getBuiltInModule("<canonical specifier>")`;
+* a Rust implementation with total predicates and explicit case-mapping results;
 * a `BuiltinModule` descriptor with the canonical specifier, the exact export
-  names, and both sources.
+  names, and the Rust backend marker.
 
-Each engine keeps its own realm shim and loader/registry adapter. The engine
-decides where to splice the implementation and how to accept a specifier; the
-implementation and wrapper text are the same in both.
+Each engine keeps its own binding. V8 creates native V8 function objects,
+registers a native synthetic module with the deno_core seam, and installs the
+same object in the registry. QuickJS creates native QuickJS functions and
+exports them from a native QuickJS module. In both engines the registry property
+and the module export are the same function object; the ES module namespace is a
+distinct object.
 
 ## Module selection
 
@@ -35,26 +36,19 @@ Every shared module has its own Cargo feature. `chars` is the first.
 
 * `neojs-core` has a positive `neo-chars` feature that enables the optional
   `neojs-builtins` dependency and its `chars` feature. A default V8 build
-  enables `neo-chars`, so the existing surface is unchanged. `neo-slices`
-  implies `neo-chars`, because `CharSlice` captures `chars.toUpper` and
-  `chars.toLower`; disabling `neo-chars` also disables `slices` and removes both
-  source files, registry entries, and loader entries. The `slices`
-  implementation is a separate file included only under `neo-slices`, so a
-  disabled build does not embed its bytes. A `neo-chars`-only build keeps
-  `chars` and omits `slices`.
+  enables `neo-chars`. `neo-slices` implies `neo-chars` because `CharSlice`
+  captures the native `chars.toUpper` and `chars.toLower` functions. Disabling
+  `neo-chars` also disables `slices` and removes the native registration, the
+  registry entry, the loader entry, and the binding bytes.
 * `neojs-lite-core` has the same positive `neo-chars` feature, enabled by its
   default feature set. `default-features = false` removes the dependency, the
-  implementation source, the registry object, the loader entry, and the
-  introspection list entry. `neojs-lite` selects `neo-chars` explicitly with
-  `default-features = false`, so the command bundle does not drift with library
-  defaults.
+  native object, the module declaration, the registry entry, and the
+  introspection list entry.
 * `neojs-builtins` itself has no default module features. A build without
-  `chars` has no descriptor, no implementation bytes, and no wrapper.
+  `chars` has no descriptor and no classifier code.
 
-Cargo features are additive and unify across the dependency graph. A build that
-another dependent enables a module for contains that module even if one consumer
-requested it off. Module selection is compile-time surface selection, not a
-sandbox.
+Cargo features are additive and unify across the dependency graph. Module
+selection is compile-time surface selection, not a sandbox.
 
 ## `neo:chars`
 
@@ -86,26 +80,25 @@ capability. It is not a sandbox.
 
 ## Precise limits
 
-* **Unicode version follows the engine.** Classification uses ECMAScript
-  Unicode property escapes (`\p{...}` with the `u` flag) and full case mapping
-  through `String.prototype.toLowerCase`/`toUpperCase`. Both engines implement
-  these, but their Unicode tables can be from different releases. A code point
-  assigned in a newer release can classify differently between V8 and QuickJS.
-  The shared contract tests use long-assigned code points and do not claim a
-  fixed Unicode version. `isSpace` is intentionally Go's `unicode.IsSpace`
-  contract, not JavaScript `\s`: U+FEFF is not whitespace.
-* **Captured intrinsics, not isolation.** The implementation captures the
-  intrinsics it uses when the realm shim is evaluated. Replacing them afterwards
-  does not change the module. Code that replaced them before the shim ran is not
-  defended against.
-* **One module instance per realm.** The wrapper reads the public registry
-  object and re-exports its function properties. Each named export is the same
-  function object as the matching registry property, while the ES module
-  namespace is a distinct object. The namespace is immutable by the language and
-  the registry object is frozen. This is not a cross-realm or cross-thread
-  mechanism.
-* **Source, not a stable ABI.** The public Rust surface is the descriptor and
-  source constants. JavaScript behavior is the contract; the exact text is not.
+* **Category data is Unicode 16.0; case data follows the Rust compiler.**
+  Classification uses the Unicode 16.0 General_Category tables from
+  `unicode-general-category`. Case mapping uses Rust's `char::to_lowercase` and
+  `char::to_uppercase`, whose Unicode release is the compiler's and is not
+  guaranteed to match the category table. A compiler upgrade can therefore
+  change a case mapping without changing classification. Both can differ from
+  the previous JavaScript implementation's engine tables. The contract tests
+  pin the intended one-code-point behavior and a Unicode 16 classification
+  boundary. `isSpace` is intentionally Go's `unicode.IsSpace` contract, not
+  JavaScript `\s`: U+FEFF is not whitespace.
+* **Captured native functions.** The engine creates the function objects once,
+  before user code runs. Replacing a JavaScript intrinsic afterwards does not
+  change the module. Code that replaces a realm intrinsic before the runtime is
+  constructed is not defended against.
+* **One module instance per realm.** The registry object is frozen and cached.
+  The ES module namespace is a distinct object whose named exports are the same
+  function objects as the registry properties.
+* **Rust signatures are internal.** The public contract is the JavaScript
+  module behavior. The crate's exact Rust signatures are not a stable ABI.
 
 ## Cross-engine tests
 
@@ -113,44 +106,26 @@ capability. It is not a sandbox.
 `neojs-lite-core`. Each test replaces two tokens with its adapter's specifier and
 registry key. The fixture covers Unicode boundaries, scalar and category edge
 cases, expanding case mappings, error classes, captured intrinsics, and module
-import identity.
+import identity. Engine-specific tests additionally assert that every export is
+a native function (`Function.prototype.toString` contains `[native code]`).
+
+## V8 native module seam
+
+`deno_core` 0.413.0 has no public API for registering an already-built synthetic
+module with explicit named exports. The workspace therefore pins a vendored copy
+with one added method, `JsRuntime::register_native_module`, documented in
+`vendor/deno_core/PATCH.md`. The method uses the crate's existing
+`ModuleMap::new_synthetic_module`; it does not change loader, resolver, cache, or
+module-graph behavior. The V8 loader serves only an empty deduplication sentinel
+for `neo:chars`, and the module map reuses the native module.
 
 ## Artifact checks
 
-The engine test suites include artifact scans. Each scan reads its own test
-executable and looks for distinctive byte sequences from the actual JavaScript
-implementation, not markers added for testing. V8 checks both `chars` and
-`slices`; QuickJS checks `chars`. A disabled build must not contain those
-sequences, and an enabled build must. A hex-encoded control string from the
-always-present shim proves the scan is reading real source bytes rather than
-passing vacuously. The sequences are decoded from hex at runtime, so the test
-source cannot itself supply the searched bytes.
-
-Because the checks use implementation code, reintroducing the original inline
-`slices` implementation into the monolith would fail a disabled scan even if no
-marker or sentinel were reintroduced. The V8 `slices` implementation is a
-separate file, `neojs-core/src/builtins/slices.impl.js`, included only under
-`neo-slices`. The previous monolithic shim embedded it unconditionally and
-removed it from the evaluated text at runtime; that is no longer how a disabled
-build is produced.
-
-## Integration state
-
-* **Canonical registry contract.** The canonical registry contract makes
-  `Neo.getBuiltInModule("neo:chars")` the only lookup and
-  `Neo.getBuiltInModulesList()` canonical-only, and wrappers use canonical
-  keys. Both engines implement it. This crate's `SPECIFIER`, `MODULE`, and
-  canonical wrapper all use `neo:chars`; `neojs-core/src/builtins.rs` splices the
-  implementation into the canonical realm shim, and
-  `neojs-core/src/builtins/chars.esm.js` reads the canonical key. The V8-shared
-  contract test uses the canonical specifier as both tokens.
-* **Per-module strings branch (in flight, separate).** `strings` is being
-  extracted independently behind an engine-local feature. This crate
-  deliberately shares **`chars`**, not `strings`, so the two changes do not
-  duplicate an implementation or touch the same source file. `chars` remains a
-  separate module; `slices` captures `chars.toUpper`/`chars.toLower`, and the V8
-  shim still defines `chars` before `slices`, so that dependency is unchanged.
-* **No V8 registry rewrite in this change.** Extracting `chars` did not change
-  the registry shape for the other V8 built-ins. Those remain canonical `neo:`
-  modules owned by the V8 runtime; the shared crate contributes only the
-  `chars` descriptor, implementation, and wrapper.
+The engine test suites include artifact scans. The V8 scan looks for the Rust
+`chars` error text, which only links when the module is compiled in, and for
+distinctive byte sequences from the still-JavaScript `slices` implementation.
+The QuickJS scan looks for the Rust `chars` error text. A disabled build must not
+contain the corresponding sequences, and an enabled build must. A control string
+from the always-present `Neo` surface proves the scan is reading real bytes. The
+sequences are decoded from hex at runtime, so the test source cannot satisfy its
+own scan.

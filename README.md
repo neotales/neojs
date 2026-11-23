@@ -347,11 +347,13 @@ so a caller cannot change later results; a new `Runtime` allocates a new array. 
 takes the same canonical `neo:` specifier: `Neo.getBuiltInModule("neo:age")` returns the module, and
 `Neo.getBuiltInModule("age")` returns `undefined`. Imports follow the same rule; the bare name `age`
 is not a built-in module specifier. The V8 build enables the positive `neo-chars` and `neo-slices`
-features by default; `--no-default-features` removes both modules, their realm-shim source, their
-registry entries, and their loader entries. The `slices` implementation is a separate source file
+features by default; `--no-default-features` removes both modules, the native `chars` registration,
+their registry entries, and their loader entries. `chars` is a native Rust binding; there is no
+JavaScript implementation or ESM facade. `slices` is still JavaScript and is a separate source file
 included only when `neo-slices` is enabled, so a disabled build does not embed its bytes.
-`neo-slices` implies `neo-chars` because `CharSlice` captures `chars.toUpper`/`chars.toLower`.
-Features are additive across the dependency graph and are not a sandbox.
+`neo-slices` implies `neo-chars` because `CharSlice` captures the native
+`chars.toUpper`/`chars.toLower` functions. Features are additive across the dependency graph and are
+not a sandbox.
 
 The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"` and,
 with its default `neo-chars` feature, implements one shared built-in, `neo:chars`.
@@ -360,9 +362,9 @@ with its default `neo-chars` feature, implements one shared built-in, `neo:chars
 same function objects the `neo:chars` namespace exports; the namespace itself is a distinct object.
 With `default-features = false` the registry and list are empty. A bare `chars` name, another scheme,
 or any other specifier returns `undefined`; a non-string name throws `TypeError`. That list is not a
-claim that another V8 module is planned or available. The `chars` implementation and wrapper come
-from the engine-neutral `neojs-builtins` crate, which both runtimes use; see
-`neojs-builtins/README.md` for the shared contract and its Unicode-version limit.
+claim that another V8 module is planned or available. The `chars` Rust logic comes from the
+engine-neutral `neojs-builtins` crate and is bound as a native QuickJS module; there is no JavaScript
+wrapper. See `neojs-builtins/README.md` for the shared contract and its Unicode-version limits.
 
 **Use the stdio built-in.** `Neo.getBuiltInModule("neo:stdio")` returns a frozen module object cached
 for the realm. `neo:stdio` is the canonical and only module specifier. It exports `Readable`,
@@ -624,8 +626,8 @@ Implemented functions:
 - `isSpace` — whitespace: tab, line feed, vertical tab, form feed, carriage return, space, U+0085,
   and categories `Zs`, `Zl`, and `Zp`.
 - `isSymbol` — a symbol (category `S`), including emoji.
-- `toLower` and `toUpper` — the lowercase or uppercase code point, when the host's full mapping is
-  a single code point. Expanding mappings such as `ß` to `SS` return the input unchanged.
+- `toLower` and `toUpper` — the lowercase or uppercase code point, when the Rust compiler's full
+  mapping is a single code point. Expanding mappings such as `ß` to `SS` return the input unchanged.
 
 Every predicate takes a Unicode code point as a number. It returns `false` for any value that is
 not a Unicode scalar value: a non-number, a non-integer, `NaN`, a value outside 0 through 0x10FFFF,
@@ -633,11 +635,15 @@ or a surrogate (0xD800 through 0xDFFF). Predicates never throw. `toLower` and `t
 `TypeError` for a non-number and `RangeError` for a non-scalar value. There are no string overloads
 and no `...At` helpers in this slice; pass `codePointAt(0)` yourself.
 
-Classification uses the Unicode property tables compiled into V8, so the Unicode version follows
-V8. `isSpace` follows Go's `unicode.IsSpace` categories: unlike JavaScript's `\s`, it includes
-U+0085 and U+00A0 but excludes U+FEFF. This module is an independent implementation informed by
-`@neotales/chars` and the QuickJS `neo:chars` module. It does not port their lookup tables, and it
-does not claim compatibility with either API.
+Classification is fixed to the Unicode 16.0 General_Category tables in the engine-neutral
+`neojs-builtins` crate, so V8 and QuickJS classify the same input the same way instead of following
+their own engine tables. Case mapping uses the Rust compiler's `char` tables; that release is not
+tied to the category table and can change on a compiler upgrade, so a case mapping can drift even
+when classification does not. Both can differ from the tables used by the previous JavaScript
+implementation. `isSpace` follows Go's `unicode.IsSpace` categories: unlike JavaScript's `\s`, it
+includes U+0085 and U+00A0 but excludes U+FEFF. This module is informed by `@neotales/chars` and the
+QuickJS `neo:chars` module; it does not port their lookup tables, and it does not claim compatibility
+with either API.
 
 **Use the strings built-in.** `Neo.getBuiltInModule("neo:strings")` returns a frozen module object
 that is cached for the realm. `neo:strings` is the canonical and only module specifier. The named
@@ -1702,8 +1708,9 @@ list is the canonical `["neo:chars"]`. `Neo.getBuiltInModule("neo:chars")` retur
 registry object whose named functions are the same function objects the `neo:chars` namespace
 exports; the namespace itself is a distinct object. With `default-features = false` the list is empty.
 A bare name, another scheme, or any other specifier returns `undefined`, and a non-string name throws
-`TypeError`. The `chars` implementation and canonical wrapper come from the engine-neutral
-`neojs-builtins` crate, which both runtimes use; it has no V8 or QuickJS dependency. Both runtimes
+`TypeError`. The `chars` Rust logic comes from the engine-neutral `neojs-builtins` crate and is
+bound as a native QuickJS module; there is no JavaScript wrapper. The crate has no V8 or QuickJS
+dependency. Both runtimes
 share `neojs-module-policy` for executable-extension decisions and rejection reasons, so `.cjs`,
 JSX/TSX, declaration files, JSON, WebAssembly, and native addons fail with the same explanation in
 either.
