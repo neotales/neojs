@@ -240,7 +240,12 @@ impl Runtime {
     /// first request for a package or version blocks the isolate thread. A
     /// direct `https://jsr.io/...` import from a local or ordinary remote module
     /// is an ordinary HTTPS module, not a `jsr:` import; an explicit jsr.io URL
-    /// imported inside a JSR graph is verified against the manifest. There is no
+    /// imported inside a JSR graph is verified against the manifest. If the same
+    /// canonical URL is already pending from a `jsr:` resolution (including a
+    /// bare `import.meta.resolve` or a failed verified load), a later direct
+    /// load of that URL takes the verified path because the original specifier
+    /// is not recoverable at load time; that is conservative verification, not
+    /// a bypass. There is no
     /// lockfile, publisher signature, dist-tag, private registry, `npm:`,
     /// `node:`, `gh:`, or import-map support.
     ///

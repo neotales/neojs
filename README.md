@@ -1663,7 +1663,11 @@ list are not implemented.
   so an attacker who rewrites both the cached manifest and the cached body can keep them consistent.
   A direct `https://jsr.io/...` import from a local or ordinary remote module is an ordinary HTTPS
   module, not a `jsr:` import, and does not use registry metadata or checksums; an explicit jsr.io
-  URL imported inside a JSR graph is verified against the manifest. JSR support covers
+  URL imported inside a JSR graph is verified against the manifest. One exception: if the same
+  canonical URL is already pending from a `jsr:` resolution (including a bare `import.meta.resolve`
+  or a failed verified load), a later direct load of that URL takes the verified path because the
+  original specifier is not recoverable at load time. That is conservative verification, not a
+  bypass. JSR support covers
   exported entrypoints and the relative modules they import; `npm:`, `node:`, `gh:`, dist-tags,
   private registries, authentication, import maps and `neo.jsonc`, lockfiles, offline policy, and
   publisher signatures are not implemented. A JSR package that imports one of those fails at
