@@ -113,7 +113,10 @@ Limits applied by the adapter:
 | `options.env` | 128 | 4096 | 4096 UTF-16 units |
 
 Both bounds fail closed. Options report `ERR_NODE_UNSUPPORTED`; environment
-objects report `ERR_NODE_REQUEST_TOO_LARGE`. Symbol keys are not returned, but
+objects report `ERR_NODE_REQUEST_TOO_LARGE`. Allocation failure is different: the
+pending QuickJS out-of-memory exception is rethrown unchanged rather than being
+translated into a Node input error, and the Rust guard releases the atom table on
+every other failure path. Symbol keys are not returned, but
 symbol slots still count toward the scan bound. Proxy and exotic objects
 (including `Map`, `Set`, typed arrays and module namespaces) are rejected before
 a trap runs or a property list is built. This is a deliberate compatibility
@@ -126,7 +129,10 @@ Tests cover 0, 128 and 129 keys, the inclusive 64-slot scan boundary,
 integer-key ordering, lone-surrogate keys, array and typed-array rejection,
 getters not being read during enumeration, a throwing getter followed by a
 successful call, Proxy `ownKeys` traps that must not run, and repeated failure
-cleanup.
+cleanup. A test-only entry point forces the table allocation to fail and checks
+that both option and environment mappings surface the QuickJS `out of memory`
+exception, not `ERR_NODE_UNSUPPORTED` or `ERR_NODE_REQUEST_TOO_LARGE`, that the
+context remains usable, and that repeated failures do not grow the runtime heap.
 
 ## Implemented surface
 
