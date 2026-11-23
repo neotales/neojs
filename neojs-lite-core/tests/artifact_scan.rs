@@ -1,15 +1,21 @@
-//! Artifact-level checks for the shared `chars` source in QuickJS builds.
+//! Artifact-level checks for the shared `chars` implementation in QuickJS
+//! builds.
 //!
-//! The sentinel is decoded from hex at runtime, so the test source does not
-//! contain the contiguous token and cannot create a false positive in a disabled
-//! build. Creating a runtime references the shim, which links the enabled
-//! implementation into this test binary.
+//! The needles are distinctive sequences from the actual implementation, not
+//! markers. A disabled build must not contain them. They are decoded from hex at
+//! runtime, so the test source does not satisfy its own scan.
 
 use std::fs;
 
 use neojs_lite_core::Runtime;
 
-const CHARS_SENTINEL_HEX: &str = "4e454f5f43484152535f41525449464143545f3346384332443141";
+/// `const DECIMAL_DIGIT = /\p{Nd}/u;` from the shared `chars` implementation.
+const CHARS_SEQUENCE_ONE_HEX: &str =
+    "636f6e737420444543494d414c5f4449474954203d202f5c707b4e647d2f753b";
+/// `throw new makeRangeError(\`${name} must be a Unicode scalar value\`);` from
+/// the shared `chars` implementation.
+const CHARS_SEQUENCE_TWO_HEX: &str = "7468726f77206e6577206d616b6552616e67654572726f722860247b6e616d657d206d757374206265206120556e69636f6465207363616c61722076616c756560293b";
+
 /// A string that is always in the shim, proving the scan reads real source bytes.
 const CONTROL_HEX: &str = "6765744275696c74496e4d6f64756c65734c697374";
 
@@ -27,27 +33,31 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+fn assert_sequences(artifact: &[u8], sequences: &[&str], expected: bool, description: &str) {
+    for hex in sequences {
+        let needle = decode_hex(hex);
+        assert_eq!(
+            contains(artifact, &needle),
+            expected,
+            "{description}: implementation sequence {hex} presence is {expected}"
+        );
+    }
+}
+
 #[test]
 fn shared_chars_source_bytes_follow_the_feature() {
     drop(Runtime::new().expect("runtime"));
 
     let artifact = fs::read(std::env::current_exe().expect("current exe")).expect("read artifact");
-    let chars = decode_hex(CHARS_SENTINEL_HEX);
     let control = decode_hex(CONTROL_HEX);
-
     assert!(
         contains(&artifact, &control),
         "artifact scan control is missing; the scan is not reading shim source bytes"
     );
 
+    let chars = [CHARS_SEQUENCE_ONE_HEX, CHARS_SEQUENCE_TWO_HEX];
     #[cfg(feature = "neo-chars")]
-    assert!(
-        contains(&artifact, &chars),
-        "neo-chars is enabled but the shared source sentinel is absent"
-    );
+    assert_sequences(&artifact, &chars, true, "neo-chars is enabled");
     #[cfg(not(feature = "neo-chars"))]
-    assert!(
-        !contains(&artifact, &chars),
-        "neo-chars is disabled but the shared source sentinel is present"
-    );
+    assert_sequences(&artifact, &chars, false, "neo-chars is disabled");
 }

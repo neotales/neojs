@@ -9,8 +9,6 @@
 // The implementation captures the intrinsics it uses at evaluation time. A
 // disabled `neo-slices` build does not compile this file into the binary at all,
 // so its source bytes are absent rather than merely unregistered.
-//
-// Artifact sentinel: NEO_SLICES_ARTIFACT_7B4E9C2D
 
     // `slices` creates live views over a JS Array or a genuine typed array.
     // A view addresses one fixed half-open range and does not copy for

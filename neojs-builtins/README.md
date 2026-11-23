@@ -118,17 +118,21 @@ import identity.
 ## Artifact checks
 
 The engine test suites include artifact scans. Each scan reads its own test
-executable and looks for a unique sentinel embedded in the JavaScript source.
-V8 checks both `chars` and `slices`; QuickJS checks `chars`. A disabled build
-must not contain the sentinel, and an enabled build must contain it. A hex-encoded
-control string from the always-present shim proves the scan is reading real
-source bytes rather than passing vacuously. The sentinels are decoded from hex at
-runtime, so the test source cannot itself supply the searched bytes.
+executable and looks for distinctive byte sequences from the actual JavaScript
+implementation, not markers added for testing. V8 checks both `chars` and
+`slices`; QuickJS checks `chars`. A disabled build must not contain those
+sequences, and an enabled build must. A hex-encoded control string from the
+always-present shim proves the scan is reading real source bytes rather than
+passing vacuously. The sequences are decoded from hex at runtime, so the test
+source cannot itself supply the searched bytes.
 
-The V8 `slices` implementation is a separate file,
-`neojs-core/src/builtins/slices.impl.js`, included only under `neo-slices`. The
-previous monolithic shim embedded it unconditionally and removed it from the
-evaluated text at runtime; that is no longer how a disabled build is produced.
+Because the checks use implementation code, reintroducing the original inline
+`slices` implementation into the monolith would fail a disabled scan even if no
+marker or sentinel were reintroduced. The V8 `slices` implementation is a
+separate file, `neojs-core/src/builtins/slices.impl.js`, included only under
+`neo-slices`. The previous monolithic shim embedded it unconditionally and
+removed it from the evaluated text at runtime; that is no longer how a disabled
+build is produced.
 
 ## Integration state and known conflicts
 

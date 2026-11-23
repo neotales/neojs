@@ -1,17 +1,31 @@
-//! Artifact-level checks for feature-selected built-in source.
+//! Artifact-level checks for feature-selected built-in implementation bytes.
 //!
-//! The shim is embedded in the library as string data, so scanning the test
-//! executable proves whether a disabled implementation's source bytes were
-//! compiled in. The sentinels are decoded from hex at runtime. They never appear
-//! contiguously in this test's own data, so a disabled build cannot produce a
-//! false positive from the test source itself.
+//! Each needle is a distinctive sequence from the actual implementation, not a
+//! marker added only for testing. A disabled build must not contain it; an
+//! enabled build must. Reintroducing the original inline implementation into
+//! the monolith would therefore fail the disabled check even without any marker.
+//!
+//! The needles are decoded from hex at runtime. They never appear contiguously
+//! in this test's own data, so the test source cannot satisfy its own scan.
 
 use std::fs;
 
 use neojs_core::Runtime;
 
-const CHARS_SENTINEL_HEX: &str = "4e454f5f43484152535f41525449464143545f3346384332443141";
-const SLICES_SENTINEL_HEX: &str = "4e454f5f534c494345535f41525449464143545f3742344539433244";
+/// `const DECIMAL_DIGIT = /\p{Nd}/u;` from the shared `chars` implementation.
+const CHARS_SEQUENCE_ONE_HEX: &str =
+    "636f6e737420444543494d414c5f4449474954203d202f5c707b4e647d2f753b";
+/// `throw new makeRangeError(\`${name} must be a Unicode scalar value\`);` from
+/// the shared `chars` implementation.
+const CHARS_SEQUENCE_TWO_HEX: &str = "7468726f77206e6577206d616b6552616e67654572726f722860247b6e616d657d206d757374206265206120556e69636f6465207363616c61722076616c756560293b";
+
+/// `const CHAR_STATE = Symbol("charSliceState");` from `slices.impl.js`.
+const SLICES_SEQUENCE_ONE_HEX: &str =
+    "636f6e737420434841525f5354415445203d2053796d626f6c282263686172536c696365537461746522293b";
+/// `throw makeTypeError("slices target must be an Array or a typed array");`
+/// from `slices.impl.js`.
+const SLICES_SEQUENCE_TWO_HEX: &str = "7468726f77206d616b65547970654572726f722822736c6963657320746172676574206d75737420626520616e204172726179206f72206120747970656420617272617922293b";
+
 /// A string that is always in the shim, proving the scan reads real source bytes.
 const CONTROL_HEX: &str = "6765744275696c74496e4d6f64756c65734c697374";
 
@@ -29,6 +43,17 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+fn assert_sequences(artifact: &[u8], sequences: &[&str], expected: bool, description: &str) {
+    for hex in sequences {
+        let needle = decode_hex(hex);
+        assert_eq!(
+            contains(artifact, &needle),
+            expected,
+            "{description}: implementation sequence {hex} presence is {expected}"
+        );
+    }
+}
+
 #[test]
 fn embedded_implementation_bytes_follow_the_features() {
     // Reference the shim through the real constructor so the enabled source is
@@ -36,34 +61,21 @@ fn embedded_implementation_bytes_follow_the_features() {
     drop(Runtime::new().expect("runtime"));
 
     let artifact = fs::read(std::env::current_exe().expect("current exe")).expect("read artifact");
-    let chars = decode_hex(CHARS_SENTINEL_HEX);
-    let slices = decode_hex(SLICES_SENTINEL_HEX);
     let control = decode_hex(CONTROL_HEX);
-
     assert!(
         contains(&artifact, &control),
         "artifact scan control is missing; the scan is not reading shim source bytes"
     );
 
+    let chars = [CHARS_SEQUENCE_ONE_HEX, CHARS_SEQUENCE_TWO_HEX];
     #[cfg(feature = "neo-chars")]
-    assert!(
-        contains(&artifact, &chars),
-        "chars is enabled but its source sentinel is absent from the binary"
-    );
+    assert_sequences(&artifact, &chars, true, "chars is enabled");
     #[cfg(not(feature = "neo-chars"))]
-    assert!(
-        !contains(&artifact, &chars),
-        "chars is disabled but its source sentinel is in the binary"
-    );
+    assert_sequences(&artifact, &chars, false, "chars is disabled");
 
+    let slices = [SLICES_SEQUENCE_ONE_HEX, SLICES_SEQUENCE_TWO_HEX];
     #[cfg(feature = "neo-slices")]
-    assert!(
-        contains(&artifact, &slices),
-        "slices is enabled but its source sentinel is absent from the binary"
-    );
+    assert_sequences(&artifact, &slices, true, "slices is enabled");
     #[cfg(not(feature = "neo-slices"))]
-    assert!(
-        !contains(&artifact, &slices),
-        "slices is disabled but its source sentinel is in the binary"
-    );
+    assert_sequences(&artifact, &slices, false, "slices is disabled");
 }
