@@ -15,11 +15,16 @@ The native `ChildProcess` export is a throwing function, not a constructible
 class; `new ChildProcess()` is a `TypeError` rather than the coded unsupported
 error. String fields are preflighted through QuickJS's string length property
 before conversion; the actual UTF-8 length is checked after conversion, so the
-host allocation is bounded by four times the configured cap. Proxy `options` and
-`options.env` are rejected before enumeration. Option/environment enumeration
-still uses QuickJS `JS_GetOwnPropertyNames`, which materializes the full plain
-property list before the count cap; this is a documented limitation, not a
-strict pre-materialization key-count bound.
+host allocation is bounded by four times the configured cap.
+
+Option and environment keys go through the workspace's vendored `rquickjs-sys`
+patch, not `Object::keys`. `JS_GetOwnEnumerableStringKeysBounded` rejects Proxy
+and exotic objects before any trap, counts every shape slot against a scan bound,
+counts enumerable string keys against a key bound, allocates only after both
+pass, and preserves JavaScript key order. Limits are 6 keys and 64 scanned slots
+for `options`, 128 keys and 4096 scanned slots for `options.env`, and 4096 UTF-16
+units per key. Symbol keys are ignored but their slots still count. See
+`vendor/rquickjs-sys/VENDOR.md` and `docs/node-compat.md`.
 
 A default `Runtime::new` rejects every `node:` import. In an opted-in runtime, a
 bare specifier that is a familiar Node module name is rejected rather than

@@ -87,26 +87,44 @@ implemented in JavaScript (`age`, `assert`, `chars`, `console`, `cron`, `crypto`
 repo-wide Rust-native built-ins migration is separate work and is not claimed
 here.
 
-### Native property enumeration limitation
+### Native property enumeration bound
 
-`rquickjs::Object::keys` calls QuickJS `JS_GetOwnPropertyNames`, which
-materializes the complete `JSPropertyEnum` list before this module can cap the
-count. There is no public QuickJS/rquickjs API for a count-only or bounded
-property iterator. The native adapter rejects Proxy `options` and `options.env`
-before enumeration, so an adversarial `ownKeys` trap is not entered; Proxy
-argument arrays remain supported with a one-time length snapshot. For accepted
-plain objects, the adapter enumerates atoms rather than converting each key to a
-Rust `String`, caps the number it converts, preflights each environment key's
-UTF-8 length, and does not interpolate unsupported option keys into errors. The
-property-enum array itself is still materialized before that cap, so this is
-**not** a strict pre-materialization key-count bound. A rquickjs/QuickJS patch or
-a bounded enumeration API is required for that claim.
+The native QuickJS adapter does not call `rquickjs::Object::keys`. That API calls
+QuickJS `JS_GetOwnPropertyNames`, which scans the whole shape and materialises the
+complete `JSPropertyEnum` list before any count cap can be applied. Instead, this
+workspace vendors `rquickjs-sys` 0.14.0 with one source patch (provenance and
+licence in `vendor/rquickjs-sys/VENDOR.md`). The patch adds:
 
-The tests cover a 100,000-byte option key, a 100,000-byte environment key, 129
-environment keys, a UTF-8 value that expands beyond its UTF-16 length, and
-Proxy `ownKeys` traps for both options and environment. They verify the
-adapter's caps and Proxy rejection, not a bound on QuickJS's property-enum
-allocation for plain objects.
+- `JS_GetOwnEnumerableStringKeysBounded`: rejects Proxy and every exotic object
+  before any callback or trap can run; counts every shape slot (deleted,
+  non-enumerable, symbol and private slots included) against `max_scan`; counts
+  enumerable string keys against `max_keys` with checked arithmetic; allocates
+  only after both bounds pass; preserves JavaScript key order (integer keys
+  ascending, then other string keys in insertion order); and returns owned atoms
+  that the caller frees through RAII.
+- `JS_AtomToCStringLenBounded`: checks a key's UTF-16 length before converting it
+  to a UTF-8 C string.
+
+Limits applied by the adapter:
+
+| Object | Max enumerable string keys | Max shape slots scanned | Max key length |
+| --- | --- | --- | --- |
+| `options` | 6 | 64 | 4096 UTF-16 units |
+| `options.env` | 128 | 4096 | 4096 UTF-16 units |
+
+Both bounds fail closed. Options report `ERR_NODE_UNSUPPORTED`; environment
+objects report `ERR_NODE_REQUEST_TOO_LARGE`. Symbol keys are not returned, but
+symbol slots still count toward the scan bound. Proxy and exotic objects
+(including `Map`, `Set`, typed arrays and module namespaces) are rejected before
+a trap runs or a property list is built. This is a deliberate compatibility
+narrowing: option bags with more than 64 shape slots, or environment objects with
+more than 4096 shape slots, are rejected instead of enumerated. Proxy argument
+arrays remain supported with a one-time `length` snapshot.
+
+Tests cover 0, 128 and 129 keys, 100,000-byte option and environment keys,
+deleted/non-enumerable/symbol slots, integer-key ordering, getters not being read
+during enumeration, a throwing getter followed by a successful call, Proxy
+`ownKeys` traps that must not run, and repeated failure cleanup.
 
 ## Implemented surface
 
