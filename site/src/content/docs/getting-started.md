@@ -115,7 +115,7 @@ require(...)`, `export =`, angle-bracket assertions (`<T>value`), and decorators
 
 ## Run tests
 
-`math.test.js`:
+`tests/math.test.js`:
 
 ```js
 import test from "test";
@@ -132,8 +132,10 @@ test("adds asynchronously", async () => {
 ```
 
 ```sh
-neojs test "tests/**/*.test.js"
+neojs test tests/math.test.js
 ```
+
+That command selects the file shown above and runs both tests.
 
 Each selected file runs in a fresh runtime. A file that registers no tests fails. See
 [the test module](/modules/test/) for timeouts, pending tests, unhandled rejections, and the exact
