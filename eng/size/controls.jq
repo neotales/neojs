@@ -11,3 +11,23 @@ def controls_complete:
   (.source.state_status == "captured") and
   (.build.v8_archive_status != "supplied-provenance-unknown") and
   (.build.v8_archive_status != "not-supplied-not-captured");
+
+# The group key shared by conflict validation and reporting. Two records are in
+# the same reproducibility group only when series, commit, dirty flag and source
+# state match.
+def conflict_key:
+  [
+    .series_id,
+    .source.git_commit,
+    .source.git_dirty,
+    (.source.state_sha256 // .source.state_status)
+  ];
+def conflict_key($r): $r | conflict_key;
+
+# Mixed completeness is possible because the target-lock contract is not part
+# of series_id. A group is confirmed only when every record has complete
+# controls; one incomplete record makes the whole group possible.
+def conflict_group_complete:
+  map(controls_complete) | index(false) == null;
+def conflict_group_kind:
+  if conflict_group_complete then "confirmed" else "possible" end;

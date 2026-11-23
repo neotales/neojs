@@ -94,25 +94,16 @@ def same_source_state($p; $r):
    ($r.source.state_sha256 // $r.source.state_status));
 def conflict_groups($all):
   [$all[] | select(.status == "ok")]
-  | group_by([
-      .series_id,
-      .source.git_commit,
-      .source.git_dirty,
-      (.source.state_sha256 // .source.state_status)
-    ])
+  | group_by(conflict_key)
   | map(select((map(.measurement.sha256) | unique | length) > 1))
   | map({
-      complete: (map(controls_complete) | index(false) == null),
+      kind: conflict_group_kind,
       records: .
     });
-def conflict_status($groups; $id):
-  if ($groups | any(.[]; .complete and (.records[0].series_id == $id))) then
-    "confirmed"
-  elif ($groups | any(.[]; (.complete | not) and (.records[0].series_id == $id))) then
-    "possible"
-  else
-    "no"
-  end;
+def conflict_status($groups; $r):
+  ($groups
+   | map(select(.records[0] | conflict_key == conflict_key($r)))
+   | .[0].kind // "no");
 
 . as $all
 | (conflict_groups($all)) as $conflicts
@@ -168,7 +159,7 @@ def conflict_status($groups; $id):
          $changed,
          $source_changed,
          ($r.series_id | short),
-         (conflict_status($conflicts; $r.series_id))
+         (conflict_status($conflicts; $r))
        ] | @tsv)
   elif $mode == "all" then
     (["measured_at", "status", "source", "family", "series", "package",
@@ -219,6 +210,6 @@ def conflict_status($groups; $id):
          ($r.source.git_commit | short),
          (if $r.source.git_canonical then "yes" else "no" end),
          $r.build.v8_archive_status,
-         (conflict_status($conflicts; $r.series_id))
+         (conflict_status($conflicts; $r))
        ] | @tsv)
   end

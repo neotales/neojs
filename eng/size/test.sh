@@ -385,6 +385,44 @@ expect_status 0 "report renders a confirmed conflict" \
 assert_contains "$TMP/stdout" "confirmed" "report marks the confirmed conflict"
 assert_contains "$TMP/stdout" "conflict" "trend labels the confirmed conflict delta"
 
+MIXED_INCOMPLETE=$(rewrite_with_ids '
+  .build.target_dir = {
+    lock: "not-recorded",
+    ownership: "not-claimed",
+    external_writer_safety: "not-claimed"
+  }
+  | .measurement.bytes = 12345681
+  | .measurement.sha256 = ("a" * 64)
+  | .measured_at = "2026-11-23T04:45:00Z"
+' "$COMPLETE")
+printf '%s\n%s\n' "$COMPLETE" "$MIXED_INCOMPLETE" >"$TMP/mixed-conflict.jsonl"
+expect_status 0 "mixed-completeness group is only a possible conflict" \
+    bash "$SCRIPT_DIR/validate.sh" --ledger "$TMP/mixed-conflict.jsonl"
+assert_contains "$TMP/stderr" "possible conflict with incomplete controls" \
+    "validator treats a mixed-completeness group as possible"
+expect_status 0 "report renders a mixed-completeness group" \
+    bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/mixed-conflict.jsonl" --trend
+assert_contains "$TMP/stdout" "possible-conflict" "trend explicitly labels possible-conflict"
+assert_contains "$TMP/stdout" "possible" "report marks the mixed group possible"
+if grep -Fq "confirmed" "$TMP/stdout"; then
+    fail "mixed-completeness group was marked confirmed"
+else
+    ok "mixed-completeness group is not marked confirmed"
+fi
+
+BROKEN="$TMP/broken-classifier"
+mkdir -p "$BROKEN"
+cp "$SCRIPT_DIR/lib.sh" "$SCRIPT_DIR/record_validate.jq" "$SCRIPT_DIR/controls.jq" "$BROKEN/"
+printf 'this is not valid jq\n' >"$BROKEN/conflict_check.jq"
+if ( . "$BROKEN/lib.sh"; size_validate_ledger "$TMP/valid.jsonl" 0 strict ) \
+    >"$TMP/stdout" 2>"$TMP/stderr"; then
+    fail "validation passed with a broken conflict classifier"
+else
+    ok "validation fails closed when the conflict classifier fails"
+fi
+assert_contains "$TMP/stderr" "conflict classifier failed" \
+    "classifier failure is reported"
+
 UNTRACKED_COMPLETE=$(rewrite_with_ids '
   .build.target_dir = {
     lock: "not-recorded",

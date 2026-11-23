@@ -262,10 +262,13 @@ Rules:
   source state produce two different digests, the records are kept. A group
   where every record has complete controls is a **confirmed reproducibility
   conflict**: strict `validate.sh` fails it, `validate.sh --allow-conflicts`
-  and `report.sh` still render it. A group with any uncaptured control is only
-  a **possible conflict with incomplete controls**: an unknown effective
+  and `report.sh` still render it. A group with **any** uncaptured control —
+  including a mixed group where one record is complete and another is not — is
+  only a **possible conflict with incomplete controls**: an unknown effective
   feature/linker, Cargo config, target environment, source state or V8 input may
-  explain it, so strict validation warns and exits 0. The report's `conflict`
+  explain it, so strict validation warns and exits 0. The same group rule is
+  shared by `conflict_check.jq` and `report.jq`; a classifier failure is fatal,
+  not an empty conflict list. The report's `conflict`
   column is `confirmed`, `possible` or `no`; the trend's delta-kind is
   `conflict` or `possible-conflict`. `measure.sh` records a differing digest
   with a warning instead of hiding or overwriting it.
@@ -295,7 +298,8 @@ That runs:
   staged binary state changes, source-state change and checkout race during
   build, Cargo config capture, environment override refusal, missing package
   handling, dry-run behaviour, controls-complete versus controls-incomplete,
-  possible versus confirmed conflicts, offline/locked trend reasons,
+  possible versus confirmed conflicts (including a mixed-completeness group
+  and a forced classifier failure), offline/locked trend reasons,
   package/target columns, target-dir contract, trend/report rendering and
   idempotent append, all in a temporary directory;
 - `validate.sh` — strict schema, integrity, unique keys and conflict detection

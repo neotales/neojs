@@ -260,7 +260,7 @@ size_validate_ledger() {
     local ledger=$1
     local allow_empty=${2:-0}
     local mode=${3:-strict}
-    local line line_no=0 error key expected series_id family_id conflict kind detail
+    local line line_no=0 error key expected series_id family_id conflict kind detail conflict_error
     local keys_file errors=0 conflicts
 
     [ -f "$ledger" ] || size_die "ledger not found: $ledger"
@@ -330,9 +330,15 @@ size_validate_ledger() {
     rm -f "$keys_file"
 
     if [ "$errors" -eq 0 ]; then
-        conflicts=$(jq -s -r -L "$(dirname -- "${BASH_SOURCE[0]}")" \
+        conflict_error=$(mktemp "${TMPDIR:-/tmp}/neojs-size-conflict.XXXXXX")
+        if ! conflicts=$(jq -s -r -L "$(dirname -- "${BASH_SOURCE[0]}")" \
             -f "$(dirname -- "${BASH_SOURCE[0]}")/conflict_check.jq" \
-            "$ledger" 2>/dev/null || true)
+            "$ledger" 2>"$conflict_error"); then
+            cat "$conflict_error" >&2
+            rm -f "$conflict_error"
+            size_die "conflict classifier failed; refusing to pass validation of $ledger"
+        fi
+        rm -f "$conflict_error"
         if [ -n "$conflicts" ]; then
             while IFS= read -r conflict; do
                 [ -n "$conflict" ] || continue
@@ -355,7 +361,7 @@ size_validate_ledger() {
                         size_warn "possible conflict with incomplete controls: $detail"
                         ;;
                     *)
-                        size_warn "unrecognised conflict classification: $conflict"
+                        size_die "conflict classifier produced an unrecognised classification: $conflict"
                         ;;
                 esac
             done <<<"$conflicts"
