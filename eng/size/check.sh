@@ -5,6 +5,9 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
+mkdir -p "$ROOT/target/size/tmp"
+export TMPDIR="$ROOT/target/size/tmp"
 
 bash "$SCRIPT_DIR/test.sh"
 if [ -s "$SCRIPT_DIR/measurements.jsonl" ]; then

@@ -38,7 +38,8 @@ input that can move the byte count:
   V8;
 - `build.features` and `build.no_default_features`;
 - `build.v8_archive` — the prebuilt V8 archive name and SHA-256, when one is
-  supplied;
+  supplied **and the package's dependency graph reaches V8**. A `neojs-lite`
+  record does not claim an archive its QuickJS build never read;
 - `build.cargo_lock_sha256` — the dependency graph;
 - `build.workspace_path_sha256` — the build path, hashed. Rust embeds source
   paths in some strings, so two worktrees can differ by a few bytes even at the
@@ -154,6 +155,13 @@ Rules:
   with one context and different digests mean the build is not reproducing
   itself; the validator rejects that ledger until the cause is understood or a
   missing control is recorded.
+- **The ledger is not a source change.** When the ledger is inside the
+  repository, it is excluded from the `git_dirty` decision; otherwise appending
+  the first measurement would make every later run look dirty and derive a new
+  key. Other modified or untracked files still mark the tree dirty.
+- **A `git_dirty: true` record is not a release measurement.** It is still a
+  real measurement of that tree, but the commit alone does not identify its
+  contents.
 
 Fields that are intentionally absent: absolute build paths, user names, host
 names, credentials, and anything read from a secret store. `workspace_path_sha256`
@@ -173,8 +181,15 @@ That runs:
 - `validate.sh` — the committed ledger must parse, satisfy the schema, have
   unique keys and reproducible contexts.
 
-The suite does not build a binary, touch the network, or modify the ledger.
-A measurement run is a separate, deliberate action.
+The suite does not build a binary, touch the network, or modify the ledger. Its
+scratch files live under `target/size/tmp/`, not the shared system temporary
+directory. A measurement run is a separate, deliberate action.
+
+Lint the scripts separately when `shellcheck` is available:
+
+```sh
+shellcheck -x -P eng/size eng/size/*.sh
+```
 
 For a local drill that exercises the whole path without writing:
 
