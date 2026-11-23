@@ -3,8 +3,7 @@ title: stdio
 description: Bounded in-memory byte streams and writers to the process stdout and stderr, synchronous only.
 ---
 
-`stdio` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `stdio` or
-`neo:stdio`; the registry form is `Neo.getBuiltInModule("stdio")`.
+`stdio` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `neo:stdio`; the registry form is `Neo.getBuiltInModule("stdio")`.
 
 It is a synchronous byte-stream foundation, not Node's `stream` or `process` module and not the
 WHATWG Streams API. No Node or Web compatibility is promised.
@@ -23,7 +22,7 @@ There is no default export and no `stdin`.
 ## Example
 
 ```js
-import { Readable, Writable, stdout, stderr } from "stdio";
+import { Readable, Writable, stdout, stderr } from "neo:stdio";
 
 const writer = new Writable();
 writer.writeSync(Uint8Array.from([0x00, 0xff]));

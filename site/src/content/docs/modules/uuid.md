@@ -3,15 +3,14 @@ title: uuid
 description: RFC 9562 version 4 and version 7 UUID generation from the operating system CSPRNG.
 ---
 
-`uuid` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `uuid` or
-`neo:uuid`; the registry form is `Neo.getBuiltInModule("uuid")`.
+`uuid` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `neo:uuid`; the registry form is `Neo.getBuiltInModule("uuid")`.
 
-The aggregate module exports `v4` and `v7`. The subpath modules `uuid/v4` and `uuid/v7` (aliases
-`neo:uuid/v4` and `neo:uuid/v7`) each expose one generator as both the named and default export.
-The function objects are the same, not wrappers.
+The aggregate module exports `v4` and `v7`. The subpath modules `neo:uuid/v4` and `neo:uuid/v7`
+each expose one generator as both the named and default export. The function objects are the same,
+not wrappers.
 
 ```js
-import { v4 as aggregateV4, v7 as aggregateV7 } from "uuid";
+import { v4 as aggregateV4, v7 as aggregateV7 } from "neo:uuid";
 import v4 from "neo:uuid/v4";
 import { v7 } from "neo:uuid/v7";
 

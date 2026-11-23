@@ -3,8 +3,7 @@ title: assert
 description: Callable assertions with structural equality, identity equality, synchronous throws, and Promise rejection checks.
 ---
 
-`assert` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `assert`
-or `neo:assert`; the registry form is `Neo.getBuiltInModule("assert")`.
+`assert` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `neo:assert`; the registry form is `Neo.getBuiltInModule("assert")`.
 
 The default export is the callable `assert` function. The named exports are its own properties.
 
@@ -22,7 +21,7 @@ The default export is the callable `assert` function. The named exports are its 
 | `rejects`, `doesNotReject` | Promise-returning async checks |
 
 ```js
-import assert, { equals, strictEquals } from "assert";
+import assert, { equals, strictEquals } from "neo:assert";
 
 const value = 1;
 assert(value, "optional message");

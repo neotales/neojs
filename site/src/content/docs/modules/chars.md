@@ -3,8 +3,7 @@ title: chars
 description: Unicode code-point classification and simple case mapping, implemented as plain ECMAScript.
 ---
 
-`chars` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `chars`
-or `neo:chars`; the registry form is `Neo.getBuiltInModule("chars")`.
+`chars` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `neo:chars`; the registry form is `Neo.getBuiltInModule("chars")`.
 
 It is plain ECMAScript and calls no host op. There is no default export and there are no string
 overloads or `...At` helpers: pass a code point, usually `text.codePointAt(0)`.
@@ -29,7 +28,7 @@ overloads or `...At` helpers: pass a code point, usually `text.codePointAt(0)`.
 | `toUpper` | The uppercase code point, when the mapping is one code point |
 
 ```js
-import { isLetter, isDigit, toUpper } from "chars";
+import { isLetter, isDigit, toUpper } from "neo:chars";
 
 console.log(isLetter("λ".codePointAt(0))); // true
 console.log(isDigit("٣".codePointAt(0))); // true

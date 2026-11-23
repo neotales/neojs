@@ -3,21 +3,22 @@ title: test
 description: The registration-based test runner behind neojs test, including timeouts, pending tests, and failure conditions.
 ---
 
-`test` is available in every V8 runtime and is **not** available in NeoJS Lite. Import it as `test`
-or `neo:test`; the registry form is `Neo.getBuiltInModule("test")`.
+`test` is available in every V8 runtime and is **not** available in NeoJS Lite. Import it as `neo:test`; the registry form is `Neo.getBuiltInModule("test")`.
 
 The default export is the `test` function. The named exports are `test`, `run`, `MAX_TESTS`, and
 `TestFailureError`.
 
-This is not Node's `node:test`. `node:test` is rejected, and there is no Node-module opt-in.
+This is not Node's `node:test`. `node:test` is rejected, and there is no Node-module opt-in. The
+bare name `test` is compatibility-only and reserved for future Node/package compatibility; import
+`neo:test`.
 
 ## Example
 
 `math.test.js`:
 
 ```js
-import test from "test";
-import assert from "assert";
+import test from "neo:test";
+import assert from "neo:assert";
 
 test("adds", () => {
     assert.equals(1 + 1, 2);

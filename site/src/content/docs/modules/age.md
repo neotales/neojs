@@ -6,7 +6,7 @@ description: X25519 identity generation and binary age v1 encryption and decrypt
 `age` is available in every V8 runtime; there is no secure-context or TLS gate. It is **not**
 available in NeoJS Lite.
 
-Import it as `age` or `neo:age`. The registry form is `Neo.getBuiltInModule("age")`.
+Import it as `neo:age`. The registry form is `Neo.getBuiltInModule("age")`.
 
 ## Exports
 
@@ -23,7 +23,7 @@ supports X25519 identities and recipients and binary age v1 only.
 ## Example
 
 ```js
-import { decrypt, encrypt, generateIdentity } from "age";
+import { decrypt, encrypt, generateIdentity } from "neo:age";
 
 const pair = generateIdentity(); // { identity, recipient }
 const plaintext = Uint8Array.from([0x68, 0x65, 0x6c, 0x6c, 0x6f]);

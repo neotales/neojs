@@ -118,8 +118,8 @@ require(...)`, `export =`, angle-bracket assertions (`<T>value`), and decorators
 `tests/math.test.js`:
 
 ```js
-import test from "test";
-import assert from "assert";
+import test from "neo:test";
+import assert from "neo:assert";
 
 test("adds", () => {
     assert.equals(1 + 1, 2);
@@ -143,19 +143,21 @@ report shape.
 
 ## Add a built-in module
 
-Built-ins are imported by a bare name or the same name under the `neo:` scheme. The two specifiers
-reach the same module instance:
+Import built-ins with the `neo:` prefix. Bare names such as `uuid` are reserved for future
+Node/package compatibility. The current `dev` tree still accepts them as compatibility behavior,
+but new code should use `neo:`:
 
 ```js
-import { v4 } from "uuid";
+import { v4 } from "neo:uuid";
 import { join } from "neo:path";
 
 console.log(v4());
 console.log(join("srv", "app", "data"));
 ```
 
-The registry is also available as `Neo.getBuiltInModule("uuid")`. See
-[built-in modules](/modules/) for the complete list and the identity rules.
+Registry lookup is separate: `Neo.getBuiltInModule("uuid")` takes the bare registry name. See the
+[canonical import policy](/modules/#canonical-import-policy) and the complete
+[built-in module list](/modules/).
 
 ## Try NeoJS Lite
 

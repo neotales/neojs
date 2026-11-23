@@ -3,8 +3,7 @@ title: crypto
 description: CSPRNG, a NeoJS AES-256-GCM envelope, stateful CBC and GCM ciphers, SHA-2, HMAC, PBKDF2, bcrypt, and Shamir secret sharing.
 ---
 
-`crypto` is available in every V8 runtime and is not available in NeoJS Lite. Import it as
-`crypto` or `neo:crypto`; the registry form is `Neo.getBuiltInModule("crypto")`.
+`crypto` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `neo:crypto`; the registry form is `Neo.getBuiltInModule("crypto")`.
 
 This is a NeoJS-specific surface, not Node's `crypto` module and not the Web Crypto API. Bytes are
 `Uint8Array`s and are never interpreted as text. There is no default export.
@@ -26,7 +25,7 @@ calls.
 ## Envelope
 
 ```js
-import { decrypt, encrypt, generateEnvelopeKey } from "crypto";
+import { decrypt, encrypt, generateEnvelopeKey } from "neo:crypto";
 
 const key = generateEnvelopeKey();
 const plaintext = Uint8Array.from([0x68, 0x65, 0x6c, 0x6c, 0x6f]);
@@ -87,7 +86,7 @@ no callback or Promise form, and no claim to Node's chunk timing.
 ## Hash and HMAC
 
 ```js
-import { createHash, createHmac, hashAsync } from "crypto";
+import { createHash, createHmac, hashAsync } from "neo:crypto";
 
 const digest = createHash("sha256").update("hello").digest("hex");
 const mac = createHmac("sha256", "key").update("hello").digest("hex");

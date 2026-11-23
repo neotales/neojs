@@ -3,8 +3,7 @@ title: cron
 description: UTC five-field cron parsing and in-process scheduling, with explicit overlap, missed-tick, and disposal rules.
 ---
 
-`cron` is available in the **V8 runtime only**. It is not available in NeoJS Lite. Import it as
-`cron` or `neo:cron`; the registry form is `Neo.getBuiltInModule("cron")`.
+`cron` is available in the **V8 runtime only**. It is not available in NeoJS Lite. Import it as `neo:cron`; the registry form is `Neo.getBuiltInModule("cron")`.
 
 The module exports `cron`, `next`, and `CronError`. It is a UTC five-field parser and an in-process
 scheduler. It is **not** Deno's `Deno.cron`, Bun's `Bun.cron`, `node-cron`, or a compatibility layer

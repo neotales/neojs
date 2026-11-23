@@ -3,8 +3,7 @@ title: ssh
 description: Synchronous SSH command execution with mandatory host-key verification and exactly one authentication method.
 ---
 
-`ssh` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `ssh` or
-`neo:ssh`; the registry form is `Neo.getBuiltInModule("ssh")`.
+`ssh` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `neo:ssh`; the registry form is `Neo.getBuiltInModule("ssh")`.
 
 This is a synchronous command-execution slice. It is not a shell, PTY, SCP, SFTP, port forwarder, or
 agent-forwarding client. It does not read `ssh_config`, identity files, or `~/.ssh/known_hosts`.
@@ -22,7 +21,7 @@ agent-forwarding client. It does not read `ssh_config`, identity files, or `~/.s
 ## `connect(options)`
 
 ```js
-import { connect } from "ssh";
+import { connect } from "neo:ssh";
 
 // Shape only: supply a real host, a real known-hosts document or host-key blob,
 // and real credentials. The documentation build does not run this example.

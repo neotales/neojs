@@ -3,14 +3,13 @@ title: path
 description: Lexical POSIX and Windows path manipulation with explicit namespaces and host-selected functions.
 ---
 
-`path` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `path` or
-`neo:path`; the registry form is `Neo.getBuiltInModule("path")`.
+`path` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `neo:path`; the registry form is `Neo.getBuiltInModule("path")`.
 
 It exports frozen `posix` and `win32` namespaces plus host-selected functions, so the same code can
 use an explicit syntax on any host.
 
 ```js
-import { posix, win32, SEPARATOR, SEPARATOR_PATTERN } from "path";
+import { posix, win32, SEPARATOR, SEPARATOR_PATTERN } from "neo:path";
 
 posix.join("/srv", "app", "..", "data"); // "/srv/data"
 posix.parse("/srv/data/file.txt");

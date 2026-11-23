@@ -31,7 +31,7 @@ disagree, the source wins.
 ## Not implemented in either runtime
 
 - **Node.js compatibility.** `node:`, `npm:`, `jsr:`, `http:`, `data:`, and `blob:` imports are
-  rejected. `node:test` is not an alias for `test`.
+  rejected. `node:test` is not `neo:test`.
 - **CommonJS.** `.cjs` and `.cts` are rejected by extension. A `.js` file that uses `require`,
   `module`, or `exports` fails as JavaScript.
 - **A permission system or sandbox.** The loader reads any file the process can read. Test files run
@@ -40,7 +40,10 @@ disagree, the source wins.
 - **Workers.**
 - **`fetch`, `URL`, or `TextEncoder` as documented NeoJS APIs.** V8 supplies the ECMAScript
   built-ins; NeoJS does not add these host APIs.
-- **Import maps, module type attributes, and bare specifiers that are not built-ins.**
+- **Import maps, module type attributes, and bare package specifiers.** Bare built-in names are
+  compatibility-only and reserved for future Node/package compatibility; import Neo built-ins with
+  the `neo:` prefix. The current `dev` tree still accepts bare names, but that is not the target
+  contract.
 - **npm package loading.** `docs/esm-npm-proposal.md` is a design proposal, not implemented behavior.
   There is no npm registry resolution, project `package.json` handling, or `node_modules` layout.
 - **JSON and WebAssembly module files**, both as the entry and as imports. V8's `WebAssembly` global

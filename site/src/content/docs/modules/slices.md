@@ -3,8 +3,7 @@ title: slices
 description: Live mutable and read-only views over Arrays, typed arrays, and Unicode code-point buffers.
 ---
 
-`slices` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `slices`
-or `neo:slices`; the registry form is `Neo.getBuiltInModule("slices")`.
+`slices` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `neo:slices`; the registry form is `Neo.getBuiltInModule("slices")`.
 
 It is plain ECMAScript: it calls no host op, adds no capability, and is not a sandbox or a
 cross-realm or cross-thread zero-copy bridge.
@@ -23,7 +22,7 @@ cross-realm or cross-thread zero-copy bridge.
 There is no default export.
 
 ```js
-import { slice, readonlySlice } from "slices";
+import { slice, readonlySlice } from "neo:slices";
 
 const base = [0, 1, 2, 3, 4];
 const view = slice(base, 1, 5); // [1, 2, 3, 4] as a live view

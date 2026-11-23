@@ -3,8 +3,7 @@ title: os
 description: Build-target platform and architecture constants, not a probe of the running machine.
 ---
 
-`os` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `os` or
-`neo:os`; the registry form is `Neo.getBuiltInModule("os")`.
+`os` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `neo:os`; the registry form is `Neo.getBuiltInModule("os")`.
 
 It exports two strings and has no default export. NeoJS installs no `os` global.
 
@@ -16,7 +15,7 @@ It exports two strings and has no default export. NeoJS installs no `os` global.
 | `arch` | Rust's `std::env::consts::ARCH` for the compilation target |
 
 ```js
-import { arch, platform } from "os";
+import { arch, platform } from "neo:os";
 
 console.log(platform); // e.g. "linux"
 console.log(arch);     // e.g. "x86_64"

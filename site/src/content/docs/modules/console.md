@@ -4,7 +4,7 @@ description: The realm's installed console object, its five NeoJS methods, and t
 ---
 
 `console` is available in every V8 runtime and is not available in NeoJS Lite. Import it as
-`console` or `neo:console`; the registry form is `Neo.getBuiltInModule("console")`.
+`neo:console`; the registry form is `Neo.getBuiltInModule("console")`.
 
 The default export is the console object the runtime installed. The named exports are the five
 NeoJS-defined method values, read when the console module is first evaluated.
@@ -17,8 +17,7 @@ NeoJS-defined method values, read when the console module is first evaluated.
 | `warn`, `error` | stderr |
 
 ```js
-import console from "console";
-import { warn } from "neo:console";
+import console, { warn } from "neo:console";
 
 console.log("stdout");
 warn("stderr");

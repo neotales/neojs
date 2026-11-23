@@ -3,8 +3,7 @@ title: strings
 description: Case-folded search and code-point-set trimming, implemented as plain ECMAScript.
 ---
 
-`strings` is available in every V8 runtime and is not available in NeoJS Lite. Import it as
-`strings` or `neo:strings`; the registry form is `Neo.getBuiltInModule("strings")`.
+`strings` is available in every V8 runtime and is not available in NeoJS Lite. Import it as `neo:strings`; the registry form is `Neo.getBuiltInModule("strings")`.
 
 It is plain ECMAScript: it calls no host op and adds no capability beyond the strings it is given.
 There is no default export.
@@ -19,7 +18,7 @@ There is no default export.
 | `trim`, `trimStart`, `trimEnd` | Trim a caller-supplied set of Unicode code points |
 
 ```js
-import { equalFold, indexOfFold, lastIndexOfFold, trim } from "strings";
+import { equalFold, indexOfFold, lastIndexOfFold, trim } from "neo:strings";
 
 console.log(equalFold("Hello WÖrLD", "hello wörld")); // true
 console.log(indexOfFold("😀a", "A")); // 2 (UTF-16 code units)
