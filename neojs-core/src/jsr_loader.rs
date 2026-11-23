@@ -49,7 +49,9 @@
 //!
 //! A registry module may import another registry module, a relative module
 //! inside its exact package version, a built-in, or an absolute `https:` URL
-//! when remote loading is enabled. It may not import `file:`: a registry module
+//! when remote loading is enabled. A canonical `jsr.io` URL joins the verified
+//! graph; another origin is an ordinary remote module. It may not import
+//! `file:`: a registry module
 //! cannot use an import to read the user's files. Relative imports are resolved
 //! against the canonical URL and must stay inside the package version
 //! directory; a module cannot use `..`, an absolute path, or a protocol-relative
