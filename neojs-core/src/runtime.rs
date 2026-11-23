@@ -228,8 +228,10 @@ impl Runtime {
     /// absolute `https:` URL. Relative imports inside a remote module resolve
     /// against that module's URL and therefore stay remote.
     ///
-    /// Only `https:` and the GitHub specifiers `gh:` and `github:` are
-    /// accepted. A GitHub specifier is normalized to one credential-free
+    /// An entry URL must be `https:` or a GitHub `gh:`/`github:` specifier. A
+    /// module's imports may additionally be relative references inside a
+    /// remote module and `jsr:` imports (see below). A GitHub specifier is
+    /// normalized to one credential-free
     /// `https://raw.githubusercontent.com/owner/repo/ref/path` URL before it is
     /// fetched, so it has the same limits, redirect policy, cache, and module
     /// identity as that HTTPS URL. `http:`, `data:`, `blob:`, and `file:` are

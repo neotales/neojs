@@ -167,9 +167,10 @@ deliberately, not in a shared shell profile.
 
 A relative import inside a remote module resolves against that module's URL, so it stays remote.
 `.js`, `.mjs`, `.ts`, and `.mts` work, statically and dynamically, and TypeScript is type-stripped
-as it is locally. Only `https:` and the GitHub specifiers below are accepted. A remote module
-cannot import a `file:` URL: there is no implicit transition from remote code to the local
-filesystem.
+as it is locally. An entry may be an `https:` URL or a `gh:`/`github:` specifier; a module import
+may also be a `jsr:` specifier, which always resolves through the public JSR registry rather than
+an arbitrary host (see [Limits](#limits) for `jsr:` resolution). A remote module cannot import a
+`file:` URL: there is no implicit transition from remote code to the local filesystem.
 
 **GitHub specifiers.** With remote loading enabled, a `gh:` or `github:` specifier names one file
 in a GitHub repository:
