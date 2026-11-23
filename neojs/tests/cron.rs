@@ -128,6 +128,61 @@ if (ticks !== 1) throw new Error(`expected 1 tick, got ${{ticks}}`);
 }
 
 #[test]
+fn reports_overlap_and_releases_at_the_last_occurrence() {
+    let source = format!(
+        r#"
+import {{ cron }} from "neo:cron";
+{PRELUDE}
+const max = {MAX_DATE_MS};
+let ticks = 0;
+let overlap = null;
+let release;
+let finish;
+const done = new Promise((resolve) => {{ finish = resolve; }});
+const job = cron(
+    "* * * * *",
+    () => {{
+        ticks += 1;
+        if (ticks === 1) {{
+            return new Promise((resolve) => {{ release = resolve; }});
+        }}
+        throw new Error("the final occurrence ran while the previous callback was in flight");
+    }},
+    {{
+        onEvent(event) {{
+            if (event.type === "overlap") {{
+                overlap = event;
+                finish();
+            }}
+        }},
+    }},
+);
+move(60_000);
+await until("first tick", () => ticks === 1);
+move(60_000);
+await until("final overlap", () => overlap !== null);
+await done;
+if (ticks !== 1) throw new Error(`the final occurrence ran: ${{ticks}}`);
+if (overlap.scheduledTime.getTime() !== max) {{
+    throw new Error(`wrong overlap time: ${{overlap.scheduledTime.toISOString()}}`);
+}}
+if (overlap.wokeAt.getTime() !== max) {{
+    throw new Error(`wrong wake time: ${{overlap.wokeAt.toISOString()}}`);
+}}
+release();
+await turn();
+// The job is released despite the overlap, so advancing the clock must not
+// schedule anything further.
+move(60_000);
+await turn();
+await turn();
+if (ticks !== 1) throw new Error(`a released job ticked again: ${{ticks}}`);
+"#
+    );
+    run_with_clock_at(&source, MAX_DATE_MS - 120_000.0);
+}
+
+#[test]
 fn skips_a_tick_while_the_previous_callback_is_in_flight() {
     let source = format!(
         r#"

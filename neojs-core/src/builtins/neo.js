@@ -2980,7 +2980,10 @@
     // reported as `missed`; the stale occurrence is not run, and the schedule
     // continues from the current time. When `due` is the last occurrence the
     // `Date` range can represent, it is dispatched once and the job then stops
-    // and releases its host resource. The host wait re-reads the wall clock at
+    // and releases its host resource, unless the preceding callback is still in
+    // flight: the normal overlap rule then skips that occurrence and reports
+    // `overlap`, and the job still stops and releases. The host wait re-reads
+    // the wall clock at
     // least once a minute and resolves only once the clock reaches the due
     // time; the scheduler also re-reads it before dispatch, so a backward clock
     // adjustment postpones a tick instead of running it early. A forward jump
@@ -3093,8 +3096,11 @@
          * returned Promise is awaited before the next tick is considered
          * available. If the next occurrence is the last minute the `Date` range
          * represents, it runs once and the job then stops and releases its host
-         * resource. Throws `TypeError` for bad arguments and `CronError` for an
-         * invalid expression or one with no future occurrence.
+         * resource. If the preceding callback is still in flight, the overlap
+         * rule skips that final occurrence and reports `overlap` instead; the
+         * job still stops and releases. Throws `TypeError` for bad arguments
+         * and `CronError` for an invalid expression or one with no future
+         * occurrence.
          */
         function cronJob(expression, callback, options) {
             requireExpression(expression);

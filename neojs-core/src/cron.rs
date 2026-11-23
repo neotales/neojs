@@ -58,7 +58,9 @@
 //! `None` and `neo:cron`'s `next` returns `null` rather than an invalid `Date`.
 //! An `after` argument outside the range is treated as the nearest boundary.
 //! A job whose next occurrence is the last representable minute dispatches it
-//! once and then stops, releasing its host resource.
+//! once and then stops, releasing its host resource. If the preceding callback
+//! is still in flight, the normal overlap rule skips that final occurrence and
+//! reports `overlap` instead; the job still stops and releases.
 //!
 //! # Scheduling and liveness
 //!
