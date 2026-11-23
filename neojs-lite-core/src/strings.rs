@@ -26,32 +26,51 @@ pub(super) fn object<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
     let object = Object::new(ctx.clone())?;
     object.set(
         "equalFold",
-        Function::new(ctx.clone(), equal_fold)?.with_length(2)?,
+        Function::new(ctx.clone(), equal_fold)?
+            .with_name("equalFold")?
+            .with_length(2)?,
     )?;
     object.set(
         "startsWithFold",
-        Function::new(ctx.clone(), starts_with_fold)?.with_length(2)?,
+        Function::new(ctx.clone(), starts_with_fold)?
+            .with_name("startsWithFold")?
+            .with_length(2)?,
     )?;
     object.set(
         "endsWithFold",
-        Function::new(ctx.clone(), ends_with_fold)?.with_length(2)?,
+        Function::new(ctx.clone(), ends_with_fold)?
+            .with_name("endsWithFold")?
+            .with_length(2)?,
     )?;
     object.set(
         "indexOfFold",
-        Function::new(ctx.clone(), index_of_fold)?.with_length(3)?,
+        Function::new(ctx.clone(), index_of_fold)?
+            .with_name("indexOfFold")?
+            .with_length(3)?,
     )?;
     object.set(
         "lastIndexOfFold",
-        Function::new(ctx.clone(), last_index_of_fold)?.with_length(3)?,
+        Function::new(ctx.clone(), last_index_of_fold)?
+            .with_name("lastIndexOfFold")?
+            .with_length(3)?,
     )?;
-    object.set("trim", Function::new(ctx.clone(), trim)?.with_length(2)?)?;
+    object.set(
+        "trim",
+        Function::new(ctx.clone(), trim)?
+            .with_name("trim")?
+            .with_length(2)?,
+    )?;
     object.set(
         "trimStart",
-        Function::new(ctx.clone(), trim_start)?.with_length(2)?,
+        Function::new(ctx.clone(), trim_start)?
+            .with_name("trimStart")?
+            .with_length(2)?,
     )?;
     object.set(
         "trimEnd",
-        Function::new(ctx.clone(), trim_end)?.with_length(2)?,
+        Function::new(ctx.clone(), trim_end)?
+            .with_name("trimEnd")?
+            .with_length(2)?,
     )?;
     super::neo::freeze(ctx, &object)?;
     Ok(object)

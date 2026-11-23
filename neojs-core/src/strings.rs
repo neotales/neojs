@@ -75,7 +75,7 @@ fn export_functions<'s>(
         ($name:literal, $function:ident, $length:literal) => {{
             let function = v8::Function::new(scope, $function)
                 .expect("a native strings function allocation failed");
-            set_function_length(scope, &function, $length);
+            set_function_metadata(scope, &function, $name, $length);
             set_export(
                 scope,
                 object,
@@ -96,25 +96,37 @@ fn export_functions<'s>(
     exports
 }
 
-/// Replaces the native function's zero `length` with the JavaScript arity.
+/// Restores the function `name` and `length` the ECMAScript implementation had.
 ///
-/// `v8::Function::new` creates a callback with length zero. The previous
-/// ECMAScript implementations exposed the declared parameter count, so the
-/// binding restores it with a non-writable, non-enumerable, configurable own
-/// property.
-fn set_function_length(
+/// `v8::Function::new` creates an anonymous callback with length zero. Both are
+/// configurable own properties, so the binding replaces them with the declared
+/// name and parameter count. They stay non-writable and non-enumerable.
+fn set_function_metadata(
     scope: &mut v8::PinScope<'_, '_>,
     function: &v8::Local<'_, v8::Function>,
+    name: &str,
     length: i32,
 ) {
-    let key = v8::String::new(scope, "length").expect("the length key fits a V8 string");
-    let value = v8::Integer::new(scope, length);
-    let mut descriptor = v8::PropertyDescriptor::new_from_value_writable(value.into(), false);
+    let name_value = v8::String::new(scope, name).expect("a function name fits a V8 string");
+    set_function_property(scope, function, "name", name_value.into());
+    let length_value = v8::Integer::new(scope, length);
+    set_function_property(scope, function, "length", length_value.into());
+}
+
+/// Defines one non-writable, non-enumerable, configurable function property.
+fn set_function_property(
+    scope: &mut v8::PinScope<'_, '_>,
+    function: &v8::Local<'_, v8::Function>,
+    key: &str,
+    value: v8::Local<'_, v8::Value>,
+) {
+    let key = v8::String::new(scope, key).expect("a function property key fits a V8 string");
+    let mut descriptor = v8::PropertyDescriptor::new_from_value_writable(value, false);
     descriptor.set_configurable(true);
     descriptor.set_enumerable(false);
     assert!(
         function.define_property(scope, key.into(), &descriptor) == Some(true),
-        "setting a native function length failed"
+        "setting a native function property failed"
     );
 }
 

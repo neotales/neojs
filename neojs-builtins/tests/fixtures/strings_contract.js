@@ -221,6 +221,7 @@ assert(JSON.stringify(registered) === JSON.stringify(expectedExports), `unexpect
 for (const name of registered) {
     assert(typeof strings[name] === "function", `${name} is not a function`);
     assert(strings[name] === registry[name], `${name} is not the registry function`);
+    assert(strings[name].name === name, `${name} has name ${JSON.stringify(strings[name].name)}`);
     assert(strings[name].length === expectedArities[name], `${name} has arity ${strings[name].length}`);
 }
 assert(!("default" in strings), "strings must not have a default export");
