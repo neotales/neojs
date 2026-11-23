@@ -31,7 +31,7 @@ cargo install --path neojs
 ```text
 Usage:
   neojs <file>                    run one module
-  neojs --allow-remote <file-or-https-url>
+  neojs --allow-remote <file-or-url>
   neojs --no-allow-remote <file>
   neojs test <file-or-glob>...    run test files
   neojs test --allow-remote <file-or-glob>...
@@ -39,7 +39,7 @@ Usage:
   neojs --allow-remote test <file-or-glob>...
 
 Options:
-  --allow-remote   allow https: entry and imports; off by default
+  --allow-remote   allow https:, gh:, and github: entry and imports; off by default
   --no-allow-remote
                    force remote loading off, overriding NEOJS_ALLOW_REMOTE
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -166,8 +166,36 @@ deliberately, not in a shared shell profile.
 
 A relative import inside a remote module resolves against that module's URL, so it stays remote.
 `.js`, `.mjs`, `.ts`, and `.mts` work, statically and dynamically, and TypeScript is type-stripped
-as it is locally. Only `https:` is accepted. A remote module cannot import a `file:` URL: there is
-no implicit transition from remote code to the local filesystem.
+as it is locally. Only `https:` and the GitHub specifiers below are accepted. A remote module
+cannot import a `file:` URL: there is no implicit transition from remote code to the local
+filesystem.
+
+**GitHub specifiers.** With remote loading enabled, a `gh:` or `github:` specifier names one file
+in a GitHub repository:
+
+```sh
+neojs --allow-remote gh:owner/repo@v1.2.3/src/main.ts
+neojs --allow-remote github:owner/repo@0123456789abcdef0123456789abcdef01234567/src/main.ts
+```
+
+```js
+// main.js, run with `neojs --allow-remote main.js`
+import { parse } from "gh:owner/repo@v1.2.3/src/parse.ts";
+```
+
+The specifier is validated and rewritten to
+`https://raw.githubusercontent.com/owner/repo/<ref>/<path>`, then loaded exactly as that HTTPS
+module, so the body, byte, module, request, redirect, deadline, and cache rules are unchanged, and
+relative imports inside the file stay on the raw host. Both schemes produce the same URL and
+therefore the same module identity and cache entry. The reference is one segment: a tag, a branch,
+or a commit SHA. A branch name containing `/` cannot be expressed because the first `/` ends the
+reference; use a tag or a full commit SHA. The legacy `gh:owner/repo/path/@ref` spelling remains
+accepted. Empty segments, `.` and `..` segments, `%` escapes, backslashes, queries, fragments,
+whitespace, and control characters are rejected, as are owner, repository, and reference strings
+outside GitHub's safe character set. A `gh:` entry or import without `--allow-remote` (or
+`NEOJS_ALLOW_REMOTE`) fails with the same disabled message as an HTTPS one. GitHub is not an
+allowlist and not a sandbox: a `gh:` specifier is one way to name an HTTPS URL, not a restriction on
+which hosts may be fetched.
 
 When a redirect is followed, the final URL is the module's identity and the requested URL is an
 alias for it, as in a browser. `import.meta.url` is the final URL, relative imports resolve against
@@ -1620,10 +1648,11 @@ database providers and a JavaScript/Node adapter are not yet wired in. See the
 [database API notes](docs/db-api.md) for its scope and design decisions.
 
 The [`neojs-manifest` crate](docs/neo-jsonc.md) is the bounded foundation for `neo.jsonc`: strict
-JSONC parsing, schema validation, and canonical import-specifier normalization for `gh:`, `npm:`,
-`jsr:`, and `node:`. It does not install an import map, expand workspaces, apply
-`include`/`exclude`, or load npm, JSR, GitHub, or Node modules. Those transports remain rejected at
-runtime.
+JSONC parsing, schema validation, and canonical import-specifier normalization for `gh:`,
+`github:`, `npm:`, `jsr:`, and `node:`. It does not install an import map, expand workspaces, or
+apply `include`/`exclude`. A normalized `gh:`/`github:` coordinate is the raw HTTPS URL the V8
+runtime loads when remote loading is enabled; npm, JSR, and Node remain rejected at runtime, and a
+manifest import map is not installed.
 
 ### QuickJS runtime: neojs-lite-core
 

@@ -1651,7 +1651,7 @@ Run an ECMAScript module or erasable TypeScript file, or run test files.
 
 Usage:
   neojs <file>                    run one module
-  neojs --allow-remote <file-or-https-url>
+  neojs --allow-remote <file-or-url>
   neojs --no-allow-remote <file>
   neojs test <file-or-glob>...    run test files
   neojs test --allow-remote <file-or-glob>...
@@ -1659,7 +1659,7 @@ Usage:
   neojs --allow-remote test <file-or-glob>...
 
 Options:
-  --allow-remote   allow https: entry and imports; off by default
+  --allow-remote   allow https:, gh:, and github: entry and imports; off by default
   --no-allow-remote
                    force remote loading off, overriding NEOJS_ALLOW_REMOTE
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -1683,11 +1683,12 @@ specifier, such as `neo:age` and `neo:test`; a bare name is not a built-in
 module. `Neo.getBuiltInModule` takes the same canonical specifier, such as
 `Neo.getBuiltInModule(\"neo:test\")`; the README lists every specifier.
 
-Remote loading is disabled by default. `--allow-remote` enables an https:
-entry and absolute https: imports; `--no-allow-remote` forces it off. Either flag
-may appear before the module, or before or after `test`. It is not SSRF
-protection and not a sandbox, and downloads are cached under `neojs/packages` in
-the user cache.
+Remote loading is disabled by default. `--allow-remote` enables an https:,
+gh:, or github: entry and those imports; `--no-allow-remote` forces it off.
+Either flag may appear before the module, or before or after `test`. A
+gh:/github: specifier becomes a raw.githubusercontent.com https: URL. It is
+not SSRF protection, not a host allowlist, and not a sandbox. Downloads are
+cached under `neojs/packages` in the user cache.
 
 `neojs test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
@@ -1718,7 +1719,7 @@ fn help_documents_allow_remote_for_modules_and_both_test_positions() {
         let text = stdout(&output);
 
         assert!(
-            text.contains("neojs --allow-remote <file-or-https-url>"),
+            text.contains("neojs --allow-remote <file-or-url>"),
             "{text}"
         );
         assert!(
@@ -1730,7 +1731,7 @@ fn help_documents_allow_remote_for_modules_and_both_test_positions() {
             "{text}"
         );
         assert!(
-            text.contains("--allow-remote   allow https: entry and imports"),
+            text.contains("--allow-remote   allow https:, gh:, and github: entry and imports"),
             "{text}"
         );
         assert!(text.contains("disabled by default"), "{text}");
@@ -1890,6 +1891,69 @@ fn allow_remote_still_runs_local_files() {
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(stdout(&output), "local with remote enabled\n");
+}
+
+/// A `gh:` or `github:` argument is classified as a URL, not a local path, and
+/// is still refused without the opt-in. No request is made.
+#[test]
+fn github_entries_are_recognised_as_urls_and_refused_without_the_flag() {
+    for entry in [
+        "gh:acme/widgets@v1/main.js",
+        "github:acme/widgets@v1/main.js",
+    ] {
+        let output = run_args(&[entry]);
+        assert_eq!(output.status.code(), Some(2), "{entry}");
+        let message = stderr(&output);
+        assert!(
+            message.contains("remote module loading is disabled"),
+            "{entry}: {message}"
+        );
+        assert!(!message.contains("No such file"), "{entry}: {message}");
+    }
+}
+
+/// With the opt-in, a malformed GitHub entry is rejected by the shared grammar
+/// before the transport is reached. The rules run offline; the test needs no
+/// scripted cache because no URL is ever valid here.
+#[test]
+fn allow_remote_validates_github_entries_before_any_request() {
+    for entry in [
+        "gh:acme/widgets@v1",
+        "gh:acme/widgets@v1/",
+        "gh:acme/widgets@v1/../secret.ts",
+        "github:acme/widgets@v1/%2e%2e/secret.ts",
+        "github:acme/widgets@v1/main.js?token=secret",
+    ] {
+        let output = run_args(&["--allow-remote", entry]);
+        assert_eq!(output.status.code(), Some(2), "{entry}");
+        let message = stderr(&output);
+        assert!(
+            message.contains("GitHub specifier is invalid"),
+            "{entry}: {message}"
+        );
+        assert!(!message.contains("token"), "{entry}: {message}");
+    }
+
+    let output = run_args(&["--allow-remote", "gh:user:secret@host/repo@v1/main.js"]);
+    assert_eq!(output.status.code(), Some(2));
+    let message = stderr(&output);
+    assert!(!message.contains("secret"), "{message}");
+}
+
+/// A local file importing GitHub is a runtime failure (exit 1) without the
+/// flag, and the message names the missing opt-in rather than a bare URL.
+#[test]
+fn github_imports_are_refused_without_the_flag() {
+    let project = Project::new();
+    let file = project.write("main.js", "import \"gh:acme/widgets@v1/main.js\";\n");
+    let output = run_file(&file);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(
+        message.contains("remote module loading is disabled"),
+        "{message}"
+    );
 }
 
 #[test]
