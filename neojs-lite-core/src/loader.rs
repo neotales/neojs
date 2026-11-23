@@ -68,7 +68,9 @@ impl Resolver for FileResolver {
         // A shared built-in is a canonical `neo:` specifier. It is exact: the
         // shared crate does not accept a bare name, another scheme, a query, or
         // a fragment. Resolving to the same string gives the engine one module
-        // identity for static and dynamic imports.
+        // identity for static and dynamic imports. With `neo-chars` off the
+        // dependency is absent and this block is not compiled.
+        #[cfg(feature = "neo-chars")]
         if let Some(builtin) = neojs_builtins::module(name) {
             return Ok(builtin.specifier.to_owned());
         }
@@ -164,7 +166,9 @@ impl Loader for FileLoader {
     ) -> Result<Module<'js, Declared>> {
         // Serve the shared canonical wrapper before the filesystem path is
         // interpreted. The wrapper reads the registry object installed by the
-        // realm shim, so imports and `Neo.getBuiltInModule` share identity.
+        // realm shim, so imports and `Neo.getBuiltInModule` share function
+        // identity while the namespace remains a distinct object.
+        #[cfg(feature = "neo-chars")]
         if let Some(builtin) = neojs_builtins::module(name) {
             return Module::declare(ctx.clone(), name, builtin.source.as_bytes().to_vec());
         }

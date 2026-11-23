@@ -30,6 +30,7 @@ console.log(value);
     runtime.run_file(&file).expect("run file");
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn neo_reports_the_lite_engine_and_the_canonical_shared_module() {
     let mut runtime = Runtime::new().expect("runtime");

@@ -3,6 +3,7 @@
 //! The contract fixture is shared verbatim with `neojs-core/tests/chars_shared.rs`.
 //! Only the two adapter tokens differ, so a behavior change in the shared
 //! implementation has to satisfy both engines.
+#![cfg(feature = "neo-chars")]
 
 use std::fs;
 

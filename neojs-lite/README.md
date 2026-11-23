@@ -42,6 +42,16 @@ Both runtimes share `neojs-module-policy` for executable-extension decisions, so
 `.js`/`.mjs`/extensionless names and the rejection reasons for `.cjs`, JSX/TSX,
 declaration files, JSON, WebAssembly, and native addons are the same.
 
+## Build features
+
+The command selects `neo-chars` explicitly from `neojs-lite-core` with
+`default-features = false`, so its advertised surface is a command decision and
+does not drift with the library defaults. The library default also enables
+`neo-chars`, but a library consumer can opt out with
+`default-features = false`. Cargo features are additive and unify across the
+dependency graph: a build that any dependent enables the module for contains it.
+Selection is not a sandbox.
+
 ## Build isolation
 
 The workspace's default members are the V8 crates. `cargo build` does not compile
