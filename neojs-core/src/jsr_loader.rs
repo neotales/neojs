@@ -45,6 +45,13 @@
 //! a `jsr:` import: V8 would share the unverified module identity, so the
 //! `jsr:` resolution is refused instead.
 //!
+//! The final URL of every ordinary remote load is observed before V8 registers
+//! it. A redirect that lands on an already verified JSR identity is refused
+//! before registration; a redirect that lands on a canonical jsr.io URL is
+//! recorded under that final URL, so a later `jsr:` import cannot reuse the
+//! unverified redirect body. A prepared `run_url` entry goes through the same
+//! observation.
+//!
 //! # Graph boundary
 //!
 //! A registry module may import another registry module, a relative module
@@ -102,6 +109,7 @@ use crate::loader::ModuleFormat;
 use crate::loader::module_format;
 use crate::loader::unsupported_module_type;
 use crate::remote::RemoteClient;
+use crate::remote::display_url;
 use crate::typescript;
 
 /// The public registry origin used in canonical module URLs.
@@ -315,13 +323,13 @@ pub(crate) struct JsrModuleLoader {
     /// A direct `https://jsr.io/...` import is absent even when it names the
     /// same file, so it keeps the ordinary remote loader's semantics and a
     /// prepared `run_url` entry is consumed instead of being fetched again.
-    jsr_modules: RefCell<BTreeSet<String>>,
+    jsr_modules: Rc<RefCell<BTreeSet<String>>>,
     /// `jsr.io` URLs that were loaded as ordinary HTTPS modules.
     ///
     /// A later `jsr:` import that resolves to the same URL cannot add registry
     /// verification to a module V8 already has under that identity, so it is
     /// rejected instead of silently reusing an unverified body.
-    ordinary_registry_urls: RefCell<BTreeSet<String>>,
+    ordinary_registry_urls: Rc<RefCell<BTreeSet<String>>>,
 }
 
 impl JsrModuleLoader {
@@ -331,6 +339,29 @@ impl JsrModuleLoader {
         files: Rc<FileModuleLoader>,
         limits: Limits,
     ) -> Self {
+        let jsr_modules = Rc::new(RefCell::new(BTreeSet::new()));
+        let ordinary_registry_urls = Rc::new(RefCell::new(BTreeSet::new()));
+        let final_jsr_modules = Rc::clone(&jsr_modules);
+        let final_ordinary = Rc::clone(&ordinary_registry_urls);
+        files.set_final_url_observer(Rc::new(move |url: &Url| {
+            if url.scheme() != "https" || url.host_str() != Some(REGISTRY_HOST) {
+                return Ok(());
+            }
+            let identities = registry_identities(url);
+            for identity in &identities {
+                if final_jsr_modules.borrow().contains(identity) {
+                    return Err(format!(
+                        "the final URL `{}` is already a verified JSR module; an ordinary HTTPS redirect cannot register a module under that identity",
+                        display_url(url)
+                    ));
+                }
+            }
+            let mut ordinary = final_ordinary.borrow_mut();
+            for identity in identities {
+                ordinary.insert(identity);
+            }
+            Ok(())
+        }));
         Self {
             registry,
             limits,
@@ -338,8 +369,8 @@ impl JsrModuleLoader {
             packages: RefCell::new(BTreeMap::new()),
             versions: RefCell::new(BTreeMap::new()),
             graph: RefCell::new(GraphState::default()),
-            jsr_modules: RefCell::new(BTreeSet::new()),
-            ordinary_registry_urls: RefCell::new(BTreeSet::new()),
+            jsr_modules,
+            ordinary_registry_urls,
         }
     }
 
@@ -456,11 +487,8 @@ impl JsrModuleLoader {
             return;
         }
         let mut ordinary = self.ordinary_registry_urls.borrow_mut();
-        ordinary.insert(url.to_string());
-        if let Ok(Some(module)) = parse_module_url(url)
-            && let Ok(canonical) = canonical_url_for(&module)
-        {
-            ordinary.insert(canonical.to_string());
+        for identity in registry_identities(url) {
+            ordinary.insert(identity);
         }
     }
 
@@ -861,6 +889,25 @@ fn canonical_url_for(module: &ModuleKey) -> Result<Url, String> {
         encode_path(file)
     ))
     .map_err(|error| format!("cannot build the canonical module URL: {error}"))
+}
+
+/// Returns the identities a registry URL can be registered under.
+///
+/// A canonical module URL is represented by its parsed string and its
+/// re-encoded canonical form. Checking both prevents an ordinary redirect and a
+/// `jsr:` resolution from disagreeing only because they encoded the path
+/// differently.
+fn registry_identities(url: &Url) -> Vec<String> {
+    let mut identities = vec![url.to_string()];
+    if let Ok(Some(module)) = parse_module_url(url)
+        && let Ok(canonical) = canonical_url_for(&module)
+    {
+        let canonical = canonical.to_string();
+        if canonical != identities[0] {
+            identities.push(canonical);
+        }
+    }
+    identities
 }
 
 /// Parses and validates one canonical registry URL.

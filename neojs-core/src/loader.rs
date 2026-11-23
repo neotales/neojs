@@ -22,7 +22,9 @@
 //! the module map registers the module under the final URL and aliases the
 //! requested URL to it. That gives the module one identity, makes its relative
 //! imports resolve against the final URL, and makes `import.meta.url` the final
-//! URL, as a browser does.
+//! URL, as a browser does. An installed final-URL observer runs before that
+//! registration; the JSR loader uses it to keep an ordinary HTTPS redirect out
+//! of a verified registry identity.
 //!
 //! Built-in specifiers resolve to one canonical `neo:` URL, so the engine caches
 //! a single module instance however many spellings or importers use. They are
@@ -54,6 +56,7 @@ use deno_error::JsErrorBox;
 use neojs_module_policy::is_path_specifier;
 use std::cell::RefCell;
 use std::path::Path;
+use std::rc::Rc;
 
 use crate::builtins;
 use crate::remote::RemoteClient;
@@ -84,6 +87,12 @@ pub(crate) fn unsupported_module_type(requested: &RequestedModuleType) -> Option
     ))
 }
 
+/// A callback that sees a remote module's final URL before registration.
+///
+/// An error refuses the module. The JSR loader installs one to track ordinary
+/// HTTPS identities and to protect verified registry identities.
+pub(crate) type FinalUrlObserver = Rc<dyn Fn(&Url) -> Result<(), String>>;
+
 /// A loader for local and, when enabled, remote ECMAScript and TypeScript
 /// modules.
 ///
@@ -106,6 +115,12 @@ pub(crate) struct FileModuleLoader {
     /// source to the module map, which registers the module under its final
     /// URL and aliases the requested URL to it.
     entry: RefCell<Option<PreparedEntry>>,
+    /// Observes the final URL of a remote module before it is registered.
+    ///
+    /// The JSR loader installs this to record an ordinary HTTPS module's final
+    /// redirect URL, and to refuse a redirect onto an already verified JSR
+    /// identity before V8 can register a second module there.
+    final_url_observer: RefCell<Option<FinalUrlObserver>>,
 }
 
 /// A remote entry module fetched and stripped before V8 sees it.
@@ -124,6 +139,25 @@ impl FileModuleLoader {
         Self {
             remote,
             entry: RefCell::new(None),
+            final_url_observer: RefCell::new(None),
+        }
+    }
+
+    /// Installs a final-URL observer.
+    ///
+    /// The observer runs after a remote module is fetched and prepared, and
+    /// before the `ModuleSource` that registers it is returned. An error
+    /// prevents registration.
+    pub(crate) fn set_final_url_observer(&self, observer: FinalUrlObserver) {
+        *self.final_url_observer.borrow_mut() = Some(observer);
+    }
+
+    /// Runs the final-URL observer, when one is installed.
+    fn observe_final_url(&self, url: &Url) -> Result<(), String> {
+        let observer = self.final_url_observer.borrow();
+        match observer.as_ref() {
+            Some(observer) => observer(url),
+            None => Ok(()),
         }
     }
 
@@ -273,6 +307,11 @@ impl ModuleLoader for FileModuleLoader {
         }
         if module_specifier.scheme() == "https" {
             if let Some(entry) = self.take_entry(module_specifier) {
+                if let Err(reason) = self.observe_final_url(&entry.found) {
+                    return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                        "cannot load {display}: {reason}"
+                    ))));
+                }
                 return ModuleLoadResponse::Sync(Ok(ModuleSource::new_with_redirect(
                     ModuleType::JavaScript,
                     ModuleSourceCode::String(entry.code.into()),
@@ -386,6 +425,11 @@ impl FileModuleLoader {
                 }
             }
         };
+        if let Err(reason) = self.observe_final_url(&fetched.final_url) {
+            return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                "cannot load {display}: {reason}"
+            ))));
+        }
         ModuleLoadResponse::Sync(Ok(ModuleSource::new_with_redirect(
             ModuleType::JavaScript,
             source,
