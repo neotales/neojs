@@ -80,7 +80,8 @@ measurement and is labelled that way; it is not a published release.
 # Show what would run. No build, no ledger write.
 eng/size/measure.sh --dry-run
 
-# Build, measure, print the records, but do not append them.
+# Build, measure, print compact JSONL records, but do not append them.
+# Progress goes to stderr, so stdout can be piped to jq.
 eng/size/measure.sh --no-record
 
 # Build, measure and append (the default).
