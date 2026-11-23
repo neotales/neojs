@@ -86,6 +86,7 @@ pub fn handle_request(request: &str, options: &NodeOptions) -> String {
                 "timedOut": result.timed_out,
                 "limitExceeded": result.limit_exceeded,
                 "incomplete": result.incomplete,
+                "ioError": result.io_error,
             }
         })
         .to_string(),

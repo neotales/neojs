@@ -126,6 +126,12 @@ function normalizeOptions(options) {
     }
 
     const encoding = options.encoding;
+    const cwdOption = options.cwd;
+    const envOption = options.env;
+    const inputOption = options.input;
+    const timeoutOption = options.timeout;
+    const maxBufferOption = options.maxBuffer;
+
     if (typeof encoding !== "string" || encoding.toLowerCase().replace("-", "") !== "utf8") {
         throw makeError(
             "ERR_NODE_UNSUPPORTED_ENCODING",
@@ -134,16 +140,16 @@ function normalizeOptions(options) {
     }
 
     const normalized = record();
-    if (options.cwd !== undefined) {
-        const cwd = requireString(options.cwd, "options.cwd");
+    if (cwdOption !== undefined) {
+        const cwd = requireString(cwdOption, "options.cwd");
         if (cwd.length > MAX_PATH_CHARS) throw requestTooLarge();
         if (cwd.includes("\0")) {
             throw invalid("options.cwd must not contain a NUL byte");
         }
         normalized.cwd = cwd;
     }
-    if (options.env !== undefined) {
-        const env = options.env;
+    if (envOption !== undefined) {
+        const env = envOption;
         if (env === null || typeof env !== "object" || isArray(env)) {
             throw makeError("ERR_INVALID_ARG_TYPE", "options.env must be an object");
         }
@@ -171,28 +177,27 @@ function normalizeOptions(options) {
         }
         normalized.env = copy;
     }
-    if (options.input !== undefined) {
-        const input = options.input;
-        if (typeof input !== "string") {
+    if (inputOption !== undefined) {
+        if (typeof inputOption !== "string") {
             throw makeError(
                 "ERR_NODE_UNSUPPORTED",
                 "node:child_process input must be a string in this opt-in slice",
             );
         }
-        if (input.length > MAX_INPUT_CHARS) throw requestTooLarge();
-        normalized.input = input;
+        if (inputOption.length > MAX_INPUT_CHARS) throw requestTooLarge();
+        normalized.input = inputOption;
     }
-    if (options.timeout !== undefined) {
-        if (!Number.isInteger(options.timeout) || options.timeout < 0) {
+    if (timeoutOption !== undefined) {
+        if (!Number.isInteger(timeoutOption) || timeoutOption < 0) {
             throw invalid("options.timeout must be a non-negative integer");
         }
-        normalized.timeout = options.timeout;
+        normalized.timeout = timeoutOption;
     }
-    if (options.maxBuffer !== undefined) {
-        if (!Number.isInteger(options.maxBuffer) || options.maxBuffer <= 0) {
+    if (maxBufferOption !== undefined) {
+        if (!Number.isInteger(maxBufferOption) || maxBufferOption <= 0) {
             throw invalid("options.maxBuffer must be a positive integer");
         }
-        normalized.maxBuffer = options.maxBuffer;
+        normalized.maxBuffer = maxBufferOption;
     }
     return normalized;
 }
@@ -204,10 +209,14 @@ function normalizeArgs(args) {
     if (!isArray(args)) {
         throw makeError("ERR_INVALID_ARG_TYPE", "arguments must be an array");
     }
-    if (args.length > MAX_ARGS) throw requestTooLarge();
+    const length = args.length;
+    if (!Number.isInteger(length) || length < 0) {
+        throw makeError("ERR_INVALID_ARG_TYPE", "arguments must have a valid length");
+    }
+    if (length > MAX_ARGS) throw requestTooLarge();
     let total = 0;
     const normalized = list();
-    for (let index = 0; index < args.length; index += 1) {
+    for (let index = 0; index < length; index += 1) {
         const argument = args[index];
         if (typeof argument === "string") {
             if (argument.includes("\0")) {
@@ -314,7 +323,8 @@ function call(operation, call_) {
         (result.signalName !== null && typeof result.signalName !== "string") ||
         typeof result.timedOut !== "boolean" ||
         typeof result.limitExceeded !== "boolean" ||
-        typeof result.incomplete !== "boolean"
+        typeof result.incomplete !== "boolean" ||
+        typeof result.ioError !== "boolean"
     ) {
         throw makeError(
             "ERR_NODE_BRIDGE_FAILURE",
@@ -380,6 +390,11 @@ function spawnSync(file, args, options) {
             "ERR_NODE_CHILD_PROCESS_INCOMPLETE",
             "the direct child exited while a descendant still held a piped stream; output may be incomplete",
         );
+    } else if (result.ioError) {
+        fields.error = makeError(
+            "ERR_NODE_CHILD_PROCESS_IO",
+            "a child process pipe read failed; output may be incomplete",
+        );
     }
     return fields;
 }
@@ -413,6 +428,13 @@ function execFileSync(file, args, options) {
         throw makeError(
             "ERR_NODE_CHILD_PROCESS_INCOMPLETE",
             "the direct child exited while a descendant still held a piped stream; output may be incomplete",
+            fields,
+        );
+    }
+    if (result.ioError) {
+        throw makeError(
+            "ERR_NODE_CHILD_PROCESS_IO",
+            "a child process pipe read failed; output may be incomplete",
             fields,
         );
     }

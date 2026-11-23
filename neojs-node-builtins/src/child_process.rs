@@ -25,6 +25,8 @@ use std::time::Instant;
 
 #[cfg(test)]
 use std::cell::Cell;
+#[cfg(test)]
+use std::cell::RefCell;
 
 #[cfg(unix)]
 use rustix::event::PollFd;
@@ -78,6 +80,10 @@ thread_local! {
     static FORCE_UNSUPPORTED: Cell<bool> = const { Cell::new(false) };
     /// Forces the post-spawn non-blocking setup to fail.
     static FAIL_NONBLOCKING: Cell<bool> = const { Cell::new(false) };
+    /// Makes the injected setup failure wait for a child-side readiness file.
+    static FAIL_READY: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    /// Forces the next pipe read to fail with EIO.
+    static FAIL_READ: Cell<bool> = const { Cell::new(false) };
     /// Exposes the pid of the last spawned child to the cleanup tests.
     static LAST_PID: Cell<Option<u32>> = const { Cell::new(None) };
 }
@@ -382,6 +388,7 @@ pub(crate) struct SyncResult {
     pub(crate) timed_out: bool,
     pub(crate) limit_exceeded: bool,
     pub(crate) incomplete: bool,
+    pub(crate) io_error: bool,
 }
 
 /// Runs one validated request under `policy`.
@@ -503,6 +510,7 @@ pub(crate) fn run(
         timed_out: execution.timed_out,
         limit_exceeded: execution.limit_exceeded,
         incomplete: execution.incomplete,
+        io_error: execution.io_error,
     })
 }
 
@@ -515,6 +523,7 @@ struct Execution {
     timed_out: bool,
     limit_exceeded: bool,
     incomplete: bool,
+    io_error: bool,
 }
 
 /// Returns whether this build has the bounded Unix pipe runner.
@@ -565,6 +574,10 @@ impl<'a> ChildGuard<'a> {
 impl Drop for ChildGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
+            #[cfg(unix)]
+            if let Some(pgid) = Pid::from_raw(self.child.id() as i32) {
+                let _ = kill_process_group(pgid, Signal::KILL);
+            }
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
@@ -615,6 +628,7 @@ fn execute(
     let mut timed_out = false;
     let mut limit_exceeded = false;
     let mut incomplete = false;
+    let mut io_error = false;
     let mut killed = false;
     let mut direct_status = None;
 
@@ -736,7 +750,7 @@ fn execute(
                 .revents()
                 .intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP)
             {
-                match read(&stdout, &mut read_buffer) {
+                match read_pipe(&stdout, &mut read_buffer) {
                     Ok(0) => stdout_open = false,
                     Ok(read) => {
                         if append_capped(&mut stdout_bytes, &read_buffer[..read], max_buffer) {
@@ -745,7 +759,10 @@ fn execute(
                         }
                     }
                     Err(error) if error == Errno::AGAIN || error == Errno::INTR => {}
-                    Err(_) => stdout_open = false,
+                    Err(_) => {
+                        io_error = true;
+                        stdout_open = false;
+                    }
                 }
             }
             index += 1;
@@ -755,7 +772,7 @@ fn execute(
                 .revents()
                 .intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP)
         {
-            match read(&stderr, &mut read_buffer) {
+            match read_pipe(&stderr, &mut read_buffer) {
                 Ok(0) => stderr_open = false,
                 Ok(read) => {
                     if append_capped(&mut stderr_bytes, &read_buffer[..read], max_buffer) {
@@ -764,10 +781,13 @@ fn execute(
                     }
                 }
                 Err(error) if error == Errno::AGAIN || error == Errno::INTR => {}
-                Err(_) => stderr_open = false,
+                Err(_) => {
+                    io_error = true;
+                    stderr_open = false;
+                }
             }
         }
-        if limit_exceeded && !killed {
+        if (limit_exceeded || io_error) && !killed {
             let now = Instant::now();
             kill_child_group(child, pgid);
             killed = true;
@@ -783,7 +803,7 @@ fn execute(
     // descendant that escaped the process group is not tracked.
     let status = child.wait().ok();
     let (status_code, signal_name) = match status {
-        Some(status) if !timed_out && !limit_exceeded && !incomplete => {
+        Some(status) if !timed_out && !limit_exceeded && !incomplete && !io_error => {
             (status.code(), exit_signal_name(&status))
         }
         Some(status) => (None, exit_signal_name(&status)),
@@ -798,6 +818,7 @@ fn execute(
         timed_out,
         limit_exceeded,
         incomplete,
+        io_error,
     })
 }
 
@@ -825,6 +846,12 @@ fn execute(
 fn set_nonblocking(fd: impl std::os::fd::AsFd) -> Result<(), ChildProcessError> {
     #[cfg(test)]
     if FAIL_NONBLOCKING.with(Cell::get) {
+        if let Some(ready) = FAIL_READY.with(|ready| ready.borrow().clone()) {
+            let started = Instant::now();
+            while !ready.exists() && started.elapsed() < Duration::from_secs(1) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
         return Err(ChildProcessError::new(
             "ERR_NODE_TEST_NONBLOCKING",
             "injected non-blocking setup failure",
@@ -842,6 +869,15 @@ fn set_nonblocking(fd: impl std::os::fd::AsFd) -> Result<(), ChildProcessError> 
 fn kill_child_group(child: &mut std::process::Child, pgid: Pid) {
     let _ = kill_process_group(pgid, Signal::KILL);
     let _ = child.kill();
+}
+
+#[cfg(unix)]
+fn read_pipe(fd: impl std::os::fd::AsFd, buffer: &mut [u8]) -> Result<usize, Errno> {
+    #[cfg(test)]
+    if FAIL_READ.with(Cell::get) {
+        return Err(Errno::IO);
+    }
+    read(fd, buffer)
 }
 
 /// Appends at most `limit` total bytes and reports whether the input overflowed.
@@ -1013,27 +1049,71 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_post_spawn_setup_failure_reaps_the_child() {
+    fn a_post_spawn_setup_failure_kills_the_child_group() {
+        assert!(Path::new("/bin/sh").exists(), "test requires /bin/sh");
         assert!(Path::new("/bin/sleep").exists(), "test requires /bin/sleep");
+        assert!(Path::new("/bin/touch").exists(), "test requires /bin/touch");
+        let directory = tempfile::tempdir().expect("temp dir");
+        let descendant_marker = directory.path().join("descendant-survived");
+        let ready = directory.path().join("ready");
+        let script = format!(
+            "(/bin/sleep 0.2; /bin/touch '{}') & echo ready > '{}'; /bin/sleep 5",
+            descendant_marker.display(),
+            ready.display()
+        );
         let policy = ChildProcessPolicy::new()
+            .allow_program("/bin/sh")
+            .expect("allow sh")
             .allow_program("/bin/sleep")
-            .expect("allow sleep");
-        let request = request("/bin/sleep", &["5"]);
+            .expect("allow sleep")
+            .allow_program("/bin/touch")
+            .expect("allow touch");
+        let request = request("/bin/sh", &["-c", &script]);
 
         LAST_PID.with(|last| last.set(None));
+        FAIL_READY.with(|path| *path.borrow_mut() = Some(ready));
         FAIL_NONBLOCKING.with(|failed| failed.set(true));
         let result = run(&request, &policy);
         FAIL_NONBLOCKING.with(|failed| failed.set(false));
+        FAIL_READY.with(|path| *path.borrow_mut() = None);
 
         let error = result.expect_err("injected setup failure");
         assert_eq!(error.code(), "ERR_NODE_TEST_NONBLOCKING");
-        let pid = LAST_PID
+        let direct_pid = LAST_PID
             .with(Cell::get)
             .expect("the child was spawned before the failure");
-        let pid = Pid::from_raw(pid as i32).expect("pid");
+        let direct_pid = Pid::from_raw(direct_pid as i32).expect("direct pid");
         assert!(
-            matches!(test_kill_process(pid), Err(Errno::SRCH)),
-            "the failed setup left a live or unreaped child"
+            matches!(test_kill_process(direct_pid), Err(Errno::SRCH)),
+            "the failed setup left a live or unreaped direct child"
+        );
+
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            !descendant_marker.exists(),
+            "the failed setup left a descendant alive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unexpected_pipe_read_error_is_not_a_success() {
+        assert!(Path::new("/bin/echo").exists(), "test requires /bin/echo");
+        let policy = ChildProcessPolicy::new()
+            .allow_program("/bin/echo")
+            .expect("allow echo");
+        let request = request("/bin/echo", &["hello"]);
+
+        LAST_PID.with(|last| last.set(None));
+        FAIL_READ.with(|failed| failed.set(true));
+        let result = run(&request, &policy);
+        FAIL_READ.with(|failed| failed.set(false));
+
+        let result = result.expect("the runner returned a result");
+        assert!(result.io_error, "a pipe read failure was treated as EOF");
+        assert_eq!(
+            result.status, None,
+            "a pipe read failure kept a success status"
         );
     }
 }

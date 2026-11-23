@@ -388,6 +388,81 @@ try {
 }
 
 #[test]
+fn option_getters_are_read_once() {
+    require("/bin/sh");
+    require("/bin/cat");
+    require("/bin/pwd");
+    run(
+        policy(&["/bin/sh", "/bin/cat", "/bin/pwd"]),
+        r#"
+import { execFileSync } from "node:child_process";
+const reads = { cwd: 0, env: 0, input: 0, timeout: 0, maxBuffer: 0 };
+const options = {
+    get encoding() { return "utf8"; },
+    get cwd() {
+        reads.cwd += 1;
+        return reads.cwd === 1 ? "/tmp" : "/definitely-not-a-directory";
+    },
+    get env() {
+        reads.env += 1;
+        return reads.env === 1
+            ? { NEOJS_GETTER: "yes" }
+            : { NEOJS_GETTER: "x".repeat(1000000) };
+    },
+    get input() {
+        reads.input += 1;
+        return reads.input === 1 ? "ok" : "x".repeat(1000000);
+    },
+    get timeout() {
+        reads.timeout += 1;
+        return reads.timeout === 1 ? 1000 : 1000000000;
+    },
+    get maxBuffer() {
+        reads.maxBuffer += 1;
+        return reads.maxBuffer === 1 ? 1024 : 1;
+    },
+};
+const output = execFileSync(
+    "/bin/sh",
+    ["-c", "/bin/pwd; printf %s \"$NEOJS_GETTER\"; /bin/cat"],
+    options,
+);
+if (output !== "/tmp\nyesok") throw new Error(`output: ${String(output)}`);
+for (const name of ["cwd", "env", "input", "timeout", "maxBuffer"]) {
+    if (reads[name] !== 1) throw new Error(`${name} reads: ${reads[name]}`);
+}
+"#,
+    )
+    .expect("single option reads");
+}
+
+#[test]
+fn proxy_argument_length_is_read_once() {
+    require("/bin/echo");
+    run(
+        policy(&["/bin/echo"]),
+        r#"
+import { execFileSync } from "node:child_process";
+let lengthReads = 0;
+const target = new Array(300).fill("x");
+const args = new Proxy(target, {
+    get(target, key, receiver) {
+        if (key === "length") {
+            lengthReads += 1;
+            return lengthReads === 1 ? 1 : 257;
+        }
+        return Reflect.get(target, key, receiver);
+    },
+});
+const output = execFileSync("/bin/echo", args, { encoding: "utf8" });
+if (output !== "x\n") throw new Error(`output: ${String(output)}`);
+if (lengthReads !== 1) throw new Error(`length reads: ${lengthReads}`);
+"#,
+    )
+    .expect("single argument-length read");
+}
+
+#[test]
 fn unsupported_asynchronous_forms_throw_instead_of_faking_a_promise() {
     run(
         policy(&[]),

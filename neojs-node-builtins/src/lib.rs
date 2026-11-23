@@ -41,8 +41,9 @@
 //! a short bounded drain. A direct child that exits while a descendant still
 //! holds a piped descriptor gets the same bounded drain and group kill; because
 //! output may be incomplete, that case is reported as an explicit incomplete
-//! error, never a successful status. A descendant that creates a new process
-//! group and escapes is not tracked. The request bridge also has a hard
+//! error, never a successful status. An unexpected pipe read error is reported
+//! as an explicit I/O error, never treated as end-of-file. A descendant that
+//! creates a new process group and escapes is not tracked. The request bridge also has a hard
 //! serialized-size cap before parsing, and the guest builds null-prototype
 //! records and arrays from intrinsics captured before user code so inherited
 //! `toJSON` hooks or a replaced `JSON.stringify` are not used. Bounded
