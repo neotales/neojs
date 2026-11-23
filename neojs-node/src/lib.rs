@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 //! V8 adapter for opt-in Node compatibility.
 //!
 //! The runtime creates this adapter only from
@@ -40,6 +40,107 @@ const MAX_ENV_ENTRIES: usize = 128;
 const MAX_ENV_BYTES: usize = 65_536;
 const MAX_PATH_UNITS: usize = 4_096;
 const MAX_OPTION_KEYS: usize = 6;
+const MAX_OPTION_SCAN: u32 = 64;
+const MAX_ENV_SCAN: u32 = 4_096;
+const MAX_OPTION_KEY_UNITS: u32 = MAX_PATH_UNITS as u32;
+
+/// Status values shared with the bounded V8 C ABI.
+#[derive(Debug, PartialEq, Eq)]
+enum BoundedKeysError {
+    TooManyKeys,
+    KeyTooLong,
+    ScanLimit,
+    Unsupported,
+    Memory,
+    Exception,
+}
+
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    /// Narrow bounded own-enumerable-string-key collector added by the
+    /// vendored V8 source patch. `out_array` is a V8 `Array*` handle.
+    fn neojs_v8_get_own_enumerable_string_keys_bounded(
+        object: *const v8::Object,
+        context: *const v8::Context,
+        max_keys: u32,
+        max_scan: u32,
+        out_array: *mut *const v8::Array,
+        out_len: *mut u32,
+        out_scanned: *mut u32,
+    ) -> i32;
+}
+
+const _: () = assert!(
+    std::mem::size_of::<v8::Local<'static, v8::Array>>() == std::mem::size_of::<*const v8::Array>()
+);
+const _: () = assert!(
+    std::mem::align_of::<v8::Local<'static, v8::Array>>()
+        == std::mem::align_of::<*const v8::Array>()
+);
+
+/// Reconstructs the V8 local handle returned by the C ABI.
+#[allow(unsafe_code)]
+fn local_array_from_raw<'s>(ptr: *const v8::Array) -> Option<v8::Local<'s, v8::Array>> {
+    if ptr.is_null() {
+        return None;
+    }
+    // The v8 crate uses the same pointer-sized representation for Local in its
+    // own C++ bridge (`support.h`). The const assertions above pin the layout.
+    Some(unsafe { std::mem::transmute_copy(&ptr) })
+}
+
+/// Collects own enumerable string keys through the bounded V8 engine API.
+#[allow(unsafe_code)]
+fn bounded_keys<'js>(
+    scope: &v8::PinScope<'js, '_>,
+    object: &v8::Local<'js, v8::Object>,
+    max_keys: u32,
+    max_scan: u32,
+    max_key_units: usize,
+) -> Result<Vec<String>, BoundedKeysError> {
+    let context = scope.get_current_context();
+    let mut array: *const v8::Array = std::ptr::null();
+    let mut len = 0u32;
+    let mut scanned = 0u32;
+    let status = unsafe {
+        neojs_v8_get_own_enumerable_string_keys_bounded(
+            &**object as *const v8::Object,
+            &*context as *const v8::Context,
+            max_keys,
+            max_scan,
+            &mut array,
+            &mut len,
+            &mut scanned,
+        )
+    };
+    match status {
+        0 => {}
+        1 => return Err(BoundedKeysError::TooManyKeys),
+        2 => return Err(BoundedKeysError::ScanLimit),
+        3 => return Err(BoundedKeysError::Unsupported),
+        4 => return Err(BoundedKeysError::Memory),
+        _ => return Err(BoundedKeysError::Exception),
+    }
+    let Some(array) = local_array_from_raw(array) else {
+        return Err(BoundedKeysError::Exception);
+    };
+    if array.length() != len || len as usize > max_keys as usize {
+        return Err(BoundedKeysError::Exception);
+    }
+    let mut keys = Vec::with_capacity(len as usize);
+    for index in 0..len {
+        let value = array
+            .get_index(scope, index)
+            .ok_or(BoundedKeysError::Exception)?;
+        let key =
+            v8::Local::<v8::String>::try_from(value).map_err(|_| BoundedKeysError::Exception)?;
+        if key.length() > max_key_units {
+            return Err(BoundedKeysError::KeyTooLong);
+        }
+        keys.push(key.to_rust_string_lossy(scope));
+    }
+    Ok(keys)
+}
 
 /// Installs the native `node:child_process` module and its process policy.
 ///
@@ -534,32 +635,21 @@ fn reject_unknown_options<'s>(
     scope: &v8::PinScope<'s, '_>,
     object: &v8::Local<'s, v8::Object>,
 ) -> Result<(), Failure> {
-    let names = object
-        .get_own_property_names(
-            scope,
-            v8::GetPropertyNamesArgs {
-                mode: v8::KeyCollectionMode::OwnOnly,
-                property_filter: v8::PropertyFilter::ONLY_ENUMERABLE
-                    | v8::PropertyFilter::SKIP_SYMBOLS,
-                index_filter: v8::IndexFilter::IncludeIndices,
-                key_conversion: v8::KeyConversionMode::ConvertToString,
-            },
-        )
-        .ok_or(Failure::Pending)?;
-    let count = names.length() as usize;
-    if count > MAX_OPTION_KEYS {
-        return Err(Failure::unsupported("an option is not implemented"));
-    }
-    for index in 0..count {
-        let key = names
-            .get_index(scope, index as u32)
-            .ok_or(Failure::Pending)?;
-        let key = v8::Local::<v8::String>::try_from(key)
-            .map_err(|_| Failure::invalid_type("an option could not be read"))?;
-        if key.length() > MAX_PATH_UNITS {
-            return Err(Failure::too_large());
-        }
-        let key = key.to_rust_string_lossy(scope);
+    let keys = bounded_keys(
+        scope,
+        object,
+        MAX_OPTION_KEYS as u32,
+        MAX_OPTION_SCAN,
+        MAX_OPTION_KEY_UNITS as usize,
+    )
+    .map_err(|error| match error {
+        BoundedKeysError::TooManyKeys
+        | BoundedKeysError::ScanLimit
+        | BoundedKeysError::Unsupported => Failure::unsupported("an option is not implemented"),
+        BoundedKeysError::KeyTooLong => Failure::too_large(),
+        BoundedKeysError::Memory | BoundedKeysError::Exception => Failure::Pending,
+    })?;
+    for key in keys {
         if !matches!(
             key.as_str(),
             "cwd" | "env" | "input" | "timeout" | "maxBuffer" | "encoding"
@@ -584,39 +674,31 @@ fn read_env<'s>(
     }
     let object = v8::Local::<v8::Object>::try_from(value)
         .map_err(|_| Failure::invalid_type("options.env must be an object"))?;
-    let names = object
-        .get_own_property_names(
-            scope,
-            v8::GetPropertyNamesArgs {
-                mode: v8::KeyCollectionMode::OwnOnly,
-                property_filter: v8::PropertyFilter::ONLY_ENUMERABLE
-                    | v8::PropertyFilter::SKIP_SYMBOLS,
-                index_filter: v8::IndexFilter::IncludeIndices,
-                key_conversion: v8::KeyConversionMode::ConvertToString,
-            },
-        )
-        .ok_or(Failure::Pending)?;
-    let count = names.length() as usize;
-    if count > MAX_ENV_ENTRIES {
-        return Err(Failure::too_large());
-    }
+    let names = bounded_keys(
+        scope,
+        &object,
+        MAX_ENV_ENTRIES as u32,
+        MAX_ENV_SCAN,
+        MAX_PATH_UNITS,
+    )
+    .map_err(|error| match error {
+        BoundedKeysError::TooManyKeys
+        | BoundedKeysError::KeyTooLong
+        | BoundedKeysError::ScanLimit => Failure::too_large(),
+        BoundedKeysError::Unsupported => {
+            Failure::unsupported("options.env is not supported by the native child_process module")
+        }
+        BoundedKeysError::Memory | BoundedKeysError::Exception => Failure::Pending,
+    })?;
 
     let mut environment = BTreeMap::new();
     let mut total = 0usize;
-    for index in 0..count {
-        let key = names
-            .get_index(scope, index as u32)
-            .ok_or(Failure::Pending)?;
-        let name = v8::Local::<v8::String>::try_from(key)
-            .map_err(|_| Failure::invalid_type("an environment name is not valid"))?;
-        if name.length() > MAX_PATH_UNITS {
-            return Err(Failure::too_large());
-        }
-        let name = name.to_rust_string_lossy(scope);
+    for name in names {
         if name.is_empty() || name.contains('=') || name.contains('\0') {
             return Err(Failure::invalid_value("an environment name is not valid"));
         }
-        let value = object.get(scope, key).ok_or(Failure::Pending)?;
+        let key = v8::String::new(scope, &name).ok_or(Failure::Pending)?;
+        let value = object.get(scope, key.into()).ok_or(Failure::Pending)?;
         let value = read_string(scope, value, "environment value", MAX_ENV_BYTES)?;
         if value.contains('\0') {
             return Err(Failure::invalid_value(

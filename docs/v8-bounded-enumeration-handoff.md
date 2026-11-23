@@ -1,10 +1,16 @@
-# V8 bounded own-key enumeration: blocker handoff
+# V8 bounded own-key enumeration: implementation record
 
-Status: **blocked, not accepted**. The V8 `node:child_process` adapter is native
-and all other review findings are fixed, but V8 still materializes the complete
-own-property key array before the adapter can enforce its six-key option cap.
-This document records the API and build findings so the work is not silently
-written off as documentation.
+Status: **implemented against a source-built, patched V8 archive**. The original
+blocker below is retained as the API/build investigation record. The resolution
+is `eng/v8-source/patches/0001-bounded-own-enumerable-string-keys.patch` plus
+`eng/v8-source/build-bounded.sh`: a narrow C ABI counts and caps ordinary
+descriptor/element/dictionary capacity before allocating the key list. Stock V8
+archives do not contain the symbol and the `node-compat` feature fails to link;
+there is no fallback to the unbounded public API.
+
+This is a source-build dependency, not a bit-reproducible artifact claim. The
+pins, patch scope, observed archive hash, and build commands are in
+`eng/v8-source/PATCH.md`.
 
 ## Requirement
 
@@ -97,9 +103,17 @@ without network or a preinstalled V8 build toolchain**:
 | Patch only `deno_core` or Rust callers | They call the same V8 public API; cannot bound V8's internal allocation. |
 | Patch only rusty_v8's C++ shim against the prebuilt archive | No bounded V8 public API to call; internal `KeyAccumulator` symbols are not a supported ABI. |
 
-## Recommendation
+## Resolution
 
-Approve a vendored V8/rusty_v8 bounded-binding build with its toolchain, or
-keep the V8 `node:child_process` compatibility claim explicitly incomplete for
-large ordinary option/environment objects. Do not replace the object contract
-with a builder, and do not claim a bound the current API cannot enforce.
+The V8 source patch adds `GetOwnEnumerableStringKeysBounded` and a narrow
+`extern "C"` entry point. The supported set is `JS_OBJECT_TYPE` with fast or
+dictionary properties and fast non-double elements. Proxy, interceptors, access
+checks, custom-element maps, dictionary/double elements, and other exotics fail
+closed before callbacks. Scan/key bounds are checked before output allocation;
+order is index-first then descriptor/dictionary insertion order. The Rust
+adapter uses the C ABI with 6/64 option and 128/4096 environment caps and
+4096-unit key limits.
+
+Build with `eng/v8-source/build-bounded.sh`, set `RUSTY_V8_ARCHIVE` to the
+reported archive, and run the V8 gates. The archive is deliberately not
+committed.

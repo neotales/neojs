@@ -124,20 +124,38 @@ mappings surface the QuickJS `out of memory` exception, not
 usable, and that repeated failures leave the runtime heap unchanged, which
 exercises the atom-table RAII cleanup.
 
-### V8 own-name enumeration limitation
+### V8 bounded own-key build
 
-V8's public API exposes no count-only or bounded own-property enumeration.
-`Object::get_own_property_names` materializes the complete key array before the
-adapter can apply its six-key option cap. The V8 adapter rejects Proxy and
-function option/environment objects before enumeration, validates and copies at
-most the bounded key set it receives, and rethrows a pending V8 exception (for
-example an allocation failure) unchanged. It does **not** claim a
-pre-materialization bound for an ordinary object with a very large own-property
-set. A bounded V8 `KeyAccumulator` seam or an equivalent vendored binding is
-required for that claim. The API, toolchain, and patch-plan findings are in
-[`v8-bounded-enumeration-handoff.md`](v8-bounded-enumeration-handoff.md); the
-branch does not claim a complete V8 Node-compatibility bound until that seam is
-available.
+The stock V8 public API exposes no bounded own-key enumeration:
+`Object::get_own_property_names` materializes the complete key array. The V8
+adapter therefore requires a V8 archive built from the pinned
+`v8` 150.4.0 / V8 15.0.245.2 source with
+`eng/v8-source/patches/0001-bounded-own-enumerable-string-keys.patch` applied.
+The patch adds a narrow C ABI used only by `neojs-node`; it is separate from the
+`deno_core` and `rquickjs-sys` patches. `eng/v8-source/build-bounded.sh` verifies
+the prepared inputs, applies the patch to an isolated copy, builds with
+`V8_FROM_SOURCE`, and prints the archive path and hash. Neither the V8 tree nor
+the archive is committed.
+
+The engine API supports `JS_OBJECT_TYPE` ordinary objects with fast or
+dictionary properties and fast non-double elements. It rejects Proxy, functions,
+interceptors, access checks, custom-element maps and other exotic objects before
+any callback. Dictionary elements, double elements, dictionary capacity beyond
+the scan cap, and property/dictionary slots beyond the scan cap fail closed.
+It counts all descriptor and element capacity slots against the scan bound
+before output allocation, allocates only after the key and scan bounds pass,
+and preserves index-first/insertion order.
+
+The adapter applies the same caps as the QuickJS adapter: options 6 keys / 64
+scanned slots, environment 128 keys / 4096 scanned slots, and 4096 UTF-16 units
+per key. Tests cover huge dictionary shapes, hidden/symbol slots, fast index
+elements, Proxy rejection, and the ordinary execution surface.
+
+Using a stock V8 archive with the `node-compat` feature fails to link because
+the bounded symbol is absent. That is deliberate: there is no silent fallback to
+the unbounded public API. Build provenance, pins, observed archive hash, and
+the no-bit-reproducibility note are in `eng/v8-source/PATCH.md`; the earlier
+handoff is retained in [`v8-bounded-enumeration-handoff.md`](v8-bounded-enumeration-handoff.md).
 
 ## Implemented surface
 

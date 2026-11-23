@@ -769,3 +769,79 @@ for (const [name, call] of [
     )
     .expect("proxy length exception propagation");
 }
+
+#[test]
+fn bounded_engine_rejects_huge_ordinary_shapes_before_enumeration() {
+    run(
+        policy(&[]),
+        r#"
+import { spawnSync } from "node:child_process";
+
+const options = { encoding: "utf8" };
+for (let index = 0; index < 20000; index += 1) options[`KEY_${index}`] = 1;
+const started = Date.now();
+let code = null;
+try {
+    spawnSync("/bin/echo", [], options);
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_UNSUPPORTED") throw new Error(`option dictionary: ${code}`);
+if (Date.now() - started > 2000) throw new Error("option dictionary enumeration was not bounded");
+
+const environment = {};
+for (let index = 0; index < 20000; index += 1) environment[`KEY_${index}`] = "value";
+const envStarted = Date.now();
+code = null;
+try {
+    spawnSync("/bin/echo", [], { encoding: "utf8", env: environment });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_REQUEST_TOO_LARGE") throw new Error(`environment dictionary: ${code}`);
+if (Date.now() - envStarted > 2000) throw new Error("environment dictionary enumeration was not bounded");
+
+const hidden = { encoding: "utf8" };
+for (let index = 0; index < 100; index += 1) {
+    Object.defineProperty(hidden, `hidden_${index}`, { value: 1, enumerable: false });
+    hidden[Symbol(`symbol_${index}`)] = 1;
+}
+code = null;
+try {
+    spawnSync("/bin/echo", [], hidden);
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_UNSUPPORTED") throw new Error(`hidden slots: ${code}`);
+
+const seven = { encoding: "utf8", a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 };
+code = null;
+try {
+    spawnSync("/bin/echo", [], seven);
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_UNSUPPORTED") throw new Error(`seven keys: ${code}`);
+"#,
+    )
+    .expect("bounded ordinary shapes");
+}
+
+#[test]
+fn bounded_engine_supports_fast_index_elements() {
+    require("/usr/bin/env");
+    run(
+        policy(&["/usr/bin/env"]),
+        r#"
+import { execFileSync } from "node:child_process";
+const output = execFileSync("/usr/bin/env", [], {
+    encoding: "utf8",
+    env: { "0": "zero", A: "a" },
+});
+if (!output.includes("0=zero") || !output.includes("A=a")) {
+    throw new Error(`index element environment: ${output}`);
+}
+"#,
+    )
+    .expect("fast index elements");
+}

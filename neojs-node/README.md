@@ -12,6 +12,14 @@ same native function objects. There is no JavaScript source, JSON bridge, host
 op, or global installation hook. The module is not in the `Neo` registry and has
 no bare or `neo:` alias.
 
+Option and environment enumeration uses a narrow bounded V8 engine API added by
+`eng/v8-source/patches/0001-bounded-own-enumerable-string-keys.patch`. The
+`node-compat` build therefore requires an archive built from the pinned V8
+source and `eng/v8-source/build-bounded.sh`, supplied through
+`RUSTY_V8_ARCHIVE`. A stock V8 archive lacks the symbol and fails to link; it is
+not silently replaced by the unbounded public API. See
+`eng/v8-source/PATCH.md` and `docs/node-compat.md`.
+
 A default `Runtime::new` rejects every `node:` import. In an opted-in runtime, a
 bare specifier that is a familiar Node module name (including `crypto`, `fs`,
 `os`, and `path`) is rejected rather than resolved to a Neo module; use `neo:`
