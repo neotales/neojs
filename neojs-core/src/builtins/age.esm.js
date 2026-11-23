@@ -1,10 +1,10 @@
-// The `age` built-in module as seen by `import ... from "age"` or
+// The `age` built-in module as seen by
 // `import ... from "neo:age"`.
 //
 // The implementations live in `neo.js`, which the runtime evaluates once per
 // realm, and call private host ops registered by `neojs-core/src/age.rs`. This
 // file only re-exports them, so every named export is the same function object
-// as the matching property of `Neo.getBuiltInModule("age")`. Nothing here
+// as the matching property of `Neo.getBuiltInModule("neo:age")`. Nothing here
 // reaches the private module registry: it reads the public module object and
 // binds its properties.
 //
@@ -21,7 +21,7 @@
 // object behind it is frozen, so neither path can replace a function. Adding a
 // property to an exported function object is visible through both paths because
 // they share the same function.
-const age = Neo.getBuiltInModule("age");
+const age = Neo.getBuiltInModule("neo:age");
 
 export const generateIdentity = age.generateIdentity;
 export const identityToRecipient = age.identityToRecipient;

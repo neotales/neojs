@@ -1,9 +1,9 @@
-// The `os` built-in module as seen by `import ... from "os"` or
+// The `os` built-in module as seen by
 // `import ... from "neo:os"`.
 //
 // The module object lives in `neo.js`, which the runtime evaluates once per
 // realm. This file only re-exports it, so every named export is the same string
-// as the matching property of `Neo.getBuiltInModule("os")`. Nothing here
+// as the matching property of `Neo.getBuiltInModule("neo:os")`. Nothing here
 // reaches the private module registry: it reads the public module object and
 // binds its properties.
 //
@@ -24,7 +24,7 @@
 // The module namespace object is immutable by the language, and the module
 // object behind it is frozen, so neither path can replace a value.
 
-const os = Neo.getBuiltInModule("os");
+const os = Neo.getBuiltInModule("neo:os");
 
 export const platform = os.platform;
 export const arch = os.arch;

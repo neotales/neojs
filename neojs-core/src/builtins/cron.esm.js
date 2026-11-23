@@ -1,9 +1,9 @@
-// The `cron` built-in module as seen by `import ... from "cron"` or
+// The `cron` built-in module as seen by
 // `import ... from "neo:cron"`.
 //
 // The module object lives in `neo.js`, which the runtime evaluates once per
 // realm. This file only re-exports it, so every named export is the same value
-// as the matching property of `Neo.getBuiltInModule("cron")`. Nothing here
+// as the matching property of `Neo.getBuiltInModule("neo:cron")`. Nothing here
 // reaches the private module registry: it reads the public module object and
 // binds its properties.
 //
@@ -18,7 +18,7 @@
 // The exported list must match the properties of the `cron` object in
 // `neo.js`. `neojs-core/tests/cron.rs` asserts that the two lists are identical
 // and that each export is identity-equal to the registry property.
-const builtin = Neo.getBuiltInModule("cron");
+const builtin = Neo.getBuiltInModule("neo:cron");
 
 export const cron = builtin.cron;
 export const next = builtin.next;

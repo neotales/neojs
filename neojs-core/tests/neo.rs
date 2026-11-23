@@ -23,22 +23,22 @@ fn engine_and_module_list_are_frozen_exact_and_stable() {
         r#"
 const list = Neo.getBuiltInModulesList();
 const expected = [
-    "age", "neo:age",
-    "assert", "neo:assert",
-    "chars", "neo:chars",
-    "console", "neo:console",
-    "cron", "neo:cron",
-    "crypto", "neo:crypto",
-    "os", "neo:os",
-    "path", "neo:path",
-    "slices", "neo:slices",
-    "ssh", "neo:ssh",
-    "stdio", "neo:stdio",
-    "strings", "neo:strings",
-    "test", "neo:test",
-    "uuid", "neo:uuid",
-    "uuid/v4", "neo:uuid/v4",
-    "uuid/v7", "neo:uuid/v7",
+    "neo:age",
+    "neo:assert",
+    "neo:chars",
+    "neo:console",
+    "neo:cron",
+    "neo:crypto",
+    "neo:os",
+    "neo:path",
+    "neo:slices",
+    "neo:ssh",
+    "neo:stdio",
+    "neo:strings",
+    "neo:test",
+    "neo:uuid",
+    "neo:uuid/v4",
+    "neo:uuid/v7",
 ];
 
 if (Neo.engine !== "neo") throw new Error(`engine: ${Neo.engine}`);
@@ -88,55 +88,72 @@ fn every_listed_specifier_resolves_to_one_importable_module() {
     run_js(
         r#"
 const list = Neo.getBuiltInModulesList();
-const names = [];
-const specifiers = [];
 
-for (const entry of list) {
-    if (typeof entry !== "string" || entry.length === 0) {
-        throw new Error(`invalid entry: ${String(entry)}`);
+for (const specifier of list) {
+    if (typeof specifier !== "string" || !specifier.startsWith("neo:")) {
+        throw new Error(`not a canonical specifier: ${String(specifier)}`);
     }
-    if (entry.startsWith("node:")) throw new Error(`Node module claimed: ${entry}`);
-    if (entry.startsWith("neo:")) {
-        specifiers.push(entry);
-    } else {
-        names.push(entry);
+    if (Neo.getBuiltInModule(specifier) === undefined) {
+        throw new Error(`registry is missing ${specifier}`);
     }
-}
-if (names.length !== 16) throw new Error(`expected 16 names, got ${names.length}`);
-if (specifiers.length !== 16) throw new Error(`expected 16 specifiers, got ${specifiers.length}`);
-
-for (const name of names) {
-    const canonical = `neo:${name}`;
-    if (Neo.getBuiltInModule(name) === undefined) {
-        throw new Error(`registry is missing ${name}`);
+    if (import.meta.resolve(specifier) !== specifier) {
+        throw new Error(`${specifier} did not resolve to itself`);
     }
-    if (Neo.getBuiltInModule(canonical) !== undefined) {
-        throw new Error(`registry accepted canonical specifier ${canonical}`);
-    }
-    if (import.meta.resolve(name) !== canonical) {
-        throw new Error(`${name} did not resolve to ${canonical}`);
-    }
-    if (import.meta.resolve(canonical) !== canonical) {
-        throw new Error(`${canonical} did not resolve to itself`);
-    }
-    const namespace = await import(name);
-    const alias = await import(canonical);
-    if (namespace !== alias) throw new Error(`${name} and ${canonical} are not one module`);
-}
-
-for (const specifier of specifiers) {
-    if (!names.includes(specifier.slice("neo:".length))) {
-        throw new Error(`canonical specifier has no bare name: ${specifier}`);
+    const namespace = await import(specifier);
+    if (namespace === null || typeof namespace !== "object") {
+        throw new Error(`${specifier} did not produce a module namespace`);
     }
 }
 
 for (const name of ["node:test", "node:fs", "node:path", "node:os", "fs", "process", "version"]) {
     if (list.includes(name)) throw new Error(`list claims ${name}`);
-    if (list.includes(`neo:${name}`)) throw new Error(`list claims neo:${name}`);
     if (Neo.getBuiltInModule(name) !== undefined) {
         throw new Error(`registry returns a module for ${name}`);
     }
 }
 "#,
     );
+}
+
+#[test]
+fn bare_registry_names_are_not_importable() {
+    run_js(
+        r#"
+// Every name behind a canonical specifier is also a bare string. None of the
+// bare forms is a built-in module: the loader must reject them and the registry
+// must not expose them. This is the negative half of the canonical-only rule.
+const names = Neo.getBuiltInModulesList().map((specifier) => specifier.slice("neo:".length));
+
+for (const name of names) {
+    if (Neo.getBuiltInModule(name) !== undefined) {
+        throw new Error(`registry accepted bare name ${name}`);
+    }
+    let accepted = false;
+    try {
+        await import(name);
+        accepted = true;
+    } catch (error) {
+        if (!(error instanceof TypeError)) throw error;
+    }
+    if (accepted) throw new Error(`loader imported bare name ${name}`);
+}
+"#,
+    );
+}
+
+#[test]
+fn a_bare_built_in_name_is_rejected_with_the_canonical_suggestion() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = dir.path().join("main.js");
+    fs::write(&file, "import { isLetter } from \"chars\";\n").expect("write source");
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime.run_file(&file).expect_err("a bare name must fail");
+    let message = error.to_string();
+
+    assert!(message.contains("chars"), "{message}");
+    assert!(
+        message.contains("canonical `neo:` specifier") && message.contains("neo:chars"),
+        "{message}"
+    );
+    assert!(message.contains("Bare module specifiers"), "{message}");
 }

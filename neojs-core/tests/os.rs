@@ -25,15 +25,14 @@ fn run_js(source: &str) {
 fn imports_are_cached_frozen_and_identity_shared() {
     run_js(
         r#"
-import * as os from "os";
-import * as alias from "neo:os";
+import * as os from "neo:os";
+import * as alias from "NEO:os";
 
-const registry = Neo.getBuiltInModule("os");
+const registry = Neo.getBuiltInModule("neo:os");
 
-if (os !== alias) throw new Error("os and neo:os namespaces differ");
-if (alias !== (await import("os"))) throw new Error("dynamic os namespace differs");
-if (alias !== (await import("neo:os"))) throw new Error("dynamic neo:os namespace differs");
-if (registry !== Neo.getBuiltInModule("os")) throw new Error("registry lookup is not cached");
+if (os !== alias) throw new Error("os and NEO:os namespaces differ");
+if (alias !== (await import("neo:os"))) throw new Error("dynamic os namespace differs");
+if (registry !== Neo.getBuiltInModule("neo:os")) throw new Error("registry lookup is not cached");
 if (Object.isFrozen(registry) !== true) throw new Error("registry is not frozen");
 if (Object.isExtensible(os) !== false) throw new Error("namespace is extensible");
 if ("default" in os) throw new Error("unexpected default export");
@@ -54,13 +53,21 @@ if (os.platform.length === 0 || os.arch.length === 0) {
     throw new Error("a constant is empty");
 }
 
-if (import.meta.resolve("os") !== "neo:os") throw new Error("canonical os specifier");
-if (import.meta.resolve("neo:os") !== "neo:os") throw new Error("canonical neo:os specifier");
+if (import.meta.resolve("neo:os") !== "neo:os") throw new Error("canonical os specifier");
+if (import.meta.resolve("NEO:os") !== "neo:os") throw new Error("scheme is not case-insensitive");
 
-// The registry takes bare names, and the module installs no global.
-if (Neo.getBuiltInModule("neo:os") !== undefined) {
-    throw new Error("registry accepted a neo: prefix");
+// The registry and loader accept only the canonical specifier, and the
+// module installs no global.
+if (Neo.getBuiltInModule("os") !== undefined) {
+    throw new Error("registry accepted a bare name");
 }
+let bareRejected = false;
+try {
+    await import("os");
+} catch (error) {
+    bareRejected = error instanceof TypeError;
+}
+if (!bareRejected) throw new Error("bare os import was accepted");
 for (const name of ["os", "__neoOs", "__NEO_OS_PLATFORM__", "__NEO_OS_ARCH__"]) {
     if (name in globalThis) throw new Error(`${name} leaked onto globalThis`);
 }
@@ -72,8 +79,8 @@ for (const name of ["os", "__neoOs", "__NEO_OS_PLATFORM__", "__NEO_OS_ARCH__"]) 
 fn exports_equal_the_rust_build_target_constants() {
     let source = format!(
         r#"
-import {{ platform, arch }} from "os";
-const registry = Neo.getBuiltInModule("os");
+import {{ platform, arch }} from "neo:os";
+const registry = Neo.getBuiltInModule("neo:os");
 if (platform !== {platform:?}) throw new Error(`platform: expected {platform:?}, got ${{platform}}`);
 if (arch !== {arch:?}) throw new Error(`arch: expected {arch:?}, got ${{arch}}`);
 if (platform !== registry.platform) throw new Error("platform differs from the registry");
@@ -89,7 +96,7 @@ if (arch !== registry.arch) throw new Error("arch differs from the registry");
 fn frozen_values_resist_replacement() {
     run_js(
         r#"
-import * as os from "os";
+import * as os from "neo:os";
 
 for (const name of ["platform", "arch"]) {
     let assignmentFailed = false;
@@ -102,7 +109,7 @@ for (const name of ["platform", "arch"]) {
 
     let redefineFailed = false;
     try {
-        Object.defineProperty(Neo.getBuiltInModule("os"), name, { value: "replaced" });
+        Object.defineProperty(Neo.getBuiltInModule("neo:os"), name, { value: "replaced" });
     } catch (error) {
         redefineFailed = error instanceof TypeError;
     }
@@ -120,7 +127,7 @@ if (os.platform === "replaced" || os.arch === "replaced") {
 fn lookup_ignores_replaced_intrinsics() {
     run_js(
         r#"
-const os = Neo.getBuiltInModule("os");
+const os = Neo.getBuiltInModule("neo:os");
 const originalGet = Map.prototype.get;
 const originalFreeze = Object.freeze;
 let replacedGetCalls = 0;
@@ -130,13 +137,13 @@ Map.prototype.get = function () {
 };
 Object.freeze = () => "not frozen";
 try {
-    if (Neo.getBuiltInModule("os") !== os) {
+    if (Neo.getBuiltInModule("neo:os") !== os) {
         throw new Error("known lookup did not return the cached module");
     }
     if (Neo.getBuiltInModule("missing") !== undefined) {
         throw new Error("unknown lookup exposed the registry");
     }
-    if (os.platform !== Neo.getBuiltInModule("os").platform) {
+    if (os.platform !== Neo.getBuiltInModule("neo:os").platform) {
         throw new Error("lookup returned replaced values");
     }
 } finally {
@@ -153,8 +160,8 @@ if (Object.isFrozen(os) !== true) throw new Error("module is no longer frozen");
 fn module_does_not_add_an_os_global() {
     run_js(
         r#"
-import "os";
 import "neo:os";
+import "NEO:os";
 if (typeof globalThis.os !== "undefined") throw new Error("os global was installed");
 "#,
     );

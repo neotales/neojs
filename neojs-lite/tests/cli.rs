@@ -48,7 +48,7 @@ fn exposes_the_lite_engine_and_empty_builtin_list() {
 console.log(Neo.engine);
 console.log(Neo.getBuiltInModulesList().length);
 console.log(Object.isFrozen(Neo.getBuiltInModulesList()));
-console.log(typeof Neo.getBuiltInModule("age"));
+console.log(typeof Neo.getBuiltInModule("neo:age"));
 "#,
     );
     let file = dir.path().join("main.js");

@@ -1,7 +1,7 @@
 //! RFC 9562 version 4 and version 7 UUID generation for `neo:uuid`.
 //!
 //! The JavaScript module object is installed by [`crate::builtins`] and is
-//! exposed as `Neo.getBuiltInModule("uuid")`, `import ... from "uuid"`, and
+//! exposed as `Neo.getBuiltInModule("neo:uuid")` and
 //! `import ... from "neo:uuid"`. The `uuid/v4` and `uuid/v7` subpaths are thin
 //! modules over the same function objects and also provide a default export.
 //! This file registers the two private host ops it calls: one for [`v4`] and
@@ -391,7 +391,7 @@ fn op_neo_uuid_v7<'s, 'i>(scope: &mut v8::PinScope<'s, 'i>) -> v8::Local<'s, v8:
 deno_core::extension!(
     neojs_uuid,
     ops = [op_neo_uuid_v4, op_neo_uuid_v7],
-    docs = "RFC 9562 UUID version 4 and 7 generation behind `Neo.getBuiltInModule(\"uuid\")`."
+    docs = "RFC 9562 UUID version 4 and 7 generation behind `Neo.getBuiltInModule(\"neo:uuid\")`."
 );
 
 #[cfg(test)]

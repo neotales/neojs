@@ -36,8 +36,9 @@ JSR is separate and out of scope; npm packages are not JSR packages.
 ## Verified baseline and reference behavior
 
 - The [neojs README](../README.md#limits) and `neojs-core/src/loader.rs` at the base commit
-  document a filesystem ESM loader, erasable `.ts`/`.mts`, built-in bare and `neo:` names,
-  rejected `npm:`/`node:`/`jsr:` specifiers, no JSON module imports, no permission system,
+  document a filesystem ESM loader, erasable `.ts`/`.mts`, built-in modules addressed only by
+  canonical `neo:` specifiers, rejected `npm:`/`node:`/`jsr:` specifiers, no JSON module imports,
+  no permission system,
   and no sandbox. Existing `crypto`, `path`, `os`, etc. are neojs APIs, not automatically
   Node-compatible. The loader currently rejects `.cjs`; ordinary `.js` is executed as ESM,
   and unresolved CommonJS globals fail at runtime. Windows is unverified.
@@ -75,9 +76,10 @@ JSR is separate and out of scope; npm packages are not JSR packages.
    module identity: propagate a graph-instance identity including the resolved peer context
    through resolution, and key module instances by that identity and canonical module path.
    The same artifact used with different peer bindings must not share a module instance or
-   resolve imports using the other context. Existing neojs built-in bare
-   specifiers retain their behavior; define and test the collision rule inside packages before
-   release. An explicit `npm:` import must never resolve to a neojs built-in.
+   resolve imports using the other context. Neo built-ins are addressed only by canonical `neo:`
+   specifiers, so a bare name such as `age` is available to package resolution and never silently
+   selects a built-in. An explicit `npm:` import must never resolve to a neojs built-in, and an
+   explicit `neo:` import must never resolve to a package.
 3. Honor package `exports` for root, subpaths, patterns, null exclusions, nested conditions
    and target validation; honor internal `#` imports including mappings to declared external
    packages. Preserve manifest key order. Recommended active conditions: `import` and
@@ -186,8 +188,9 @@ proposals. Each needs compatibility and security review; none unlocks CommonJS i
 
 ## Decisions needed before implementation
 
-- Which collision rule applies when a package imports a bare name already used by a neojs
-  built-in? How will users explicitly address each without breaking existing scripts?
+- Is the current collision rule final: bare names belong to package resolution, while neojs
+  built-ins are reachable only by canonical `neo:` specifiers? If not, what is the replacement,
+  and how are existing scripts migrated from the retired bare built-in names?
 - Which `main` fallback and unsupported package metadata forms are in the first slice?
   How will `npm:` roots supply peers without a project manifest?
 - Is automatic project lockfile creation acceptable, and what is the CLI/embedding API for

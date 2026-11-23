@@ -4,16 +4,16 @@
 //! `neojs-module-policy` crate, which the separate QuickJS runtime also uses.
 //! Engine-specific resolution and reading stay here.
 //!
-//! Resolution accepts relative paths, absolute paths, `file:` URLs, and the
-//! built-in specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`,
-//! `neo:chars`, `console`, `neo:console`, `crypto`, `neo:crypto`, `os`,
-//! `neo:os`, `path`, `neo:path`, `slices`, `neo:slices`, `ssh`, `neo:ssh`,
-//! `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`, `neo:test`, `uuid`,
-//! `neo:uuid`, `uuid/v4`, `neo:uuid/v4`, `uuid/v7`, and `neo:uuid/v7`
-//! ([`crate::builtins`]), and — only when the runtime was created with
-//! [`crate::Runtime::with_remote`] — absolute `https:` URLs. Every other scheme
-//! is rejected with a reason that names the missing feature instead of failing
-//! later inside V8.
+//! Resolution accepts relative paths, absolute paths, `file:` URLs, the
+//! canonical built-in specifiers `neo:age`, `neo:assert`, `neo:chars`,
+//! `neo:console`, `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`,
+//! `neo:slices`, `neo:ssh`, `neo:stdio`, `neo:strings`, `neo:test`, `neo:uuid`,
+//! `neo:uuid/v4`, and `neo:uuid/v7` ([`crate::builtins`]), and — only when the
+//! runtime was created with [`crate::Runtime::with_remote`] — absolute `https:`
+//! URLs. Every other scheme is rejected with a reason that names the missing
+//! feature instead of failing later inside V8. A bare specifier is never a
+//! built-in module, even when it matches a registry name; `age` is rejected
+//! where `neo:age` resolves.
 //!
 //! A relative specifier in a remote module resolves against that module's URL,
 //! so it stays remote. A remote module cannot import `file:`; remote code gets
@@ -23,9 +23,13 @@
 //! imports resolve against the final URL, and makes `import.meta.url` the final
 //! URL, as a browser does.
 //!
-//! Built-in specifiers resolve to one canonical `neo:` URL, so the engine caches
-//! a single module instance however many spellings or importers use. They are
-//! never read from disk.
+//! Each built-in module has exactly one canonical `neo:` specifier. The URL
+//! scheme is matched case-insensitively, as URL schemes are, so `NEO:age` is
+//! the same module as `neo:age`. The path is matched against the original
+//! specifier, not a URL-normalized one: embedded tab/newline characters and
+//! leading or trailing whitespace or control characters are rejected rather
+//! than trimmed. The engine caches one instance per canonical URL. Built-in
+//! modules are never read from disk.
 //!
 //! A `.ts` or `.mts` module is read as text and type-stripped before V8 sees it
 //! ([`crate::typescript`]). A file that cannot be reduced to ECMAScript fails
@@ -161,13 +165,22 @@ impl FileModuleLoader {
             return self.resolve_https(joined);
         }
 
-        let specifier_url = Url::parse(specifier).map_err(|error| {
-            JsErrorBox::generic(format!(
-                "cannot resolve `{}` from {}: {error}",
-                display_specifier(specifier),
-                display_referrer(referrer)
-            ))
-        })?;
+        let specifier_url = match Url::parse(specifier) {
+            Ok(url) => url,
+            Err(error) => {
+                // A bare name has no URL base to resolve against. Reject it
+                // with the same explanation as a bare name from a local
+                // importer instead of a parser message about a missing base.
+                if let Some(reason) = unsupported_specifier(specifier, referrer) {
+                    return Err(JsErrorBox::generic(reason));
+                }
+                return Err(JsErrorBox::generic(format!(
+                    "cannot resolve `{}` from {}: {error}",
+                    display_specifier(specifier),
+                    display_referrer(referrer)
+                )));
+            }
+        };
         match specifier_url.scheme() {
             "https" => self.resolve_https(specifier_url),
             "http" => Err(JsErrorBox::generic(with_referrer(
@@ -210,13 +223,10 @@ impl ModuleLoader for FileModuleLoader {
             return builtin_url(canonical);
         }
         // A URL scheme is case-insensitive, so `NEO:chars` reaches the same
-        // built-in as `neo:chars`.
-        if let Ok(url) = Url::parse(specifier)
-            && url.scheme() == "neo"
-            && url.query().is_none()
-            && url.fragment().is_none()
-            && let Some(canonical) = builtins::resolve_name(url.path())
-        {
+        // canonical module as `neo:chars`. The path is read from the original
+        // string: `Url::parse` trims whitespace and removes embedded
+        // tab/newline characters, which would make `neo:ch\nars` resolve.
+        if let Some(canonical) = case_insensitive_builtin(specifier) {
             return builtin_url(canonical);
         }
 
@@ -395,6 +405,32 @@ impl FileModuleLoader {
     }
 }
 
+/// Resolves a built-in specifier whose scheme differs only in ASCII case.
+///
+/// Only the `neo` scheme is case-insensitive; the path is matched byte for
+/// byte against the registry. The specifier is split directly instead of passed
+/// through [`Url::parse`], because the URL parser trims leading and trailing C0
+/// controls and spaces and removes embedded tab, line feed, and carriage return
+/// characters. Accepting those transformations would make a malformed spelling
+/// such as `neo:ch\nars` reach `neo:chars`.
+///
+/// The path must contain no ASCII space or control character at all. Registry
+/// names never do, so this rejects the trimmed forms even if one were added
+/// later. Query and fragment text stays part of the path and cannot match.
+fn case_insensitive_builtin(specifier: &str) -> Option<&'static str> {
+    let (scheme, path) = specifier.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("neo") {
+        return None;
+    }
+    if path
+        .chars()
+        .any(|character| character == ' ' || character.is_ascii_control())
+    {
+        return None;
+    }
+    builtins::resolve_name(path)
+}
+
 /// Resolves a built-in specifier to its canonical URL.
 ///
 /// The canonical specifiers are compile-time constants, so a parse failure means
@@ -419,9 +455,21 @@ fn unsupported_specifier(specifier: &str, referrer: &str) -> Option<String> {
         return None;
     }
 
+    if builtins::is_registry_name(specifier) {
+        return Some(with_referrer(
+            format!(
+                "cannot resolve `{}`: Neo built-in modules must be imported by their canonical `neo:` specifier; use `neo:{}`. Bare module specifiers are not implemented (built-in modules: {})",
+                display_specifier(specifier),
+                specifier,
+                builtins::implemented_specifiers()
+            ),
+            referrer,
+        ));
+    }
+
     Some(with_referrer(
         format!(
-            "cannot resolve `{}`: bare module specifiers other than the built-in modules are not implemented; use a relative or absolute file path (built-in modules: {})",
+            "cannot resolve `{}`: bare module specifiers are not implemented; use a relative or absolute file path (built-in modules: {})",
             display_specifier(specifier),
             builtins::implemented_specifiers()
         ),

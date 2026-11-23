@@ -37,9 +37,9 @@ fn age_is_available_and_roundtrips_bytes() {
         r#"
 import { decrypt, encrypt, generateIdentity, identityToRecipient } from "neo:age";
 
-const registry = Neo.getBuiltInModule("age");
+const registry = Neo.getBuiltInModule("neo:age");
 if (typeof registry !== "object" || registry === null) throw Error("missing registry module");
-if (Neo.getBuiltInModule("age") !== registry) throw Error("registry lookup is not cached");
+if (Neo.getBuiltInModule("neo:age") !== registry) throw Error("registry lookup is not cached");
 if (!Object.isFrozen(registry)) throw Error("registry module is not frozen");
 for (const name of ["generateIdentity", "identityToRecipient", "encrypt", "decrypt"]) {
     if (typeof registry[name] !== "function") throw Error(`${name} is not a function`);
@@ -98,7 +98,7 @@ fn age_rejects_unsupported_argument_counts_and_types() {
     run_js(
         r#"
 import * as age from "neo:age";
-const registry = Neo.getBuiltInModule("age");
+const registry = Neo.getBuiltInModule("neo:age");
 const pair = registry.generateIdentity();
 
 function expectTypeError(fn, label) {
@@ -158,25 +158,23 @@ if ("default" in age) throw Error("age must not have a default export");
 fn age_module_specifiers_share_one_module_instance() {
     run_js(
         r#"
-import * as staticAge from "age";
+import * as staticAge from "neo:age";
 
-const registry = Neo.getBuiltInModule("age");
-const first = await import("age");
-const alias = await import("neo:age");
+const registry = Neo.getBuiltInModule("neo:age");
+const first = await import("neo:age");
 const uppercase = await import("NEO:age");
-const again = await import("age");
+const again = await import("neo:age");
 
 if (staticAge !== first) throw Error("static and dynamic import differ");
-if (first !== alias) throw Error("age and neo:age differ");
-if (alias !== uppercase) throw Error("scheme matching is not case-insensitive");
-if (alias !== again) throw Error("repeated dynamic import was not cached");
+if (first !== uppercase) throw Error("scheme matching is not case-insensitive");
+if (first !== again) throw Error("repeated dynamic import was not cached");
 if (staticAge.encrypt !== registry.encrypt) throw Error("registry function differs");
 if (staticAge.decrypt !== registry.decrypt) throw Error("registry decrypt differs");
 if (staticAge.generateIdentity !== registry.generateIdentity) throw Error("registry generator differs");
 if (staticAge.identityToRecipient !== registry.identityToRecipient) throw Error("registry derive differs");
 if ("default" in staticAge) throw Error("age must not have a default export");
-if (import.meta.resolve("age") !== "neo:age") throw Error("age did not resolve canonically");
-if (import.meta.resolve("neo:age") !== "neo:age") throw Error("alias did not resolve canonically");
+if (import.meta.resolve("neo:age") !== "neo:age") throw Error("age did not resolve canonically");
+if (import.meta.resolve("NEO:age") !== "neo:age") throw Error("scheme is not case-insensitive");
 "#,
     );
     // A second importer in a different module must see the same function
@@ -190,7 +188,7 @@ if (import.meta.resolve("neo:age") !== "neo:age") throw Error("alias did not res
     let file = dir.path().join("main.js");
     fs::write(
         &file,
-        "import { encrypt as a } from \"age\";\nimport { encrypt as b } from \"./consumer.js\";\nif (a !== b) throw new Error(\"cross-module identity failed\");\n",
+        "import { encrypt as a } from \"neo:age\";\nimport { encrypt as b } from \"./consumer.js\";\nif (a !== b) throw new Error(\"cross-module identity failed\");\n",
     )
     .expect("write main");
     let mut runtime = Runtime::new().expect("runtime");
@@ -201,8 +199,8 @@ if (import.meta.resolve("neo:age") !== "neo:age") throw Error("alias did not res
 fn age_named_exports_are_the_registry_functions() {
     run_js(
         r#"
-import * as age from "age";
-const registry = Neo.getBuiltInModule("age");
+import * as age from "neo:age";
+const registry = Neo.getBuiltInModule("neo:age");
 const exported = Object.keys(age).sort();
 const registered = Object.keys(registry).sort();
 if (JSON.stringify(exported) !== JSON.stringify(registered)) {
@@ -532,7 +530,7 @@ expectLimit(() => decrypt(pair.identity, new Uint8Array(MAX_CIPHERTEXT + 1)));
 // A key text over 512 bytes is refused before parsing.
 let keyError;
 try {
-    Neo.getBuiltInModule("age").identityToRecipient("A".repeat(513));
+    Neo.getBuiltInModule("neo:age").identityToRecipient("A".repeat(513));
 } catch (error) {
     keyError = error;
 }
@@ -722,15 +720,22 @@ if (String(decryptFailure.message).includes(marker)) {
 }
 
 #[test]
-fn age_is_not_available_under_an_unknown_registry_name() {
+fn age_is_not_available_under_a_bare_or_misspelled_name() {
     run_js(
         r#"
-if (Neo.getBuiltInModule("neo:age") !== undefined) {
-    throw new Error("prefixed registry name must be unknown");
+if (Neo.getBuiltInModule("age") !== undefined) {
+    throw new Error("bare registry name must be unknown");
 }
 if (Neo.getBuiltInModule("Age") !== undefined) {
-    throw new Error("bare registry name must match exactly");
+    throw new Error("registry names are case-sensitive");
 }
+let bareRejected = false;
+try {
+    await import("age");
+} catch (error) {
+    bareRejected = error instanceof TypeError;
+}
+if (!bareRejected) throw new Error("bare age import was accepted");
 "#,
     );
 }

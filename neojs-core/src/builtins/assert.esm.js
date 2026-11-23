@@ -1,9 +1,9 @@
-// The `assert` built-in module as seen by `import ... from "assert"` or
+// The `assert` built-in module as seen by
 // `import ... from "neo:assert"`.
 //
 // The implementation lives in `neo.js`, which the runtime evaluates once per
 // realm. This file only re-exports it, so every named export is the same
-// function object as the matching property of `Neo.getBuiltInModule("assert")`,
+// function object as the matching property of `Neo.getBuiltInModule("neo:assert")`,
 // and the default export is that callable object itself. Nothing here reaches
 // the private module registry: it reads the public module object and binds its
 // properties.
@@ -19,7 +19,7 @@
 // `assert/strict` and Deno's `@std/assert`; it is not a compatibility layer.
 // In particular, structural equality is `equals` and identity is
 // `strictEquals`. There is no `assertEquals`, `deepEqual`, or `strictEqual`.
-const assert = Neo.getBuiltInModule("assert");
+const assert = Neo.getBuiltInModule("neo:assert");
 
 export default assert;
 export { assert };

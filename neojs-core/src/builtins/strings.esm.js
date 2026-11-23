@@ -1,10 +1,10 @@
-// The `strings` built-in module as seen by `import ... from "strings"` or
+// The `strings` built-in module as seen by
 // `import ... from "neo:strings"`.
 //
 // The implementations live in `neo.js`, which the runtime evaluates once per
 // realm. This file only re-exports them, so every named export is the same
 // function object as the matching property of
-// `Neo.getBuiltInModule("strings")`. Nothing here reaches the private module
+// `Neo.getBuiltInModule("neo:strings")`. Nothing here reaches the private module
 // registry: it reads the public module object and binds its properties.
 //
 // The exported list must match the properties of the `strings` object in
@@ -15,7 +15,7 @@
 // object behind it is frozen, so neither path can replace a function. Adding a
 // property to an exported function object is visible through both paths
 // because they share the same function.
-const strings = Neo.getBuiltInModule("strings");
+const strings = Neo.getBuiltInModule("neo:strings");
 
 export const equalFold = strings.equalFold;
 export const startsWithFold = strings.startsWithFold;

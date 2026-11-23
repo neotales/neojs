@@ -472,17 +472,17 @@ if (hex(loneDecryptor.final()) !== "efbfbd") throw Error("U+FFFD replacement");
 fn cipher_exports_are_registry_functions_and_the_envelope_stays_separate() {
     run_js(
         r#"
-import * as crypto from "crypto";
+import * as crypto from "neo:crypto";
 import { createDecryptor, createEncryptor, decrypt, encrypt, generateEnvelopeKey } from "neo:crypto";
 
-const registry = Neo.getBuiltInModule("crypto");
+const registry = Neo.getBuiltInModule("neo:crypto");
 if (createEncryptor !== registry.createEncryptor) throw Error("createEncryptor identity");
 if (createDecryptor !== registry.createDecryptor) throw Error("createDecryptor identity");
 if (typeof registry.createEncryptor !== "function") throw Error("createEncryptor missing");
 if ("createCipheriv" in registry || "createDecipheriv" in registry) {
     throw Error("Node cipher names must not be exported");
 }
-if (import.meta.resolve("crypto") !== "neo:crypto") throw Error("resolve");
+if (import.meta.resolve("neo:crypto") !== "neo:crypto") throw Error("resolve");
 
 // The NEO1 envelope and the cipher surface are separate: a cipher output is
 // not an envelope and the envelope functions do not see cipher objects.
