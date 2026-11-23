@@ -183,7 +183,7 @@ fn simultaneous_stdin_and_stdout_do_not_deadlock() {
         &policy,
         "spawnSync",
         "/bin/sh",
-        &["-c", "cat; printf err >&2"],
+        &["-c", "/bin/cat; printf err >&2"],
         json!({ "input": input, "maxBuffer": 1_048_576 }),
     );
     let result = ok_result(&response);
