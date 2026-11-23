@@ -27,6 +27,10 @@
 //!   Entry and rejection diagnostics never invoke getters, proxy traps,
 //!   `toString`, or `String`.
 //! * `console.log` and `console.error` write to the process streams.
+//! * A minimal `Neo` global reports `engine` `"neo-lite"`.
+//!   `Neo.getBuiltInModulesList()` returns one frozen empty array because this
+//!   runtime has no built-in modules, and `Neo.getBuiltInModule(name)` returns
+//!   `undefined` for every string name. A non-string name throws `TypeError`.
 //!
 //! # What is not implemented yet
 //!
@@ -39,7 +43,8 @@
 //!   and no event loop beyond QuickJS's own job queue. A top-level `await` that
 //!   depends on an external event fails with an error instead of hanging.
 //! * **No built-in `neo:` modules.** The QuickJS crate currently loads local
-//!   ECMAScript files only.
+//!   ECMAScript files only. The `Neo` global is introspection only: it does not
+//!   make any `neo:` specifier importable.
 //! * **No sandbox.** Permissions, host capabilities, and isolation are not
 //!   implemented.
 //!

@@ -39,6 +39,27 @@ fn runs_a_module_and_prints_console_output() {
 }
 
 #[test]
+fn exposes_the_lite_engine_and_empty_builtin_list() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(
+        &dir,
+        "main.js",
+        r#"
+console.log(Neo.engine);
+console.log(Neo.getBuiltInModulesList().length);
+console.log(Object.isFrozen(Neo.getBuiltInModulesList()));
+console.log(typeof Neo.getBuiltInModule("age"));
+"#,
+    );
+    let file = dir.path().join("main.js");
+
+    let output = run(&[file.as_os_str()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "neo-lite\n0\ntrue\nundefined\n");
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
 fn runs_relative_imports_from_the_entry_directory() {
     let dir = tempfile::tempdir().expect("temp dir");
     write(

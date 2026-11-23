@@ -31,6 +31,95 @@ console.log(value);
 }
 
 #[test]
+fn neo_reports_the_lite_engine_and_an_empty_frozen_list() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "memory.js",
+            r#"
+const list = Neo.getBuiltInModulesList();
+if (Neo.engine !== "neo-lite") throw new Error(`engine: ${Neo.engine}`);
+if (!Array.isArray(list)) throw new Error("module list is not an array");
+if (list.length !== 0) throw new Error(`module list is not empty: ${list.length}`);
+if (Neo.getBuiltInModulesList() !== list) {
+    throw new Error("repeated calls returned different arrays");
+}
+if (Object.isFrozen(list) !== true) throw new Error("module list is not frozen");
+if (Object.isExtensible(list) !== false) throw new Error("module list is extensible");
+if (Object.isFrozen(Neo) !== true) throw new Error("Neo is not frozen");
+
+for (const name of [
+    "age", "assert", "chars", "console", "cron", "crypto", "os", "path", "slices",
+    "ssh", "stdio", "strings", "test", "uuid", "uuid/v4", "uuid/v7",
+    "neo:age", "neo:cron", "neo:test", "node:test", "node:fs", "fs",
+]) {
+    if (Neo.getBuiltInModule(name) !== undefined) {
+        throw new Error(`Neo claimed ${name}`);
+    }
+}
+let badNameThrew = false;
+try {
+    Neo.getBuiltInModule(1);
+} catch (error) {
+    badNameThrew = error instanceof TypeError;
+}
+if (!badNameThrew) throw new Error("a non-string name did not throw TypeError");
+
+const descriptor = Object.getOwnPropertyDescriptor(globalThis, "Neo");
+if (!descriptor) throw new Error("Neo is not an own global property");
+if (descriptor.writable !== false) throw new Error("Neo is writable");
+if (descriptor.enumerable !== false) throw new Error("Neo is enumerable");
+if (descriptor.configurable !== false) throw new Error("Neo is configurable");
+const engine = Object.getOwnPropertyDescriptor(Neo, "engine");
+if (!engine) throw new Error("engine is not an own property");
+if (engine.writable !== false) throw new Error("engine is writable");
+if (engine.configurable !== false) throw new Error("engine is configurable");
+
+let mutationThrew = false;
+try {
+    list.push("age");
+} catch (error) {
+    mutationThrew = error instanceof TypeError;
+}
+if (!mutationThrew) throw new Error("a list mutation did not throw TypeError");
+if (list.length !== 0) throw new Error("the module list changed");
+"#,
+        )
+        .expect("Neo introspection");
+}
+
+#[test]
+fn neo_lookup_uses_the_intrinsic_type_error_after_a_global_replacement() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "memory.js",
+            r#"
+const IntrinsicTypeError = TypeError;
+let substitutedCalls = 0;
+globalThis.TypeError = function (...args) {
+    substitutedCalls += 1;
+    return new IntrinsicTypeError(`substituted:${args.length}`);
+};
+
+let caught;
+try {
+    Neo.getBuiltInModule(1);
+} catch (error) {
+    caught = error;
+}
+
+if (substitutedCalls !== 0) throw new Error("the substituted TypeError ran");
+if (!(caught instanceof IntrinsicTypeError)) throw new Error("not the intrinsic TypeError");
+if (caught.message !== "module name must be a string") {
+    throw new Error(`message: ${caught.message}`);
+}
+"#,
+        )
+        .expect("intrinsic TypeError");
+}
+
+#[test]
 fn relative_static_imports_resolve_from_the_entry_file() {
     let dir = tempfile::tempdir().expect("temp dir");
     write(

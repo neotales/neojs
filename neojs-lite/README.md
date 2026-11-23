@@ -33,7 +33,10 @@ This command does **not** claim parity with `neojs` (V8):
   `.js` or `.mjs`.
 * **No host asynchrony.** There are no timers or host Promise integration. A
   top-level `await` works only when QuickJS's own job queue can settle it.
-* **No built-in `neo:` modules.** Local ECMAScript files only.
+* **No built-in `neo:` modules.** Local ECMAScript files only. The `Neo`
+  global is introspection only: its list is empty,
+  `getBuiltInModule` returns `undefined` for every string name, and a
+  non-string name throws `TypeError`.
 * **No permissions or sandbox.** None are implemented.
 
 Both runtimes share `neojs-module-policy` for executable-extension decisions, so

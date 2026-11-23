@@ -297,6 +297,35 @@ Identity and mutation semantics:
   boundary: the console module writes to the same process streams as the global console and adds no
   new capability.
 
+**Inspect the runtime.** `Neo.engine` names the engine that installed the global. This V8 runtime
+reports `"neo"`. `Neo.getBuiltInModulesList()` returns one frozen array of every implemented built-in
+module specifier, in registration order. Each built-in contributes its bare registry name and its
+canonical `neo:` specifier, so the `uuid/v4` and `uuid/v7` subpaths appear in both forms.
+
+```js
+Neo.engine; // "neo"
+Neo.getBuiltInModulesList();
+// ["age", "neo:age", "assert", "neo:assert", "chars", "neo:chars",
+//  "console", "neo:console", "cron", "neo:cron", "crypto", "neo:crypto",
+//  "os", "neo:os", "path", "neo:path", "slices", "neo:slices",
+//  "ssh", "neo:ssh", "stdio", "neo:stdio", "strings", "neo:strings",
+//  "test", "neo:test", "uuid", "neo:uuid", "uuid/v4", "neo:uuid/v4",
+//  "uuid/v7", "neo:uuid/v7"]
+```
+
+The list is a snapshot of the current runtime, not a promise of a future module, and it lists no
+Node modules: a `node:` opt-in is not implemented. The same frozen array is returned for every call,
+so a caller cannot change later results; a new `Runtime` allocates a new array. `Neo.getBuiltInModule`
+takes the bare names in the list. The `neo:` entries are the canonical import specifiers; the bare
+entries are registry names and import aliases, so `Neo.getBuiltInModule("neo:age")` returns
+`undefined`.
+
+The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"`.
+`Neo.getBuiltInModulesList()` is one frozen empty array because that runtime implements no built-in
+modules, and `Neo.getBuiltInModule(name)` returns `undefined` for every string name. A non-string name
+throws `TypeError`. That empty list is not a claim that a module is planned or available; `neo:`
+imports remain rejected there.
+
 **Use the stdio built-in.** `Neo.getBuiltInModule("stdio")` returns a frozen module object cached
 for the realm. `stdio` is the canonical bare specifier and `neo:stdio` is an alias for the same
 module instance. It exports `Readable`, `Writable`, `stdout`, `stderr`, and `MAX_BYTES`; there is no
@@ -1628,7 +1657,9 @@ dynamic imports still run; a nonconverging job chain or a throwing queued job fa
 promise still rejected without a handler when the queue empties is an error; rejection diagnostics use
 primitive values and an Error's own data without invoking getters, proxies, `toString`, or `String`.
 It does **not** implement TypeScript, host asynchrony or timers, `neo:` built-in modules, permissions,
-or a sandbox, and it does not claim parity with the V8 runtime. Both runtimes share
+or a sandbox, and it does not claim parity with the V8 runtime. It installs a minimal `Neo` global
+whose engine is `"neo-lite"` and whose built-in module list is empty; `Neo.getBuiltInModule` returns
+`undefined` for every string name and throws `TypeError` for a non-string name. Both runtimes share
 `neojs-module-policy` for executable-extension decisions and rejection reasons, so `.cjs`, JSX/TSX,
 declaration files, JSON, WebAssembly, and native addons fail with the same explanation in either.
 
@@ -1644,8 +1675,11 @@ in-process scheduling, writes to the process's stdout and stderr, lexical POSIX 
 operations, SHA-2 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous
 SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
-authentication, the built-in module registry, and the embedding API above. Features outside this
-list are not implemented.
+authentication, the built-in module registry and its `Neo.engine` and `Neo.getBuiltInModulesList`
+introspection, and the embedding API above. The QuickJS runtime installs only the `Neo` introspection
+surface, not the built-in modules: `Neo.engine` is `"neo-lite"`, its built-in module list is empty,
+`Neo.getBuiltInModule` returns `undefined` for every string name, and a non-string name throws
+`TypeError`. Features outside this list are not implemented.
 
 - TypeScript has no type checking and no transpilation. Only syntax that can be erased is accepted:
   `enum`, `namespace`, parameter properties, `import =`, `export =`, decorators, and angle-bracket

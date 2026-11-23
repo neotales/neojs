@@ -30,7 +30,10 @@
 //! `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`, `neo:test`, `uuid`,
 //! `neo:uuid`, `uuid/v4`, `neo:uuid/v4`, `uuid/v7`, and `neo:uuid/v7`. The
 //! `uuid/v4` and `uuid/v7` subpaths are thin modules whose named and default
-//! exports are the same functions as `uuid.v4` and `uuid.v7`.
+//! exports are the same functions as `uuid.v4` and `uuid.v7`. The global `Neo`
+//! reports `engine` `"neo"`; `Neo.getBuiltInModulesList` returns one frozen
+//! array containing each built-in's bare registry name followed by its canonical
+//! `neo:` specifier, including `cron` and both UUID subpaths.
 //!
 //! `cron` parses standard five-field UTC cron expressions and runs a callback
 //! on the schedule. `cron(expression, callback, options?)` returns a frozen

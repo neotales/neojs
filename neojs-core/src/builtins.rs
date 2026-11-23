@@ -2,8 +2,10 @@
 //! synthetic ECMAScript modules that import specifiers reach.
 //!
 //! The scripts here install globals that neojs supplies: currently
-//! [`neo_shim`], which defines the `Neo` object and its cached built-in
-//! modules. `chars`, `console`, `os`, `slices`, `strings`, and `test` are
+//! [`neo_shim`], which defines the `Neo` object, its cached built-in modules,
+//! and the introspection surface `Neo.engine` and
+//! `Neo.getBuiltInModulesList`. `chars`, `console`, `os`, `slices`, `strings`,
+//! and `test` are
 //! plain ECMAScript (the `os` module contains two build-target constants
 //! substituted by [`neo_shim`]); `assert` calls one private host op registered
 //! by [`crate::assert`] to observe a genuine native Promise. `cron` calls six
@@ -108,8 +110,12 @@ use deno_core::url::Url;
 
 /// Installs the global `Neo` object and the built-in module registry.
 ///
-/// Evaluation happens once per realm. The `age`, `assert`, `chars`, `cron`,
-/// `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, `uuid`,
+/// Evaluation happens once per realm. `Neo.engine` is `"neo"` for this V8
+/// runtime. `Neo.getBuiltInModulesList` returns one frozen array, built from the
+/// registry in insertion order, with each built-in's bare name followed by its
+/// canonical `neo:` specifier; repeated calls return that same array. The `age`,
+/// `assert`, `chars`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
+/// `strings`, `test`, `uuid`,
 /// `uuid/v4`, and `uuid/v7` module objects are frozen and
 /// cached, so repeated `Neo.getBuiltInModule` calls return the same object for
 /// each. The `console` module object is the console object the runtime
