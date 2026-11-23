@@ -58,7 +58,7 @@ frozen and non-writable, and the empty list is the same array for every lookup.
 ```js
 console.log(Neo.engine); // "neo-lite"
 console.log(Neo.getBuiltInModulesList().length); // 0
-console.log(Neo.getBuiltInModule("age")); // undefined
+console.log(Neo.getBuiltInModule("neo:age")); // undefined
 ```
 
 This is not the V8 runtime's built-in surface. It does not make any `neo:`
