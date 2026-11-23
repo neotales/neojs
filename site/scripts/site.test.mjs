@@ -12,6 +12,23 @@ import { parse } from "node-html-parser";
 const siteRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(siteRoot, "dist");
 
+const builtInModules = [
+  "age",
+  "assert",
+  "chars",
+  "console",
+  "cron",
+  "crypto",
+  "os",
+  "path",
+  "slices",
+  "ssh",
+  "stdio",
+  "strings",
+  "test",
+  "uuid",
+];
+
 const expectedPages = [
   "",
   "getting-started/",
@@ -102,6 +119,24 @@ async function resolveInternalHref(href) {
   const asPage = path.join(dist, relative, "index.html");
   return exists(asPage);
 }
+
+test("documented built-in imports use the neo: prefix", async () => {
+  const docs = path.join(siteRoot, "src", "content", "docs");
+  const files = (await walk(docs)).filter(
+    (file) => file.endsWith(".md") || file.endsWith(".mdx"),
+  );
+  const bare = [];
+
+  for (const file of files) {
+    const text = await readFile(file, "utf8");
+    for (const name of builtInModules) {
+      const bareImport = new RegExp(`from\\s+"${name}"|import\\(\\s*"${name}"\\s*\\)`);
+      if (bareImport.test(text)) bare.push(`${path.relative(siteRoot, file)}: ${name}`);
+    }
+  }
+
+  assert.deepEqual(bare, [], `bare built-in imports are not canonical:\n${bare.join("\n")}`);
+});
 
 test("the production build exists", async () => {
   assert.equal(

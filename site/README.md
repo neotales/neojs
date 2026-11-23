@@ -49,3 +49,7 @@ Svelte dependency and no Svelte-based documentation components.
 
 The pages summarise the repository `README.md`, `docs/`, crate READMEs, and the module sources.
 Keep claims scoped to what the source implements, and keep the V8/Lite distinction explicit.
+
+Use `neo:` import specifiers for Neo built-ins in every example. Bare built-in names are reserved
+for future Node/package compatibility; `pnpm test` fails if a documented built-in import omits the
+prefix.
