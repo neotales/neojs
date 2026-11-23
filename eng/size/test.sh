@@ -233,6 +233,11 @@ expect_status 0 "dry run succeeds" \
     bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs --ledger "$TMP/dry.jsonl"
 assert_contains "$TMP/stdout" "--release" "dry run prints the release command"
 assert_contains "$TMP/stdout" "dry run complete" "dry run reports completion"
+
+expect_status 0 "dry run honours an explicit target directory" \
+    bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs --target-dir "$TMP/size-build" \
+    --ledger "$TMP/dry.jsonl"
+assert_contains "$TMP/stdout" "$TMP/size-build/" "dry run artifact path uses the dedicated target directory"
 if [ ! -e "$TMP/dry.jsonl" ]; then
     ok "dry run does not create a ledger"
 else

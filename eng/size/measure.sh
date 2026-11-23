@@ -151,6 +151,11 @@ if [ -z "$TOOLCHAIN" ]; then
 fi
 
 mkdir -p -- "$TARGET_DIR" "$TARGET_DIR/tmp"
+# Cargo must use the dedicated directory, or the path the script measures and
+# the path the build writes to diverge. TMPDIR keeps build scratch out of the
+# shared temporary directory.
+export CARGO_TARGET_DIR="$TARGET_DIR"
+export TMPDIR="$TARGET_DIR/tmp"
 
 # Builds are compared with each other only when the inputs that can move the
 # byte count are the same. Refuse the ambient ones instead of quietly
