@@ -355,6 +355,13 @@ included only when `neo-slices` is enabled, so a disabled build does not embed i
 `chars.toUpper`/`chars.toLower` functions. Features are additive across the dependency graph and are
 not a sandbox.
 
+Only `neo:chars` is a native Rust module in this change. Every other V8 built-in module — `neo:age`,
+`neo:assert`, `neo:console`, `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`, `neo:slices`,
+`neo:ssh`, `neo:stdio`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` —
+still has an ECMAScript module source and is not yet migrated to a native binding. Some of those
+modules call private Rust host ops, but a host op is not a native module. The QuickJS runtime
+implements only `neo:chars`; it does not implement the V8-only modules.
+
 The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"` and,
 with its default `neo-chars` feature, implements one shared built-in, `neo:chars`.
 `Neo.getBuiltInModulesList()` is one frozen array of canonical specifiers (`["neo:chars"]`), and

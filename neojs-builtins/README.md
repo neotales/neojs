@@ -32,7 +32,10 @@ distinct object.
 
 ## Module selection
 
-Every shared module has its own Cargo feature. `chars` is the first.
+Every shared module has its own Cargo feature. `chars` is the first, and it is
+the only module this crate implements today. The other `neo:` built-in modules
+remain ECMAScript module sources in the V8 runtime and are not yet migrated
+here; the QuickJS runtime implements only `chars`.
 
 * `neojs-core` has a positive `neo-chars` feature that enables the optional
   `neojs-builtins` dependency and its `chars` feature. A default V8 build
