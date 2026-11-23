@@ -14,7 +14,9 @@ name = "neojs-lite"
 path = "src/main.rs"
 
 [dependencies]
-neojs-lite-core = { version = "0.1.0", path = "../neojs-lite-core" }
+# The command opts in to the `neo:crypto` built-in explicitly. The library's
+# default build stays empty for embedders.
+neojs-lite-core = { version = "0.1.0", path = "../neojs-lite-core", features = ["crypto"] }
 
 [dev-dependencies]
 tempfile.workspace = true

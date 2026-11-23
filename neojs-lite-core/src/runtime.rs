@@ -346,9 +346,13 @@ impl Runtime {
     /// Creates a QuickJS runtime, installs the file loader, and installs
     /// `console`.
     ///
+    /// With the `crypto` Cargo feature enabled, this also registers the
+    /// `neo:crypto` native module. It is registered but not evaluated until the
+    /// entry imports it.
+    ///
     /// This performs no filesystem access. An error means QuickJS could not
-    /// allocate its runtime or context, or the console binding could not be
-    /// installed.
+    /// allocate its runtime or context, the console binding could not be
+    /// installed, or the crypto module could not be declared.
     pub fn new() -> Result<Self, Error> {
         let runtime = rquickjs::Runtime::new().map_err(|error| Error::Init {
             message: error.to_string(),
@@ -377,6 +381,8 @@ impl Runtime {
                     })?;
                 ctx.globals().set("__neojsLiteWrite", write)?;
                 ctx.eval::<(), _>(CONSOLE_SHIM)?;
+                #[cfg(feature = "crypto")]
+                crate::crypto::register(&ctx)?;
                 #[cfg(test)]
                 install_test_gc(&ctx)?;
                 Ok(())

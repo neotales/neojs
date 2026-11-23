@@ -1,9 +1,16 @@
 //! Module resolution and loading for local ECMAScript files.
 //!
-//! The resolver turns a specifier into one canonical absolute path, which is
-//! also the module identity. The loader accepts only formats that QuickJS can
-//! execute: `.js`, `.mjs`, and names without an extension. The format decision
-//! comes from `neojs-module-policy`, the same policy the V8 runtime uses.
+//! The resolver turns a file specifier into one canonical absolute path, which
+//! is also the module identity. When the `crypto` feature is enabled, it also
+//! maps `crypto` and `neo:crypto` (case-insensitive `neo:` scheme) to the
+//! native module's canonical specifier, `neo:crypto`. With the feature off, it
+//! rejects those two spellings with a reason that names the disabled feature
+//! instead of reporting a generic bare-specifier failure.
+//!
+//! The loader accepts only formats that QuickJS can execute: `.js`, `.mjs`, and
+//! names without an extension. The format decision comes from
+//! `neojs-module-policy`, the same policy the V8 runtime uses. Built-in modules
+//! are native QuickJS modules and do not pass through this loader.
 
 use std::path::{Path, PathBuf};
 
@@ -15,9 +22,13 @@ use rquickjs::{
 };
 use url::Url;
 
+use crate::builtins;
+
 const BARE_SPECIFIER_REASON: &str = "bare module specifiers are not implemented in neojs-lite; use a relative path, an absolute path, or a file: URL";
 const TYPE_ATTRIBUTE_REASON: &str =
     "import attributes are not implemented; neojs-lite loads ECMAScript modules only";
+const CRYPTO_DISABLED_REASON: &str =
+    "the `neo:crypto` built-in module is not enabled in this build; enable the `crypto` feature";
 
 /// Rejects any non-empty import attribute bag.
 ///
@@ -60,6 +71,16 @@ impl Resolver for FileResolver {
         attributes: Option<ImportAttributes<'js>>,
     ) -> Result<String> {
         reject_attributes(base, name, attributes)?;
+        if let Some(canonical) = builtins::resolve(name) {
+            return Ok(canonical.to_owned());
+        }
+        if builtins::is_crypto_specifier(name) {
+            return Err(Error::new_resolving_message(
+                base,
+                name,
+                CRYPTO_DISABLED_REASON,
+            ));
+        }
         let path = candidate_path(base, name)?;
         let canonical = std::fs::canonicalize(&path).map_err(|error| {
             Error::new_resolving_message(

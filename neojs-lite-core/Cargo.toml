@@ -9,7 +9,18 @@ rust-version.workspace = true
 authors.workspace = true
 readme = "README.md"
 
+[features]
+# Positive opt-in. The default library build has no built-in `neo:` modules.
+# The `neojs-lite` command enables this feature explicitly. Cargo unifies
+# features across a build graph: if any dependency enables `crypto`, every
+# user of `neojs-lite-core` in that build gets it too. Embedders that need the
+# module off must control the whole graph, not only their own manifest.
+default = []
+crypto = ["dep:neojs-crypto-core"]
+
 [dependencies]
+# Optional so a default embedder does not link a crypto backend it never uses.
+neojs-crypto-core = { version = "0.1.0", path = "../neojs-crypto-core", optional = true }
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
 # Pinned: the C API and Rust API change between minor releases. 0.14.0 is the
 # version reviewed for this crate; `loader` supplies the module resolver and

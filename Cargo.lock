@@ -2109,6 +2109,7 @@ dependencies = [
 name = "neojs-lite-core"
 version = "0.1.0"
 dependencies = [
+ "neojs-crypto-core",
  "neojs-module-policy",
  "rquickjs",
  "tempfile",

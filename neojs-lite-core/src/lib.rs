@@ -28,6 +28,27 @@
 //!   `toString`, or `String`.
 //! * `console.log` and `console.error` write to the process streams.
 //!
+//! # Optional `neo:crypto`
+//!
+//! The `crypto` Cargo feature is a positive opt-in and is **off by default**.
+//! With it enabled, the runtime registers a native QuickJS module under the
+//! canonical specifier `neo:crypto`; both `import ... from "neo:crypto"` and
+//! `import ... from "crypto"` resolve to that one instance. The module exports
+//! exactly `generateEnvelopeKey`, `randomBytes`, `encrypt`, and `decrypt`, and
+//! shares its NEO1 envelope and CSPRNG backend with the V8 runtime through
+//! `neojs-crypto-core`. It is synchronous because Lite has no host asynchronous
+//! work; no async or other `crypto` export is advertised.
+//!
+//! The `neojs-lite` command enables the feature explicitly. A library embedder
+//! that leaves it off gets no built-in module, and importing either spelling
+//! fails with a reason that names the disabled feature. Cargo unifies features
+//! across a build graph: if any dependency enables the feature, every user of
+//! this crate in that build gets it too.
+//!
+//! [`enabled_builtin_modules`] is the build-time list of actually enabled
+//! modules. It is the truthful integration point for a future introspection
+//! surface; this crate does not install an introspection global.
+//!
 //! # What is not implemented yet
 //!
 //! The runtime is deliberately focused and does **not** claim parity with
@@ -38,15 +59,19 @@
 //! * **No host asynchrony.** There are no timers, no host promise integration,
 //!   and no event loop beyond QuickJS's own job queue. A top-level `await` that
 //!   depends on an external event fails with an error instead of hanging.
-//! * **No built-in `neo:` modules.** The QuickJS crate currently loads local
-//!   ECMAScript files only.
+//! * **Only the optional `neo:crypto` built-in.** No other `neo:` module and no
+//!   `Neo.getBuiltInModule` registry exists in Lite.
 //! * **No sandbox.** Permissions, host capabilities, and isolation are not
 //!   implemented.
 //!
 //! These are current limitations, not planned API contracts. Check the tests
 //! and the crate-level documentation for the surface that exists today.
 
+mod builtins;
+#[cfg(feature = "crypto")]
+mod crypto;
 mod loader;
 mod runtime;
 
+pub use builtins::enabled_builtin_modules;
 pub use runtime::{Error, Runtime};
