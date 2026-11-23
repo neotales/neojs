@@ -385,6 +385,45 @@ try {
 if (code !== "ERR_NODE_REQUEST_TOO_LARGE") {
     throw new Error(`UTF-8 expansion: ${code}`);
 }
+
+let ownKeysCalls = 0;
+const proxyOptions = new Proxy({}, {
+    ownKeys() {
+        ownKeysCalls += 1;
+        return [];
+    },
+});
+code = null;
+try {
+    childProcess.execFileSync("/bin/echo", [], proxyOptions);
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_UNSUPPORTED") {
+    throw new Error(`Proxy options: ${code}`);
+}
+if (ownKeysCalls !== 0) {
+    throw new Error(`Proxy options invoked ownKeys ${ownKeysCalls} time(s)`);
+}
+
+const proxyEnv = new Proxy({}, {
+    ownKeys() {
+        ownKeysCalls += 1;
+        return [];
+    },
+});
+code = null;
+try {
+    childProcess.execFileSync("/bin/echo", [], { encoding: "utf8", env: proxyEnv });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_UNSUPPORTED") {
+    throw new Error(`Proxy env: ${code}`);
+}
+if (ownKeysCalls !== 0) {
+    throw new Error(`Proxy env invoked ownKeys ${ownKeysCalls} time(s)`);
+}
 "#,
     )
     .expect("native property-key bounds");

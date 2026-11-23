@@ -271,6 +271,13 @@ fn read_options<'js>(
     if !value.is_object() || value.is_array() {
         return Err(invalid(ctx, "options must be an object"));
     }
+    if value.is_proxy() {
+        return Err(coded_error(
+            ctx,
+            "ERR_NODE_UNSUPPORTED",
+            "Proxy options are not supported by the native child_process module",
+        ));
+    }
     let object = value.as_object().expect("checked object");
 
     let known_options = [
@@ -428,6 +435,13 @@ fn read_argument<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Result<String> {
 fn read_env<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Result<BTreeMap<String, String>> {
     if !value.is_object() || value.is_array() {
         return Err(invalid(ctx, "options.env must be an object"));
+    }
+    if value.is_proxy() {
+        return Err(coded_error(
+            ctx,
+            "ERR_NODE_UNSUPPORTED",
+            "Proxy options.env is not supported by the native child_process module",
+        ));
     }
     let object = value.as_object().expect("checked object");
     let mut environment = BTreeMap::new();
