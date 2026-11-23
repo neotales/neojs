@@ -36,6 +36,55 @@ globalThis.console = Object.freeze({
 });
 "#;
 
+/// Installs the minimal `Neo` introspection global for this QuickJS runtime.
+///
+/// The engine is `neo-lite`. This runtime has no built-in modules, so the list
+/// is one frozen empty array and `getBuiltInModule` returns `undefined` for
+/// every name. The object and global property are frozen and non-writable, and
+/// the same array is returned for every list lookup. This is not the V8
+/// runtime's surface: no `neo:` module is implemented here, and the list does
+/// not claim any.
+const NEO_SHIM: &str = r#"
+(() => {
+    "use strict";
+
+    const freeze = Object.freeze;
+    const defineProperty = Object.defineProperty;
+    const builtInModuleList = freeze([]);
+
+    /**
+     * Return `undefined` for every name because this runtime has no built-in
+     * modules. The shape matches the V8 registry lookup.
+     *
+     * @throws {TypeError} when the name is not a string.
+     */
+    function getBuiltInModule(name) {
+        if (typeof name !== "string") {
+            throw new TypeError("module name must be a string");
+        }
+        return undefined;
+    }
+
+    /**
+     * Return the one frozen empty list of built-in module specifiers.
+     */
+    function getBuiltInModulesList() {
+        return builtInModuleList;
+    }
+
+    defineProperty(globalThis, "Neo", {
+        value: freeze({
+            engine: "neo-lite",
+            getBuiltInModule,
+            getBuiltInModulesList,
+        }),
+        writable: false,
+        enumerable: false,
+        configurable: false,
+    });
+})();
+"#;
+
 /// Unhandled promise rejections recorded by QuickJS's host rejection tracker.
 #[derive(Default)]
 struct RejectionState {
@@ -240,7 +289,7 @@ fn rejection_message(ctx: &Ctx<'_>, reason: &Value<'_>) -> String {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// QuickJS could not create a runtime, context, or console binding.
+    /// QuickJS could not create a runtime, context, or console/Neo binding.
     #[error("cannot initialize the QuickJS runtime: {message}")]
     Init {
         /// The binding's error message.
@@ -344,11 +393,14 @@ pub struct Runtime {
 
 impl Runtime {
     /// Creates a QuickJS runtime, installs the file loader, and installs
-    /// `console`.
+    /// `console` and the `Neo` introspection global.
     ///
-    /// This performs no filesystem access. An error means QuickJS could not
-    /// allocate its runtime or context, or the console binding could not be
-    /// installed.
+    /// `Neo.engine` is `"neo-lite"`. This runtime has no built-in modules, so
+    /// `Neo.getBuiltInModulesList()` returns one frozen empty array and
+    /// `Neo.getBuiltInModule(name)` returns `undefined`; it does not claim the
+    /// V8 runtime's built-ins. This performs no filesystem access. An error
+    /// means QuickJS could not allocate its runtime or context, or a shim could
+    /// not be installed.
     pub fn new() -> Result<Self, Error> {
         let runtime = rquickjs::Runtime::new().map_err(|error| Error::Init {
             message: error.to_string(),
@@ -377,6 +429,7 @@ impl Runtime {
                     })?;
                 ctx.globals().set("__neojsLiteWrite", write)?;
                 ctx.eval::<(), _>(CONSOLE_SHIM)?;
+                ctx.eval::<(), _>(NEO_SHIM)?;
                 #[cfg(test)]
                 install_test_gc(&ctx)?;
                 Ok(())

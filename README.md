@@ -271,8 +271,12 @@ Node modules: a `node:` opt-in is not implemented. The same frozen array is retu
 so a caller cannot change later results; a new `Runtime` allocates a new array. `Neo.getBuiltInModule`
 takes the bare names in the list. The `neo:` entries are the canonical import specifiers; the bare
 entries are registry names and import aliases, so `Neo.getBuiltInModule("neo:age")` returns
-`undefined`. The QuickJS runtime does not install the `Neo` global and has no built-in modules to
-list yet.
+`undefined`.
+
+The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"`.
+`Neo.getBuiltInModulesList()` is one frozen empty array because that runtime implements no built-in
+modules, and `Neo.getBuiltInModule(name)` returns `undefined` for every name. That empty list is not
+a claim that a module is planned or available; `neo:` imports remain rejected there.
 
 **Use the stdio built-in.** `Neo.getBuiltInModule("stdio")` returns a frozen module object cached
 for the realm. `stdio` is the canonical bare specifier and `neo:stdio` is an alias for the same
@@ -1510,11 +1514,12 @@ queue. It then drains queued jobs, bounded at 100,000, so trailing `.then` callb
 dynamic imports still run; a nonconverging job chain or a throwing queued job fails closed, and a
 promise still rejected without a handler when the queue empties is an error; rejection diagnostics use
 primitive values and an Error's own data without invoking getters, proxies, `toString`, or `String`.
-It does **not** implement TypeScript, host asynchrony or timers, `neo:` built-in modules, the `Neo`
-introspection global, permissions, or a sandbox, and it does not claim parity with the V8 runtime.
-Both runtimes share `neojs-module-policy` for executable-extension decisions and rejection reasons, so
-`.cjs`, JSX/TSX, declaration files, JSON, WebAssembly, and native addons fail with the same
-explanation in either.
+It does **not** implement TypeScript, host asynchrony or timers, `neo:` built-in modules, permissions,
+or a sandbox, and it does not claim parity with the V8 runtime. It installs a minimal `Neo` global
+whose engine is `"neo-lite"` and whose built-in module list is empty; `Neo.getBuiltInModule` returns
+`undefined` for every name. Both runtimes share `neojs-module-policy` for executable-extension
+decisions and rejection reasons, so `.cjs`, JSX/TSX, declaration files, JSON, WebAssembly, and native
+addons fail with the same explanation in either.
 
 ## Limits
 
@@ -1528,8 +1533,9 @@ lexical POSIX and Windows path operations, SHA-2 hashing and HMAC (synchronous i
 Promise-based one-shot), synchronous SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
 authentication, the built-in module registry and its `Neo.engine` and `Neo.getBuiltInModulesList`
-introspection, and the embedding API above. Features outside this
-list are not implemented.
+introspection, and the embedding API above. The QuickJS runtime installs only the `Neo` introspection
+surface, not the built-in modules: `Neo.engine` is `"neo-lite"`, its built-in module list is empty,
+and its `Neo.getBuiltInModule` returns `undefined`. Features outside this list are not implemented.
 
 - TypeScript has no type checking and no transpilation. Only syntax that can be erased is accepted:
   `enum`, `namespace`, parameter properties, `import =`, `export =`, decorators, and angle-bracket

@@ -46,6 +46,25 @@ relative name resolves imports against the process working directory. The
 in-memory entry is not read from disk and its own extension is not checked;
 imported files still go through the loader and shared extension policy.
 
+## Runtime introspection
+
+The runtime installs a minimal `Neo` global. Its `engine` property is
+`"neo-lite"`. This runtime has no built-in modules, so
+`Neo.getBuiltInModulesList()` returns one frozen empty array and
+`Neo.getBuiltInModule(name)` returns `undefined` for every name. The `Neo`
+object and the global property are frozen and non-writable, and the empty list
+is the same array for every lookup.
+
+```js
+console.log(Neo.engine); // "neo-lite"
+console.log(Neo.getBuiltInModulesList().length); // 0
+console.log(Neo.getBuiltInModule("age")); // undefined
+```
+
+This is not the V8 runtime's built-in surface. It does not make any `neo:`
+specifier importable, and the empty list does not claim that a module exists or
+will exist.
+
 ## Lifecycle
 
 A runtime evaluates one entry. A preflight failure (unsupported format,
@@ -68,7 +87,9 @@ This crate does **not** claim parity with the V8-based `neojs`:
 * **No TypeScript.** `.ts` and `.mts` are rejected with a clear reason.
 * **No host asynchrony.** There are no timers or host Promise integration. A
   top-level `await` works only when QuickJS's own job queue can settle it.
-* **No built-in `neo:` modules.** Local ECMAScript files only.
+* **No built-in `neo:` modules.** Local ECMAScript files only. The `Neo`
+  global is introspection only: its list is empty and `getBuiltInModule`
+  returns `undefined` for every name.
 * **No permissions or sandbox.** None are implemented.
 
 Both runtimes share `neojs-module-policy` for executable-extension decisions, so
