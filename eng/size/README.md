@@ -161,7 +161,7 @@ directory and is never committed.
 ### Missing artifacts
 
 `neojs-lite` is present at the base commit this tracker was added to, so the
-first ledger entry covers both binaries. A branch that removes it (or builds a
+first baseline covers both binaries. A branch that removes it (or builds a
 subset) is still handled explicitly:
 
 - a package directory absent from the checkout is recorded with

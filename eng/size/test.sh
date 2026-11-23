@@ -8,7 +8,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
-size_require jq sha256sum bash git mktemp flock
+size_require jq sha256sum bash git mktemp flock gzip cargo
 
 ROOT=$(size_repo_root)
 mkdir -p "$ROOT/target/size/tmp"
@@ -311,6 +311,18 @@ expect_status 0 "trend labels capture-status changes" \
     bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/capture-trend.jsonl" --trend
 assert_contains "$TMP/stdout" "cargo-config-capture" "trend distinguishes unknown-to-captured config"
 assert_contains "$TMP/stdout" "source-state-capture" "trend distinguishes unknown-to-captured source state"
+
+DIRTYVALID=$(rewrite_with_ids '
+  .source.git_dirty = true
+  | .source.git_canonical = false
+  | .source.state_sha256 = ("9" * 64)
+  | .measured_at = "2026-11-23T02:00:00Z"
+' "$VALID")
+printf '%s\n%s\n' "$VALID" "$DIRTYVALID" >"$TMP/dirty-trend.jsonl"
+expect_status 0 "trend labels source-state deltas" \
+    bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/dirty-trend.jsonl" --trend
+assert_contains "$TMP/stdout" "source-state" "trend labels a non-canonical source delta"
+assert_contains "$TMP/stdout" "source-canonical" "trend names the canonical change"
 
 
 : >"$TMP/append.jsonl"

@@ -95,7 +95,10 @@ def conflict_series($all):
         elif ($r.series_id == $p.series_id and
               same_source_state($p; $r) and
               $r.measurement.sha256 != $p.measurement.sha256) then "conflict"
-        elif $r.series_id == $p.series_id then "strict"
+        elif ($r.series_id == $p.series_id and
+              $r.source.git_canonical == $p.source.git_canonical and
+              $r.source.state_sha256 == $p.source.state_sha256) then "strict"
+        elif $r.series_id == $p.series_id then "source-state"
         else "controls-differ" end) as $kind
      | (if $p == null then "-"
         else (control_diff($p; $r) | if . == "" then "-" else . end) end) as $changed
