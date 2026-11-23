@@ -1613,8 +1613,8 @@ Usage:
 
 Options:
   --allow-remote   allow https: entry and imports; off by default
-  -h, --help       show this help; alone, or after `test`
-  -V, --version    show the version; must be the only argument
+  -h, --help       show this help; alone, after `test`, or after `--allow-remote`
+  -V, --version    show the version; alone, or after `--allow-remote`
   --               end option parsing, for a file or pattern beginning with `-`
 
 Modules are ECMAScript modules, and relative imports resolve from the importing
@@ -1712,6 +1712,47 @@ fn help_and_version_options_succeed_alone() {
     assert!(stderr(&long_help).contains("unknown option `--help-long`"));
 }
 
+/// A leading `--allow-remote` is skipped before the command is classified, so
+/// help and version still work with it. The parser also accepts `--help` after
+/// `test`, but not `--version` there.
+#[test]
+fn help_and_version_accept_a_leading_allow_remote() {
+    for args in [
+        ["--allow-remote", "--help"].as_slice(),
+        ["--allow-remote", "-h"].as_slice(),
+        ["--allow-remote", "test", "--help"].as_slice(),
+        ["--allow-remote", "test", "-h"].as_slice(),
+        ["--allow-remote", "--version"].as_slice(),
+        ["--allow-remote", "-V"].as_slice(),
+    ] {
+        let output = run_args(args);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "args: {args:?}, stderr: {}",
+            stderr(&output)
+        );
+    }
+
+    let help = expected_help();
+    for args in [
+        ["--allow-remote", "--help"].as_slice(),
+        ["--allow-remote", "-h"].as_slice(),
+        ["--allow-remote", "test", "--help"].as_slice(),
+        ["--allow-remote", "test", "-h"].as_slice(),
+    ] {
+        assert_eq!(stdout(&run_args(args)), help, "args: {args:?}");
+    }
+
+    let version = format!("neojs {}\n", env!("CARGO_PKG_VERSION"));
+    for args in [
+        ["--allow-remote", "--version"].as_slice(),
+        ["--allow-remote", "-V"].as_slice(),
+    ] {
+        assert_eq!(stdout(&run_args(args)), version, "args: {args:?}");
+    }
+}
+
 #[test]
 fn reports_bad_arguments_and_exits_2() {
     let no_args = run_args(&[]);
@@ -1729,7 +1770,8 @@ fn reports_bad_arguments_and_exits_2() {
         "neojs: unknown option `--unknown`\nTry 'neojs --help'.\n"
     );
 
-    // Options are accepted only as the sole argument; `--` is the exception.
+    // Apart from a leading `--allow-remote`, help and version are accepted only
+    // as the sole argument; `--` is the exception for naming a file.
     let help_with_file = run_args(&["--help", "main.js"]);
     assert_eq!(help_with_file.status.code(), Some(2));
     assert_eq!(
