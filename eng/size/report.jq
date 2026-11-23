@@ -31,12 +31,18 @@ def control_diff($p; $r):
        "cargo-lock" else empty end),
     (if $p.build.workspace_path_sha256 != $r.build.workspace_path_sha256 then
        "workspace-path" else empty end),
-    (if $p.build.cargo_config != $r.build.cargo_config then
-       "cargo-config" else empty end),
+    (if $p.build.cargo_config == $r.build.cargo_config then empty
+     elif ($p.build.cargo_config.status == "not-captured" or
+           $r.build.cargo_config.status == "not-captured") then
+       "cargo-config-capture"
+     else "cargo-config" end),
     (if $p.build.env_overrides != $r.build.env_overrides then
        "env-overrides" else empty end),
-    (if $p.build.target_specific_env != $r.build.target_specific_env then
-       "target-env" else empty end),
+    (if $p.build.target_specific_env == $r.build.target_specific_env then empty
+     elif ($p.build.target_specific_env.status == "not-captured" or
+           $r.build.target_specific_env.status == "not-captured") then
+       "target-env-capture"
+     else "target-env" end),
     (if $p.build.effective_features != $r.build.effective_features then
        "effective-features" else empty end),
     (if $p.build.effective_linker != $r.build.effective_linker then
@@ -44,10 +50,13 @@ def control_diff($p; $r):
     (if $p.build.v8_archive_status != $r.build.v8_archive_status or
         v8_identity($p) != v8_identity($r) then
        "v8-archive" else empty end),
-    (if $p.source.git_canonical != $r.source.git_canonical or
-        $p.source.state_status != $r.source.state_status or
-        $p.source.state_sha256 != $r.source.state_sha256 then
-       "source-state" else empty end)
+    (if $p.source.git_canonical != $r.source.git_canonical then
+       "source-canonical"
+     elif $p.source.state_sha256 == $r.source.state_sha256 then empty
+     elif ($p.source.state_status == "not-captured" or
+           $r.source.state_status == "not-captured") then
+       "source-state-capture"
+     else "source-state" end)
   ] | join(",");
 def same_source_state($p; $r):
   ($p.source.git_commit == $r.source.git_commit) and

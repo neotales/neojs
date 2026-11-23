@@ -299,6 +299,19 @@ assert_contains "$TMP/stdout" "controls-differ" "trend labels a controls-differ 
 assert_contains "$TMP/stdout" "toolchain" "trend names the differing control"
 assert_contains "$TMP/stdout" "-5678" "trend shows a signed delta"
 
+UNCAPPED=$(rewrite_with_ids '
+  .build.cargo_config = {status: "not-captured", files: []}
+  | .build.target_specific_env = {status: "not-captured", names: []}
+  | .source.state_status = "not-captured"
+  | .source.state_sha256 = null
+  | .measured_at = "2026-11-23T01:00:00Z"
+' "$VALID")
+printf '%s\n%s\n' "$UNCAPPED" "$VALID" >"$TMP/capture-trend.jsonl"
+expect_status 0 "trend labels capture-status changes" \
+    bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/capture-trend.jsonl" --trend
+assert_contains "$TMP/stdout" "cargo-config-capture" "trend distinguishes unknown-to-captured config"
+assert_contains "$TMP/stdout" "source-state-capture" "trend distinguishes unknown-to-captured source state"
+
 
 : >"$TMP/append.jsonl"
 size_append_record "$TMP/append.jsonl" "$VALID" >"$TMP/append.log" 2>&1
