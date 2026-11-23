@@ -3,6 +3,11 @@
 //! These run real ECMAScript modules through [`Runtime`], so they cover the
 //! installed global, the registry, and the loader together. The JavaScript
 //! modules assert on their own and throw on failure.
+//!
+//! The hardcoded lists include `chars` and `slices`, so this file runs only when
+//! both features are enabled. The feature matrix has a dedicated
+//! `feature_flags.rs` for the reduced surfaces.
+#![cfg(all(feature = "neo-chars", feature = "neo-slices"))]
 
 use std::fs;
 

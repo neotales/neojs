@@ -9,7 +9,20 @@ rust-version.workspace = true
 authors.workspace = true
 
 [features]
-default = []
+# A default V8 build keeps the existing surface: the shared `neo:chars`
+# implementation and `neo:slices`, which depends on it. `neo-slices` implies
+# `neo-chars` because `CharSlice` captures `chars.toUpper`/`chars.toLower`.
+# With default features off, both public modules, their source blocks, their
+# registry entries, and their loader entries are absent. Features are additive
+# and unify across the dependency graph; this is surface selection, not a
+# sandbox.
+default = ["neo-chars", "neo-slices"]
+# The shared `chars` implementation and its bare/canonical V8 adapter. This
+# enables the optional `neojs-builtins` dependency and its `chars` module.
+neo-chars = ["dep:neojs-builtins", "neojs-builtins/chars"]
+# `slices` and its loader/registry entries. It cannot be built without `chars`:
+# `CharSlice` captures `chars.toUpper` and `chars.toLower`.
+neo-slices = ["neo-chars"]
 # Test-only fault injection for the peer-close reply branch. Never enabled by a
 # normal build; `neojs` enables it only for its own dev/test targets.
 test-support = []
@@ -25,7 +38,7 @@ deno_error.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
 httpdate.workspace = true
-neojs-builtins = { workspace = true, features = ["chars"] }
+neojs-builtins = { workspace = true, optional = true }
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
 neotales-age.workspace = true
 neotales-ssh.workspace = true

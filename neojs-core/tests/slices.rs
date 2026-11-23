@@ -1,4 +1,5 @@
 //! Integration tests for the `slices` built-in, driven through `Runtime`.
+#![cfg(feature = "neo-slices")]
 
 use std::fs;
 use std::path::PathBuf;

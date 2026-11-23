@@ -5,6 +5,7 @@
 //! key and bare import spelling for every V8 built-in. The canonical-only
 //! registry change that is in flight will change these two tokens to
 //! `neo:chars`; the shared implementation and contract stay the same.
+#![cfg(feature = "neo-chars")]
 
 use std::fs;
 

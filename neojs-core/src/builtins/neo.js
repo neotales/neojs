@@ -115,7 +115,7 @@
     // the shim is assembled, so V8 and QuickJS evaluate the same source and
     // capture the same intrinsics. The object is defined before `slices`
     // evaluates: `CharSlice` captures `chars.toUpper` and `chars.toLower`.
-    const chars = __NEO_CHARS_IMPL__;
+    // __NEO_CHARS_DECLARATION__
 
     // `strings` is plain ECMAScript: folded matching and set-based trimming.
     // It calls no host op and adds no capability beyond the strings it is
@@ -5781,6 +5781,7 @@
     defineField(assert, "rejects", rejects);
     defineField(assert, "doesNotReject", doesNotReject);
     Object.freeze(assert);
+    // __NEO_SLICES_IMPL_START__
     // `slices` creates live views over a JS Array or a genuine typed array.
     // A view addresses one fixed half-open range and does not copy for
     // construction, `slice`, `at`, `set`, `indexOf`, `includes`, or iteration.
@@ -6625,6 +6626,7 @@
             slice,
         });
     })();
+    // __NEO_SLICES_IMPL_END__
 
     // The `test` built-in module.
     //
@@ -7378,13 +7380,13 @@
     const modules = new Map([
         ["age", age],
         ["assert", assert],
-        ["chars", chars],
+        // __NEO_CHARS_REGISTRY_ENTRY__
         ["console", consoleModule],
         ["cron", cron],
         ["crypto", crypto],
         ["os", os],
         ["path", path],
-        ["slices", slices],
+        // __NEO_SLICES_REGISTRY_ENTRY__
         ["ssh", ssh],
         ["stdio", stdio],
         ["strings", strings],

@@ -262,7 +262,10 @@
 //! `stdio`, and `strings`, both paths expose the same classes, functions, and
 //! shared stream objects;
 //! the
-//! namespace is a separate container over them. For `assert`, the registry
+//! namespace is a separate container over them. `chars` and `slices` are
+//! present only when the `neo-chars` and `neo-slices` features are enabled; a
+//! default V8 build enables both, and `neo-slices` implies `neo-chars`. For
+//! `assert`, the registry
 //! object is the callable function, and the module also has a default export
 //! whose value is that function. For `console`, the registry object is the
 //! console object the runtime installed, and the default export's value is that

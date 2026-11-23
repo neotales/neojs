@@ -972,6 +972,7 @@ mod tests {
     // Integration test through the actual runtime: static and dynamic imports,
     // scoped names, exports, erasable TypeScript, JavaScript, and a relative
     // dependency are all exercised together.
+    #[cfg(feature = "neo-chars")]
     #[test]
     fn loads_static_and_dynamic_scoped_modules() {
         let registry = MockJsrRegistry::new()
