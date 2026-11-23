@@ -124,6 +124,18 @@ mappings surface the QuickJS `out of memory` exception, not
 usable, and that repeated failures leave the runtime heap unchanged, which
 exercises the atom-table RAII cleanup.
 
+### V8 own-name enumeration limitation
+
+V8's public API exposes no count-only or bounded own-property enumeration.
+`Object::get_own_property_names` materializes the complete key array before the
+adapter can apply its six-key option cap. The V8 adapter rejects Proxy and
+function option/environment objects before enumeration, validates and copies at
+most the bounded key set it receives, and rethrows a pending V8 exception (for
+example an allocation failure) unchanged. It does **not** claim a
+pre-materialization bound for an ordinary object with a very large own-property
+set. A bounded V8 `KeyAccumulator` seam or an equivalent vendored binding is
+required for that claim.
+
 ## Implemented surface
 
 Only `node:child_process` is implemented. The module exports:
