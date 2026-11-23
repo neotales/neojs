@@ -24,10 +24,12 @@ size are bounded. The serialized V8 bridge request is capped before parsing.
 The QuickJS adapter exposes this core through native `ModuleDef` exports with no
 JavaScript source or bridge. It preflights string fields through QuickJS's string
 length property before conversion and checks actual UTF-8 length after; the host
-allocation is bounded by the configured cap. The V8 adapter still uses a
-JavaScript export facade because deno_core 0.413.0 has no public named
-synthetic-module seam; that is an explicit migration item, not a completed
-native module.
+allocation is bounded by the configured cap. Option/environment key enumeration
+still calls QuickJS `JS_GetOwnPropertyNames`, which materializes the full
+property list before the count cap; this is documented as a non-strict bound.
+The V8 adapter still uses a JavaScript export facade because deno_core 0.413.0
+has no public named synthetic-module seam; that is an explicit migration item,
+not a completed native module.
 
 On Unix, pipes are non-blocking and driven by `poll` on the calling thread; no
 reader or writer threads are created. A timeout, output overflow, or an

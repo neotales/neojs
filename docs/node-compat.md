@@ -87,6 +87,22 @@ implemented in JavaScript (`age`, `assert`, `chars`, `console`, `cron`, `crypto`
 repo-wide Rust-native built-ins migration is separate work and is not claimed
 here.
 
+### Native property enumeration limitation
+
+`rquickjs::Object::keys` calls QuickJS `JS_GetOwnPropertyNames`, which
+materializes the complete `JSPropertyEnum` list before this module can cap the
+count. There is no public QuickJS/rquickjs API for a count-only or bounded
+property iterator. The native adapter now enumerates atoms rather than
+converting each key to a Rust `String`, caps the number it converts, preflights
+each environment key's UTF-8 length, and does not interpolate unsupported option
+keys into errors. The property-enum array itself is still materialized before
+that cap, so this is **not** a strict pre-materialization key-count bound. A
+rquickjs/QuickJS patch or a bounded enumeration API is required for that claim.
+
+The tests cover a 100,000-byte option key, a 100,000-byte environment key, 129
+environment keys, and a UTF-8 value that expands beyond its UTF-16 length. They
+verify the adapter's caps, not a bound on QuickJS's property-enum allocation.
+
 ## Implemented surface
 
 Only `node:child_process` is implemented. The module exports:
