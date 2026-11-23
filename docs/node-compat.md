@@ -1,7 +1,8 @@
 # Opt-in Node compatibility
 
 NeoJS does not ship a Node compatibility layer by default. The `node:` resolver,
-the shared process core, and both engine adapters are compiled only when a
+the shared process core, and both engine adapters are compiled only with the
+off-by-default `node-compat` feature, and installed at runtime only when a
 runtime is explicitly constructed for Node compatibility. The default V8 and
 QuickJS graphs do not include `neojs-node`, `neojs-lite-node`, or
 `neojs-node-builtins`.
