@@ -35,6 +35,13 @@
 // and uses the runtime's existing print, timer, and event-loop primitives. It
 // is not Node's `node:test` and is not an isolation boundary.
 //
+// The `cron` module parses UTC five-field cron expressions and runs a callback
+// on the schedule through six private host ops. It keeps one callback at a time,
+// reports overlap, missed ticks, and callback errors through an optional
+// observer, and keeps the event loop alive until the job is disposed. It has no
+// local-time, DST, time-zone, or fake-timer surface, and it is not Deno's
+// `Deno.cron`, Bun's `Bun.cron`, or `node-cron`.
+//
 // The `os` module exposes only the build target's `platform` and `arch`. They
 // are Rust's `std::env::consts` values substituted before this script runs; the
 // module calls no host op, reads no environment or operating-system file, and
@@ -3081,6 +3088,310 @@
     // OS-release file, registry, sysctl value, file, or process table, and it
     // installs no global. `version`, `codename`, `variant`, user, keyring, and
     // scheduler surfaces are not implemented here.
+    // The `neo:cron` built-in module object.
+    //
+    // This is a UTC five-field cron parser and an in-process scheduler. The
+    // grammar, the POSIX day-of-month/day-of-week rule, the 100-year occurrence
+    // search, the scheduler's overlap and missed-tick rules, and the liveness
+    // contract are documented in `neojs-core/src/cron.rs`. It is not Deno's
+    // `Deno.cron`, Bun's `Bun.cron`, `node-cron`, or any other implementation's
+    // compatibility layer.
+    //
+    // `cron(expression, callback, options?)` returns a frozen controller.
+    // `dispose()` is idempotent and is also installed as `[Symbol.dispose]`
+    // when the engine provides that symbol. `next(expression, after?)` returns
+    // a `Date` or `null`. The host ops are captured once, so replacing
+    // `Deno.core.ops` later does not change what this module calls.
+    //
+    // Scheduling: one callback runs at a time. A tick that arrives while the
+    // previous callback is still running is skipped and reported as `overlap`.
+    // A wake-up so late that the following occurrence is already due is
+    // reported as `missed`; the stale occurrence is not run, and the schedule
+    // continues from the current time. When `due` is the last occurrence the
+    // `Date` range can represent, it is dispatched once and the job then stops
+    // and releases its host resource, unless the preceding callback is still in
+    // flight: the normal overlap rule then skips that occurrence and reports
+    // `overlap`, and the job still stops and releases. The host wait re-reads
+    // the wall clock at
+    // least once a minute and resolves only once the clock reaches the due
+    // time; the scheduler also re-reads it before dispatch, so a backward clock
+    // adjustment postpones a tick instead of running it early. A forward jump
+    // can still make a tick late, which the `missed` rule then discards rather
+    // than replaying a backlog. A callback's thrown value or rejected Promise
+    // is reported as `error` and does not stop the schedule. With no `onEvent`
+    // observer, callback failures are thrown from a microtask so they are not
+    // silently lost; an exception thrown by `onEvent` itself is discarded to
+    // keep the schedule alive.
+    //
+    // An undisposed job keeps the isolate alive: its pending wait op is
+    // event-loop work. `dispose()` cancels the pending wait, but an already
+    // started callback is not interrupted. Dropping the runtime abandons all
+    // jobs. The scheduler uses the runtime's Tokio timer, not `setTimeout`, so a
+    // callback that blocks the isolate delays every timer. There is no fake
+    // timer surface: the deterministic test clock is a Rust-only test-support
+    // hook and is absent from a normal build.
+    const cron = (() => {
+        const cronOps = Deno.core.ops;
+        const opCreate = cronOps.op_neo_cron_create;
+        const opDispose = cronOps.op_neo_cron_dispose;
+        const opNext = cronOps.op_neo_cron_next;
+        const opFollowing = cronOps.op_neo_cron_following;
+        const opWait = cronOps.op_neo_cron_wait;
+        const opNow = cronOps.op_neo_cron_now;
+
+        const cronError = Error;
+        const cronTypeError = TypeError;
+        const cronRangeError = RangeError;
+        const cronDate = Date;
+        const cronGetTime = Function.prototype.call.bind(Date.prototype.getTime);
+        // `Promise.resolve` needs `this` to be the `Promise` constructor, so it
+        // cannot be called unbound. Bind it once, like the other intrinsics.
+        const cronPromise = Promise;
+        const cronResolve = Promise.resolve.bind(cronPromise);
+        const cronQueueMicrotask = queueMicrotask;
+        const cronFreeze = Object.freeze;
+        const cronDefineProperty = Object.defineProperty;
+        const cronObjectKeys = Object.keys;
+        const cronIsFinite = Number.isFinite;
+        const cronIsNaN = Number.isNaN;
+        const cronDispose =
+            typeof Symbol.dispose === "symbol" ? Symbol.dispose : null;
+
+        /**
+         * A cron expression, limit, no-occurrence, or argument failure.
+         *
+         * `code` is one of `NEO_CRON_EXPRESSION`, `NEO_CRON_LIMIT`,
+         * `NEO_CRON_NO_OCCURRENCE`, or `NEO_CRON_ARGUMENT`. The message is for
+         * people and may change; match on the code.
+         */
+        class CronError extends cronError {
+            constructor(code, message) {
+                super(message);
+                this.name = "CronError";
+                this.code = code;
+            }
+        }
+
+        function failure(outcome) {
+            return new CronError(outcome.code, outcome.message);
+        }
+
+        function requireExpression(expression) {
+            if (typeof expression !== "string") {
+                throw new cronTypeError("cron expression must be a string");
+            }
+        }
+
+        /**
+         * The first occurrence strictly after `after`, as a `Date`, or `null`.
+         *
+         * `after` is a `Date` or an epoch millisecond number and defaults to
+         * the host clock. Occurrences are UTC and have zero seconds and
+         * milliseconds. An invalid expression throws `CronError`; a valid
+         * expression with no occurrence in the 100-year search window, or none
+         * within the `Date` range, returns `null`. This is a pure query: it
+         * creates no job and schedules nothing.
+         */
+        function next(expression, after) {
+            requireExpression(expression);
+            let at;
+            if (after === undefined) {
+                at = opNow();
+            } else if (after instanceof cronDate) {
+                at = cronGetTime(after);
+                if (!cronIsFinite(at)) {
+                    throw new cronRangeError("after is an invalid Date");
+                }
+            } else if (typeof after === "number") {
+                if (!cronIsFinite(after)) {
+                    throw new cronRangeError("after must be a finite epoch millisecond number");
+                }
+                at = after;
+            } else {
+                throw new cronTypeError("after must be a Date or an epoch millisecond number");
+            }
+            const outcome = opNext(expression, at);
+            if (!outcome.ok) throw failure(outcome);
+            return outcome.value === null ? null : new cronDate(outcome.value);
+        }
+
+        /**
+         * Run `callback` on a UTC cron schedule.
+         *
+         * The first tick is strictly after this call. The returned controller is
+         * frozen; `dispose()` is idempotent and cancels the pending wait.
+         * `options.onEvent(event)` receives `{ type: "overlap" | "missed" |
+         * "error", ... }` events. The callback is called with no arguments; a
+         * returned Promise is awaited before the next tick is considered
+         * available. If the next occurrence is the last minute the `Date` range
+         * represents, it runs once and the job then stops and releases its host
+         * resource. If the preceding callback is still in flight, the overlap
+         * rule skips that final occurrence and reports `overlap` instead; the
+         * job still stops and releases. Throws `TypeError` for bad arguments
+         * and `CronError` for an invalid expression or one with no future
+         * occurrence.
+         */
+        function cronJob(expression, callback, options) {
+            requireExpression(expression);
+            if (typeof callback !== "function") {
+                throw new cronTypeError("cron callback must be a function");
+            }
+            let onEvent = null;
+            if (options !== undefined) {
+                if (options === null || typeof options !== "object") {
+                    throw new cronTypeError("cron options must be an object");
+                }
+                const keys = cronObjectKeys(options);
+                for (let index = 0; index < keys.length; index += 1) {
+                    if (keys[index] !== "onEvent") {
+                        throw new cronTypeError(`unknown cron option: ${keys[index]}`);
+                    }
+                }
+                if (options.onEvent !== undefined) {
+                    if (typeof options.onEvent !== "function") {
+                        throw new cronTypeError("cron option onEvent must be a function");
+                    }
+                    onEvent = options.onEvent;
+                }
+            }
+
+            const created = opCreate(expression);
+            if (!created.ok) throw failure(created);
+            const token = created.token;
+            let disposed = false;
+            let inFlight = false;
+
+            function emit(event) {
+                if (onEvent === null) return;
+                try {
+                    onEvent(cronFreeze(event));
+                } catch {
+                    // An observer that throws must not stop the schedule. The
+                    // module does not log; a failing observer is the caller's
+                    // diagnostic to make.
+                }
+            }
+
+            function reportError(error, fatal) {
+                if (onEvent !== null) {
+                    emit({ type: "error", error, fatal });
+                    return;
+                }
+                // No observer: surface the failure as an uncaught exception
+                // instead of discarding it. `queueMicrotask` routes through the
+                // engine's report-exception callback.
+                cronQueueMicrotask(() => {
+                    throw error;
+                });
+            }
+
+            function dispose() {
+                if (disposed) return;
+                disposed = true;
+                opDispose(token);
+            }
+
+            const job = { dispose };
+            if (cronDispose !== null) {
+                cronDefineProperty(job, cronDispose, {
+                    value: dispose,
+                    enumerable: false,
+                    writable: false,
+                    configurable: false,
+                });
+            }
+            cronFreeze(job);
+
+            (async () => {
+                let due = created.next;
+                try {
+                    while (!disposed) {
+                        const woke = await opWait(token, due);
+                        if (disposed || woke === -1 || cronIsNaN(woke)) break;
+                        due = woke;
+                        const now = opNow();
+
+                        // The wall clock can move backward between the wait
+                        // resolving and this read. Waiting again for the same
+                        // occurrence is the only safe response: dispatching
+                        // here would run it before its due time.
+                        if (now < due) continue;
+
+                        if (inFlight) {
+                            emit({
+                                type: "overlap",
+                                scheduledTime: new cronDate(due),
+                                wokeAt: new cronDate(now),
+                            });
+                            due = opFollowing(token, now);
+                            if (cronIsNaN(due)) break;
+                            continue;
+                        }
+
+                        // No following occurrence means `due` is the last
+                        // representable one. It is still due and must run;
+                        // the lookup after the callback stops the loop and
+                        // releases the job.
+                        const following = opFollowing(token, due);
+                        if (!cronIsNaN(following) && following <= now) {
+                            emit({
+                                type: "missed",
+                                scheduledTime: new cronDate(due),
+                                wokeAt: new cronDate(now),
+                            });
+                            due = opFollowing(token, now);
+                            if (cronIsNaN(due)) break;
+                            continue;
+                        }
+
+                        inFlight = true;
+                        try {
+                            const result = callback();
+                            let then;
+                            if (
+                                result !== null &&
+                                (typeof result === "object" || typeof result === "function")
+                            ) {
+                                then = result.then;
+                            }
+                            if (typeof then === "function") {
+                                cronResolve(result).then(
+                                    () => {
+                                        inFlight = false;
+                                    },
+                                    (error) => {
+                                        inFlight = false;
+                                        reportError(error, false);
+                                    },
+                                );
+                            } else {
+                                inFlight = false;
+                            }
+                        } catch (error) {
+                            inFlight = false;
+                            reportError(error, false);
+                        }
+
+                        due = opFollowing(token, due);
+                        if (cronIsNaN(due)) break;
+                    }
+                } catch (error) {
+                    reportError(error, true);
+                } finally {
+                    dispose();
+                }
+            })();
+
+            return job;
+        }
+
+        return cronFreeze({
+            cron: cronJob,
+            next,
+            CronError,
+        });
+    })();
+
     const os = Object.freeze({
         platform: __NEO_OS_PLATFORM__,
         arch: __NEO_OS_ARCH__,
@@ -7207,6 +7518,7 @@
         ["assert", assert],
         ["chars", chars],
         ["console", consoleModule],
+        ["cron", cron],
         ["crypto", crypto],
         ["os", os],
         ["path", path],

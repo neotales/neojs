@@ -189,6 +189,34 @@ fn runs_a_module_and_prints_to_stdout() {
     assert_eq!(stderr(&output), "");
 }
 
+/// The `cron` built-in must parse through the real CLI, create and dispose a
+/// job, and then let the process exit. A leaked wait would fail the deadline.
+#[test]
+fn cron_built_in_reports_next_and_disposes_a_job() {
+    let project = Project::new();
+    let file = project.write(
+        "cron.js",
+        r#"
+import { cron, next } from "neo:cron";
+
+const when = next("0 0 * * *", new Date("2024-01-01T12:34:56.000Z"));
+console.log(when.toISOString());
+
+const job = cron("0 0 1 1 *", () => {});
+job.dispose();
+job.dispose();
+if (typeof Symbol.dispose === "symbol") job[Symbol.dispose]();
+console.log("disposed");
+"#,
+    );
+
+    let output = run_file_with_timeout(&file, Duration::from_secs(15));
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "2024-01-02T00:00:00.000Z\ndisposed\n");
+    assert_eq!(stderr(&output), "");
+}
+
 /// The stdio writers must reach the real process descriptors, preserve binary
 /// bytes, and stay writable through `console` after their wrapper is closed.
 #[test]
@@ -1199,7 +1227,7 @@ fn reports_an_unknown_neo_module_and_lists_the_implemented_ones() {
     assert!(message.contains("not implemented"), "{message}");
     assert!(
         message.contains(
-            "neojs implements age, neo:age, assert, neo:assert, chars, neo:chars, console, neo:console, crypto, neo:crypto, os, neo:os, path, neo:path, slices, neo:slices, ssh, neo:ssh, stdio, neo:stdio, strings, neo:strings"
+            "neojs implements age, neo:age, assert, neo:assert, chars, neo:chars, console, neo:console, cron, neo:cron, crypto, neo:crypto, os, neo:os, path, neo:path, slices, neo:slices, ssh, neo:ssh, stdio, neo:stdio, strings, neo:strings"
         ),
         "{message}"
     );
@@ -1647,10 +1675,10 @@ file. .js, .mjs, .ts, and .mts run. TypeScript is stripped, not type checked:
 only erasable syntax is accepted (no enum, namespace, or other transforms), and
 .tsx, .jsx, .cts, and declaration files are rejected.
 
-The age, assert, chars, console, crypto, os, path, slices,
-ssh, stdio, strings, test, and uuid built-in modules are implemented, including
-the uuid/v4 and uuid/v7 subpaths. Import one by bare name or with the `neo:`
-prefix, or use `Neo.getBuiltInModule(\"test\")` and
+The age, assert, chars, console, cron, crypto, os, path,
+slices, ssh, stdio, strings, test, and uuid built-in modules are implemented,
+including the uuid/v4 and uuid/v7 subpaths. Import one by bare name or with the
+`neo:` prefix, or use `Neo.getBuiltInModule(\"test\")` and
 `Neo.getBuiltInModule(\"uuid\")`; the README lists every specifier.
 
 Remote loading is disabled by default. `--allow-remote` enables an https:

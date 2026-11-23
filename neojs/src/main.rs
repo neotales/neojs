@@ -442,10 +442,10 @@ file. .js, .mjs, .ts, and .mts run. TypeScript is stripped, not type checked:
 only erasable syntax is accepted (no enum, namespace, or other transforms), and
 .tsx, .jsx, .cts, and declaration files are rejected.
 
-The age, assert, chars, console, crypto, os, path, slices,
-ssh, stdio, strings, test, and uuid built-in modules are implemented, including
-the uuid/v4 and uuid/v7 subpaths. Import one by bare name or with the `neo:`
-prefix, or use `Neo.getBuiltInModule(\"test\")` and
+The age, assert, chars, console, cron, crypto, os, path,
+slices, ssh, stdio, strings, test, and uuid built-in modules are implemented,
+including the uuid/v4 and uuid/v7 subpaths. Import one by bare name or with the
+`neo:` prefix, or use `Neo.getBuiltInModule(\"test\")` and
 `Neo.getBuiltInModule(\"uuid\")`; the README lists every specifier.
 
 Remote loading is disabled by default. `--allow-remote` enables an https:

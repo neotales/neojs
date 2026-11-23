@@ -29,6 +29,7 @@ use crate::Error;
 use crate::age::neojs_age;
 use crate::assert::neojs_assert;
 use crate::builtins::neo_shim;
+use crate::cron::neojs_cron;
 use crate::crypto::neojs_crypto;
 use crate::crypto_cipher::neojs_crypto_cipher;
 use crate::crypto_hash::neojs_crypto_hash;
@@ -179,15 +180,17 @@ impl Runtime {
     /// Creates a runtime and installs the console and built-in module shims.
     ///
     /// The runtime has one realm. The `age`, `assert`, `chars`, `console`,
-    /// `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and
-    /// `uuid`
+    /// `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`,
+    /// `test`, and `uuid`
     /// built-in modules are cached in that realm, and both bare and
     /// `neo:`-prefixed import specifiers resolve to them; a new `Runtime`
     /// creates a new realm, new functions, and new module instances. The
-    /// `age`, `crypto`, `path`, `ssh`, `stdio`, and `uuid` modules register their
-    /// private host ops in that realm before user code runs; `chars`, `os`,
-    /// `slices`, `strings`, and `test` are plain ECMAScript, and `assert` calls
-    /// one private Promise-observation host op. The `console`
+    /// `age`, `cron`, `crypto`, `path`, `ssh`, `stdio`, and `uuid` modules
+    /// register their private host ops in that realm before user code runs;
+    /// `chars`, `os`, `slices`, `strings`, and `test` are plain ECMAScript, and
+    /// `assert` calls one private Promise-observation host op. The `cron` ops
+    /// take the runtime's own Tokio timer and resource table, so an undisposed
+    /// job keeps the event loop alive. The `console`
     /// module's object is the console object the runtime installed: its default
     /// export's value is that object, and its
     /// named exports are that object's method values when the module is
@@ -409,6 +412,7 @@ impl Runtime {
         let mut extensions = vec![
             neojs_age::init(),
             neojs_assert::init(),
+            neojs_cron::init(),
             neojs_crypto::init(),
             neojs_crypto_cipher::init(),
             neojs_crypto_hash::init(),
@@ -418,6 +422,8 @@ impl Runtime {
             neojs_stdio::init(),
             neojs_uuid::init(),
         ];
+        #[cfg(feature = "test-support")]
+        extensions.push(crate::cron::test_support_extension());
         #[cfg(feature = "test-support")]
         extensions.push(crate::crypto_hash::test_support_extension());
         let redactions = remote.as_ref().map(RemoteClient::redactions);
