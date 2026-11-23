@@ -49,10 +49,24 @@ fn bridge_shim(max_request_chars: usize) -> String {
     const stringify = JSON.stringify;
     const defineProperty = Object.defineProperty;
     const freeze = Object.freeze;
+    const create = Object.create;
+    const setPrototypeOf = Object.setPrototypeOf;
+    const isArray = Array.isArray;
+    const hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
     const max = {max_request_chars};
 
     function failure(code, message) {{
         return stringify({{ ok: false, error: {{ code, message }} }});
+    }}
+
+    function record() {{
+        return create(null);
+    }}
+
+    function list() {{
+        const value = [];
+        setPrototypeOf(value, null);
+        return value;
     }}
 
     const runSync = freeze(function runSync(request) {{
@@ -66,7 +80,7 @@ fn bridge_shim(max_request_chars: usize) -> String {
     }});
 
     defineProperty(globalThis, "{bridge_global}", {{
-        value: freeze({{ runSync }}),
+        value: freeze({{ runSync, stringify, record, list, isArray, hasOwn }}),
         writable: false,
         enumerable: false,
         configurable: false,

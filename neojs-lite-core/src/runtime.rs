@@ -442,9 +442,11 @@ impl Runtime {
     /// of the neojs-lite process, including filesystem, network, and further
     /// process creation permitted by the operating system. A timeout, output
     /// overflow, or inherited pipe left after the direct child exits triggers a
-    /// bounded drain and a group SIGKILL; a descendant that creates a new
-    /// process group and escapes is not tracked. Bounded completion is Unix-only;
-    /// another platform returns `ERR_NODE_CHILD_PROCESS_UNSUPPORTED`.
+    /// bounded drain and a group SIGKILL; an inherited pipe is an explicit
+    /// `ERR_NODE_CHILD_PROCESS_INCOMPLETE` failure, not a success with possibly
+    /// truncated output. A descendant that creates a new process group and
+    /// escapes is not tracked. Bounded completion is Unix-only; another platform
+    /// rejects before spawning.
     #[cfg(feature = "node-compat")]
     pub fn with_node_compat(options: neojs_lite_node::NodeOptions) -> Result<Self, Error> {
         Self::create(Some(options))

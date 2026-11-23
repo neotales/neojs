@@ -259,12 +259,24 @@ fn an_inherited_pipe_cannot_extend_completion() {
     run(
         policy(&["/bin/sh", "/bin/sleep"]),
         r#"
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 const result = spawnSync("/bin/sh", ["-c", "(/bin/sleep 5) & exit 0"], {
     encoding: "utf8",
 });
-if (result.status !== 0) throw new Error(`status: ${result.status}`);
-if (result.error) throw new Error(`error: ${result.error.code}`);
+if (result.status !== null) throw new Error(`status: ${result.status}`);
+if (!result.error || result.error.code !== "ERR_NODE_CHILD_PROCESS_INCOMPLETE") {
+    throw new Error(`incomplete error: ${result.error && result.error.code}`);
+}
+
+let execError = null;
+try {
+    execFileSync("/bin/sh", ["-c", "(/bin/sleep 5) & exit 0"], { encoding: "utf8" });
+} catch (error) {
+    execError = error;
+}
+if (!execError || execError.code !== "ERR_NODE_CHILD_PROCESS_INCOMPLETE") {
+    throw new Error(`exec incomplete error: ${execError && execError.code}`);
+}
 "#,
     )
     .expect("bounded inherited-pipe completion");
@@ -280,6 +292,7 @@ fn the_bridge_cannot_be_replaced_before_import_and_huge_requests_are_capped() {
     run(
         policy(&[]),
         r#"
+const original = globalThis.__neojsNodeChildProcess;
 let replaced = false;
 try {
     globalThis.__neojsNodeChildProcess = {
@@ -291,10 +304,22 @@ try {
 } catch {
 }
 if (replaced) throw new Error("the bridge replacement succeeded");
-const before = globalThis.__neojsNodeChildProcess;
+if (globalThis.__neojsNodeChildProcess !== original) {
+    throw new Error("the bridge identity changed before import");
+}
 const childProcess = await import("node:child_process");
-if (globalThis.__neojsNodeChildProcess !== before) {
-    throw new Error("the bridge changed during import");
+if (globalThis.__neojsNodeChildProcess !== original) {
+    throw new Error("the bridge identity changed during import");
+}
+
+let denied = null;
+try {
+    childProcess.execFileSync("/bin/echo", ["x"], { encoding: "utf8" });
+} catch (error) {
+    denied = error && error.code;
+}
+if (denied !== "ERR_NODE_CHILD_PROCESS_DENIED") {
+    throw new Error(`actual denied call: ${denied}`);
 }
 
 const huge = Deno.core.ops.op_neojs_node_child_process_run("x".repeat(4194305));
@@ -318,6 +343,48 @@ if (code !== "ERR_NODE_REQUEST_TOO_LARGE") {
 "#,
     )
     .expect("bridge hardening");
+}
+
+#[test]
+fn the_bridge_identity_survives_import_and_allows_execution() {
+    require("/bin/echo");
+    run(
+        policy(&["/bin/echo"]),
+        r#"
+const original = globalThis.__neojsNodeChildProcess;
+const childProcess = await import("node:child_process");
+if (globalThis.__neojsNodeChildProcess !== original) {
+    throw new Error("the bridge identity changed during import");
+}
+const output = childProcess.execFileSync("/bin/echo", ["ok"], { encoding: "utf8" });
+if (output !== "ok\n") throw new Error(`allowed output: ${String(output)}`);
+"#,
+    )
+    .expect("bridge identity and allowed call");
+}
+
+#[test]
+fn hostile_serialization_hooks_do_not_run_or_allocate() {
+    require("/bin/echo");
+    run(
+        policy(&["/bin/echo"]),
+        r#"
+Object.prototype.toJSON = () => ({ evil: "x".repeat(1000000) });
+Array.prototype.toJSON = () => "evil";
+const originalStringify = JSON.stringify;
+JSON.stringify = () => "x".repeat(10000000);
+try {
+    const childProcess = await import("node:child_process");
+    const output = childProcess.execFileSync("/bin/echo", ["ok"], { encoding: "utf8" });
+    if (output !== "ok\n") throw new Error(`output: ${JSON.stringify(output)}`);
+} finally {
+    JSON.stringify = originalStringify;
+    delete Object.prototype.toJSON;
+    delete Array.prototype.toJSON;
+}
+"#,
+    )
+    .expect("safe serialization");
 }
 
 #[test]

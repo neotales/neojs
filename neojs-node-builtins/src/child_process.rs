@@ -15,12 +15,16 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Child;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Stdio;
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
+
+#[cfg(test)]
+use std::cell::Cell;
 
 #[cfg(unix)]
 use rustix::event::PollFd;
@@ -67,6 +71,16 @@ const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(50);
 /// The longest single poll wait, so `try_wait` and the deadline are checked.
 #[cfg(unix)]
 const POLL_SLICE: Duration = Duration::from_millis(10);
+
+#[cfg(test)]
+thread_local! {
+    /// Simulates a platform without the bounded Unix runner.
+    static FORCE_UNSUPPORTED: Cell<bool> = const { Cell::new(false) };
+    /// Forces the post-spawn non-blocking setup to fail.
+    static FAIL_NONBLOCKING: Cell<bool> = const { Cell::new(false) };
+    /// Exposes the pid of the last spawned child to the cleanup tests.
+    static LAST_PID: Cell<Option<u32>> = const { Cell::new(None) };
+}
 
 /// The default maximum wall-clock time for one child process.
 pub const DEFAULT_MAX_TIMEOUT: Duration = Duration::from_secs(10);
@@ -358,6 +372,7 @@ pub(crate) struct RunRequest {
 }
 
 /// A completed synchronous request.
+#[derive(Debug)]
 pub(crate) struct SyncResult {
     pub(crate) pid: u32,
     pub(crate) status: Option<i32>,
@@ -366,6 +381,7 @@ pub(crate) struct SyncResult {
     pub(crate) stderr: Vec<u8>,
     pub(crate) timed_out: bool,
     pub(crate) limit_exceeded: bool,
+    pub(crate) incomplete: bool,
 }
 
 /// Runs one validated request under `policy`.
@@ -440,6 +456,13 @@ pub(crate) fn run(
         Some(value) => value,
     };
 
+    // Reject before building or spawning the command. A platform without the
+    // bounded pipe runner must not execute a child and then discover it cannot
+    // clean it up safely.
+    if !platform_supported() {
+        return Err(platform_unsupported());
+    }
+
     let mut command = Command::new(&program);
     command.args(&request.args);
     command.env_clear();
@@ -465,7 +488,11 @@ pub(crate) fn run(
 
     let mut child = command.spawn().map_err(ChildProcessError::spawn)?;
     let pid = child.id();
-    let execution = execute(&mut child, &input, timeout, max_buffer)?;
+    #[cfg(test)]
+    LAST_PID.with(|last| last.set(Some(pid)));
+    let mut guard = ChildGuard::new(&mut child);
+    let execution = execute(&mut *guard.child, &input, timeout, max_buffer)?;
+    guard.disarm();
 
     Ok(SyncResult {
         pid,
@@ -475,6 +502,7 @@ pub(crate) fn run(
         stderr: execution.stderr,
         timed_out: execution.timed_out,
         limit_exceeded: execution.limit_exceeded,
+        incomplete: execution.incomplete,
     })
 }
 
@@ -486,6 +514,61 @@ struct Execution {
     stderr: Vec<u8>,
     timed_out: bool,
     limit_exceeded: bool,
+    incomplete: bool,
+}
+
+/// Returns whether this build has the bounded Unix pipe runner.
+#[cfg(unix)]
+fn platform_supported() -> bool {
+    #[cfg(test)]
+    {
+        !FORCE_UNSUPPORTED.with(Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+#[cfg(not(unix))]
+fn platform_supported() -> bool {
+    false
+}
+
+fn platform_unsupported() -> ChildProcessError {
+    ChildProcessError::new(
+        "ERR_NODE_CHILD_PROCESS_UNSUPPORTED",
+        "bounded child-process completion is implemented on Unix only",
+    )
+}
+
+/// Kills and reaps a spawned child if execution unwinds early.
+///
+/// The guard is armed immediately after `spawn` and disarmed only after the
+/// bounded runner has completed and reaped the direct child. A post-spawn setup
+/// failure therefore cannot leak a running process.
+struct ChildGuard<'a> {
+    child: &'a mut Child,
+    armed: bool,
+}
+
+impl<'a> ChildGuard<'a> {
+    fn new(child: &'a mut Child) -> Self {
+        Self { child, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ChildGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
 
 /// Runs a spawned child to a bounded completion on Unix.
@@ -531,6 +614,7 @@ fn execute(
     let mut stderr_bytes = Vec::new();
     let mut timed_out = false;
     let mut limit_exceeded = false;
+    let mut incomplete = false;
     let mut killed = false;
     let mut direct_status = None;
 
@@ -570,6 +654,12 @@ fn execute(
         if now >= stop_at {
             if killed {
                 break;
+            }
+            if direct_status.is_some() && (stdout_open || stderr_open) {
+                // The direct child exited while a descendant still held its
+                // piped streams. This is not a truthful success with possibly
+                // truncated output; report it explicitly.
+                incomplete = true;
             }
             kill_child_group(child, pgid);
             killed = true;
@@ -693,7 +783,9 @@ fn execute(
     // descendant that escaped the process group is not tracked.
     let status = child.wait().ok();
     let (status_code, signal_name) = match status {
-        Some(status) if !timed_out && !limit_exceeded => (status.code(), exit_signal_name(&status)),
+        Some(status) if !timed_out && !limit_exceeded && !incomplete => {
+            (status.code(), exit_signal_name(&status))
+        }
         Some(status) => (None, exit_signal_name(&status)),
         None => (None, None),
     };
@@ -705,6 +797,7 @@ fn execute(
         stderr: stderr_bytes,
         timed_out,
         limit_exceeded,
+        incomplete,
     })
 }
 
@@ -730,6 +823,13 @@ fn execute(
 
 #[cfg(unix)]
 fn set_nonblocking(fd: impl std::os::fd::AsFd) -> Result<(), ChildProcessError> {
+    #[cfg(test)]
+    if FAIL_NONBLOCKING.with(Cell::get) {
+        return Err(ChildProcessError::new(
+            "ERR_NODE_TEST_NONBLOCKING",
+            "injected non-blocking setup failure",
+        ));
+    }
     let flags = fcntl_getfl(&fd).map_err(|error| {
         ChildProcessError::spawn(io::Error::from_raw_os_error(error.raw_os_error()))
     })?;
@@ -845,7 +945,27 @@ fn signal_name(number: i32) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::append_capped;
+    use super::*;
+    use std::path::Path;
+
+    #[cfg(unix)]
+    use rustix::io::Errno;
+    #[cfg(unix)]
+    use rustix::process::Pid;
+    #[cfg(unix)]
+    use rustix::process::test_kill_process;
+
+    fn request(file: &str, args: &[&str]) -> RunRequest {
+        RunRequest {
+            file: file.to_string(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            cwd: None,
+            env: None,
+            input: None,
+            timeout_ms: None,
+            max_buffer: None,
+        }
+    }
 
     #[test]
     fn a_capped_append_stops_at_the_limit_and_reports_overflow() {
@@ -861,5 +981,59 @@ mod tests {
         let mut bytes = Vec::new();
         assert!(append_capped(&mut bytes, b"abcdef", 3));
         assert_eq!(bytes, b"abc");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unsupported_platform_rejects_before_spawn() {
+        assert!(Path::new("/bin/sh").exists(), "test requires /bin/sh");
+        let directory = tempfile::tempdir().expect("temp dir");
+        let marker = directory.path().join("must-not-exist");
+        let policy = ChildProcessPolicy::new()
+            .allow_program("/bin/sh")
+            .expect("allow sh");
+        let request = request(
+            "/bin/sh",
+            &["-c", &format!("/bin/touch '{}'", marker.display())],
+        );
+
+        LAST_PID.with(|last| last.set(None));
+        FORCE_UNSUPPORTED.with(|forced| forced.set(true));
+        let result = run(&request, &policy);
+        FORCE_UNSUPPORTED.with(|forced| forced.set(false));
+
+        let error = result.expect_err("unsupported platform");
+        assert_eq!(error.code(), "ERR_NODE_CHILD_PROCESS_UNSUPPORTED");
+        assert!(
+            !marker.exists(),
+            "the unsupported platform executed the child"
+        );
+        assert_eq!(LAST_PID.with(Cell::get), None, "the child was spawned");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_post_spawn_setup_failure_reaps_the_child() {
+        assert!(Path::new("/bin/sleep").exists(), "test requires /bin/sleep");
+        let policy = ChildProcessPolicy::new()
+            .allow_program("/bin/sleep")
+            .expect("allow sleep");
+        let request = request("/bin/sleep", &["5"]);
+
+        LAST_PID.with(|last| last.set(None));
+        FAIL_NONBLOCKING.with(|failed| failed.set(true));
+        let result = run(&request, &policy);
+        FAIL_NONBLOCKING.with(|failed| failed.set(false));
+
+        let error = result.expect_err("injected setup failure");
+        assert_eq!(error.code(), "ERR_NODE_TEST_NONBLOCKING");
+        let pid = LAST_PID
+            .with(Cell::get)
+            .expect("the child was spawned before the failure");
+        let pid = Pid::from_raw(pid as i32).expect("pid");
+        assert!(
+            matches!(test_kill_process(pid), Err(Errno::SRCH)),
+            "the failed setup left a live or unreaped child"
+        );
     }
 }

@@ -39,12 +39,15 @@
 //! driven by `poll` on the calling thread; no reader or writer thread is
 //! created. A timeout or output overflow kills the child's process group after
 //! a short bounded drain. A direct child that exits while a descendant still
-//! holds a piped descriptor gets the same bounded drain and group kill, so an
-//! inherited pipe cannot defeat the deadline. A descendant that creates a new
-//! process group and escapes is not tracked. The request bridge also has a hard
-//! serialized-size cap before parsing. Bounded child-process completion is
-//! implemented on Unix; another platform returns
-//! `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` instead of using an unbounded join.
+//! holds a piped descriptor gets the same bounded drain and group kill; because
+//! output may be incomplete, that case is reported as an explicit incomplete
+//! error, never a successful status. A descendant that creates a new process
+//! group and escapes is not tracked. The request bridge also has a hard
+//! serialized-size cap before parsing, and the guest builds null-prototype
+//! records and arrays from intrinsics captured before user code so inherited
+//! `toJSON` hooks or a replaced `JSON.stringify` are not used. Bounded
+//! child-process completion is implemented on Unix; another platform rejects
+//! before spawning rather than using an unbounded join.
 //!
 //! This is **not a sandbox**. An allowed executable runs with the authority of
 //! the neojs process. It can read and write files, use the network, and start

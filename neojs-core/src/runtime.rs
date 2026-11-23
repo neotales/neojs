@@ -396,9 +396,11 @@ impl Runtime {
     /// process group. A timeout, output overflow, or a direct-child exit that
     /// leaves an inherited pipe open triggers a bounded drain and a group
     /// SIGKILL; the runner never joins a reader thread that a descendant could
-    /// keep blocked. A descendant that creates a new process group and escapes
-    /// the group is not tracked. Bounded completion is Unix-only; another
-    /// platform returns `ERR_NODE_CHILD_PROCESS_UNSUPPORTED`.
+    /// keep blocked. An inherited pipe left after the direct child exits is an
+    /// explicit `ERR_NODE_CHILD_PROCESS_INCOMPLETE` failure, not a success with
+    /// possibly truncated output. A descendant that creates a new process group
+    /// and escapes the group is not tracked. Bounded completion is Unix-only;
+    /// another platform rejects before spawning.
     ///
     /// This is **not a sandbox**. An allowed program runs with the authority of
     /// the neojs process, including filesystem, network, and further process

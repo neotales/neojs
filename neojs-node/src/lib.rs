@@ -33,8 +33,19 @@ pub const BRIDGE_SHIM: &str = r#"
 (() => {
     "use strict";
     const runSync = Deno.core.ops.op_neojs_node_child_process_run;
+    const stringify = JSON.stringify;
+    const create = Object.create;
+    const setPrototypeOf = Object.setPrototypeOf;
+    const isArray = Array.isArray;
+    const hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+    const record = () => create(null);
+    const list = () => {
+        const value = [];
+        setPrototypeOf(value, null);
+        return value;
+    };
     Object.defineProperty(globalThis, "__neojsNodeChildProcess", {
-        value: Object.freeze({ runSync }),
+        value: Object.freeze({ runSync, stringify, record, list, isArray, hasOwn }),
         writable: false,
         enumerable: false,
         configurable: false,

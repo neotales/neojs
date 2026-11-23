@@ -85,6 +85,7 @@ pub fn handle_request(request: &str, options: &NodeOptions) -> String {
                 "stderr": String::from_utf8_lossy(&result.stderr),
                 "timedOut": result.timed_out,
                 "limitExceeded": result.limit_exceeded,
+                "incomplete": result.incomplete,
             }
         })
         .to_string(),

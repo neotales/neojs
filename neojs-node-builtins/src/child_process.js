@@ -12,12 +12,36 @@
 // none is faked with a blocking call or a resolved Promise.
 "use strict";
 
+// The bridge is installed before user code with the original JSON.stringify,
+// record/array constructors, Array.isArray, and own-property helper. Requests
+// are built from null-prototype records and arrays, so inherited toJSON hooks,
+// getters, and a replaced global JSON.stringify are not consulted.
 const bridge = globalThis.__neojsNodeChildProcess;
-if (!bridge || typeof bridge.runSync !== "function") {
+if (
+    !bridge ||
+    typeof bridge.runSync !== "function" ||
+    typeof bridge.stringify !== "function" ||
+    typeof bridge.record !== "function" ||
+    typeof bridge.list !== "function" ||
+    typeof bridge.isArray !== "function" ||
+    typeof bridge.hasOwn !== "function"
+) {
     throw new Error("node:child_process is not installed in this runtime");
 }
 const runSync = bridge.runSync;
-const hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+const stringify = bridge.stringify;
+const record = bridge.record;
+const list = bridge.list;
+const isArray = bridge.isArray;
+const hasOwn = bridge.hasOwn;
+
+const SUPPORTED_OPTIONS = record();
+SUPPORTED_OPTIONS.cwd = true;
+SUPPORTED_OPTIONS.env = true;
+SUPPORTED_OPTIONS.input = true;
+SUPPORTED_OPTIONS.timeout = true;
+SUPPORTED_OPTIONS.maxBuffer = true;
+SUPPORTED_OPTIONS.encoding = true;
 
 // Hard ceilings before guest normalization and before the bridge. The Rust
 // policy may be stricter; these bound copies and the serialized request.
@@ -35,8 +59,6 @@ function requestTooLarge() {
         "the node:child_process request exceeds the hard size limit",
     );
 }
-
-const SUPPORTED_OPTIONS = ["cwd", "env", "input", "timeout", "maxBuffer", "encoding"];
 
 function makeError(code, message, properties) {
     const error = new Error(message);
@@ -88,14 +110,14 @@ function requireString(value, what) {
 
 function normalizeOptions(options) {
     if (options === undefined) {
-        options = {};
+        options = record();
     }
-    if (options === null || typeof options !== "object" || Array.isArray(options)) {
+    if (options === null || typeof options !== "object" || isArray(options)) {
         throw makeError("ERR_INVALID_ARG_TYPE", "options must be an object");
     }
     for (const key in options) {
         if (!hasOwn(options, key)) continue;
-        if (!SUPPORTED_OPTIONS.includes(key)) {
+        if (SUPPORTED_OPTIONS[key] !== true) {
             throw makeError(
                 "ERR_NODE_UNSUPPORTED",
                 `the node:child_process option \`${key}\` is not implemented`,
@@ -111,7 +133,7 @@ function normalizeOptions(options) {
         );
     }
 
-    const normalized = {};
+    const normalized = record();
     if (options.cwd !== undefined) {
         const cwd = requireString(options.cwd, "options.cwd");
         if (cwd.length > MAX_PATH_CHARS) throw requestTooLarge();
@@ -122,12 +144,12 @@ function normalizeOptions(options) {
     }
     if (options.env !== undefined) {
         const env = options.env;
-        if (env === null || typeof env !== "object" || Array.isArray(env)) {
+        if (env === null || typeof env !== "object" || isArray(env)) {
             throw makeError("ERR_INVALID_ARG_TYPE", "options.env must be an object");
         }
         let count = 0;
         let total = 0;
-        const copy = Object.create(null);
+        const copy = record();
         for (const name in env) {
             if (!hasOwn(env, name)) continue;
             count += 1;
@@ -177,14 +199,14 @@ function normalizeOptions(options) {
 
 function normalizeArgs(args) {
     if (args === undefined) {
-        return [];
+        return list();
     }
-    if (!Array.isArray(args)) {
+    if (!isArray(args)) {
         throw makeError("ERR_INVALID_ARG_TYPE", "arguments must be an array");
     }
     if (args.length > MAX_ARGS) throw requestTooLarge();
     let total = 0;
-    const normalized = [];
+    const normalized = list();
     for (let index = 0; index < args.length; index += 1) {
         const argument = args[index];
         if (typeof argument === "string") {
@@ -193,12 +215,12 @@ function normalizeArgs(args) {
             }
             total += argument.length;
             if (total > MAX_ARG_CHARS) throw requestTooLarge();
-            normalized.push(argument);
+            normalized[normalized.length] = argument;
         } else if (typeof argument === "number" || typeof argument === "boolean") {
             const text = String(argument);
             total += text.length;
             if (total > MAX_ARG_CHARS) throw requestTooLarge();
-            normalized.push(text);
+            normalized[normalized.length] = text;
         } else {
             throw makeError(
                 "ERR_INVALID_ARG_TYPE",
@@ -220,19 +242,22 @@ function normalizeCall(file, args, options) {
     }
     const normalizedArgs = normalizeArgs(args);
     const normalizedOptions = normalizeOptions(options);
-    return { program, args: normalizedArgs, options: normalizedOptions };
+    const result = record();
+    result.program = program;
+    result.args = normalizedArgs;
+    result.options = normalizedOptions;
+    return result;
 }
 
 function call(operation, call_) {
-    const request = {
-        operation,
-        file: call_.program,
-        args: call_.args,
-        options: call_.options,
-    };
+    const request = record();
+    request.operation = operation;
+    request.file = call_.program;
+    request.args = call_.args;
+    request.options = call_.options;
     let text;
     try {
-        text = JSON.stringify(request);
+        text = stringify(request);
     } catch {
         throw makeError(
             "ERR_INVALID_ARG_VALUE",
@@ -288,7 +313,8 @@ function call(operation, call_) {
         (result.status !== null && typeof result.status !== "number") ||
         (result.signalName !== null && typeof result.signalName !== "string") ||
         typeof result.timedOut !== "boolean" ||
-        typeof result.limitExceeded !== "boolean"
+        typeof result.limitExceeded !== "boolean" ||
+        typeof result.incomplete !== "boolean"
     ) {
         throw makeError(
             "ERR_NODE_BRIDGE_FAILURE",
@@ -318,7 +344,7 @@ function resultFields(result) {
  * way; a policy denial or argument error throws.
  */
 function spawnSync(file, args, options) {
-    if (args !== undefined && !Array.isArray(args)) {
+    if (args !== undefined && !isArray(args)) {
         options = args;
         args = [];
     }
@@ -349,6 +375,11 @@ function spawnSync(file, args, options) {
             "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
             "child process output exceeded maxBuffer",
         );
+    } else if (result.incomplete) {
+        fields.error = makeError(
+            "ERR_NODE_CHILD_PROCESS_INCOMPLETE",
+            "the direct child exited while a descendant still held a piped stream; output may be incomplete",
+        );
     }
     return fields;
 }
@@ -361,7 +392,7 @@ function spawnSync(file, args, options) {
  * `spawnSync` where they exist.
  */
 function execFileSync(file, args, options) {
-    if (args !== undefined && !Array.isArray(args)) {
+    if (args !== undefined && !isArray(args)) {
         options = args;
         args = [];
     }
@@ -375,6 +406,13 @@ function execFileSync(file, args, options) {
         throw makeError(
             "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
             "child process output exceeded maxBuffer",
+            fields,
+        );
+    }
+    if (result.incomplete) {
+        throw makeError(
+            "ERR_NODE_CHILD_PROCESS_INCOMPLETE",
+            "the direct child exited while a descendant still held a piped stream; output may be incomplete",
             fields,
         );
     }

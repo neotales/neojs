@@ -208,8 +208,9 @@ fn a_descendant_holding_pipes_cannot_extend_the_deadline() {
     );
     let elapsed = started.elapsed();
     let result = ok_result(&response);
-    assert_eq!(result["status"], 0);
+    assert_eq!(result["status"], Value::Null);
     assert_eq!(result["timedOut"], false);
+    assert_eq!(result["incomplete"], true);
     assert!(
         elapsed < Duration::from_secs(2),
         "an inherited pipe extended completion for {elapsed:?}"
@@ -236,7 +237,8 @@ fn a_descendant_left_holding_pipes_is_killed_after_the_direct_child_exits() {
         serde_json::json!({}),
     );
     let result = ok_result(&response);
-    assert_eq!(result["status"], 0);
+    assert_eq!(result["status"], Value::Null);
+    assert_eq!(result["incomplete"], true);
     std::thread::sleep(Duration::from_millis(400));
     assert!(
         !marker.exists(),
