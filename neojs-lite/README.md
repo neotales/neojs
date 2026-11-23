@@ -33,15 +33,24 @@ This command does **not** claim parity with `neojs` (V8):
   `.js` or `.mjs`.
 * **No host asynchrony.** There are no timers or host Promise integration. A
   top-level `await` works only when QuickJS's own job queue can settle it.
-* **No built-in `neo:` modules.** Local ECMAScript files only. The `Neo`
-  global is introspection only: its list is empty,
-  `getBuiltInModule` returns `undefined` for every string name, and a
-  non-string name throws `TypeError`.
+* **Most built-in `neo:` modules are absent.** Only the shared `neo:chars`
+  module is implemented. Other V8 modules are not importable, and the `Neo`
+  list does not claim them.
 * **No permissions or sandbox.** None are implemented.
 
 Both runtimes share `neojs-module-policy` for executable-extension decisions, so
 `.js`/`.mjs`/extensionless names and the rejection reasons for `.cjs`, JSX/TSX,
 declaration files, JSON, WebAssembly, and native addons are the same.
+
+## Build features
+
+The command selects `neo-chars` explicitly from `neojs-lite-core` with
+`default-features = false`, so its advertised surface is a command decision and
+does not drift with the library defaults. The library default also enables
+`neo-chars`, but a library consumer can opt out with
+`default-features = false`. Cargo features are additive and unify across the
+dependency graph: a build that any dependent enables the module for contains it.
+Selection is not a sandbox.
 
 ## Build isolation
 

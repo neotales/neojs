@@ -1,9 +1,13 @@
-//! Module resolution and loading for local ECMAScript files.
+//! Module resolution and loading for local ECMAScript files and shared
+//! `neo:` built-ins.
 //!
 //! The resolver turns a specifier into one canonical absolute path, which is
-//! also the module identity. The loader accepts only formats that QuickJS can
-//! execute: `.js`, `.mjs`, and names without an extension. The format decision
-//! comes from `neojs-module-policy`, the same policy the V8 runtime uses.
+//! also the module identity. A canonical specifier listed by the engine-neutral
+//! `neojs-builtins` crate resolves to itself instead; the loader serves that
+//! module's canonical wrapper from the same crate. The loader accepts only
+//! formats that QuickJS can execute: `.js`, `.mjs`, and names without an
+//! extension. The format decision comes from `neojs-module-policy`, the same
+//! policy the V8 runtime uses.
 
 use std::path::{Path, PathBuf};
 
@@ -42,13 +46,14 @@ fn reject_attributes(
     Ok(())
 }
 
-/// Resolves relative paths, absolute paths, and `file:` URLs to one canonical
-/// absolute path.
+/// Resolves relative paths, absolute paths, `file:` URLs, and shared `neo:`
+/// built-ins to one canonical identity.
 ///
-/// The canonical path is the module identity, so the same file reached by two
-/// spellings is evaluated once. Bare specifiers and every other URL scheme are
-/// rejected with a reason. The returned name is always valid UTF-8 because
-/// QuickJS module names are strings.
+/// A canonical path is the module identity, so the same file reached by two
+/// spellings is evaluated once. A shared built-in resolves to its canonical
+/// `neo:` specifier, so static and dynamic imports also reach one instance.
+/// Bare specifiers and every other URL scheme are rejected with a reason. The
+/// returned name is always valid UTF-8 because QuickJS module names are strings.
 pub(super) struct FileResolver;
 
 impl Resolver for FileResolver {
@@ -60,6 +65,15 @@ impl Resolver for FileResolver {
         attributes: Option<ImportAttributes<'js>>,
     ) -> Result<String> {
         reject_attributes(base, name, attributes)?;
+        // A shared built-in is a canonical `neo:` specifier. It is exact: the
+        // shared crate does not accept a bare name, another scheme, a query, or
+        // a fragment. Resolving to the same string gives the engine one module
+        // identity for static and dynamic imports. With `neo-chars` off the
+        // dependency is absent and this block is not compiled.
+        #[cfg(feature = "neo-chars")]
+        if let Some(builtin) = neojs_builtins::module(name) {
+            return Ok(builtin.specifier.to_owned());
+        }
         let path = candidate_path(base, name)?;
         let canonical = std::fs::canonicalize(&path).map_err(|error| {
             Error::new_resolving_message(
@@ -150,6 +164,14 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
+        // Serve the shared canonical wrapper before the filesystem path is
+        // interpreted. The wrapper reads the registry object installed by the
+        // realm shim, so imports and `Neo.getBuiltInModule` share function
+        // identity while the namespace remains a distinct object.
+        #[cfg(feature = "neo-chars")]
+        if let Some(builtin) = neojs_builtins::module(name) {
+            return Module::declare(ctx.clone(), name, builtin.source.as_bytes().to_vec());
+        }
         let path = Path::new(name);
         match module_format(path) {
             Ok(ModuleFormat::JavaScript) => {}

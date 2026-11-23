@@ -30,8 +30,9 @@ console.log(value);
     runtime.run_file(&file).expect("run file");
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
-fn neo_reports_the_lite_engine_and_an_empty_frozen_list() {
+fn neo_reports_the_lite_engine_and_the_canonical_shared_module() {
     let mut runtime = Runtime::new().expect("runtime");
     runtime
         .run_source(
@@ -40,7 +41,9 @@ fn neo_reports_the_lite_engine_and_an_empty_frozen_list() {
 const list = Neo.getBuiltInModulesList();
 if (Neo.engine !== "neo-lite") throw new Error(`engine: ${Neo.engine}`);
 if (!Array.isArray(list)) throw new Error("module list is not an array");
-if (list.length !== 0) throw new Error(`module list is not empty: ${list.length}`);
+if (JSON.stringify(list) !== JSON.stringify(["neo:chars"])) {
+    throw new Error(`unexpected module list: ${JSON.stringify(list)}`);
+}
 if (Neo.getBuiltInModulesList() !== list) {
     throw new Error("repeated calls returned different arrays");
 }
@@ -48,10 +51,20 @@ if (Object.isFrozen(list) !== true) throw new Error("module list is not frozen")
 if (Object.isExtensible(list) !== false) throw new Error("module list is extensible");
 if (Object.isFrozen(Neo) !== true) throw new Error("Neo is not frozen");
 
+const chars = Neo.getBuiltInModule("neo:chars");
+if (chars === undefined || typeof chars !== "object") {
+    throw new Error("the canonical chars module is missing");
+}
+if (Object.isFrozen(chars) !== true) throw new Error("chars is not frozen");
+if (Neo.getBuiltInModule("neo:chars") !== chars) {
+    throw new Error("repeated chars lookups returned different objects");
+}
+
 for (const name of [
     "age", "assert", "chars", "console", "cron", "crypto", "os", "path", "slices",
     "ssh", "stdio", "strings", "test", "uuid", "uuid/v4", "uuid/v7",
     "neo:age", "neo:cron", "neo:test", "node:test", "node:fs", "fs",
+    "", "__proto__", "constructor", "neo:chars?x", "neo:chars#x",
 ]) {
     if (Neo.getBuiltInModule(name) !== undefined) {
         throw new Error(`Neo claimed ${name}`);
@@ -82,7 +95,7 @@ try {
     mutationThrew = error instanceof TypeError;
 }
 if (!mutationThrew) throw new Error("a list mutation did not throw TypeError");
-if (list.length !== 0) throw new Error("the module list changed");
+if (list.length !== 1) throw new Error("the module list changed");
 "#,
         )
         .expect("Neo introspection");
