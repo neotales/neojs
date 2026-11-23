@@ -33,16 +33,26 @@ implementation and wrapper text are the same in both.
 
 Every shared module has its own Cargo feature. `chars` is the first.
 
-* `neojs-core` enables `chars`, so a default V8 build keeps the existing
-  `chars` surface.
-* `neojs-lite-core` enables `chars` explicitly, so the QuickJS build does not
-  inherit it by accident.
+* `neojs-core` has a positive `neo-chars` feature that enables the optional
+  `neojs-builtins` dependency and its `chars` feature. A default V8 build
+  enables `neo-chars`, so the existing surface is unchanged. `neo-slices`
+  implies `neo-chars`, because `CharSlice` captures `chars.toUpper` and
+  `chars.toLower`; disabling `neo-chars` also disables `slices` and removes both
+  source blocks, registry entries, and loader entries. A `neo-chars`-only build
+  keeps `chars` and omits `slices`.
+* `neojs-lite-core` has the same positive `neo-chars` feature, enabled by its
+  default feature set. `default-features = false` removes the dependency, the
+  implementation source, the registry object, the loader entry, and the
+  introspection list entry. `neojs-lite` selects `neo-chars` explicitly with
+  `default-features = false`, so the command bundle does not drift with library
+  defaults.
 * `neojs-builtins` itself has no default module features. A build without
   `chars` has no descriptor, no implementation bytes, and no wrapper.
 
 Cargo features are additive and unify across the dependency graph. A build that
-another dependent enables a module for contains that module. Module selection is
-compile-time surface selection, not a sandbox.
+another dependent enables a module for contains that module even if one consumer
+requested it off. Module selection is compile-time surface selection, not a
+sandbox.
 
 ## `neo:chars`
 
@@ -87,9 +97,11 @@ capability. It is not a sandbox.
   does not change the module. Code that replaced them before the shim ran is not
   defended against.
 * **One module instance per realm.** The wrapper reads the public registry
-  object, so the module namespace and `Neo.getBuiltInModule` share function
-  identity. The namespace is immutable by the language and the registry object
-  is frozen. This is not a cross-realm or cross-thread mechanism.
+  object and re-exports its function properties. Each named export is the same
+  function object as the matching registry property, while the ES module
+  namespace is a distinct object. The namespace is immutable by the language and
+  the registry object is frozen. This is not a cross-realm or cross-thread
+  mechanism.
 * **Source, not a stable ABI.** The public Rust surface is the descriptor and
   source constants. JavaScript behavior is the contract; the exact text is not.
 

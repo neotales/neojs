@@ -41,6 +41,9 @@ if (JSON.stringify(exported) !== JSON.stringify(registered)) {
 if (registry === undefined || registry === null || typeof registry !== "object") {
     fail("the registry did not return the chars object");
 }
+if (chars === registry) {
+    fail("the ES module namespace must be a distinct object from the registry object");
+}
 is(Object.isFrozen(registry), "the registry object is frozen");
 if ("default" in chars) fail("chars must not have a default export");
 for (const name of registered) {
@@ -54,6 +57,9 @@ const again = await import("__CHARS_SPECIFIER__");
 equal(dynamic, again, "repeated dynamic import identity");
 equal(dynamic.isLetter, chars.isLetter, "static and dynamic import identity");
 equal(registry.isLetter, dynamic.isLetter, "dynamic import and registry identity");
+if (dynamic === registry) {
+    fail("the dynamic namespace must be a distinct object from the registry object");
+}
 
 // Scalar and category boundaries. These code points are long-assigned, so the
 // contract does not depend on which Unicode release an engine ships.

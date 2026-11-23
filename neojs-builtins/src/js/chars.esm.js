@@ -2,9 +2,11 @@
 //
 // Both engines serve this source through their own module loader. It reads the
 // public module object installed by the realm shim and re-exports its function
-// objects, so the module namespace and `Neo.getBuiltInModule("neo:chars")`
-// share identity: every named export is the same function object as the
-// matching registry property, and repeated imports return one module instance.
+// objects, so each named export is the same function object as the matching
+// registry property and repeated imports return one module instance. The ES
+// module namespace itself is a distinct object from the registry object; only
+// the exported function identities are shared. The wrapper is not a copy of the
+// registry object.
 //
 // The registry key is canonical. The shared module has no bare `chars` alias;
 // an engine that still accepts a legacy bare name resolves it to this canonical
