@@ -1572,23 +1572,40 @@ impl JsRuntime {
       );
   }
 
-  /// Test-only: remove and return a known lazy ESM source.
+  /// Test-only: register a JSON module name under `RequestedModuleType::Json`.
   ///
-  /// This exists for collision tests in a dependent crate. It is not part of
-  /// the normal embedder API.
+  /// This exists for name-collision tests in a dependent crate. It is not part
+  /// of the normal embedder API.
   #[cfg(feature = "native_module_testing")]
   #[doc(hidden)]
-  pub fn take_lazy_loaded_esm_source_for_test(
+  pub fn add_json_module_for_test(
     &mut self,
     specifier: &str,
-  ) -> Option<String> {
-    self
-      .inner
-      .main_realm
-      .0
-      .module_map()
-      .take_lazy_esm_source(specifier)
-      .map(|code| code.as_str().to_string())
+    code: &str,
+  ) -> ModuleId {
+    let module_map = self.inner.main_realm.0.module_map();
+    let context = self.inner.main_realm.0.context().clone();
+    let isolate = &mut *self.inner.v8_isolate;
+    v8::scope!(let scope, isolate);
+    let context = v8::Local::new(scope, context);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    module_map
+      .new_json_module(scope, specifier.to_string(), code.to_string())
+      .expect("test JSON module")
+  }
+
+  /// Test-only: add a `RequestedModuleType::Json` alias name.
+  ///
+  /// This exists for name-collision tests in a dependent crate. It is not part
+  /// of the normal embedder API.
+  #[cfg(feature = "native_module_testing")]
+  #[doc(hidden)]
+  pub fn add_json_alias_for_test(&mut self, alias: &str, target: &str) {
+    self.inner.main_realm.0.module_map().alias(
+      ModuleName::from(alias.to_string()),
+      &RequestedModuleType::Json,
+      ModuleName::from(target.to_string()),
+    );
   }
 
   #[inline]

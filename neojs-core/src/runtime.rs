@@ -1180,26 +1180,75 @@ if (dynamic.isLetter !== chars.isLetter) {
             "a native registration must reject a known lazy ESM collision"
         );
 
-        // The rejected registration must not have removed or replaced the lazy
-        // source. The original bytes remain, and the module still compiles and
-        // evaluates under its original identity.
-        let code = js
-            .take_lazy_loaded_esm_source_for_test(specifier)
-            .expect("the lazy ESM source remains");
-        assert_eq!(code, source);
+        // Load through the ordinary lazy-module path, not with source bytes
+        // supplied by the test. Two independent lazy loaders must return the
+        // one original namespace, with the original export.
+        js.execute_script(
+            "<lazy-collision>",
+            format!(
+                r#"
+const specifier = "{specifier}";
+const loadA = Deno.core.createLazyLoader(specifier);
+const loadB = Deno.core.createLazyLoader(specifier);
+const first = loadA();
+const again = loadA();
+const other = loadB();
+if (first !== again || first !== other) {{
+    throw new Error("the lazy module identity changed");
+}}
+if (first.value !== 7) {{
+    throw new Error("the original lazy export changed");
+}}
+"#
+            ),
+        )
+        .expect("the remaining lazy source loads and evaluates");
+    }
 
-        let namespace = js
-            .lazy_load_es_module_with_code(specifier, source.to_string())
-            .expect("the remaining lazy source evaluates");
-        let context = js.main_context();
-        deno_core::v8::scope!(let scope, js.v8_isolate());
-        let context = deno_core::v8::Local::new(scope, context);
-        let scope = &mut deno_core::v8::ContextScope::new(scope, context);
-        let namespace = deno_core::v8::Local::new(scope, namespace);
-        let namespace = deno_core::v8::Local::<deno_core::v8::Object>::try_from(namespace)
-            .expect("module namespace is an object");
-        let key = deno_core::v8::String::new(scope, "value").expect("export key");
-        let value = namespace.get(scope, key.into()).expect("export value");
-        assert_eq!(value.uint32_value(scope), Some(7));
+    #[test]
+    fn native_module_registration_rejects_typed_and_alias_collisions() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let js = runtime.js.as_mut().expect("the isolate is present");
+
+        // A JSON module lives under RequestedModuleType::Json, not None.
+        js.add_json_module_for_test("neo:typed-collision", r#"{"ok":true}"#);
+        let export = js
+            .execute_script("<native-export>", "(function value() { return 7; })")
+            .expect("export value");
+        assert!(
+            js.register_native_module(
+                "neo:typed-collision",
+                vec![(deno_core::ascii_str!("value"), export)],
+            )
+            .is_err(),
+            "a native registration must reject a typed module name"
+        );
+        // A second attempt still sees the typed name, proving the rejected call
+        // did not remove it.
+        assert!(
+            js.register_native_module("neo:typed-collision", Vec::new())
+                .is_err(),
+            "the typed module name was removed"
+        );
+
+        // The alias is also under RequestedModuleType::Json, so a None lookup
+        // alone would miss it; has_name_any_type must catch it.
+        js.add_json_alias_for_test("neo:alias-collision", "neo:typed-collision");
+        let export = js
+            .execute_script("<native-export>", "(function value() { return 7; })")
+            .expect("export value");
+        assert!(
+            js.register_native_module(
+                "neo:alias-collision",
+                vec![(deno_core::ascii_str!("value"), export)],
+            )
+            .is_err(),
+            "a native registration must reject a typed alias name"
+        );
+        assert!(
+            js.register_native_module("neo:alias-collision", Vec::new())
+                .is_err(),
+            "the typed alias name was removed"
+        );
     }
 }

@@ -27,10 +27,12 @@ module-graph behaviour. The replacement is applied in the workspace
 Remove this directory and the `[patch.crates-io]` entry as soon as an upstream
 `deno_core` release exposes an equivalent public API. The local Rust diff is:
 
-* `runtime/jsruntime.rs`: `register_native_module` and two test-only lazy-ESM
-  helpers gated by the `native_module_testing` feature;
+* `runtime/jsruntime.rs`: `register_native_module` and test-only lazy-ESM,
+  JSON-name, and JSON-alias helpers gated by the `native_module_testing`
+  feature;
 * `modules/module_map_data.rs` and `modules/map.rs`: `has_name_any_type`, which
-  checks the by-name table under every requested module type;
+  checks the by-name table under every requested module type, plus a small
+  `ModuleMap::alias` wrapper for the collision test;
 * `Cargo.toml`: the `native_module_testing` feature.
 
 The added `LICENSE` documents the upstream MIT terms. `neojs-core` enables

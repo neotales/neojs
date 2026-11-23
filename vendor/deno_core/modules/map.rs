@@ -286,6 +286,20 @@ impl ModuleMap {
     self.data.borrow().has_name_any_type(name)
   }
 
+  /// Add an alias under a requested module type.
+  #[cfg(feature = "native_module_testing")]
+  pub(crate) fn alias(
+    &self,
+    name: FastString,
+    requested_module_type: &RequestedModuleType,
+    target: FastString,
+  ) {
+    self
+      .data
+      .borrow_mut()
+      .alias(name, requested_module_type, target);
+  }
+
   /// Register an additional `(name, requested_module_type) -> module_id`
   /// mapping for an already-registered module. See
   /// `ModuleMapData::register_under_type`.
