@@ -87,11 +87,12 @@ pub(crate) fn unsupported_module_type(requested: &RequestedModuleType) -> Option
     ))
 }
 
-/// A callback that sees a remote module's final URL before registration.
+/// A callback that sees a remote module's requested and final URLs before
+/// registration.
 ///
 /// An error refuses the module. The JSR loader installs one to track ordinary
 /// HTTPS identities and to protect verified registry identities.
-pub(crate) type FinalUrlObserver = Rc<dyn Fn(&Url) -> Result<(), String>>;
+pub(crate) type FinalUrlObserver = Rc<dyn Fn(&Url, &Url) -> Result<(), String>>;
 
 /// A loader for local and, when enabled, remote ECMAScript and TypeScript
 /// modules.
@@ -115,11 +116,13 @@ pub(crate) struct FileModuleLoader {
     /// source to the module map, which registers the module under its final
     /// URL and aliases the requested URL to it.
     entry: RefCell<Option<PreparedEntry>>,
-    /// Observes the final URL of a remote module before it is registered.
+    /// Observes the requested and final URLs of a remote module before it is
+    /// registered.
     ///
-    /// The JSR loader installs this to record an ordinary HTTPS module's final
-    /// redirect URL, and to refuse a redirect onto an already verified JSR
-    /// identity before V8 can register a second module there.
+    /// The JSR loader installs this to record an ordinary HTTPS module's
+    /// requested and final redirect URLs, and to refuse a redirect onto an
+    /// already verified JSR identity before V8 can register a second module
+    /// there.
     final_url_observer: RefCell<Option<FinalUrlObserver>>,
 }
 
@@ -143,20 +146,20 @@ impl FileModuleLoader {
         }
     }
 
-    /// Installs a final-URL observer.
+    /// Installs a URL observer.
     ///
     /// The observer runs after a remote module is fetched and prepared, and
-    /// before the `ModuleSource` that registers it is returned. An error
-    /// prevents registration.
+    /// before the `ModuleSource` that registers it is returned. It receives the
+    /// requested URL and the final redirect URL. An error prevents registration.
     pub(crate) fn set_final_url_observer(&self, observer: FinalUrlObserver) {
         *self.final_url_observer.borrow_mut() = Some(observer);
     }
 
     /// Runs the final-URL observer, when one is installed.
-    fn observe_final_url(&self, url: &Url) -> Result<(), String> {
+    fn observe_final_url(&self, requested: &Url, final_url: &Url) -> Result<(), String> {
         let observer = self.final_url_observer.borrow();
         match observer.as_ref() {
-            Some(observer) => observer(url),
+            Some(observer) => observer(requested, final_url),
             None => Ok(()),
         }
     }
@@ -307,7 +310,7 @@ impl ModuleLoader for FileModuleLoader {
         }
         if module_specifier.scheme() == "https" {
             if let Some(entry) = self.take_entry(module_specifier) {
-                if let Err(reason) = self.observe_final_url(&entry.found) {
+                if let Err(reason) = self.observe_final_url(module_specifier, &entry.found) {
                     return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
                         "cannot load {display}: {reason}"
                     ))));
@@ -425,7 +428,7 @@ impl FileModuleLoader {
                 }
             }
         };
-        if let Err(reason) = self.observe_final_url(&fetched.final_url) {
+        if let Err(reason) = self.observe_final_url(module_specifier, &fetched.final_url) {
             return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
                 "cannot load {display}: {reason}"
             ))));

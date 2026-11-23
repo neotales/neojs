@@ -36,8 +36,8 @@
 //!
 //! # Direct HTTPS and the JSR graph
 //!
-//! Only a `jsr:` import, a relative import from an admitted JSR module, or an
-//! explicit `https://jsr.io` module URL imported by an admitted JSR module joins
+//! Only a `jsr:` import, a relative import from a resolved JSR module, or an
+//! explicit `https://jsr.io` module URL imported by a resolved JSR module joins
 //! the verified JSR graph. An ordinary `https://jsr.io/...` import from a local
 //! or remote module keeps the HTTPS loader's semantics and is not checked
 //! against registry metadata, so a prepared `run_url` entry is used as-is. A
@@ -51,6 +51,14 @@
 //! recorded under that final URL, so a later `jsr:` import cannot reuse the
 //! unverified redirect body. A prepared `run_url` entry goes through the same
 //! observation.
+//!
+//! A `jsr:` resolution is pending, not loaded. Only a successful verified load
+//! marks the identity as loaded and makes it a collision authority. An
+//! `import.meta.resolve` that never loads therefore does not refuse an ordinary
+//! redirect, and a failed load does not either. A pending resolution still
+//! selects the verified load path if V8 later loads the URL; the original
+//! specifier is not available at load time, and choosing verification is the
+//! safe direction.
 //!
 //! # Graph boundary
 //!
@@ -317,19 +325,23 @@ pub(crate) struct JsrModuleLoader {
     packages: RefCell<BTreeMap<String, PackageMetadata>>,
     versions: RefCell<BTreeMap<String, VersionMetadata>>,
     graph: RefCell<GraphState>,
-    /// Canonical URLs admitted to the verified JSR graph by a `jsr:` import or
-    /// a relative import from an admitted JSR module.
+    /// Canonical URLs resolved from a `jsr:` specifier or a relative import
+    /// from a resolved JSR module, and not yet loaded successfully.
     ///
-    /// A direct `https://jsr.io/...` import is absent even when it names the
-    /// same file, so it keeps the ordinary remote loader's semantics and a
-    /// prepared `run_url` entry is consumed instead of being fetched again.
-    jsr_modules: Rc<RefCell<BTreeSet<String>>>,
-    /// `jsr.io` URLs that were loaded as ordinary HTTPS modules.
+    /// This set selects the verified load path. It is deliberately not a
+    /// collision authority: `import.meta.resolve` can populate it without a
+    /// later load, and a failed load must not refuse an ordinary redirect.
+    jsr_pending: Rc<RefCell<BTreeSet<String>>>,
+    /// Canonical URLs whose verified module source was handed to V8.
     ///
-    /// A later `jsr:` import that resolves to the same URL cannot add registry
-    /// verification to a module V8 already has under that identity, so it is
-    /// rejected instead of silently reusing an unverified body.
-    ordinary_registry_urls: Rc<RefCell<BTreeSet<String>>>,
+    /// This is the collision authority for ordinary HTTPS redirects.
+    jsr_loaded: Rc<RefCell<BTreeSet<String>>>,
+    /// `jsr.io` URLs whose ordinary HTTPS module source was handed to V8.
+    ///
+    /// Both the requested and final identities are recorded, because V8
+    /// registers under the final redirect URL and aliases the requested URL.
+    /// A later `jsr:` import of either identity is refused.
+    ordinary_loaded: Rc<RefCell<BTreeSet<String>>>,
 }
 
 impl JsrModuleLoader {
@@ -339,29 +351,35 @@ impl JsrModuleLoader {
         files: Rc<FileModuleLoader>,
         limits: Limits,
     ) -> Self {
-        let jsr_modules = Rc::new(RefCell::new(BTreeSet::new()));
-        let ordinary_registry_urls = Rc::new(RefCell::new(BTreeSet::new()));
-        let final_jsr_modules = Rc::clone(&jsr_modules);
-        let final_ordinary = Rc::clone(&ordinary_registry_urls);
-        files.set_final_url_observer(Rc::new(move |url: &Url| {
-            if url.scheme() != "https" || url.host_str() != Some(REGISTRY_HOST) {
-                return Ok(());
-            }
-            let identities = registry_identities(url);
-            for identity in &identities {
-                if final_jsr_modules.borrow().contains(identity) {
-                    return Err(format!(
-                        "the final URL `{}` is already a verified JSR module; an ordinary HTTPS redirect cannot register a module under that identity",
-                        display_url(url)
-                    ));
+        let jsr_pending = Rc::new(RefCell::new(BTreeSet::new()));
+        let jsr_loaded = Rc::new(RefCell::new(BTreeSet::new()));
+        let ordinary_loaded = Rc::new(RefCell::new(BTreeSet::new()));
+        let final_jsr_loaded = Rc::clone(&jsr_loaded);
+        let final_ordinary = Rc::clone(&ordinary_loaded);
+        files.set_final_url_observer(Rc::new(
+            move |requested: &Url, final_url: &Url| {
+                let requested_identities = registry_identities_if_registry(requested);
+                let final_identities = registry_identities_if_registry(final_url);
+                {
+                    let loaded = final_jsr_loaded.borrow();
+                    if requested_identities
+                        .iter()
+                        .chain(final_identities.iter())
+                        .any(|identity| loaded.contains(identity))
+                    {
+                        return Err(format!(
+                            "the final URL `{}` is already a verified JSR module; an ordinary HTTPS load cannot register a module under that identity",
+                            display_url(final_url)
+                        ));
+                    }
                 }
-            }
-            let mut ordinary = final_ordinary.borrow_mut();
-            for identity in identities {
-                ordinary.insert(identity);
-            }
-            Ok(())
-        }));
+                let mut ordinary = final_ordinary.borrow_mut();
+                for identity in requested_identities.into_iter().chain(final_identities) {
+                    ordinary.insert(identity);
+                }
+                Ok(())
+            },
+        ));
         Self {
             registry,
             limits,
@@ -369,8 +387,9 @@ impl JsrModuleLoader {
             packages: RefCell::new(BTreeMap::new()),
             versions: RefCell::new(BTreeMap::new()),
             graph: RefCell::new(GraphState::default()),
-            jsr_modules,
-            ordinary_registry_urls,
+            jsr_pending,
+            jsr_loaded,
+            ordinary_loaded,
         }
     }
 
@@ -407,12 +426,12 @@ impl JsrModuleLoader {
             let resolved = jsr::resolve_module(&specifier, &package, &version)
                 .map_err(|error| error.to_string())?;
             let url = canonical_module_url(&resolved)?;
-            if !self.is_jsr_module(url.as_str()) && self.is_ordinary_registry_url(&url) {
+            if self.is_ordinary_loaded(&url) {
                 return Err(format!(
                     "`{url}` was already loaded as an ordinary HTTPS module; a `jsr:` import cannot add registry verification to that module. Use the `jsr:` import first, or a new Runtime."
                 ));
             }
-            self.admit(&url);
+            self.pend(&url);
             Ok(url)
         })();
         result.map_err(|reason| resolve_error(input, referrer, reason))
@@ -455,49 +474,68 @@ impl JsrModuleLoader {
             // Normalize the encoding chosen by the URL parser so one file has
             // one module identity however the importer spelled it.
             let url = canonical_url_for(&joined_module)?;
-            if !self.is_jsr_module(url.as_str()) && self.is_ordinary_registry_url(&url) {
+            if self.is_ordinary_loaded(&url) {
                 return Err(format!(
                     "`{url}` was already loaded as an ordinary HTTPS module; a JSR graph import cannot add registry verification to that module"
                 ));
             }
-            self.admit(&url);
+            self.pend(&url);
             Ok(url)
         })();
         result.map_err(|reason| resolve_error(input, referrer, reason))
     }
 
-    /// Records a canonical URL as part of the verified JSR graph.
-    fn admit(&self, url: &Url) {
-        self.jsr_modules.borrow_mut().insert(url.to_string());
-    }
-
-    /// Returns whether a URL was admitted by a `jsr:` or admitted relative
-    /// import.
-    fn is_jsr_module(&self, url: &str) -> bool {
-        self.jsr_modules.borrow().contains(url)
-    }
-
-    /// Records a `jsr.io` URL that is being loaded as an ordinary HTTPS module.
+    /// Records a canonical URL as resolved through the JSR path.
     ///
-    /// A canonical module URL is recorded in both its parsed and canonical
-    /// forms, so a later `jsr:` resolution cannot miss the collision because the
-    /// two spellings encoded the path differently.
-    fn note_ordinary_registry_url(&self, url: &Url) {
-        if url.scheme() != "https" || url.host_str() != Some(REGISTRY_HOST) {
-            return;
-        }
-        let mut ordinary = self.ordinary_registry_urls.borrow_mut();
-        for identity in registry_identities(url) {
-            ordinary.insert(identity);
+    /// This does not mark it loaded; only a successful `load_jsr` does that.
+    fn pend(&self, url: &Url) {
+        if !self.is_jsr_loaded(url) {
+            self.jsr_pending.borrow_mut().insert(url.to_string());
         }
     }
 
-    /// Returns whether a URL was loaded as an ordinary HTTPS module.
-    fn is_ordinary_registry_url(&self, url: &Url) -> bool {
-        self.ordinary_registry_urls.borrow().contains(url.as_str())
+    /// Returns whether a URL is pending or loaded as a JSR module.
+    fn is_jsr_candidate(&self, url: &Url) -> bool {
+        let identities = registry_identities(url);
+        let pending = self.jsr_pending.borrow();
+        let loaded = self.jsr_loaded.borrow();
+        identities
+            .iter()
+            .any(|identity| pending.contains(identity) || loaded.contains(identity))
     }
 
-    /// Handles an explicit `https://jsr.io` import from an admitted JSR module.
+    /// Returns whether a URL's verified source was handed to V8.
+    fn is_jsr_loaded(&self, url: &Url) -> bool {
+        let loaded = self.jsr_loaded.borrow();
+        registry_identities(url)
+            .iter()
+            .any(|identity| loaded.contains(identity))
+    }
+
+    /// Marks a URL as loaded after its verified source is prepared.
+    fn mark_jsr_loaded(&self, url: &Url) {
+        let identities = registry_identities(url);
+        {
+            let mut pending = self.jsr_pending.borrow_mut();
+            for identity in &identities {
+                pending.remove(identity);
+            }
+        }
+        let mut loaded = self.jsr_loaded.borrow_mut();
+        for identity in identities {
+            loaded.insert(identity);
+        }
+    }
+
+    /// Returns whether a URL's ordinary source was handed to V8.
+    fn is_ordinary_loaded(&self, url: &Url) -> bool {
+        let loaded = self.ordinary_loaded.borrow();
+        registry_identities(url)
+            .iter()
+            .any(|identity| loaded.contains(identity))
+    }
+
+    /// Handles an explicit `https://jsr.io` import from a resolved JSR module.
     ///
     /// Returns `None` when the specifier is not a `jsr.io` URL, so the caller
     /// can delegate it. A canonical module URL joins the verified JSR graph; a
@@ -517,13 +555,12 @@ impl JsrModuleLoader {
                 );
             };
             let canonical = canonical_url_for(&module)?;
-            if !self.is_jsr_module(canonical.as_str()) && self.is_ordinary_registry_url(&canonical)
-            {
+            if self.is_ordinary_loaded(&canonical) {
                 return Err(format!(
                     "`{canonical}` was already loaded as an ordinary HTTPS module; a JSR graph import cannot add registry verification to that module"
                 ));
             }
-            self.admit(&canonical);
+            self.pend(&canonical);
             Ok(canonical)
         })();
         Some(result.map_err(|reason| resolve_error(input, referrer, reason)))
@@ -615,16 +652,23 @@ impl JsrModuleLoader {
         Ok(())
     }
 
-    /// Loads one admitted JSR graph module after verifying it against the
+    /// Loads one resolved JSR graph module after verifying it against the
     /// version manifest.
     fn load_jsr(&self, url: &Url, referrer: &str) -> Result<ModuleSource, LoadFailure> {
+        if self.is_ordinary_loaded(url) {
+            return Err(self.load_failure(
+                url,
+                referrer,
+                "the URL is already loaded as an ordinary HTTPS module; a `jsr:` import cannot add registry verification to that module".to_owned(),
+            ));
+        }
         let Some(module) =
             parse_module_url(url).map_err(|reason| self.load_failure(url, referrer, reason))?
         else {
             return Err(self.load_failure(
                 url,
                 referrer,
-                "the admitted JSR module URL is not a canonical registry module".to_owned(),
+                "the resolved JSR module URL is not a canonical registry module".to_owned(),
             ));
         };
         let format = module_format(Path::new(module.path.as_str()))
@@ -694,7 +738,8 @@ impl ModuleLoader for JsrModuleLoader {
         if specifier.starts_with("jsr:") {
             return self.resolve_jsr(specifier, referrer);
         }
-        if self.is_jsr_module(referrer) {
+        let referrer_is_jsr = Url::parse(referrer).is_ok_and(|url| self.is_jsr_candidate(&url));
+        if referrer_is_jsr {
             if is_relative_reference(specifier) {
                 return self.resolve_relative(specifier, referrer);
             }
@@ -706,12 +751,6 @@ impl ModuleLoader for JsrModuleLoader {
             if let Some(response) = self.resolve_registry_https(specifier, referrer) {
                 return response;
             }
-        }
-        // Record a direct jsr.io URL before the remote loader resolves it, so a
-        // later `jsr:` import of the same identity cannot silently reuse an
-        // unverified module.
-        if let Ok(url) = Url::parse(specifier) {
-            self.note_ordinary_registry_url(&url);
         }
         self.files.resolve(specifier, referrer, kind)
     }
@@ -730,18 +769,17 @@ impl ModuleLoader for JsrModuleLoader {
         let referrer = maybe_referrer
             .map(|referrer| referrer.specifier.as_str())
             .unwrap_or("");
-        if self.is_jsr_module(module_specifier.as_str()) {
+        if self.is_jsr_candidate(module_specifier) {
             return match self.load_jsr(module_specifier, referrer) {
-                Ok(source) => ModuleLoadResponse::Sync(Ok(source)),
+                Ok(source) => {
+                    self.mark_jsr_loaded(module_specifier);
+                    ModuleLoadResponse::Sync(Ok(source))
+                }
                 Err(failure) => {
                     ModuleLoadResponse::Sync(Err(JsErrorBox::generic(failure.to_string())))
                 }
             };
         }
-        // A direct jsr.io URL keeps the ordinary HTTPS loader's semantics. Note
-        // it so a later `jsr:` import cannot reuse the same module identity
-        // without registry verification.
-        self.note_ordinary_registry_url(module_specifier);
         self.files.load(module_specifier, maybe_referrer, options)
     }
 }
@@ -908,6 +946,15 @@ fn registry_identities(url: &Url) -> Vec<String> {
         }
     }
     identities
+}
+
+/// Returns registry identities for a URL only when it is on the public origin.
+fn registry_identities_if_registry(url: &Url) -> Vec<String> {
+    if url.scheme() == "https" && url.host_str() == Some(REGISTRY_HOST) {
+        registry_identities(url)
+    } else {
+        Vec::new()
+    }
 }
 
 /// Parses and validates one canonical registry URL.
@@ -1894,9 +1941,10 @@ await import("jsr:@scope/bb@1");
 
     fn load_file(loader: &JsrModuleLoader, url: &str) -> Result<(), String> {
         let url = deno_core::url::Url::parse(url).expect("fixture URL");
-        // A real `resolve` admits the canonical URL before `load` sees it.
-        // This unit test calls `load` directly to exercise the bounds.
-        loader.admit(&url);
+        // A real `resolve` marks the canonical URL as a pending JSR module
+        // before `load` sees it. This unit test calls `load` directly to
+        // exercise the bounds.
+        loader.pend(&url);
         let options = || deno_core::ModuleLoadOptions {
             is_dynamic_import: false,
             is_synchronous: false,
