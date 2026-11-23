@@ -87,6 +87,11 @@ pub mod test_support {
         crate::strings::test_reads()
     }
 
+    /// Return the number of source read attempts, including a failed one.
+    pub fn strings_text_attempts() -> usize {
+        crate::strings::test_attempts()
+    }
+
     /// Reset the streaming-search read counters and injected failure.
     pub fn reset_strings_text_reads() {
         crate::strings::reset_test_reads();

@@ -118,9 +118,15 @@ if (caught.message !== "injected strings read failure") {
         .run_source("memory.js", source)
         .expect("the guest catches the injected exception");
     let (units, windows) = test_support::strings_text_reads();
-    assert!(windows == 1, "the failed scan read {windows} windows");
+    let attempts = test_support::strings_text_attempts();
+    assert_eq!(windows, 1, "the failed scan read {windows} windows");
     assert!(
         units <= WINDOW_UNITS,
         "the failed scan copied {units} units"
+    );
+    assert_eq!(
+        attempts,
+        WINDOW_UNITS + 1,
+        "the scan attempted {attempts} reads; it must stop at the failed read"
     );
 }

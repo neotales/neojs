@@ -26,6 +26,10 @@ static TEXT_UNITS_READ: std::sync::atomic::AtomicUsize = std::sync::atomic::Atom
 #[cfg(feature = "test-support")]
 static TEXT_WINDOWS_READ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Counts every source read attempt, including the one that fails.
+#[cfg(feature = "test-support")]
+static TEXT_READ_ATTEMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Number of successful windows before an injected read failure.
 #[cfg(feature = "test-support")]
 static FAIL_AFTER_LOADS: std::sync::atomic::AtomicUsize =
@@ -45,11 +49,18 @@ pub(crate) fn test_reads() -> (usize, usize) {
     )
 }
 
+/// Returns the number of source read attempts, including a failed one.
+#[cfg(feature = "test-support")]
+pub(crate) fn test_attempts() -> usize {
+    TEXT_READ_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Resets the streaming-search read counters and injected failure.
 #[cfg(feature = "test-support")]
 pub(crate) fn reset_test_reads() {
     TEXT_UNITS_READ.store(0, std::sync::atomic::Ordering::Relaxed);
     TEXT_WINDOWS_READ.store(0, std::sync::atomic::Ordering::Relaxed);
+    TEXT_READ_ATTEMPTS.store(0, std::sync::atomic::Ordering::Relaxed);
     FAIL_AFTER_LOADS.store(NO_INJECTED_FAILURE, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -265,6 +276,8 @@ impl logic::Utf16Source for Utf16Text<'_> {
     }
 
     fn unit(&mut self, index: usize) -> std::result::Result<u16, Self::Error> {
+        #[cfg(feature = "test-support")]
+        TEXT_READ_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if index < self.window_start || index >= self.window_start + self.window.len() {
             self.load(index)?;
         }
