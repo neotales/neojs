@@ -13,7 +13,17 @@ This directory is `rquickjs-sys` 0.14.0 from crates.io, pinned exactly.
 - The patch adds no callbacks, does not run Proxy or other exotic traps, rejects
   every exotic object before inspection, counts all shape slots against a scan
   bound, and allocates only after both key and scan bounds pass.
-- The generated bindings in `src/bindings/` carry the same two declarations for
+- Every `JS_BOUNDED_KEYS_MEMORY` return has a pending QuickJS out-of-memory
+  exception: the table allocation goes through `js_malloc`, and the size-overflow
+  branch throws explicitly. The Rust adapter rethrows that pending exception
+  instead of constructing a new error, so an allocation failure cannot be
+  reported as a Node input error. No atom table exists on that path; the normal
+  RAII guard still runs.
+- `JS_GetOwnEnumerableStringKeysBoundedAllocFailureForTest` is a test-only entry
+  point that follows the same bounds and cleanup but forces the table allocation
+  to fail, producing a normal `out of memory` exception. It is not part of the
+  adapter API and runs no JavaScript.
+- The generated bindings in `src/bindings/` carry the same declarations for
   every supported target so the ABI is identical on all bundled platforms. The
   C side is target-independent, but only `x86_64-unknown-linux-gnu` has been
   compiled and tested in this change; no other target was cross-compiled here.

@@ -1035,6 +1035,17 @@ JS_EXTERN int JS_GetOwnEnumerableStringKeysBounded(JSContext *ctx,
                                                    uint32_t *plen,
                                                    uint32_t *pscanned);
 
+/* Test-only entry point: same bounds and cleanup, but the table allocation is
+   failed deterministically. Not part of the supported adapter API. */
+JS_EXTERN int
+JS_GetOwnEnumerableStringKeysBoundedAllocFailureForTest(JSContext *ctx,
+                                                        JSValueConst obj,
+                                                        uint32_t max_keys,
+                                                        uint32_t max_scan,
+                                                        JSPropertyEnum **ptab,
+                                                        uint32_t *plen,
+                                                        uint32_t *pscanned);
+
 /* Converts an atom to a C string only after checking its UTF-16 length against
    max_len. Returns JS_BOUNDED_KEYS_OK, JS_BOUNDED_KEYS_TOO_MANY_KEYS,
    JS_BOUNDED_KEYS_UNSUPPORTED, or JS_BOUNDED_KEYS_EXCEPTION. On success the

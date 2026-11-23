@@ -1189,6 +1189,18 @@ unsafe extern "C" {
         pscanned: *mut u32,
     ) -> ::core::ffi::c_int;
 }
+
+unsafe extern "C" {
+    pub fn JS_GetOwnEnumerableStringKeysBoundedAllocFailureForTest(
+        ctx: *mut JSContext,
+        obj: JSValue,
+        max_keys: u32,
+        max_scan: u32,
+        ptab: *mut *mut JSPropertyEnum,
+        plen: *mut u32,
+        pscanned: *mut u32,
+    ) -> ::core::ffi::c_int;
+}
 unsafe extern "C" {
     pub fn JS_AtomToCStringLenBounded(
         ctx: *mut JSContext,

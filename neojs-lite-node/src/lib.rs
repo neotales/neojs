@@ -484,6 +484,72 @@ fn bounded_string_keys<'js>(
 ) -> std::result::Result<Vec<String>, BoundedKeysError> {
     use rquickjs::qjs;
 
+    let mut tab: *mut qjs::JSPropertyEnum = std::ptr::null_mut();
+    let mut len = 0u32;
+    let mut scanned = 0u32;
+
+    // SAFETY: `ctx` owns a live context, `object` belongs to it, and the out
+    // pointers are valid stack locations.
+    let status = unsafe {
+        qjs::JS_GetOwnEnumerableStringKeysBounded(
+            ctx.as_raw().as_ptr(),
+            object.as_raw(),
+            max_keys,
+            max_scan,
+            &mut tab,
+            &mut len,
+            &mut scanned,
+        )
+    };
+    finish_bounded_keys(ctx, status, tab, len, max_key_len)
+}
+
+/// Test-only entry point that forces the table allocation to fail.
+///
+/// It shares [`finish_bounded_keys`] with the production path, so the status
+/// handling, pending-exception propagation and RAII cleanup are identical.
+#[cfg(test)]
+#[allow(unsafe_code)]
+fn bounded_string_keys_with_alloc_failure<'js>(
+    ctx: &Ctx<'js>,
+    object: &Object<'js>,
+    max_keys: u32,
+    max_scan: u32,
+    max_key_len: u32,
+) -> std::result::Result<Vec<String>, BoundedKeysError> {
+    use rquickjs::qjs;
+
+    let mut tab: *mut qjs::JSPropertyEnum = std::ptr::null_mut();
+    let mut len = 0u32;
+    let mut scanned = 0u32;
+
+    // SAFETY: as above; this is the vendored test-only entry point.
+    let status = unsafe {
+        qjs::JS_GetOwnEnumerableStringKeysBoundedAllocFailureForTest(
+            ctx.as_raw().as_ptr(),
+            object.as_raw(),
+            max_keys,
+            max_scan,
+            &mut tab,
+            &mut len,
+            &mut scanned,
+        )
+    };
+    finish_bounded_keys(ctx, status, tab, len, max_key_len)
+}
+
+/// Maps a bounded-enumeration status to keys, freeing the atom table on every
+/// path.
+#[allow(unsafe_code)]
+fn finish_bounded_keys<'js>(
+    ctx: &Ctx<'js>,
+    status: i32,
+    tab: *mut rquickjs::qjs::JSPropertyEnum,
+    len: u32,
+    max_key_len: u32,
+) -> std::result::Result<Vec<String>, BoundedKeysError> {
+    use rquickjs::qjs;
+
     // These values mirror the JSBoundedKeysStatus C enum in the vendored
     // QuickJS header. They are part of the audited patch surface.
     const OK: i32 = 0;
@@ -512,24 +578,6 @@ fn bounded_string_keys<'js>(
     }
 
     let raw = ctx.as_raw().as_ptr();
-    let mut tab: *mut qjs::JSPropertyEnum = std::ptr::null_mut();
-    let mut len = 0u32;
-    let mut scanned = 0u32;
-
-    // SAFETY: `raw` is the live context belonging to `ctx`, `object` belongs to
-    // the same context, and the out pointers are valid stack locations.
-    let status = unsafe {
-        qjs::JS_GetOwnEnumerableStringKeysBounded(
-            raw,
-            object.as_raw(),
-            max_keys,
-            max_scan,
-            &mut tab,
-            &mut len,
-            &mut scanned,
-        )
-    };
-
     let guard = EnumGuard { raw, tab, len };
     match status {
         OK => {}
@@ -572,14 +620,34 @@ fn bounded_string_keys<'js>(
     Ok(keys)
 }
 
+/// Rethrows the pending QuickJS exception without allocating a new error.
+///
+/// Allocation failures already carry a QuickJS out-of-memory exception. Using
+/// a coded error here would hide it and require another allocation, which can
+/// fail again while the runtime is out of memory.
+fn bounded_pending_error<'js>(ctx: &Ctx<'js>) -> rquickjs::Error {
+    if ctx.has_exception() {
+        let caught = ctx.catch();
+        ctx.throw(caught)
+    } else {
+        // Defensive: the MEMORY and EXCEPTION statuses are expected to carry an
+        // exception. Returning `Unknown` avoids allocating on this path.
+        rquickjs::Error::Unknown
+    }
+}
+
 fn bounded_option_error<'js>(ctx: &Ctx<'js>, error: BoundedKeysError) -> rquickjs::Error {
     match error {
+        BoundedKeysError::Memory => bounded_pending_error(ctx),
+        BoundedKeysError::Exception => {
+            if ctx.has_exception() {
+                bounded_pending_error(ctx)
+            } else {
+                invalid(ctx, "options could not be read")
+            }
+        }
         BoundedKeysError::InvalidKey => {
             coded_error(ctx, "ERR_NODE_UNSUPPORTED", "an option is not implemented")
-        }
-        BoundedKeysError::Exception => {
-            let _ = ctx.catch();
-            invalid(ctx, "options could not be read")
         }
         _ => coded_error(ctx, "ERR_NODE_UNSUPPORTED", "an option is not implemented"),
     }
@@ -593,11 +661,15 @@ fn bounded_env_error<'js>(ctx: &Ctx<'js>, error: BoundedKeysError) -> rquickjs::
             "Proxy options.env is not supported by the native child_process module",
         ),
         BoundedKeysError::InvalidKey => invalid(ctx, "an environment name is not valid"),
+        BoundedKeysError::Memory => bounded_pending_error(ctx),
         BoundedKeysError::Exception => {
-            let _ = ctx.catch();
-            request_too_large(ctx)
+            if ctx.has_exception() {
+                bounded_pending_error(ctx)
+            } else {
+                invalid(ctx, "environment keys could not be read")
+            }
         }
-        _ => request_too_large(ctx),
+        BoundedKeysError::TooManyKeys | BoundedKeysError::ScanLimit => request_too_large(ctx),
     }
 }
 
@@ -898,8 +970,11 @@ fn js_string<'js>(ctx: &Ctx<'js>, text: &str) -> Result<rquickjs::String<'js>> {
 
 #[cfg(test)]
 mod bounded_key_tests {
-    use super::{BoundedKeysError, bounded_string_keys};
-    use rquickjs::{Context, Runtime, Value};
+    use super::{
+        BoundedKeysError, bounded_env_error, bounded_option_error, bounded_string_keys,
+        bounded_string_keys_with_alloc_failure,
+    };
+    use rquickjs::{Context, Exception, Runtime, Value};
 
     fn with_object<R>(
         script: &str,
@@ -1111,5 +1186,76 @@ mod bounded_key_tests {
                 BoundedKeysError::TooManyKeys
             );
         }
+    }
+
+    #[test]
+    fn an_allocation_failure_rethrows_the_quickjs_oom_and_cleans_up() {
+        let runtime = Runtime::new().expect("runtime");
+        let context = Context::full(&runtime).expect("context");
+
+        // First failure: inspect exactly what the guest would receive.
+        context.with(|ctx| {
+            let value: Value = ctx.eval("({ visible: 1 })").expect("object");
+            let object = value.as_object().expect("object");
+            let error = bounded_string_keys_with_alloc_failure(&ctx, object, 16, 64, 64)
+                .expect_err("allocation failure");
+            assert_eq!(error, BoundedKeysError::Memory);
+
+            let mapped = bounded_env_error(&ctx, error);
+            assert!(matches!(mapped, rquickjs::Error::Exception));
+
+            let caught = ctx.catch();
+            let exception =
+                Exception::from_object(caught.as_object().expect("error object").clone())
+                    .expect("error instance");
+            let message = exception.message().unwrap_or_default();
+            assert!(message.contains("out of memory"), "{message}");
+            assert!(!message.contains("ERR_NODE_"), "{message}");
+
+            // The options mapping must not turn the same failure into
+            // ERR_NODE_UNSUPPORTED either.
+            let value: Value = ctx.eval("({ visible: 1 })").expect("object");
+            let object = value.as_object().expect("object");
+            let error = bounded_string_keys_with_alloc_failure(&ctx, object, 16, 64, 64)
+                .expect_err("allocation failure");
+            let mapped = bounded_option_error(&ctx, error);
+            assert!(matches!(mapped, rquickjs::Error::Exception));
+            let caught = ctx.catch();
+            let exception =
+                Exception::from_object(caught.as_object().expect("error object").clone())
+                    .expect("error instance");
+            let message = exception.message().unwrap_or_default();
+            assert!(message.contains("out of memory"), "{message}");
+            assert!(!message.contains("ERR_NODE_"), "{message}");
+
+            // The context still works after the failure.
+            let answer: i32 = ctx.eval("40 + 2").expect("eval after failure");
+            assert_eq!(answer, 42);
+            ctx.run_gc();
+        });
+
+        // Repeated failures must not grow the runtime heap.
+        runtime.run_gc();
+        let before = runtime.memory_usage().malloc_size;
+        for _ in 0..64 {
+            context.with(|ctx| {
+                let value: Value = ctx.eval("({ visible: 1 })").expect("object");
+                let object = value.as_object().expect("object");
+                let error = bounded_string_keys_with_alloc_failure(&ctx, object, 16, 64, 64)
+                    .expect_err("allocation failure");
+                let _ = bounded_env_error(&ctx, error);
+                let _ = ctx.catch();
+            });
+        }
+        runtime.run_gc();
+        let after = runtime.memory_usage().malloc_size;
+        assert!(
+            after <= before + 8192,
+            "runtime heap grew from {before} to {after}"
+        );
+        context.with(|ctx| {
+            let answer: i32 = ctx.eval("6 * 7").expect("eval after failures");
+            assert_eq!(answer, 42);
+        });
     }
 }

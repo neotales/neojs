@@ -9703,12 +9703,14 @@ int JS_GetOwnPropertyNames(JSContext *ctx, JSPropertyEnum **ptab,
                                           JS_VALUE_GET_OBJ(obj), flags);
 }
 
-int JS_GetOwnEnumerableStringKeysBounded(JSContext *ctx, JSValueConst obj,
-                                         uint32_t max_keys,
-                                         uint32_t max_scan,
-                                         JSPropertyEnum **ptab,
-                                         uint32_t *plen,
-                                         uint32_t *pscanned)
+static int js_get_own_enumerable_string_keys_bounded(JSContext *ctx,
+                                                     JSValueConst obj,
+                                                     uint32_t max_keys,
+                                                     uint32_t max_scan,
+                                                     bool force_alloc_failure,
+                                                     JSPropertyEnum **ptab,
+                                                     uint32_t *plen,
+                                                     uint32_t *pscanned)
 {
     JSObject *p;
     JSShape *sh;
@@ -9764,9 +9766,16 @@ int JS_GetOwnEnumerableStringKeysBounded(JSContext *ctx, JSValueConst obj,
             return JS_BOUNDED_KEYS_TOO_MANY_KEYS;
     }
     key_count = num_count + str_count;
-    if ((size_t)key_count > SIZE_MAX / sizeof(JSPropertyEnum))
+    if ((size_t)key_count > SIZE_MAX / sizeof(JSPropertyEnum)) {
+        JS_ThrowOutOfMemory(ctx);
         return JS_BOUNDED_KEYS_MEMORY;
+    }
     count = key_count == 0 ? 1 : (size_t)key_count;
+    if (force_alloc_failure) {
+        /* Deterministic fault injection for the allocation failure path. */
+        JS_ThrowOutOfMemory(ctx);
+        return JS_BOUNDED_KEYS_MEMORY;
+    }
     tab = js_malloc(ctx, sizeof(JSPropertyEnum) * count);
     if (!tab)
         return JS_BOUNDED_KEYS_MEMORY;
@@ -9810,6 +9819,27 @@ int JS_GetOwnEnumerableStringKeysBounded(JSContext *ctx, JSValueConst obj,
     *ptab = tab;
     *plen = key_count;
     return JS_BOUNDED_KEYS_OK;
+}
+
+int JS_GetOwnEnumerableStringKeysBounded(JSContext *ctx, JSValueConst obj,
+                                         uint32_t max_keys,
+                                         uint32_t max_scan,
+                                         JSPropertyEnum **ptab,
+                                         uint32_t *plen,
+                                         uint32_t *pscanned)
+{
+    return js_get_own_enumerable_string_keys_bounded(
+        ctx, obj, max_keys, max_scan, false, ptab, plen, pscanned);
+}
+
+/* Test-only: takes the same path but fails the table allocation. The pending
+   exception is a normal QuickJS out-of-memory error. */
+int JS_GetOwnEnumerableStringKeysBoundedAllocFailureForTest(
+    JSContext *ctx, JSValueConst obj, uint32_t max_keys, uint32_t max_scan,
+    JSPropertyEnum **ptab, uint32_t *plen, uint32_t *pscanned)
+{
+    return js_get_own_enumerable_string_keys_bounded(
+        ctx, obj, max_keys, max_scan, true, ptab, plen, pscanned);
 }
 
 int JS_AtomToCStringLenBounded(JSContext *ctx, size_t *plen, JSAtom atom,
