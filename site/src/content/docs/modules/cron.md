@@ -76,18 +76,33 @@ There is no `ref`, `unref`, `close`, `closed`, name, backoff, or retry option. T
 
 ## Events
 
-Pass `onEvent(event)` to observe scheduling events:
+Pass `onEvent(event)` to observe scheduling events. This example is
+self-contained: `* * * * *` runs once per UTC minute, so it waits up to 60
+seconds for the first tick, observes a real `error` event, disposes the job,
+and exits.
 
 ```js
-const job = cron("* * * * *", async () => {
-    await sync();
+import { cron, next } from "neo:cron";
+
+// The first tick is strictly after this call, at a whole UTC minute.
+const firstTick = next("* * * * *");
+console.log(`waiting up to 60 seconds for ${firstTick.toISOString()}`);
+
+let job;
+job = cron("* * * * *", () => {
+    throw new Error("demonstration failure");
 }, {
     onEvent(event) {
-        if (event.type === "error") console.error(event.error);
+        if (event.type !== "error") return;
+        console.log(`observed ${event.type}: ${event.error.message} (fatal=${event.fatal})`);
+        job.dispose();
     },
 });
-job.dispose();
 ```
+
+The callback throws on purpose so the example produces an `error` event.
+`fatal` is `false` for a callback failure. If the expression were invalid or had
+no future occurrence, `cron` would throw before a job is returned.
 
 The event shapes are:
 
