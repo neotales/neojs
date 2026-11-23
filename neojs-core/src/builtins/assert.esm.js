@@ -4,15 +4,16 @@
 // The implementation lives in `neo.js`, which the runtime evaluates once per
 // realm. This file only re-exports it, so every named export is the same
 // function object as the matching property of `Neo.getBuiltInModule("assert")`,
-// and the default export is that callable object itself. Nothing here reaches
-// the private module registry: it reads the public module object and binds its
-// properties.
+// and the default export is that callable object itself. The ES module namespace
+// is a distinct object from the registry object; only the exported function
+// identity is shared. Nothing here reaches the private module registry: it reads
+// the public module object and binds its properties.
 //
 // The exported list must match the properties of the `assert` function in
 // `neo.js`. `neojs-core/tests/runtime.rs` asserts that the lists are identical,
 // that each named export is identity-equal to the registry property, and that
-// the default export is the callable `assert`. The module namespace is
-// immutable, and the module object behind it is frozen, so neither path can
+// the default export is the callable `assert`. The namespace is immutable by the
+// language, and the registry object it reads is frozen, so neither path can
 // replace a function.
 //
 // The surface is a neojs-specific assertion API inspired by Node's

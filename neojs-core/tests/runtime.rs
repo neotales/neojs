@@ -824,6 +824,10 @@ fn built_in_module_namespace_and_registry_are_immutable() {
 import * as chars from "chars";
 const registry = Neo.getBuiltInModule("chars");
 
+if (chars === registry) {
+    throw new Error("the module namespace must be distinct from the registry object");
+}
+
 let rejections = 0;
 try {
     chars.isLetter = () => "namespace";
