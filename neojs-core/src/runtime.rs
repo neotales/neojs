@@ -1030,6 +1030,32 @@ mod tests {
     use super::Runtime;
     use crate::Error;
     use crate::builtins::neo_shim;
+    use std::rc::Rc;
+
+    struct IdentityLoader;
+
+    impl deno_core::ModuleLoader for IdentityLoader {
+        fn resolve(
+            &self,
+            specifier: &str,
+            _referrer: &str,
+            _kind: deno_core::ResolutionKind,
+        ) -> deno_core::ModuleResolveResponse {
+            deno_core::ModuleSpecifier::parse(specifier)
+                .map_err(|error| deno_error::JsErrorBox::generic(error.to_string()))
+        }
+
+        fn load(
+            &self,
+            _specifier: &deno_core::ModuleSpecifier,
+            _maybe_referrer: Option<&deno_core::ModuleLoadReferrer>,
+            _options: deno_core::ModuleLoadOptions,
+        ) -> deno_core::ModuleLoadResponse {
+            deno_core::ModuleLoadResponse::Sync(Err(deno_error::JsErrorBox::generic(
+                "the collision test does not expect a file load",
+            )))
+        }
+    }
 
     #[cfg(feature = "neo-chars")]
     fn noop<'s>(
@@ -1207,48 +1233,56 @@ if (first.value !== 7) {{
 
     #[test]
     fn native_module_registration_rejects_typed_and_alias_collisions() {
-        let mut runtime = Runtime::new().expect("runtime");
-        let js = runtime.js.as_mut().expect("the isolate is present");
+        let mut js = deno_core::JsRuntime::new(deno_core::RuntimeOptions {
+            module_loader: Some(Rc::new(IdentityLoader)),
+            ..Default::default()
+        });
 
         // A JSON module lives under RequestedModuleType::Json, not None.
-        js.add_json_module_for_test("neo:typed-collision", r#"{"ok":true}"#);
+        js.add_json_module_for_test("https://test/typed.json", r#"{"ok":true}"#);
         let export = js
             .execute_script("<native-export>", "(function value() { return 7; })")
             .expect("export value");
         assert!(
             js.register_native_module(
-                "neo:typed-collision",
+                "https://test/typed.json",
                 vec![(deno_core::ascii_str!("value"), export)],
             )
             .is_err(),
             "a native registration must reject a typed module name"
         );
-        // A second attempt still sees the typed name, proving the rejected call
-        // did not remove it.
-        assert!(
-            js.register_native_module("neo:typed-collision", Vec::new())
-                .is_err(),
-            "the typed module name was removed"
-        );
 
         // The alias is also under RequestedModuleType::Json, so a None lookup
         // alone would miss it; has_name_any_type must catch it.
-        js.add_json_alias_for_test("neo:alias-collision", "neo:typed-collision");
+        js.add_json_alias_for_test("https://test/alias.json", "https://test/typed.json");
         let export = js
             .execute_script("<native-export>", "(function value() { return 7; })")
             .expect("export value");
         assert!(
             js.register_native_module(
-                "neo:alias-collision",
+                "https://test/alias.json",
                 vec![(deno_core::ascii_str!("value"), export)],
             )
             .is_err(),
             "a native registration must reject a typed alias name"
         );
-        assert!(
-            js.register_native_module("neo:alias-collision", Vec::new())
-                .is_err(),
-            "the typed alias name was removed"
-        );
+
+        // Resolve and import both names through the real module graph. The
+        // JSON module and its typed alias must still exist, carry the original
+        // value, and resolve to one module identity after both rejections.
+        let main =
+            deno_core::ModuleSpecifier::parse("https://test/main.js").expect("main specifier");
+        let main_id = deno_core::futures::executor::block_on(js.load_main_es_module_from_code(
+            &main,
+            r#"
+import typed from "https://test/typed.json" with { type: "json" };
+import alias from "https://test/alias.json" with { type: "json" };
+if (typed.ok !== true) throw new Error("the typed JSON value changed");
+if (typed !== alias) throw new Error("the typed alias lost module identity");
+"#,
+        ))
+        .expect("the typed module and alias resolve and load");
+        deno_core::futures::executor::block_on(js.mod_evaluate(main_id))
+            .expect("the typed import graph evaluates");
     }
 }
