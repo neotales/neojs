@@ -1,10 +1,11 @@
 # `@neotales/chars` and `@neotales/slices` JSR fixtures
 
-These are **unmodified** responses from the public JSR registry, captured once
-over HTTPS without credentials. They are real registry documents and package
-source, not synthesized shapes. No sanitization was needed: the captured bytes
-contain only public package metadata, source, and license text. They are stored
-here so the integration tests run offline and deterministically.
+The captured registry documents and source files are **unmodified** responses
+from the public JSR registry, fetched over HTTPS without credentials. They are
+real registry documents and package source, not synthesized shapes. No
+sanitization was needed: the captured bytes contain only public package
+metadata, source, and license text. They are stored here so the integration
+tests run offline and deterministically.
 
 - Capture date: 2026-11-22 (UTC).
 - Registry origin: `https://jsr.io`
