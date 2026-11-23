@@ -459,5 +459,26 @@ fn a_malformed_github_specifier_is_never_echoed_in_an_error() {
         assert!(!message.contains("token"), "{name}: {message}");
     }
 
+    // Remote importer: a fetched module may import the same malformed
+    // specifier. Only the entry request may happen; the malformed import must
+    // fail before a raw URL is ever requested, and the error must not echo the
+    // input.
+    let remote = Server::new(&[(
+        "https://mods.test/main.js",
+        Reply::ok("import \"gh:user:secret@host/repo@v1/main.js\";\n"),
+    )]);
+    let mut runtime = runtime(&remote);
+    let error = runtime
+        .run_url("https://mods.test/main.js")
+        .expect_err("the remote import must fail");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    let message = error.to_string();
+    assert!(message.contains("GitHub specifier is invalid"), "{message}");
+    assert!(!message.contains("secret"), "{message}");
+    assert!(!message.contains("token"), "{message}");
+    assert_eq!(remote.seen(), ["https://mods.test/main.js"]);
+
     assert_eq!(server.seen(), Vec::<String>::new());
 }
