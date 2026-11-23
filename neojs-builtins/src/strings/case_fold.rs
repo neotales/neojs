@@ -1,16 +1,17 @@
 //! Unicode simple case-folding table for `neo:strings`.
 //!
-//! Generated once, not computed at runtime. The table is a sorted list of
-//! inclusive code point ranges, each mapped to the first target code point:
-//! `(start, end, target)` means `start..=end` fold to
-//! `target..=target + (end - start)`.
+//! Generated once from the Unicode 16.0 simple case-folding data, not computed
+//! at runtime. The table is a sorted list of inclusive code point ranges, each
+//! mapped to the first target code point: `(start, end, target)` means
+//! `start..=end` fold to `target..=target + (end - start)`.
 //!
-//! The data is the Unicode 16.0 simple case-folding relation. Entries whose
-//! full case folding expands to more than one code point keep their one-code-
-//! point simple mapping (for example U+1E9E folds to U+00DF) or are identity
-//! when Unicode defines no simple mapping (for example U+00DF). Code points
-//! that are unassigned in Unicode 16.0, including code points added in later
-//! releases, are identity.
+//! Unicode 16.0 is the release this V8 build's `/iu` canonicalization follows:
+//! the engine rejects a fold between code points added in Unicode 17.0, and the
+//! `neo:chars` tables are pinned to the same release. Entries whose full case
+//! folding expands to more than one code point keep their one-code-point simple
+//! mapping (for example U+1E9E folds to U+00DF) or are identity when Unicode
+//! defines no simple mapping (for example U+00DF). Code points unassigned in
+//! Unicode 16.0 are identity.
 //!
 //! `simple_fold` is an idempotent function on Unicode scalar values and on the
 //! lone surrogate code units that a JavaScript string can contain. Comparing

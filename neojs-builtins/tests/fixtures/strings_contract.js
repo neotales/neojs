@@ -33,6 +33,7 @@ const foldCases = [
     ["[a-z]", "[a-z]", true, "a literal character class"],
     ["\\d", "\\d", true, "a literal backslash"],
     ["a*", "aaa", false, "a literal star"],
+    ["\uA7CE", "\uA7CF", false, "a Unicode 17 addition is identity in the pinned release"],
 ];
 for (const [left, right, expected, description] of foldCases) {
     assert(strings.equalFold(left, right) === expected, `equalFold failed: ${description}`);

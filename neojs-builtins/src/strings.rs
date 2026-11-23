@@ -18,8 +18,9 @@
 //! comparison: `"K"` equals U+212A KELVIN SIGN and `"s"` equals U+017F LATIN
 //! SMALL LETTER LONG S, while `"ss"` does not equal `"ß"` (that is full
 //! folding) and `"I"` does not equal U+0131 DOTLESS I. The table is Unicode
-//! 16.0, fixed at build time, so both engines agree instead of following their
-//! own Unicode release.
+//! 16.0, the release the current V8 build's `/iu` canonicalization follows,
+//! fixed at build time so both engines agree instead of following their own
+//! Unicode release.
 //!
 //! Searching is linear in the text plus the search string (KMP over the
 //! fold-equivalence relation) and uses O(search) extra memory, so a repeated
@@ -608,6 +609,10 @@ mod tests {
         assert_eq!(case_fold::simple_fold(0xB5), 0x3BC);
         assert_eq!(case_fold::simple_fold(0xD800), 0xD800);
         assert_eq!(case_fold::simple_fold(0x1F600), 0x1F600);
+        // Unicode 17 additions are unassigned in the pinned release, so they
+        // stay identity, matching the engine's `/iu` behavior.
+        assert_eq!(case_fold::simple_fold(0xA7CE), 0xA7CE);
+        assert_eq!(case_fold::simple_fold(0x16EA0), 0x16EA0);
     }
 
     #[test]
