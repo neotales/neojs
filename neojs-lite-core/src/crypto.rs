@@ -26,10 +26,13 @@
 //! Argument validation happens in Rust with QuickJS's internal class and buffer
 //! APIs. A `Uint8Array` is recognized by its internal slot, not by
 //! `Symbol.hasInstance`, a prototype, or a `byteLength` getter. The view's
-//! byte range is copied once, with no JavaScript running between reading its
-//! length and copying it, so a detached or out-of-bounds view is rejected
-//! rather than read stale bytes. Error messages are fixed and never contain
-//! key, plaintext, ciphertext, or associated-data bytes.
+//! byte range is read from the internal accessor and checked against the
+//! current element count from the captured intrinsic getter; if they disagree,
+//! the view is rejected instead of copying a shorter range. The bytes are then
+//! copied once, with no JavaScript running between reading the range and
+//! copying it, so a detached or out-of-bounds view is rejected rather than read
+//! stale bytes. Error messages are fixed and never contain key, plaintext,
+//! ciphertext, or associated-data bytes.
 //!
 //! # Resizable buffers
 //!
@@ -37,18 +40,19 @@
 //! range, and growing the buffer does not change the view. Shared
 //! `SharedArrayBuffer` views are copied normally.
 //!
-//! Two resizable-buffer cases differ from the V8 adapter, because QuickJS's C
-//! buffer accessor does not expose the range V8 does. The adapter fails closed
-//! rather than guessing:
+//! A length-tracking view (`new Uint8Array(resizableBuffer)`) grows and shrinks
+//! with the buffer. QuickJS's C buffer accessor keeps reporting the length the
+//! view had when it was created, so the adapter reads the current element count
+//! through the intrinsic `%TypedArray%.prototype.length` getter captured before
+//! user code. If the two disagree, the adapter cannot prove the accessor's range
+//! is the whole view and rejects it with `NEO_CRYPTO_DETACHED`; it never copies
+//! a truncated range. This applies to plaintext, key, and associated data.
+//! Own `length` properties and replaced prototypes do not affect the captured
+//! getter.
 //!
-//! * A fixed-length view shrunk until it no longer fits reports length zero to
-//!   JavaScript but has no readable byte range. It is rejected with
-//!   `NEO_CRYPTO_DETACHED`; V8 encrypts it as empty.
-//! * A length-tracking view (`new Uint8Array(resizableBuffer)`) reports its
-//!   grown length to JavaScript, but the binding's accessor keeps returning
-//!   the length it had when the view was created. The adapter copies that
-//!   original in-bounds range; V8 copies the grown range. Use a fixed-length
-//!   view for an exact range.
+//! A fixed-length view shrunk until it no longer fits reports length zero to
+//! JavaScript but has no readable byte range. It is rejected with
+//! `NEO_CRYPTO_DETACHED`; V8 encrypts it as empty. Failing closed is deliberate.
 
 use std::ffi::CStr;
 use std::ptr::NonNull;
@@ -57,18 +61,47 @@ use neojs_crypto_core::{
     CryptoError, CryptoErrorCode, CryptoLimits, KEY_LEN, MAX_ASSOCIATED_DATA_BYTES,
     MAX_RANDOM_BYTES, decrypt, encrypt, generate_envelope_key, random_bytes,
 };
-use rquickjs::function::{Exhaustive, Opt};
+use rquickjs::function::{Exhaustive, Opt, This};
 use rquickjs::module::{Declarations, Exports, ModuleDef};
-use rquickjs::{Ctx, Exception, Function, Module, TypedArray, Value, qjs};
+use rquickjs::{Ctx, Exception, Function, JsLifetime, Module, TypedArray, Value, qjs};
 
 use crate::builtins::CRYPTO_SPECIFIER;
+
+/// The intrinsic `%TypedArray%.prototype.length` getter, captured before user
+/// code runs.
+///
+/// QuickJS's `JS_GetTypedArrayBuffer` reports the length a length-tracking view
+/// had when it was created, while the real element count lives elsewhere and is
+/// updated when a resizable buffer changes size. The intrinsic getter reads that
+/// current count in C, without consulting an own `length` property, a replaced
+/// prototype, or a Proxy trap. Storing it in runtime userdata lets the native
+/// module compare the two and reject a view whose correct range cannot be
+/// established, instead of truncating it.
+struct TypedArrayIntrinsics<'js> {
+    length: Function<'js>,
+}
+
+// SAFETY: the struct contains one rquickjs JavaScript value and mirrors its
+// lifetime exactly; `Changed` only renames that lifetime.
+unsafe impl<'js> JsLifetime<'js> for TypedArrayIntrinsics<'js> {
+    type Changed<'to> = TypedArrayIntrinsics<'to>;
+}
 
 /// Register the `neo:crypto` native module in this context.
 ///
 /// QuickJS stores the module in the context's loaded-module list, so a later
 /// `import "neo:crypto"` reaches that one instance. The module is not evaluated
 /// until it is imported.
+///
+/// This also captures the intrinsic typed-array length getter. `Runtime::new`
+/// calls it before any user code, so a hostile `length` property or prototype
+/// replacement cannot change what the adapter reads.
 pub(crate) fn register(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    let length = ctx.eval::<Function, _>(
+        "Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'length').get",
+    )?;
+    ctx.store_userdata(TypedArrayIntrinsics { length })
+        .map_err(|_| rquickjs::Error::Unknown)?;
     Module::declare_def::<CryptoModule, _>(ctx.clone(), CRYPTO_SPECIFIER)?;
     Ok(())
 }
@@ -133,10 +166,10 @@ fn make_encrypt<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
          associated_data: Opt<Value<'js>>|
          -> rquickjs::Result<TypedArray<'js, u8>> {
             let limits = CryptoLimits::default();
-            let key = key_bytes(key).map_err(|error| throw_crypto(&ctx, error))?;
-            let plaintext = bytes_value(plaintext, limits.max_plaintext)
+            let key = key_bytes(&ctx, key).map_err(|error| throw_crypto(&ctx, error))?;
+            let plaintext = bytes_value(&ctx, plaintext, limits.max_plaintext)
                 .map_err(|error| throw_crypto(&ctx, error))?;
-            let associated_data = associated_data_bytes(associated_data)
+            let associated_data = associated_data_bytes(&ctx, associated_data)
                 .map_err(|error| throw_crypto(&ctx, error))?;
             let envelope = encrypt(&key, plaintext, &associated_data, limits)
                 .map_err(|error| throw_crypto(&ctx, error))?;
@@ -157,11 +190,14 @@ fn make_decrypt<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
          associated_data: Opt<Value<'js>>|
          -> rquickjs::Result<TypedArray<'js, u8>> {
             let limits = CryptoLimits::default();
-            let key = key_bytes(key).map_err(|error| throw_crypto(&ctx, error))?;
-            let envelope =
-                bytes_value(envelope, limits.max_plaintext + neojs_crypto_core::OVERHEAD)
-                    .map_err(|error| throw_crypto(&ctx, error))?;
-            let associated_data = associated_data_bytes(associated_data)
+            let key = key_bytes(&ctx, key).map_err(|error| throw_crypto(&ctx, error))?;
+            let envelope = bytes_value(
+                &ctx,
+                envelope,
+                limits.max_plaintext + neojs_crypto_core::OVERHEAD,
+            )
+            .map_err(|error| throw_crypto(&ctx, error))?;
+            let associated_data = associated_data_bytes(&ctx, associated_data)
                 .map_err(|error| throw_crypto(&ctx, error))?;
             let plaintext = decrypt(&key, envelope, &associated_data, limits)
                 .map_err(|error| throw_crypto(&ctx, error))?;
@@ -172,11 +208,8 @@ fn make_decrypt<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
 }
 
 /// Read the exact 32-byte key from a `Uint8Array` without invoking JavaScript.
-fn key_bytes<'js>(value: Value<'js>) -> Result<Vec<u8>, CryptoError> {
-    let view = typed_array(value)?;
-    let Some(raw) = view.as_raw() else {
-        return Err(CryptoError::new(CryptoErrorCode::Detached));
-    };
+fn key_bytes<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Vec<u8>, CryptoError> {
+    let (_view, raw) = checked_view(ctx, value)?;
     if raw.len() != KEY_LEN {
         return Err(CryptoError::new(CryptoErrorCode::Key));
     }
@@ -184,26 +217,69 @@ fn key_bytes<'js>(value: Value<'js>) -> Result<Vec<u8>, CryptoError> {
 }
 
 /// Read a `Uint8Array` after checking its byte length against `max`.
-fn bytes_value<'js>(value: Value<'js>, max: usize) -> Result<Vec<u8>, CryptoError> {
-    let view = typed_array(value)?;
-    let Some(raw) = view.as_raw() else {
-        return Err(CryptoError::new(CryptoErrorCode::Detached));
-    };
+fn bytes_value<'js>(ctx: &Ctx<'js>, value: Value<'js>, max: usize) -> Result<Vec<u8>, CryptoError> {
+    let (_view, raw) = checked_view(ctx, value)?;
     if raw.len() > max {
         return Err(CryptoError::new(CryptoErrorCode::Limit));
     }
     copy_raw(raw)
 }
 
+/// Validate a view and return its readable range.
+///
+/// QuickJS's C buffer accessor reports the creation length for a
+/// length-tracking view. The intrinsic getter reports the current element
+/// count. If they disagree, the whole view is not the range the accessor
+/// exposes, so the adapter rejects it rather than truncating. The view stays
+/// alive until the caller copies the returned range.
+fn checked_view<'js>(
+    ctx: &Ctx<'js>,
+    value: Value<'js>,
+) -> Result<(TypedArray<'js, u8>, NonNull<[u8]>), CryptoError> {
+    let view = typed_array(value)?;
+    let Some(raw) = view.as_raw() else {
+        return Err(CryptoError::new(CryptoErrorCode::Detached));
+    };
+    if current_length(ctx, &view)? != raw.len() {
+        return Err(CryptoError::new(CryptoErrorCode::Detached));
+    }
+    Ok((view, raw))
+}
+
+/// Read the current element count through the captured intrinsic getter.
+///
+/// The getter is called with the view as `this`; it reads QuickJS's internal
+/// count in C and does not consult an own `length` property or the current
+/// prototype chain. A missing intrinsic or unexpected result fails closed.
+fn current_length<'js>(ctx: &Ctx<'js>, view: &TypedArray<'js, u8>) -> Result<usize, CryptoError> {
+    let Some(intrinsics) = ctx.userdata::<TypedArrayIntrinsics>() else {
+        return Err(CryptoError::new(CryptoErrorCode::Detached));
+    };
+    let current: Value = intrinsics
+        .length
+        .call((This(view.as_value().clone()),))
+        .map_err(|_| CryptoError::new(CryptoErrorCode::Detached))?;
+    let Some(length) = current.as_int() else {
+        return Err(CryptoError::new(CryptoErrorCode::Detached));
+    };
+    if length < 0 {
+        return Err(CryptoError::new(CryptoErrorCode::Detached));
+    }
+    Ok(length as usize)
+}
+
 /// Read the optional trailing associated-data argument.
 ///
 /// Absent and `undefined` both mean an empty value. `null` and every other
 /// non-`Uint8Array` value are a `TypeError`, checked before any byte is copied.
-fn associated_data_bytes<'js>(value: Opt<Value<'js>>) -> Result<Vec<u8>, CryptoError> {
+fn associated_data_bytes<'js>(
+    ctx: &Ctx<'js>,
+    value: Opt<Value<'js>>,
+) -> Result<Vec<u8>, CryptoError> {
     match value.0 {
         None => Ok(Vec::new()),
         Some(value) if value.is_undefined() => Ok(Vec::new()),
-        Some(value) => bytes_value(value, MAX_ASSOCIATED_DATA_BYTES),
+        Some(value) => bytes_value(ctx, value, MAX_ASSOCIATED_DATA_BYTES),
     }
 }
 

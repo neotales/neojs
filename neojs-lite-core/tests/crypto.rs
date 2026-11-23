@@ -233,6 +233,96 @@ if (!outOfBoundsRejected) throw new Error("out-of-bounds view was not rejected")
 }
 
 #[test]
+fn crypto_rejects_resized_tracking_views_instead_of_truncating() {
+    run_js(
+        r#"
+import { decrypt, encrypt } from "neo:crypto";
+const key = new Uint8Array(32).fill(0x2a);
+const plaintext = Uint8Array.from([1, 2, 3]);
+
+function expectDetached(fn, label) {
+    try {
+        fn();
+    } catch (error) {
+        if (error.code !== "NEO_CRYPTO_DETACHED") throw error;
+        return;
+    }
+    throw new Error(`${label}: expected NEO_CRYPTO_DETACHED`);
+}
+
+// Plaintext: a tracking view grown after creation must not be truncated to
+// the creation length.
+const plainBuffer = new ArrayBuffer(4, { maxByteLength: 16 });
+const plainTracking = new Uint8Array(plainBuffer);
+plainBuffer.resize(8);
+if (plainTracking.length !== 8) throw new Error("plain tracking did not grow");
+expectDetached(() => encrypt(key, plainTracking), "grown plaintext");
+
+// Key: the same check applies to the key range.
+const keyBuffer = new ArrayBuffer(32, { maxByteLength: 64 });
+const keyTracking = new Uint8Array(keyBuffer);
+keyBuffer.resize(33);
+if (keyTracking.length !== 33) throw new Error("key tracking did not grow");
+expectDetached(() => encrypt(keyTracking, plaintext), "grown key");
+
+// Associated data: and to the AAD range.
+const aadBuffer = new ArrayBuffer(4, { maxByteLength: 16 });
+const aadTracking = new Uint8Array(aadBuffer);
+aadBuffer.resize(8);
+expectDetached(() => encrypt(key, plaintext, aadTracking), "grown aad");
+
+// Envelope input: and to the envelope range.
+const envelopeBuffer = new ArrayBuffer(34, { maxByteLength: 64 });
+const envelopeTracking = new Uint8Array(envelopeBuffer);
+envelopeBuffer.resize(40);
+expectDetached(() => decrypt(key, envelopeTracking), "grown envelope");
+
+// A tracking view shrunk below its creation length is also unprovable.
+const shrinkBuffer = new ArrayBuffer(8, { maxByteLength: 16 });
+const shrinkTracking = new Uint8Array(shrinkBuffer);
+shrinkBuffer.resize(4);
+expectDetached(() => encrypt(key, shrinkTracking), "shrunk plaintext");
+
+// A fixed view over the same buffer is exact and still works.
+plainBuffer.resize(12);
+const fixed = new Uint8Array(plainBuffer, 0, 3);
+fixed.set([7, 8, 9]);
+const fixedOut = decrypt(key, encrypt(key, fixed));
+if (fixedOut.length !== 3 || fixedOut[0] !== 7 || fixedOut[2] !== 9) {
+    throw new Error("fixed view over resizable buffer");
+}
+
+// Hostile own `length` properties cannot make a grown tracking view look
+// smaller, and cannot make a fixed view look wrong.
+Object.defineProperty(plainTracking, "length", { value: 4 });
+expectDetached(() => encrypt(key, plainTracking), "own length shadow");
+Object.defineProperty(fixed, "length", { value: 99 });
+if (decrypt(key, encrypt(key, fixed)).length !== 3) {
+    throw new Error("own length shadow broke a fixed view");
+}
+
+// A replaced prototype getter is equally irrelevant: the adapter uses the
+// intrinsic captured before user code.
+const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+const realLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, "length");
+Object.defineProperty(typedArrayPrototype, "length", {
+    get() { return 0; },
+    configurable: true,
+});
+expectDetached(() => encrypt(key, plainTracking), "replaced prototype getter");
+let fixedAfter;
+try {
+    fixedAfter = decrypt(key, encrypt(key, fixed));
+} catch (error) {
+    throw new Error(`replaced prototype getter broke a fixed view: ${error.code} ${error.message}`);
+}
+if (fixedAfter.byteLength !== 3) throw new Error("replaced prototype getter changed a fixed view");
+Object.defineProperty(typedArrayPrototype, "length", realLength);
+"#,
+    );
+}
+
+#[test]
 fn crypto_rejects_detached_views() {
     run_js(
         r#"
