@@ -562,6 +562,46 @@ fn reports_a_missing_package() {
     );
 }
 
+// Integration test: a JSR module can import another JSR package, and each
+// package's metadata is fetched once for the runtime.
+#[test]
+fn loads_a_jsr_dependency() {
+    let dep = b"export const dep = 5;\n";
+    let root = b"import { dep } from \"jsr:@scope/dep@1\";\nexport const value = dep + 1;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", root)], &[(".", "./mod.js")])),
+            )
+            .with(
+                file_url("scope", "pkg", "1.0.0", "/mod.js"),
+                Reply::ok(root),
+            )
+            .with(
+                meta_url("scope", "dep"),
+                Reply::ok(package_metadata("scope", "dep", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "dep", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", dep)], &[(".", "./mod.js")])),
+            )
+            .with(file_url("scope", "dep", "1.0.0", "/mod.js"), Reply::ok(dep)),
+    );
+
+    run(
+        &server,
+        "import { value } from \"jsr:@scope/pkg@1\";\nif (value !== 6) throw new Error(`bad value ${value}`);\n",
+    )
+    .expect("a JSR package may import another JSR package");
+    assert_eq!(server.request_count(&meta_url("scope", "pkg")), 1);
+    assert_eq!(server.request_count(&meta_url("scope", "dep")), 1);
+}
+
 // Integration test: a redirect from a JSR registry request is subject to the
 // remote client's HTTPS-only policy, and a downgrade never reaches the target.
 #[test]
