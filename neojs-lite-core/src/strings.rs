@@ -11,11 +11,37 @@
 
 use std::slice;
 
+use rquickjs::function::This;
 use rquickjs::{
     Ctx, Exception, Function, Object, Result, Value, function::Opt, module::ModuleDef, qjs,
 };
 
 use neojs_builtins::strings as logic;
+
+/// Counts engine text units copied for the streaming-search tests.
+#[cfg(feature = "test-support")]
+static TEXT_UNITS_READ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts engine windows copied for the streaming-search tests.
+#[cfg(feature = "test-support")]
+static TEXT_WINDOWS_READ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Returns `(units, windows)` copied from QuickJS strings by the streaming
+/// search.
+#[cfg(feature = "test-support")]
+pub(crate) fn test_reads() -> (usize, usize) {
+    (
+        TEXT_UNITS_READ.load(std::sync::atomic::Ordering::Relaxed),
+        TEXT_WINDOWS_READ.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// Resets the streaming-search read counters.
+#[cfg(feature = "test-support")]
+pub(crate) fn reset_test_reads() {
+    TEXT_UNITS_READ.store(0, std::sync::atomic::Ordering::Relaxed);
+    TEXT_WINDOWS_READ.store(0, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Creates the frozen public module object.
 ///
@@ -92,6 +118,133 @@ fn required_string<'js>(
         return Err(Exception::throw_type(ctx, message));
     }
     js_units(ctx, value)
+}
+
+/// Reads a required string argument without copying it.
+fn required_string_value<'js>(
+    ctx: &Ctx<'js>,
+    value: &Opt<Value<'js>>,
+    message: &str,
+) -> Result<Value<'js>> {
+    let Some(value) = value.0.as_ref() else {
+        return Err(Exception::throw_type(ctx, message));
+    };
+    if !value.is_string() {
+        return Err(Exception::throw_type(ctx, message));
+    }
+    Ok(value.clone())
+}
+
+/// Returns the UTF-16 length of a string primitive without converting it.
+fn js_length<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Result<usize> {
+    let raw = unsafe {
+        qjs::JS_GetProperty(
+            ctx.as_raw().as_ptr(),
+            value.as_raw(),
+            qjs::JS_ATOM_length as qjs::JSAtom,
+        )
+    };
+    if raw.tag == i64::from(qjs::JS_TAG_EXCEPTION) {
+        return Err(rquickjs::Error::Unknown);
+    }
+    let length = unsafe { Value::from_raw(ctx.clone(), raw) };
+    length
+        .as_number()
+        .map(|length| length as usize)
+        .ok_or(rquickjs::Error::Unknown)
+}
+
+/// A forward-readable QuickJS string that copies bounded windows on demand.
+///
+/// QuickJS has no public per-code-unit accessor. The adapter calls the
+/// captured `String.prototype.slice` intrinsic and converts only one bounded
+/// window at a time, so a small `fromIndex` does not copy the whole string.
+struct Utf16Text<'js> {
+    ctx: Ctx<'js>,
+    text: Value<'js>,
+    slice: Function<'js>,
+    length: usize,
+    read_limit: usize,
+    window_start: usize,
+    window: Vec<u16>,
+    failed: bool,
+}
+
+impl<'js> Utf16Text<'js> {
+    fn new(ctx: &Ctx<'js>, text: &Value<'js>) -> Result<Self> {
+        let state = ctx
+            .userdata::<super::neo::NeoState>()
+            .ok_or(rquickjs::Error::Unknown)?;
+        let slice = state
+            .slice
+            .as_ref()
+            .ok_or(rquickjs::Error::Unknown)?
+            .clone()
+            .restore(ctx)?;
+        let length = js_length(ctx, text)?;
+        Ok(Self {
+            ctx: ctx.clone(),
+            text: text.clone(),
+            slice,
+            length,
+            read_limit: usize::MAX,
+            window_start: 0,
+            window: Vec::new(),
+            failed: false,
+        })
+    }
+
+    fn load(&mut self, start: usize) {
+        let end = (start + logic::WINDOW_UNITS)
+            .min(self.length)
+            .min(self.read_limit.max(start + 1));
+        let piece: Value<'js> = match self.slice.call((This(self.text.clone()), start, end)) {
+            Ok(piece) => piece,
+            Err(_) => {
+                self.failed = true;
+                return;
+            }
+        };
+        match js_units(&self.ctx, &piece) {
+            Ok(units) => {
+                self.window = units;
+                self.window_start = start;
+                #[cfg(feature = "test-support")]
+                {
+                    TEXT_UNITS_READ
+                        .fetch_add(self.window.len(), std::sync::atomic::Ordering::Relaxed);
+                    TEXT_WINDOWS_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            Err(_) => self.failed = true,
+        }
+    }
+}
+
+impl logic::Utf16Source for Utf16Text<'_> {
+    fn len(&self) -> usize {
+        self.length
+    }
+
+    fn set_read_limit(&mut self, end: usize) {
+        self.read_limit = end;
+    }
+
+    fn unit(&mut self, index: usize) -> u16 {
+        if self.failed {
+            return 0;
+        }
+        if index < self.window_start || index >= self.window_start + self.window.len() {
+            self.load(index);
+        }
+        if self.failed {
+            return 0;
+        }
+        self.window
+            .get(index - self.window_start)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 /// Reads an optional string argument, distinguishing `undefined` from a
@@ -197,10 +350,18 @@ fn index_of_fold<'js>(
     search: Opt<Value<'js>>,
     from_index: Opt<Value<'js>>,
 ) -> Result<f64> {
-    let text = required_string(&ctx, &text, logic::TEXT_MESSAGE)?;
+    let text = required_string_value(&ctx, &text, logic::TEXT_MESSAGE)?;
     let search = required_string(&ctx, &search, logic::SEARCH_MESSAGE)?;
     let from_index = optional_index(&ctx, &from_index)?;
-    match logic::index_of_fold(&text, &search, from_index) {
+    let mut source = Utf16Text::new(&ctx, &text)?;
+    let result = logic::index_of_fold_source(&mut source, &search, from_index);
+    if source.failed {
+        return Err(Exception::throw_internal(
+            &ctx,
+            "strings text access failed",
+        ));
+    }
+    match result {
         Ok(index) => Ok(index_value(index)),
         Err(error) => Err(Exception::throw_range(&ctx, error.message())),
     }
@@ -212,10 +373,18 @@ fn last_index_of_fold<'js>(
     search: Opt<Value<'js>>,
     from_index: Opt<Value<'js>>,
 ) -> Result<f64> {
-    let text = required_string(&ctx, &text, logic::TEXT_MESSAGE)?;
+    let text = required_string_value(&ctx, &text, logic::TEXT_MESSAGE)?;
     let search = required_string(&ctx, &search, logic::SEARCH_MESSAGE)?;
     let from_index = optional_index(&ctx, &from_index)?;
-    match logic::last_index_of_fold(&text, &search, from_index) {
+    let mut source = Utf16Text::new(&ctx, &text)?;
+    let result = logic::last_index_of_fold_source(&mut source, &search, from_index);
+    if source.failed {
+        return Err(Exception::throw_internal(
+            &ctx,
+            "strings text access failed",
+        ));
+    }
+    match result {
         Ok(index) => Ok(index_value(index)),
         Err(error) => Err(Exception::throw_range(&ctx, error.message())),
     }

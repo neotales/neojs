@@ -72,3 +72,23 @@ mod neo;
 mod strings;
 
 pub use runtime::{Error, Runtime};
+
+/// Test-only hooks. Compiled only with the off-by-default `test-support`
+/// feature, which a normal build never enables.
+#[cfg(all(feature = "test-support", feature = "neo-strings"))]
+#[doc(hidden)]
+pub mod test_support {
+    /// Return `(units, windows)` copied from QuickJS strings by the last
+    /// `indexOfFold`/`lastIndexOfFold` calls.
+    ///
+    /// Used to prove that a small `fromIndex` reads a bounded prefix instead of
+    /// copying the whole text.
+    pub fn strings_text_reads() -> (usize, usize) {
+        crate::strings::test_reads()
+    }
+
+    /// Reset the streaming-search read counters.
+    pub fn reset_strings_text_reads() {
+        crate::strings::reset_test_reads();
+    }
+}

@@ -21,6 +21,12 @@ pub(super) struct NeoState {
     /// The frozen public `neo:strings` object, when the feature is selected.
     #[cfg(feature = "neo-strings")]
     pub(super) strings: Option<Persistent<Object<'static>>>,
+    /// The captured `String.prototype.slice` used for bounded text windows.
+    ///
+    /// The search binding calls this intrinsic instead of converting the whole
+    /// string. A replacement made after runtime creation does not change it.
+    #[cfg(feature = "neo-strings")]
+    pub(super) slice: Option<Persistent<Function<'static>>>,
     /// The frozen canonical module list returned for every call.
     pub(super) list: Persistent<Array<'static>>,
 }
@@ -42,6 +48,13 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>) -> Result<()> {
     let chars: Option<Object<'js>> = Some(super::chars::object(ctx)?);
     #[cfg(feature = "neo-strings")]
     let strings: Option<Object<'js>> = Some(super::strings::object(ctx)?);
+    #[cfg(feature = "neo-strings")]
+    let slice: Persistent<Function<'static>> = {
+        let constructor: Object<'js> = ctx.globals().get("String")?;
+        let prototype: Object<'js> = constructor.get("prototype")?;
+        let function: Function<'js> = prototype.get("slice")?;
+        Persistent::save(ctx, function)
+    };
 
     let list = Array::new(ctx.clone())?;
     let mut index = 0;
@@ -63,6 +76,8 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>) -> Result<()> {
         chars: chars.map(|chars| Persistent::save(ctx, chars)),
         #[cfg(feature = "neo-strings")]
         strings: strings.map(|strings| Persistent::save(ctx, strings)),
+        #[cfg(feature = "neo-strings")]
+        slice: Some(slice),
         list: Persistent::save(ctx, list),
     })
     .map_err(|_| rquickjs::Error::Unknown)?;

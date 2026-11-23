@@ -117,3 +117,24 @@ fn a_query_or_fragment_does_not_alias_the_builtin() {
         "{message}"
     );
 }
+
+#[test]
+fn a_replaced_slice_intrinsic_does_not_change_the_search() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "memory.js",
+            r#"
+import { lastIndexOfFold } from "neo:strings";
+let calls = 0;
+String.prototype.slice = () => {
+    calls += 1;
+    throw new Error("the replaced slice was called");
+};
+const index = lastIndexOfFold("abcabc", "BC", 6);
+if (index !== 4) throw new Error(`unexpected index: ${index}`);
+if (calls !== 0) throw new Error(`the replaced slice ran ${calls} times`);
+"#,
+        )
+        .expect("captured slice");
+}
