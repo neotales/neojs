@@ -1353,12 +1353,22 @@ mod bounded_key_tests {
             ctx.run_gc();
         });
 
-        // Repeated failures must free the table and all three atoms.
+        // Repeated failures with fresh dynamic keys must release the table and
+        // every duplicated atom. Reusing interned keys would hide an atom leak.
         runtime.run_gc();
-        let before = runtime.memory_usage().malloc_size;
-        for _ in 0..64 {
+        let before = runtime.memory_usage();
+        for index in 0..64 {
+            let script = format!(
+                r#"(() => {{
+                    const o = {{}};
+                    o["KEY_A_{index}"] = "1";
+                    o["KEY_B_{index}"] = "2";
+                    o["KEY_C_{index}"] = "3";
+                    return o;
+                }})()"#
+            );
             context.with(|ctx| {
-                let value: Value = ctx.eval(r#"({ A: "1", B: "2", C: "3" })"#).expect("object");
+                let value: Value = ctx.eval(script.as_str()).expect("object");
                 let object = value.as_object().expect("object");
                 let error =
                     bounded_string_keys_with_key_conversion_failure(&ctx, object, 128, 4096, 4096)
@@ -1368,10 +1378,18 @@ mod bounded_key_tests {
             });
         }
         runtime.run_gc();
-        let after = runtime.memory_usage().malloc_size;
+        let after = runtime.memory_usage();
         assert!(
-            after <= before,
-            "runtime heap grew from {before} to {after}"
+            after.atom_count <= before.atom_count,
+            "atom count grew from {} to {}",
+            before.atom_count,
+            after.atom_count
+        );
+        assert!(
+            after.malloc_size <= before.malloc_size,
+            "runtime heap grew from {} to {}",
+            before.malloc_size,
+            after.malloc_size
         );
         context.with(|ctx| {
             let answer: i32 = ctx.eval("40 + 2").expect("eval after failures");
