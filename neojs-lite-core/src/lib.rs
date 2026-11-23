@@ -72,6 +72,5 @@ pub use runtime::{Error, Runtime};
 #[cfg(feature = "node-compat")]
 pub use neojs_lite_node::{
     CHILD_PROCESS_SPECIFIER, ChildProcessError, ChildProcessPolicy, Limits, NodeOptions,
-    PolicyError, SUPPORTED_MODULES, is_known_node_bare_name, module_source,
-    unsupported_module_reason,
+    PolicyError, SUPPORTED_MODULES, is_known_node_bare_name, unsupported_module_reason,
 };

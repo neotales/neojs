@@ -184,6 +184,7 @@ if (cat.output[1] !== "abc") throw new Error("cat output array is wrong");
 
 const exit = spawnSync("/bin/sh", ["-c", "exit 7"], { encoding: "utf8" });
 if (exit.status !== 7) throw new Error(`exit status: ${exit.status}`);
+if (exit.error !== undefined) throw new Error(`nonzero exit has an error: ${exit.error.code}`);
 
 let failed = null;
 try {

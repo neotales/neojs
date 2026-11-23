@@ -491,8 +491,8 @@ impl Runtime {
     /// allowlist is a path match, not an inode or content pin; protect the
     /// executable and every ancestor directory from untrusted writes.
     ///
-    /// The host bridge is synchronous because this runtime has no host
-    /// asynchronous event loop. No asynchronous `ChildProcess` surface is
+    /// The native module functions are synchronous because this runtime has no
+    /// host asynchronous event loop. No asynchronous `ChildProcess` surface is
     /// offered or imitated.
     ///
     /// This is **not a sandbox**. An allowed executable runs with the authority
@@ -509,7 +509,7 @@ impl Runtime {
         Self::create(Some(options))
     }
 
-    /// Builds a runtime, optionally installing the Node compatibility bridge.
+    /// Builds a runtime, optionally installing the Node compatibility policy.
     fn create(node: Option<NodeConfig>) -> Result<Self, Error> {
         let node_enabled = node.is_some();
         let runtime = rquickjs::Runtime::new().map_err(|error| Error::Init {
@@ -547,7 +547,7 @@ impl Runtime {
                 ctx.eval::<(), _>(neo_shim())?;
                 #[cfg(feature = "node-compat")]
                 if let Some(options) = node {
-                    neojs_lite_node::install(&ctx, options)?;
+                    neojs_lite_node::install_options(&ctx, options);
                 }
                 #[cfg(test)]
                 install_test_gc(&ctx)?;
@@ -723,6 +723,9 @@ impl Drop for Runtime {
         // is still alive. Dropping them later with the runtime would call into
         // a freed context.
         self.rejections.borrow_mut().clear();
+        #[cfg(feature = "node-compat")]
+        self.context
+            .with(|ctx| neojs_lite_node::remove_options(&ctx));
     }
 }
 

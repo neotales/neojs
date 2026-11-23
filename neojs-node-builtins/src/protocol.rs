@@ -12,8 +12,8 @@ use serde_json::json;
 
 use crate::child_process::MAX_REQUEST_BYTES;
 use crate::child_process::NodeOptions;
-use crate::child_process::RunRequest;
-use crate::child_process::run;
+use crate::child_process::SyncRequest;
+use crate::child_process::run_sync;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,7 +65,7 @@ pub fn handle_request(request: &str, options: &NodeOptions) -> String {
         );
     }
 
-    let request = RunRequest {
+    let request = SyncRequest {
         file: parsed.file,
         args: parsed.args,
         cwd: parsed.options.cwd,
@@ -74,7 +74,7 @@ pub fn handle_request(request: &str, options: &NodeOptions) -> String {
         timeout_ms: parsed.options.timeout,
         max_buffer: parsed.options.max_buffer,
     };
-    match run(&request, options.child_process()) {
+    match run_sync(&request, options) {
         Ok(result) => json!({
             "ok": true,
             "result": {

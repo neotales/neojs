@@ -66,6 +66,7 @@ mod protocol;
 
 pub use child_process::{
     ChildProcessError, ChildProcessPolicy, Limits, MAX_REQUEST_BYTES, NodeOptions, PolicyError,
+    SyncRequest, SyncResult, run_sync,
 };
 pub use module::{
     CHILD_PROCESS_SPECIFIER, SUPPORTED_MODULES, is_known_node_bare_name, module_source,

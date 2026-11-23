@@ -367,33 +367,65 @@ impl fmt::Display for ChildProcessError {
 impl std::error::Error for ChildProcessError {}
 
 /// A validated synchronous request.
-pub(crate) struct RunRequest {
-    pub(crate) file: String,
-    pub(crate) args: Vec<String>,
-    pub(crate) cwd: Option<String>,
-    pub(crate) env: Option<BTreeMap<String, String>>,
-    pub(crate) input: Option<String>,
-    pub(crate) timeout_ms: Option<u64>,
-    pub(crate) max_buffer: Option<usize>,
+///
+/// This is the typed form of the request used by an engine adapter that can
+/// build it without a JSON round trip. It is still validated against the policy
+/// by [`run_sync`].
+#[derive(Clone, Debug)]
+pub struct SyncRequest {
+    /// The absolute program path.
+    pub file: String,
+    /// Program arguments.
+    pub args: Vec<String>,
+    /// Optional working directory.
+    pub cwd: Option<String>,
+    /// Explicit environment; the ambient environment is never inherited.
+    pub env: Option<BTreeMap<String, String>>,
+    /// Optional standard input as UTF-8 text.
+    pub input: Option<String>,
+    /// Requested timeout in milliseconds; zero selects the policy maximum.
+    pub timeout_ms: Option<u64>,
+    /// Requested per-stream output bound.
+    pub max_buffer: Option<usize>,
 }
 
 /// A completed synchronous request.
 #[derive(Debug)]
-pub(crate) struct SyncResult {
-    pub(crate) pid: u32,
-    pub(crate) status: Option<i32>,
-    pub(crate) signal_name: Option<&'static str>,
-    pub(crate) stdout: Vec<u8>,
-    pub(crate) stderr: Vec<u8>,
-    pub(crate) timed_out: bool,
-    pub(crate) limit_exceeded: bool,
-    pub(crate) incomplete: bool,
-    pub(crate) io_error: bool,
+pub struct SyncResult {
+    /// The direct child's process id.
+    pub pid: u32,
+    /// The exit code, or `None` for signal/timeout/overflow/incomplete/io.
+    pub status: Option<i32>,
+    /// The terminating signal name, when known.
+    pub signal_name: Option<&'static str>,
+    /// Captured standard output, bounded by `maxBuffer`.
+    pub stdout: Vec<u8>,
+    /// Captured standard error, bounded by `maxBuffer`.
+    pub stderr: Vec<u8>,
+    /// Whether the deadline killed the child.
+    pub timed_out: bool,
+    /// Whether an output stream exceeded `maxBuffer`.
+    pub limit_exceeded: bool,
+    /// Whether a descendant held a pipe after the direct child exited.
+    pub incomplete: bool,
+    /// Whether an unexpected pipe read failed.
+    pub io_error: bool,
+}
+
+/// Runs one typed request under `options` and the current policy.
+///
+/// This is the engine-neutral entry point for an adapter that constructs the
+/// request in Rust. The JSON protocol uses the same runner.
+pub fn run_sync(
+    request: &SyncRequest,
+    options: &NodeOptions,
+) -> Result<SyncResult, ChildProcessError> {
+    run(request, options.child_process())
 }
 
 /// Runs one validated request under `policy`.
-pub(crate) fn run(
-    request: &RunRequest,
+fn run(
+    request: &SyncRequest,
     policy: &ChildProcessPolicy,
 ) -> Result<SyncResult, ChildProcessError> {
     let limits = policy.limits;
@@ -894,7 +926,7 @@ fn append_capped(output: &mut Vec<u8>, bytes: &[u8], limit: usize) -> bool {
 }
 
 /// Validates argument shape before a child exists.
-fn check_args(request: &RunRequest, limits: Limits) -> Result<(), ChildProcessError> {
+fn check_args(request: &SyncRequest, limits: Limits) -> Result<(), ChildProcessError> {
     if request.args.len() > limits.max_args {
         return Err(ChildProcessError::limit(
             "the argument count exceeds the configured limit",
@@ -918,7 +950,7 @@ fn check_args(request: &RunRequest, limits: Limits) -> Result<(), ChildProcessEr
 }
 
 /// Validates the explicit environment map before a child exists.
-fn check_environment(request: &RunRequest, limits: Limits) -> Result<(), ChildProcessError> {
+fn check_environment(request: &SyncRequest, limits: Limits) -> Result<(), ChildProcessError> {
     let Some(environment) = &request.env else {
         return Ok(());
     };
@@ -991,8 +1023,8 @@ mod tests {
     #[cfg(unix)]
     use rustix::process::test_kill_process;
 
-    fn request(file: &str, args: &[&str]) -> RunRequest {
-        RunRequest {
+    fn request(file: &str, args: &[&str]) -> SyncRequest {
+        SyncRequest {
             file: file.to_string(),
             args: args.iter().map(|arg| arg.to_string()).collect(),
             cwd: None,

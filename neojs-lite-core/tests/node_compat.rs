@@ -148,6 +148,7 @@ if (cat.output[1] !== "abc") throw new Error("cat output array is wrong");
 
 const exit = spawnSync("/bin/sh", ["-c", "exit 7"], { encoding: "utf8" });
 if (exit.status !== 7) throw new Error(`exit status: ${exit.status}`);
+if (exit.error !== undefined) throw new Error(`nonzero exit has an error: ${exit.error.code}`);
 
 let failed = null;
 try {
@@ -252,31 +253,20 @@ if (!execError || execError.code !== "ERR_NODE_CHILD_PROCESS_INCOMPLETE") {
 }
 
 #[test]
-fn the_bridge_cannot_be_replaced_before_import_and_huge_requests_are_capped() {
+fn the_native_module_has_no_bridge_and_huge_native_inputs_are_capped() {
     run(
         policy(&[]),
         r#"
-const original = globalThis.__neojsNodeChildProcess;
+if (globalThis.__neojsNodeChildProcess !== undefined) {
+    throw new Error("a JavaScript bridge global is present");
+}
 if (globalThis.__neojsNodeRawRun !== undefined) {
-    throw new Error("the raw host function is still reachable");
-}
-let replaced = false;
-try {
-    globalThis.__neojsNodeChildProcess = {
-        runSync() {
-            replaced = true;
-            return "{}";
-        },
-    };
-} catch {
-}
-if (replaced) throw new Error("the bridge replacement succeeded");
-if (globalThis.__neojsNodeChildProcess !== original) {
-    throw new Error("the bridge identity changed before import");
+    throw new Error("a raw host function global is present");
 }
 const childProcess = await import("node:child_process");
-if (globalThis.__neojsNodeChildProcess !== original) {
-    throw new Error("the bridge identity changed during import");
+const again = await import("node:child_process");
+if (childProcess !== again) {
+    throw new Error("the native module namespace changed");
 }
 
 let denied = null;
@@ -287,12 +277,6 @@ try {
 }
 if (denied !== "ERR_NODE_CHILD_PROCESS_DENIED") {
     throw new Error(`actual denied call: ${denied}`);
-}
-
-const huge = globalThis.__neojsNodeChildProcess.runSync("x".repeat(4194305));
-const parsed = JSON.parse(huge);
-if (!parsed.error || parsed.error.code !== "ERR_NODE_REQUEST_TOO_LARGE") {
-    throw new Error(`bridge cap: ${huge.slice(0, 80)}`);
 }
 
 let code = null;
@@ -309,25 +293,31 @@ if (code !== "ERR_NODE_REQUEST_TOO_LARGE") {
 }
 "#,
     )
-    .expect("bridge hardening");
+    .expect("native module boundary");
 }
 
 #[test]
-fn the_bridge_identity_survives_import_and_allows_execution() {
+fn the_native_module_identity_survives_import_and_allows_execution() {
     require("/bin/echo");
     run(
         policy(&["/bin/echo"]),
         r#"
-const original = globalThis.__neojsNodeChildProcess;
 const childProcess = await import("node:child_process");
-if (globalThis.__neojsNodeChildProcess !== original) {
-    throw new Error("the bridge identity changed during import");
+const again = await import("node:child_process");
+if (childProcess !== again) {
+    throw new Error("the native module namespace changed during import");
+}
+if (childProcess.default.spawnSync !== childProcess.spawnSync) {
+    throw new Error("default.spawnSync is not the named export");
+}
+if (childProcess.default.execFileSync !== childProcess.execFileSync) {
+    throw new Error("default.execFileSync is not the named export");
 }
 const output = childProcess.execFileSync("/bin/echo", ["ok"], { encoding: "utf8" });
 if (output !== "ok\n") throw new Error(`allowed output: ${String(output)}`);
 "#,
     )
-    .expect("bridge identity and allowed call");
+    .expect("native module identity and allowed call");
 }
 
 #[test]
@@ -476,7 +466,7 @@ for (const [name, call] of [
     ["execFile", () => execFile("/bin/echo")],
     ["execSync", () => execSync("/bin/echo")],
     ["fork", () => fork("/bin/echo")],
-    ["ChildProcess", () => new ChildProcess()],
+    ["ChildProcess", () => ChildProcess()],
 ]) {
     let threw = false;
     try {

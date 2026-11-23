@@ -16,11 +16,12 @@ pub const SUPPORTED_MODULES: &[&str] = &[CHILD_PROCESS_SPECIFIER];
 
 const CHILD_PROCESS_SOURCE: &str = include_str!("child_process.js");
 
-// MIGRATION LIMITATION: this is still a JavaScript facade over the Rust core.
-// A Rust-native named ES module is blocked in deno_core 0.413.0 because
+// V8 MIGRATION LIMITATION: this JavaScript facade is used only by the V8 adapter.
+// The QuickJS adapter serves native `ModuleDef` exports with no JS source. A
+// Rust-native V8 named ES module is blocked in deno_core 0.413.0 because
 // `ModuleMap` and `JsRuntime::module_map()` are crate-private, `ModuleLoader`
 // can only return source text, and `Extension::synthetic_esm_modules` requires
-// a JavaScript backing script. See `docs/node-compat.md`. Do not treat the
+// a JavaScript backing script. See `docs/node-compat.md`. Do not treat the V8
 // facade as satisfying the no-JavaScript-built-ins requirement.
 
 /// Returns the ECMAScript module source for a supported Node specifier.

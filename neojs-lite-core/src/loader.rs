@@ -250,16 +250,12 @@ impl Loader for FileLoader {
                 return Err(Error::new_loading_message(name, node_disabled(name)));
             }
             #[cfg(feature = "node-compat")]
-            if let Some(source) = neojs_lite_node::module_source(name) {
-                return Module::declare(ctx.clone(), name, source.as_bytes().to_vec());
-            }
+            return neojs_lite_node::module(ctx.clone(), name);
             #[cfg(not(feature = "node-compat"))]
             return Err(Error::new_loading_message(
                 name,
                 "the Node compatibility adapter is not compiled into this neojs-lite-core",
             ));
-            #[cfg(feature = "node-compat")]
-            return Err(Error::new_loading_message(name, node_unsupported(name)));
         }
         if name.starts_with("node:") {
             return Err(Error::new_loading_message(name, node_unsupported(name)));
