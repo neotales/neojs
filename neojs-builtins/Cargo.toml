@@ -16,6 +16,11 @@ default = []
 # explicitly. Cargo features are additive across the dependency graph, so a
 # module is present whenever any dependent enables it.
 chars = ["dep:unicode-general-category"]
+# The shared `neo:strings` Rust implementation and descriptor. The V8 runtime
+# enables it so a default V8 build keeps `strings`; the QuickJS runtime enables
+# it explicitly. It uses the same Unicode General_Category crate for the
+# JavaScript whitespace set that `String.prototype.trim` uses.
+strings = ["dep:unicode-general-category"]
 
 [dependencies]
 # Unicode General_Category lookup for the `chars` classifier. Version 1.1.0

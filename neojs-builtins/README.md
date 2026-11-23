@@ -32,23 +32,23 @@ distinct object.
 
 ## Module selection
 
-Every shared module has its own Cargo feature. `chars` is the first, and it is
-the only module this crate implements today. The other `neo:` built-in modules
-remain ECMAScript module sources in the V8 runtime and are not yet migrated
-here; the QuickJS runtime implements only `chars`.
+Every shared module has its own Cargo feature. `chars` and `strings` are the
+modules this crate implements today. The other `neo:` built-in modules remain
+ECMAScript module sources in the V8 runtime and are not yet migrated here; the
+QuickJS runtime implements `chars` and `strings`.
 
-* `neojs-core` has a positive `neo-chars` feature that enables the optional
-  `neojs-builtins` dependency and its `chars` feature. A default V8 build
-  enables `neo-chars`. `neo-slices` implies `neo-chars` because `CharSlice`
+* `neojs-core` has positive `neo-chars` and `neo-strings` features that enable
+  the optional `neojs-builtins` dependency and the matching module. A default
+  V8 build enables both. `neo-slices` implies `neo-chars` because `CharSlice`
   captures the native `chars.toUpper` and `chars.toLower` functions. Disabling
-  `neo-chars` also disables `slices` and removes the native registration, the
-  registry entry, the loader entry, and the binding bytes.
-* `neojs-lite-core` has the same positive `neo-chars` feature, enabled by its
-  default feature set. `default-features = false` removes the dependency, the
-  native object, the module declaration, the registry entry, and the
-  introspection list entry.
-* `neojs-builtins` itself has no default module features. A build without
-  `chars` has no descriptor and no classifier code.
+  a module removes its native registration, its registry entry, its loader
+  entry, and its binding bytes.
+* `neojs-lite-core` has the same positive features, enabled by its default
+  feature set. `default-features = false` removes the dependency, the native
+  objects, the module declarations, the registry entries, and the introspection
+  list entries.
+* `neojs-builtins` itself has no default module features. A build without a
+  module has no descriptor and no implementation code for it.
 
 Cargo features are additive and unify across the dependency graph. Module
 selection is compile-time surface selection, not a sandbox.
@@ -81,6 +81,30 @@ out-of-range value, or `NaN` returns `false`. `toLower` and `toUpper` throw
 The module calls no host op, reads no environment or file, and adds no
 capability. It is not a sandbox.
 
+## `neo:strings`
+
+The canonical specifier and registry key is `neo:strings`.
+
+| Export | Contract |
+| --- | --- |
+| `equalFold` | Compare two strings under simple case folding. |
+| `startsWithFold` | True when the text begins with the prefix under folding. |
+| `endsWithFold` | True when the text ends with the suffix under folding. |
+| `indexOfFold` | First folded occurrence as a UTF-16 code unit index, or `-1`. |
+| `lastIndexOfFold` | Last folded occurrence at or before an optional limit, or `-1`. |
+| `trim` | Remove leading and trailing code points in an optional set; with no set, exactly `String.prototype.trim`. |
+| `trimStart` | Remove leading code points; with no set, exactly `String.prototype.trimStart`. |
+| `trimEnd` | Remove trailing code points; with no set, exactly `String.prototype.trimEnd`. |
+
+The functions operate on UTF-16 code units. A lone surrogate is compared as
+itself and never matches half of a surrogate pair; indices are code unit
+offsets, not code point offsets. Folding is Unicode 16.0 simple case folding
+from a generated table, so `"K"` equals U+212A KELVIN SIGN, `"s"` equals
+U+017F LONG S, `"I"` does not equal U+0131 DOTLESS I, and `"ss"` does not equal
+`"ß"`. Non-string arguments throw `TypeError`; a non-integer index throws
+`RangeError`, while `Infinity` and `-Infinity` clamp. The module calls no host
+op and adds no capability.
+
 ## Precise limits
 
 * **Category data is Unicode 16.0; case data follows the Rust compiler.**
@@ -93,6 +117,11 @@ capability. It is not a sandbox.
   pin the intended one-code-point behavior and a Unicode 16 classification
   boundary. `isSpace` is intentionally Go's `unicode.IsSpace` contract, not
   JavaScript `\s`: U+FEFF is not whitespace.
+* **Folding is pinned to Unicode 16.0 while `chars` case mapping follows the
+  compiler.** The `strings` table is fixed at Unicode 16.0, so both engines fold
+  the same input the same way. `chars` case mapping still uses the compiler's
+  `char` tables. A compiler upgrade can change a `chars` mapping without
+  changing `strings` folding.
 * **Captured native functions.** The engine creates the function objects once,
   before user code runs. Replacing a JavaScript intrinsic afterwards does not
   change the module. Code that replaces a realm intrinsic before the runtime is
@@ -105,8 +134,8 @@ capability. It is not a sandbox.
 
 ## Cross-engine tests
 
-`tests/fixtures/chars_contract.js` is run by both `neojs-core` and
-`neojs-lite-core`. Each test replaces two tokens with its adapter's specifier and
+`tests/fixtures/chars_contract.js` and `tests/fixtures/strings_contract.js` are
+run by both `neojs-core` and `neojs-lite-core`. Each test replaces two tokens with its adapter's specifier and
 registry key. The fixture covers Unicode boundaries, scalar and category edge
 cases, expanding case mappings, error classes, captured intrinsics, and module
 import identity. Engine-specific tests additionally assert that every export is
@@ -120,14 +149,14 @@ with one added method, `JsRuntime::register_native_module`, documented in
 `vendor/deno_core/PATCH.md`. The method uses the crate's existing
 `ModuleMap::new_synthetic_module`; it does not change loader, resolver, cache, or
 module-graph behavior. The V8 loader serves only an empty deduplication sentinel
-for `neo:chars`, and the module map reuses the native module.
+for the native modules, and the module map reuses the native module.
 
 ## Artifact checks
 
 The engine test suites include artifact scans. The V8 scan looks for the Rust
-`chars` error text, which only links when the module is compiled in, and for
-distinctive byte sequences from the still-JavaScript `slices` implementation.
-The QuickJS scan looks for the Rust `chars` error text. A disabled build must not
+`chars` and `strings` error texts, which only link when the module is compiled
+in, and for distinctive byte sequences from the still-JavaScript `slices`
+implementation. The QuickJS scan looks for the Rust `chars` error text. A disabled build must not
 contain the corresponding sequences, and an enabled build must. A control string
 from the always-present `Neo` surface proves the scan is reading real bytes. The
 sequences are decoded from hex at runtime, so the test source cannot satisfy its
