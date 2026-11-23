@@ -1,6 +1,6 @@
 --- a/v8/src/objects/keys.h
 +++ b/v8/src/objects/keys.h
-@@ -32,6 +32,31 @@
+@@ -32,6 +32,32 @@
        static_cast<int>(v8::KeyCollectionMode::kIncludePrototypes)
  };
  
@@ -13,6 +13,7 @@
 +  kUnsupported = 3,
 +  kMemory = 4,
 +  kKeyTooLong = 5,
++  kInvalidKey = 6,
 +  kException = -1,
 +};
 +
@@ -44,18 +45,21 @@
  #include <optional>
  
  #include "src/api/api-arguments-inl.h"
-@@ -1459,6 +1462,205 @@
+@@ -1459,6 +1462,216 @@
    return result;
  }
  
 +
 +namespace {
 +
++uint64_t g_element_slots_inspected = 0;
++
 +uint32_t OwnFastElementKeys(Tagged<FixedArrayBase> elements) {
 +  Tagged<FixedArray> array = Cast<FixedArray>(elements);
 +  const uint32_t capacity = elements->length().value();
 +  uint32_t count = 0;
 +  for (uint32_t i = 0; i < capacity; i++) {
++    g_element_slots_inspected++;
 +    if (!IsTheHole(array->get(i))) count++;
 +  }
 +  return count;
@@ -106,6 +110,14 @@
 +}
 +
 +}  // namespace
++
++extern "C" V8_EXPORT void neojs_v8_reset_element_scan_probe() {
++  g_element_slots_inspected = 0;
++}
++
++extern "C" V8_EXPORT uint64_t neojs_v8_element_scan_probe() {
++  return g_element_slots_inspected;
++}
 +
 +BoundedOwnKeysStatus GetOwnEnumerableStringKeysBounded(
 +    Isolate* isolate, DirectHandle<JSReceiver> receiver, uint32_t max_keys,
@@ -260,7 +272,7 @@
  #include "src/objects/js-promise-inl.h"
  #include "src/objects/js-regexp-inl.h"
  #include "src/objects/js-weak-refs-inl.h"
-@@ -4991,6 +4992,62 @@
+@@ -4991,6 +4992,71 @@
                            v8::IndexFilter::kIncludeIndices, key_conversion);
  }
  
@@ -307,12 +319,21 @@
 +  for (uint32_t index = 0; index < length; index++) {
 +    i::DirectHandle<i::String> key = i::direct_handle(
 +        i::Cast<i::String>(keys->get(index)), i_isolate);
++    if (key->length() == 0) {
++      return static_cast<int>(i::BoundedOwnKeysStatus::kInvalidKey);
++    }
 +    if (key->length() > max_key_units) {
 +      return static_cast<int>(i::BoundedOwnKeysStatus::kKeyTooLong);
++    }
++    if (!i::String::IsWellFormedUnicode(i_isolate, key)) {
++      return static_cast<int>(i::BoundedOwnKeysStatus::kInvalidKey);
 +    }
 +    Local<String> local_key = Utils::ToLocal(key);
 +    Isolate* v8_isolate = reinterpret_cast<Isolate*>(i_isolate);
 +    String::Utf8Value utf8(v8_isolate, local_key);
++    if (*utf8 == nullptr) {
++      return static_cast<int>(i::BoundedOwnKeysStatus::kException);
++    }
 +    sink(sink_data, reinterpret_cast<const uint8_t*>(*utf8),
 +         static_cast<size_t>(utf8.length()));
 +  }

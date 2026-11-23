@@ -18,7 +18,11 @@ The patch changes only:
 It adds an internal `GetOwnEnumerableStringKeysBounded` function and a narrow
 `extern "C"` entry point. It does not alter any existing V8 API or key collector
 path. Keys are copied to a Rust sink while the V8 handle scope is alive; no V8
-handle crosses the C ABI, so there is no escaped-local lifetime.
+handle crosses the C ABI, so there is no escaped-local lifetime. Empty keys and
+keys with unpaired surrogates are rejected with `kInvalidKey` before UTF-8
+conversion; a null `String::Utf8Value` is reported as `kException`. Test-only
+`neojs_v8_reset_element_scan_probe`/`neojs_v8_element_scan_probe` counters
+prove the element-slot loop is not entered before the scan-budget check.
 
 ## Supported and rejected objects
 
@@ -50,10 +54,10 @@ worktree. From the verified `prepare.sh` inputs:
 | ICU data | `icudtl.dat` sha256 `1cf67874b5a87a8363a86fb3f81e3cbbed54d389062dab8fb52308d5cf8c8612`; `icudtb.dat` sha256 `c58e1567b34e12a672b24ff4a5f21efa4c4481ab64a213dde059309b01aacde2` |
 | Rust toolchain | sha256 `832de79f8d90940f4aaef023f83a00c1e7210c023f4d57f606b7bf9831c889aa`, 274393124 bytes |
 | Chromium clang | sha256 `de584381536aa5ba2403033c4f8b70f3c39c2e5d7fa87c953b7fd8bfbba0ee2a`, 69635068 bytes |
-| Patch file | sha256 `b0bd951eda45659f32912293c9f6b7e0168e1d4280dfdadfff53856afef3e757`, 325 lines |
-| Patched `keys.h` | sha256 `20c9fe7be177ccd6175e5738293c4dcdbd545e09bfb2a6ac07ddb0cafcaea3d5` |
-| Patched `keys.cc` | sha256 `c84de6aa2a4a8a27a8f7fd30890bf01693a0f4a30c7f27d7c6c4771f1716dc8b` |
-| Patched `api.cc` | sha256 `5025ce1012d183d215edce11a0d90c276747b506b3f5efbf578c61b74fe36e01` |
+| Patch file | sha256 `f5933d7169a092eb03f909138a76bad492e65c46da90b70ea50621622c1646ca`, 325 lines |
+| Patched `keys.h` | sha256 `29e3de9dcb8e3c4424a3bc6b3520573cae6c1bdff29104bbbdb20e6a298e1890` |
+| Patched `keys.cc` | sha256 `ca0260e09da2e91cbf979bee393da555fb0d26056b6075d22f4d11a750873561` |
+| Patched `api.cc` | sha256 `be4d4ac17b905bc02cb6a0f9464b24a43df03649ff96c6356c5b9e26bcb344f4` |
 
 The prepared cache is verified with
 `eng/v8-source/prepare.sh --verify-only`. Local stamps are drift detection, not
@@ -66,24 +70,28 @@ hashes below.
 
 ```sh
 export NEOTALES_V8_CACHE=/path/to/verified/prepared/cache
+export NEOTALES_V8_PROCEDURE=/path/to/read-only/procedure
 eng/v8-source/build-bounded.sh
 # then, for the Node build/tests:
 export RUSTY_V8_ARCHIVE=/path/reported/by/build-bounded.sh
 ```
 
-The script copies the prepared crate to an isolated build root, applies the
-patch, uses the verified `GN`, Chromium clang, Rust toolchain and build-env,
-sets `V8_FROM_SOURCE=1`, and builds a release `librusty_v8.a` offline. The V8
+The script recreates a fresh source tree, applies the exact patch, uses the
+verified `GN`, Chromium clang, Rust toolchain and build-env, sets
+`V8_FROM_SOURCE=1`, and builds a release `librusty_v8.a` in a unique target
+directory per run. It requires `flock`, rejects `/` and overlapping roots, and
+publishes the archive plus `provenance.txt` under `artifacts/<run-id>/`. The V8
 tree and archive are not committed.
 
 Observed local build (Linux x86_64, 12 jobs):
 
-- `librusty_v8.a`: 186,810,152 bytes
-- sha256: `643ddb9ef4413922f14ee8e77cc5972882011f62c52d1494efa87f56b3a77ff8`
+- `librusty_v8.a`: 186,814,054 bytes
+- sha256: `127352881d5a46aaf5ad2cb952fb18762afc36af1ba63aa61841fae1fea3701b`
 - Earlier builds from the same pinned source produced different bytes
-  (`67552f…`, `f3a244…`); the difference is the no-bit-reproducibility caveat,
-  not a pin. Rebuilding the archive requires `cargo clean -p v8` in the
-  consumer target because Cargo does not track the archive file content.
+  (`643ddb…`, `67552f…`, `f3a244…`); the difference is the no-bit-
+  reproducibility caveat, not a pin. Rebuilding the archive requires
+  `cargo clean -p v8` in the consumer target because Cargo does not track the
+  archive file content.
 - exported symbol: `neojs_v8_get_own_enumerable_string_keys_bounded`
 - ICU and Temporal enabled in the build (`V8_INTL_SUPPORT`,
   `V8_TEMPORAL_SUPPORT`, `icudtl_dat.o` present)

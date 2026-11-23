@@ -150,8 +150,11 @@ It counts all descriptor and element capacity slots against the scan bound
 before output allocation, allocates only after the key and scan bounds pass,
 and preserves index-first/insertion order. Keys are copied to a Rust sink while
 the V8 handle scope is alive; no V8 local handle crosses the C ABI, so there is
-no escaped-handle lifetime to manage. A GC/handle-churn unit test exercises the
-sink path.
+no escaped-handle lifetime to manage. Empty keys and keys with unpaired
+surrogates are rejected before UTF-8 conversion; a null UTF-8 conversion is
+reported as an explicit exception. A GC/handle-churn unit test exercises the
+sink path, and test-only element-scan counters prove the slot loop is not
+entered before the budget check.
 
 The adapter applies the same caps as the QuickJS adapter: options 6 keys / 64
 scanned slots, environment 128 keys / 4096 scanned slots, and 4096 UTF-16 units

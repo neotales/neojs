@@ -771,6 +771,53 @@ for (const [name, call] of [
 }
 
 #[test]
+fn bounded_engine_rejects_non_round_trippable_and_empty_keys() {
+    require("/usr/bin/env");
+    run(
+        policy(&["/usr/bin/env"]),
+        r#"
+import { execFileSync, spawnSync } from "node:child_process";
+
+let code = null;
+try {
+    spawnSync("/bin/echo", [], {
+        encoding: "utf8",
+        env: { "\uD800": "bad", "\uFFFD": "good" },
+    });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_INVALID_ARG_VALUE") throw new Error(`unpaired surrogate: ${code}`);
+
+const good = execFileSync("/usr/bin/env", [], {
+    encoding: "utf8",
+    env: { "\uFFFD": "replacement" },
+});
+if (!good.includes("\uFFFD=replacement")) {
+    throw new Error(`replacement key lookup: ${good}`);
+}
+
+code = null;
+try {
+    spawnSync("/bin/echo", [], { encoding: "utf8", env: { "": "empty" } });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_INVALID_ARG_VALUE") throw new Error(`empty env key: ${code}`);
+
+code = null;
+try {
+    spawnSync("/bin/echo", [], { encoding: "utf8", "\uD800": true });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_UNSUPPORTED") throw new Error(`surrogate option key: ${code}`);
+"#,
+    )
+    .expect("key round-trip rejection");
+}
+
+#[test]
 fn bounded_engine_rejects_huge_ordinary_shapes_before_enumeration() {
     run(
         policy(&[]),

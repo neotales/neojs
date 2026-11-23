@@ -49,6 +49,7 @@ const MAX_OPTION_KEY_UNITS: u32 = MAX_PATH_UNITS as u32;
 enum BoundedKeysError {
     TooManyKeys,
     KeyTooLong,
+    InvalidKey,
     ScanLimit,
     Unsupported,
     Memory,
@@ -121,6 +122,7 @@ fn bounded_keys<'js>(
         3 => return Err(BoundedKeysError::Unsupported),
         4 => return Err(BoundedKeysError::Memory),
         5 => return Err(BoundedKeysError::KeyTooLong),
+        6 => return Err(BoundedKeysError::InvalidKey),
         _ => return Err(BoundedKeysError::Exception),
     }
     if keys.len() != len as usize {
@@ -634,6 +636,7 @@ fn reject_unknown_options<'s>(
         | BoundedKeysError::ScanLimit
         | BoundedKeysError::Unsupported => Failure::unsupported("an option is not implemented"),
         BoundedKeysError::KeyTooLong => Failure::too_large(),
+        BoundedKeysError::InvalidKey => Failure::unsupported("an option is not implemented"),
         BoundedKeysError::Memory | BoundedKeysError::Exception => Failure::Pending,
     })?;
     for key in keys {
@@ -672,6 +675,7 @@ fn read_env<'s>(
         BoundedKeysError::TooManyKeys
         | BoundedKeysError::KeyTooLong
         | BoundedKeysError::ScanLimit => Failure::too_large(),
+        BoundedKeysError::InvalidKey => Failure::invalid_value("an environment name is not valid"),
         BoundedKeysError::Unsupported => {
             Failure::unsupported("options.env is not supported by the native child_process module")
         }
@@ -1024,10 +1028,17 @@ fn exec_file_sync<'s>(
 
 #[cfg(test)]
 mod bounded_keys_gc_tests {
-    use super::bounded_keys;
+    use super::{BoundedKeysError, bounded_keys};
     use deno_core::JsRuntime;
     use deno_core::v8;
 
+    #[allow(unsafe_code)]
+    unsafe extern "C" {
+        fn neojs_v8_reset_element_scan_probe();
+        fn neojs_v8_element_scan_probe() -> u64;
+    }
+
+    #[allow(unsafe_code)]
     #[test]
     fn keys_survive_gc_and_handle_churn_around_the_abi() {
         v8::V8::set_flags_from_string("--expose-gc");
@@ -1054,5 +1065,46 @@ mod bounded_keys_gc_tests {
             let _ = v8::String::new(scope, &format!("handle-churn-{index}"));
         }
         assert_eq!(keys, ["alpha", "beta", "gamma"]);
+    }
+
+    #[allow(unsafe_code)]
+    #[test]
+    fn element_scan_budget_is_checked_before_any_slot_loop() {
+        v8::V8::set_flags_from_string("--expose-gc");
+        let mut js = JsRuntime::new(Default::default());
+        js.execute_script(
+            "<bounded-element-scan>",
+            "globalThis.elementObject = { encoding: 'utf8' }; for (let i = 0; i < 100; i += 1) globalThis.elementObject[i] = i;",
+        )
+        .expect("script");
+
+        let context = js.main_context();
+        v8::scope!(let scope, js.v8_isolate());
+        let context = v8::Local::new(scope, context);
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let global = scope.get_current_context().global(scope);
+        let key = v8::String::new(scope, "elementObject").expect("key");
+        let value = global.get(scope, key.into()).expect("object");
+        let object = v8::Local::<v8::Object>::try_from(value).expect("object");
+
+        unsafe { neojs_v8_reset_element_scan_probe() };
+        assert_eq!(
+            bounded_keys(scope, &object, 16, 0, 64),
+            Err(BoundedKeysError::ScanLimit)
+        );
+        assert_eq!(
+            unsafe { neojs_v8_element_scan_probe() },
+            0,
+            "element slots were inspected before the scan budget check"
+        );
+
+        unsafe { neojs_v8_reset_element_scan_probe() };
+        let keys = bounded_keys(scope, &object, 200, 1_000, 64).expect("element keys");
+        assert!(keys.iter().any(|key| key == "0"));
+        let inspected = unsafe { neojs_v8_element_scan_probe() };
+        assert!(
+            inspected >= 100,
+            "the probe did not count the fast element slots: {inspected}"
+        );
     }
 }
