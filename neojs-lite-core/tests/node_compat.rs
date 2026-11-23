@@ -326,6 +326,71 @@ for (const call of oversized) {
 }
 
 #[test]
+fn native_property_keys_are_bounded_after_enumeration() {
+    run(
+        policy(&[]),
+        r#"
+const childProcess = await import("node:child_process");
+const hugeKey = "x".repeat(100000);
+
+let code = null;
+try {
+    childProcess.execFileSync("/bin/echo", [], {
+        encoding: "utf8",
+        [hugeKey]: true,
+    });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_UNSUPPORTED") {
+    throw new Error(`huge option key: ${code}`);
+}
+
+code = null;
+try {
+    childProcess.execFileSync("/bin/echo", [], {
+        encoding: "utf8",
+        env: { [hugeKey]: "value" },
+    });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_REQUEST_TOO_LARGE") {
+    throw new Error(`huge env key: ${code}`);
+}
+
+const tooMany = {};
+for (let index = 0; index < 129; index += 1) {
+    tooMany[`KEY_${index}`] = "value";
+}
+code = null;
+try {
+    childProcess.execFileSync("/bin/echo", [], { encoding: "utf8", env: tooMany });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_REQUEST_TOO_LARGE") {
+    throw new Error(`too many env keys: ${code}`);
+}
+
+code = null;
+try {
+    childProcess.execFileSync("/bin/echo", [], {
+        encoding: "utf8",
+        env: { NEOJS_EXPANSION: "é".repeat(40000) },
+    });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_REQUEST_TOO_LARGE") {
+    throw new Error(`UTF-8 expansion: ${code}`);
+}
+"#,
+    )
+    .expect("native property-key bounds");
+}
+
+#[test]
 fn the_native_module_identity_survives_import_and_allows_execution() {
     require("/bin/echo");
     run(

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::ffi::c_char;
 
 use rquickjs::Array;
+use rquickjs::Atom;
 use rquickjs::Ctx;
 use rquickjs::Exception;
 use rquickjs::Function;
@@ -272,16 +273,21 @@ fn read_options<'js>(
     }
     let object = value.as_object().expect("checked object");
 
-    for key in object.keys::<String>() {
+    let known_options = [
+        Atom::from_str(ctx.clone(), "cwd")?,
+        Atom::from_str(ctx.clone(), "env")?,
+        Atom::from_str(ctx.clone(), "input")?,
+        Atom::from_str(ctx.clone(), "timeout")?,
+        Atom::from_str(ctx.clone(), "maxBuffer")?,
+        Atom::from_str(ctx.clone(), "encoding")?,
+    ];
+    for key in object.keys::<Atom>() {
         let key = key?;
-        if !matches!(
-            key.as_str(),
-            "cwd" | "env" | "input" | "timeout" | "maxBuffer" | "encoding"
-        ) {
+        if !known_options.iter().any(|known| known == &key) {
             return Err(coded_error(
                 ctx,
                 "ERR_NODE_UNSUPPORTED",
-                &format!("the node:child_process option `{key}` is not implemented"),
+                "an option is not implemented",
             ));
         }
     }
@@ -426,16 +432,15 @@ fn read_env<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Result<BTreeMap<String, 
     let object = value.as_object().expect("checked object");
     let mut environment = BTreeMap::new();
     let mut total = 0usize;
-    for key in object.keys::<String>() {
-        let name = key?;
+    for key in object.keys::<Atom>() {
+        let key = key?;
         if environment.len() >= MAX_ENV_ENTRIES {
             return Err(request_too_large(ctx));
         }
+        let key_value = key.to_value()?;
+        let name = read_string(ctx, &key_value, "environment name", MAX_PATH_BYTES)?;
         if name.is_empty() || name.contains('=') || name.contains('\0') {
             return Err(invalid(ctx, "an environment name is not valid"));
-        }
-        if name.len() > MAX_PATH_BYTES {
-            return Err(request_too_large(ctx));
         }
         let value = object.get::<_, Value>(name.as_str())?;
         let value = read_string(ctx, &value, "environment value", MAX_ENV_BYTES)?;
