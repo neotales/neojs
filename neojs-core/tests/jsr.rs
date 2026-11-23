@@ -1267,6 +1267,111 @@ if (direct.value !== 4) throw new Error("the ordinary redirect was blocked");
     assert_eq!(server.request_count(requested), 1);
 }
 
+// Integration test: after a bare `jsr:` resolution, an ordinary redirect to the
+// same URL must keep its relative imports on the ordinary remote path. The
+// pending resolution must not classify the ordinary referrer as JSR.
+#[test]
+fn an_ordinary_redirect_after_pending_jsr_resolve_keeps_relative_imports_ordinary() {
+    let requested = "https://elsewhere.test/entry.js";
+    let target = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let helper = file_url("scope", "pkg", "1.0.0", "/helper.js");
+    let body = b"import { helper } from \"./helper.js\";\nexport const value = helper + 1;\n";
+    let helper_body = b"export const helper = 4;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", body)], &[(".", "./mod.js")])),
+            )
+            .with(
+                requested.to_string(),
+                Reply::redirect("https://jsr.io/@scope/pkg/1.0.0/mod.js"),
+            )
+            .with(target.clone(), Reply::ok(body.as_slice()))
+            .with(helper.clone(), Reply::ok(helper_body.as_slice())),
+    );
+
+    run(
+        &server,
+        r#"
+const resolved = import.meta.resolve("jsr:@scope/pkg@1");
+if (resolved !== "https://jsr.io/@scope/pkg/1.0.0/mod.js") {
+    throw new Error(`unexpected resolution ${resolved}`);
+}
+const direct = await import("https://elsewhere.test/entry.js");
+if (direct.value !== 5) throw new Error("relative imports left the ordinary path");
+"#,
+    )
+    .expect("a pending jsr: resolution must not classify ordinary relative imports as JSR");
+    assert_eq!(
+        server.request_count(&helper),
+        1,
+        "the relative dependency must be fetched as ordinary HTTPS"
+    );
+}
+
+// Integration test: after a failed JSR load, the URL remains pending but is not
+// verified. An ordinary redirect to it must keep its relative imports ordinary.
+#[test]
+fn an_ordinary_redirect_after_failed_jsr_load_keeps_relative_imports_ordinary() {
+    let requested = "https://elsewhere.test/entry.js";
+    let target = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let helper = file_url("scope", "pkg", "1.0.0", "/helper.js");
+    let declared = b"export const value = 1;\n";
+    let actual = b"import { helper } from \"./helper.js\";\nexport const value = helper + 1;\n";
+    let helper_body = b"export const helper = 4;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(
+                    &[("/mod.js", declared)],
+                    &[(".", "./mod.js")],
+                )),
+            )
+            .with(target.clone(), Reply::ok(actual.as_slice()))
+            .with(
+                requested.to_string(),
+                Reply::redirect("https://jsr.io/@scope/pkg/1.0.0/mod.js"),
+            )
+            .with(helper.clone(), Reply::ok(helper_body.as_slice())),
+    );
+
+    run(
+        &server,
+        r#"
+let failed = null;
+try {
+    await import("jsr:@scope/pkg@1");
+} catch (error) {
+    failed = error;
+}
+if (failed === null) throw new Error("the jsr: load was expected to fail");
+const direct = await import("https://elsewhere.test/entry.js");
+if (direct.value !== 5) throw new Error("relative imports left the ordinary path");
+"#,
+    )
+    .expect("a failed jsr: load must not classify ordinary relative imports as JSR");
+    assert_eq!(
+        server.request_count(&target),
+        2,
+        "the failed verified load and the ordinary redirect each fetch the target once"
+    );
+    assert_eq!(
+        server.request_count(&helper),
+        1,
+        "the relative dependency must be fetched as ordinary HTTPS"
+    );
+}
+
 // Integration test: an ordinary redirect to a differently encoded canonical
 // jsr.io path is recorded under the canonical identity, so a later `jsr:`
 // import cannot reuse it.
