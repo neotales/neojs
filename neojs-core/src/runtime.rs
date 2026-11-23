@@ -232,12 +232,17 @@ impl Runtime {
     /// imports. They resolve through the public JSR registry: package metadata
     /// selects an exact version, version metadata resolves the entrypoint, and
     /// each file's length and SHA-256 are verified against the version manifest
-    /// before it reaches TypeScript stripping or V8. Metadata and files use this
-    /// runtime's HTTPS client, redirect policy, deadlines, request/byte budgets,
-    /// and user cache. Resolution is synchronous, so the first request for a
-    /// package or version blocks the isolate thread. There is no lockfile,
-    /// publisher signature, dist-tag, private registry, `npm:`, `node:`, `gh:`,
-    /// or import-map support.
+    /// before it reaches TypeScript stripping or V8. That proves consistency
+    /// with the retrieved metadata, not publisher identity, and the cache is
+    /// mutable local state rather than an authentication boundary. Metadata and
+    /// files use this runtime's HTTPS client, redirect policy, deadlines,
+    /// request/byte budgets, and user cache. Resolution is synchronous, so the
+    /// first request for a package or version blocks the isolate thread. A
+    /// direct `https://jsr.io/...` import from a local or ordinary remote module
+    /// is an ordinary HTTPS module, not a `jsr:` import; an explicit jsr.io URL
+    /// imported inside a JSR graph is verified against the manifest. There is no
+    /// lockfile, publisher signature, dist-tag, private registry, `npm:`,
+    /// `node:`, `gh:`, or import-map support.
     ///
     /// Redirects are followed one hop at a time: the target must be
     /// credential-free HTTPS and within `options.max_redirects`; a downgrade to

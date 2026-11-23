@@ -8,7 +8,10 @@
 //! The crate-private [`crate::jsr_loader`] wires it to deno_core's module loader
 //! over the opt-in HTTPS transport in [`crate::remote`].
 //! [`crate::Runtime::with_remote`] and `neojs --allow-remote` enable it; a
-//! default runtime still rejects every `jsr:` import.
+//! default runtime still rejects every `jsr:` import. A direct
+//! `https://jsr.io/...` import from a local or ordinary remote module is an
+//! ordinary HTTPS module and does not use this resolver; an explicit jsr.io URL
+//! imported inside a JSR graph is checked against the manifest.
 //!
 //! The integration imports a package's exported entrypoints and the relative
 //! modules they import. It does not implement `npm:`, `node:`, `gh:`, or import
@@ -17,7 +20,8 @@
 //! authentication support, custom origin, or publisher signature. Metadata is
 //! trusted through HTTPS to the public `jsr.io` origin, and a file is executed
 //! only after its length and SHA-256 match the version metadata. That is content
-//! integrity against a corrupted or substituted file, not publisher identity.
+//! integrity against a corrupted or substituted file relative to the retrieved
+//! metadata, not publisher identity or an authentication boundary for the cache.
 //!
 //! # Scope
 //!
@@ -86,7 +90,10 @@
 //! remote client. The package metadata, version metadata, and each file are
 //! ordinary HTTPS GETs to `https://jsr.io/...`; the remote client caches them by
 //! URL under its own freshness and revalidation policy. A cached body is still
-//! checked against this module's manifest length and checksum before use.
+//! checked against the manifest length and checksum before use. That proves
+//! consistency with the retrieved metadata, not publisher identity; a local
+//! attacker who consistently rewrites both the cached metadata and the cached
+//! body can keep them consistent.
 //!
 //! [`deno_core::ModuleLoader::resolve`] is synchronous, so the first import of a
 //! package or version fetches its metadata on the isolate thread, using the same

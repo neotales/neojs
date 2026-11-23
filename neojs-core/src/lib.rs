@@ -25,13 +25,18 @@
 //! resolve through the public JSR registry. The package's `meta.json` selects an
 //! exact version, the version metadata resolves the entrypoint through the
 //! package exports, and every file is checked against the version manifest's
-//! length and SHA-256 before it is type-stripped and executed. The same HTTPS
+//! length and SHA-256 before it is type-stripped and executed. That check proves
+//! consistency with the retrieved metadata; it is not a publisher signature,
+//! and the cache is not an authentication boundary. The same HTTPS
 //! client, redirect policy, deadlines, and user cache are used, and metadata and
 //! files are cached by URL. A `jsr:` import with remote loading disabled is
-//! rejected. There is no lockfile, publisher signature, dist-tag, private
-//! registry, `npm:`, `node:`, `gh:`, or import-map support; a package that
-//! imports those specifiers fails at resolution. Resolution is synchronous, so
-//! the first metadata request for a package or version blocks the isolate
+//! rejected. A direct `https://jsr.io/...` import from a local or ordinary
+//! remote module is an ordinary HTTPS module, not a `jsr:` import; an explicit
+//! jsr.io URL imported inside a JSR graph is verified against the manifest.
+//! There is no lockfile, publisher signature, dist-tag,
+//! private registry, `npm:`, `node:`, `gh:`, or import-map support; a package
+//! that imports those specifiers fails at resolution. Resolution is synchronous,
+//! so the first metadata request for a package or version blocks the isolate
 //! thread.
 //!
 //! It provides the `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`,
