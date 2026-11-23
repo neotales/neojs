@@ -376,7 +376,7 @@ impl JsrModuleLoader {
             let resolved = jsr::resolve_module(&specifier, &package, &version)
                 .map_err(|error| error.to_string())?;
             let url = canonical_module_url(&resolved)?;
-            if self.is_ordinary_registry_url(&url) {
+            if !self.is_jsr_module(url.as_str()) && self.is_ordinary_registry_url(&url) {
                 return Err(format!(
                     "`{url}` was already loaded as an ordinary HTTPS module; a `jsr:` import cannot add registry verification to that module. Use the `jsr:` import first, or a new Runtime."
                 ));
@@ -424,7 +424,7 @@ impl JsrModuleLoader {
             // Normalize the encoding chosen by the URL parser so one file has
             // one module identity however the importer spelled it.
             let url = canonical_url_for(&joined_module)?;
-            if self.is_ordinary_registry_url(&url) {
+            if !self.is_jsr_module(url.as_str()) && self.is_ordinary_registry_url(&url) {
                 return Err(format!(
                     "`{url}` was already loaded as an ordinary HTTPS module; a JSR graph import cannot add registry verification to that module"
                 ));
@@ -489,7 +489,8 @@ impl JsrModuleLoader {
                 );
             };
             let canonical = canonical_url_for(&module)?;
-            if self.is_ordinary_registry_url(&canonical) {
+            if !self.is_jsr_module(canonical.as_str()) && self.is_ordinary_registry_url(&canonical)
+            {
                 return Err(format!(
                     "`{canonical}` was already loaded as an ordinary HTTPS module; a JSR graph import cannot add registry verification to that module"
                 ));

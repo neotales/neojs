@@ -884,6 +884,42 @@ fn a_jsr_import_cannot_reuse_an_unverified_ordinary_registry_module() {
     );
 }
 
+// Integration test: once a canonical jsr.io URL is admitted by `jsr:`, a later
+// direct HTTPS import of the same URL reuses the verified module, and a later
+// `jsr:` import is not rejected as a false collision.
+#[test]
+fn a_jsr_import_can_follow_a_direct_https_import_of_a_verified_url() {
+    let url = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let body = b"export const value = 1;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", body)], &[(".", "./mod.js")])),
+            )
+            .with(url.clone(), Reply::ok(body.as_slice())),
+    );
+
+    run(
+        &server,
+        &format!(
+            r#"
+const first = await import("jsr:@scope/pkg@1");
+const direct = await import("{url}");
+const second = await import("jsr:@scope/pkg@1");
+if (first !== direct) throw new Error("the direct import is a different module");
+if (direct !== second) throw new Error("the second jsr: import is a different module");
+if (first.value !== 1) throw new Error(`bad value ${{first.value}}`);
+"#
+        ),
+    )
+    .expect("a direct import of an already verified JSR URL must reuse the module");
+}
+
 // Integration test: the cache is local mutable state. Rewriting both the
 // version metadata and the file keeps the checksum consistent, so the loader
 // accepts the substituted body. This documents a limitation: the checksum
