@@ -85,10 +85,12 @@ tree and archive are not committed.
 
 Observed local build (Linux x86_64, 12 jobs):
 
-- `librusty_v8.a`: 186,814,054 bytes
-- sha256: `127352881d5a46aaf5ad2cb952fb18762afc36af1ba63aa61841fae1fea3701b`
-- Earlier builds from the same pinned source produced different bytes
-  (`643ddb…`, `67552f…`, `f3a244…`); the difference is the no-bit-
+- `librusty_v8.a`: 186,838,134 bytes
+- sha256: `cca39ea314e03e1378b59c3a2118e2ffb3e64f40e97e4eb2c8a66fba8807fbbe`
+- The unique-target script build produced this artifact and wrote
+  `artifacts/20261123T152657Z-445194/provenance.txt`; an earlier manual build
+  from the same source produced `12735288…`, and other builds produced
+  `643ddb…`, `67552f…`, `f3a244…`. The differences are the no-bit-
   reproducibility caveat, not a pin. Rebuilding the archive requires
   `cargo clean -p v8` in the consumer target because Cargo does not track the
   archive file content.
