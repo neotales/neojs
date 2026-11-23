@@ -83,11 +83,15 @@ There is no `generateKey`, `createHash`, `hashAsync`, `subtle`, bcrypt, cipher,
 or Shamir export. Importing one is a link error, not a rejected Promise. Lite
 has no host asynchronous work, so this slice advertises no async form.
 
-### Enable it
+### Enable it (workspace / local checkout)
+
+The workspace itself uses a sibling path dependency. This is a local-checkout
+example, not a claim that `neojs-lite-core` is published at a registry version.
+Adjust the path for your checkout.
 
 ```toml
 [dependencies]
-neojs-lite-core = { version = "0.1.0", path = "../neojs-lite-core", features = ["crypto"] }
+neojs-lite-core = { path = "../neojs-lite-core", features = ["crypto"] }
 ```
 
 Cargo unifies features across a build graph: if any dependency enables
