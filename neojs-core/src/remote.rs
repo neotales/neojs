@@ -1,9 +1,11 @@
 //! HTTPS module transport and the user-profile module cache.
 //!
 //! Remote loading is opt-in per [`crate::Runtime`]; a default runtime never
-//! performs a network request. When enabled, only `https:` URLs are accepted.
-//! `http:`, `data:`, `blob:`, and `file:` are not remote transports, and a
-//! remote module cannot import a `file:` module.
+//! performs a network request. When enabled, only `https:` URLs are accepted
+//! here. The loader resolves a `gh:` or `github:` specifier to one such URL
+//! first ([`crate::github`]), so this client sees the same HTTPS request and
+//! applies the same policy. `http:`, `data:`, `blob:`, and `file:` are not
+//! remote transports, and a remote module cannot import a `file:` module.
 //!
 //! The client is deliberately small:
 //!

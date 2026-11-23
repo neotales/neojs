@@ -5,7 +5,9 @@
 //!
 //! | Input | Canonical form |
 //! | --- | --- |
-//! | `gh:owner/repo/path/@tagOrSha` | `https://raw.githubusercontent.com/owner/repo/tagOrSha/path` |
+//! | `gh:owner/repo@ref/path` | `https://raw.githubusercontent.com/owner/repo/ref/path` |
+//! | `github:owner/repo@ref/path` | the same raw URL as the `gh:` spelling |
+//! | `gh:owner/repo/path/@ref` (legacy) | `https://raw.githubusercontent.com/owner/repo/ref/path` |
 //! | `npm:[@scope/]name@version[/subpath]` | the same `npm:` spelling, with a validated name |
 //! | `jsr:@scope/name@version[/subpath]` | the same `jsr:` spelling, with a validated name |
 //! | `node:name[/subpath]` | the same `node:` spelling |
@@ -14,17 +16,28 @@
 //! | `./path` | the same relative path, validated |
 //!
 //! Normalization is not loading. [`Support`] states whether the project has a
-//! transport for the canonical form. npm, JSR, GitHub, and Node are always
-//! [`Support::Unsupported`]; local paths and HTTPS are [`Support::NormalizedOnly`]
-//! because this crate does not install a manifest import map into either
-//! runtime.
+//! transport for the canonical form. npm, JSR, and Node are always
+//! [`Support::Unsupported`]. Local paths, HTTPS, and GitHub are
+//! [`Support::NormalizedOnly`] because this crate does not install a manifest
+//! import map into either runtime; a GitHub coordinate is loadable as a direct
+//! runtime specifier only when remote loading is enabled.
 //!
 //! The parser is strict about ambiguity:
 //!
 //! - Specifiers contain no whitespace or control characters.
-//! - `gh:` uses the **last** `/@` as the reference separator. A reference may
-//!   not contain `/`, so `gh:o/r/dir/@scope/file/@v1` is rejected rather than
-//!   guessed. A path may contain `@` in an earlier segment.
+//! - `gh:` and `github:` accept `owner/repo@ref/path`. The reference ends at
+//!   the first `/`, so a branch name that contains `/` cannot be expressed;
+//!   use a tag or a full commit SHA. A path may contain `@`, including in a
+//!   segment after the reference.
+//! - The legacy `gh:owner/repo/path/@ref` spelling is still accepted. It uses
+//!   the **last** `/@` as the reference separator, so
+//!   `gh:o/r/dir/@scope/file/@v1` is rejected rather than guessed. An earlier
+//!   path segment may contain `@`.
+//! - The two spellings cannot be confused: `@` immediately after the
+//!   repository selects the new form, and `/` after the repository selects the
+//!   legacy form. A specifier with neither is rejected.
+//! - The scheme itself is matched case-sensitively here (`GH:` is an unknown
+//!   scheme), matching the rest of this parser.
 //! - npm and JSR require an explicit version. Omission and dist-tags are left
 //!   to a future transport instead of being guessed here.
 //! - npm and JSR version text is preserved as one token. The parser does not
@@ -51,7 +64,6 @@ const NPM_REASON: &str =
     "npm package resolution, artifact download, extraction, and cache policy are not implemented";
 const JSR_REASON: &str =
     "JSR metadata resolution, artifact download, and cache policy are not implemented";
-const GH_REASON: &str = "the GitHub specifier is normalized to a raw HTTPS URL, but manifest import maps are not installed and GitHub fetching is not tested";
 const NODE_REASON: &str =
     "Node built-in modules and a Node compatibility transform are not implemented";
 const BARE_REASON: &str = "bare import-map targets are not implemented";
@@ -150,10 +162,11 @@ impl NormalizedSpecifier {
     /// Returns the transport status for this specifier.
     pub fn support(&self) -> Support {
         match self {
-            Self::Path(_) | Self::FileUrl(_) | Self::Https(_) => Support::NormalizedOnly,
+            Self::Path(_) | Self::FileUrl(_) | Self::Https(_) | Self::Gh(_) => {
+                Support::NormalizedOnly
+            }
             Self::Npm(_) => Support::Unsupported(NPM_REASON),
             Self::Jsr(_) => Support::Unsupported(JSR_REASON),
-            Self::Gh(_) => Support::Unsupported(GH_REASON),
             Self::Node(_) => Support::Unsupported(NODE_REASON),
             Self::Bare(_) => Support::Unsupported(BARE_REASON),
         }
@@ -311,12 +324,17 @@ impl fmt::Display for GhSpecifier {
 /// Returns [`Error::InvalidSpecifier`] for a malformed specifier, and
 /// [`Error::UnsupportedTransport`] for a syntactically valid scheme with no
 /// implemented transport (`http:`, `data:`, `blob:`, and any other unknown
-/// scheme). `npm:`, `jsr:`, `gh:`, and `node:` parse successfully and report
-/// [`Support::Unsupported`] from [`NormalizedSpecifier::support`].
+/// scheme). `npm:`, `jsr:`, and `node:` parse successfully and report
+/// [`Support::Unsupported`] from [`NormalizedSpecifier::support`]. `gh:` and
+/// `github:` parse successfully and report [`Support::NormalizedOnly`]: this
+/// crate normalizes the coordinate but installs no import map.
 pub fn normalize_specifier(raw: &str) -> Result<NormalizedSpecifier, Error> {
     validate_input(raw)?;
 
     if let Some(rest) = raw.strip_prefix("gh:") {
+        return parse_gh(rest);
+    }
+    if let Some(rest) = raw.strip_prefix("github:") {
         return parse_gh(rest);
     }
     if let Some(rest) = raw.strip_prefix("npm:") {
@@ -395,26 +413,26 @@ fn validate_input(raw: &str) -> Result<(), Error> {
 fn parse_gh(rest: &str) -> Result<NormalizedSpecifier, Error> {
     let Some((owner, remainder)) = rest.split_once('/') else {
         return Err(invalid(
-            "a gh: specifier must name `gh:owner/repo/path/@reference`",
+            "a gh: or github: specifier must name `owner/repo@reference/path`",
         ));
     };
-    let Some((repo, remainder)) = remainder.split_once('/') else {
+    let repo_end = remainder.find(['@', '/']).unwrap_or(remainder.len());
+    let repo = &remainder[..repo_end];
+    let after_repo = &remainder[repo_end..];
+    let (reference, path) = if let Some(after_at) = after_repo.strip_prefix('@') {
+        parse_gh_new_reference(after_at)?
+    } else if let Some(after_slash) = after_repo.strip_prefix('/') {
+        parse_gh_legacy_reference(after_slash)?
+    } else {
         return Err(invalid(
-            "a gh: specifier must include a repository and a file path",
+            "a gh: or github: specifier must include a repository, a tag or commit reference after `@`, and a file path",
         ));
     };
-    let Some(separator) = remainder.rfind("/@") else {
-        return Err(invalid(
-            "a gh: specifier must end the path with `/@` and a tag or commit reference",
-        ));
-    };
-    let path = &remainder[..separator];
-    let reference = &remainder[separator + 2..];
 
     validate_gh_owner(owner)?;
     validate_gh_repo(repo)?;
     validate_gh_reference(reference)?;
-    validate_module_path(path, MAX_SUBPATH_BYTES, "the gh: path")?;
+    validate_module_path(path, MAX_SUBPATH_BYTES, "the GitHub path")?;
 
     let mut url = Url::parse("https://raw.githubusercontent.com/").map_err(|_| {
         invalid("could not build the GitHub raw URL; this is an internal constant error")
@@ -437,6 +455,46 @@ fn parse_gh(rest: &str) -> Result<NormalizedSpecifier, Error> {
         path: path.to_owned(),
         url: url.to_string(),
     }))
+}
+
+/// Splits the text after `owner/repo@` into a reference and a file path.
+///
+/// The reference is one segment: it ends at the first `/`. That makes the
+/// spelling deterministic, but it also means a branch whose name contains `/`
+/// cannot be written; use a tag or a full commit SHA. The path may itself
+/// contain `@`.
+fn parse_gh_new_reference(after_at: &str) -> Result<(&str, &str), Error> {
+    let Some((reference, path)) = after_at.split_once('/') else {
+        return Err(invalid(
+            "a gh: or github: specifier must include a file path after `owner/repo@reference/`",
+        ));
+    };
+    if reference.is_empty() {
+        return Err(invalid(
+            "a gh: or github: specifier must name a tag or commit reference after `@`",
+        ));
+    }
+    Ok((reference, path))
+}
+
+/// Splits the legacy `owner/repo/path/@reference` form at its last `/@`.
+///
+/// A reference may not contain `/`, and the last separator wins, so
+/// `owner/repo/dir/@scope/file/@v1` is rejected instead of guessed.
+fn parse_gh_legacy_reference(after_slash: &str) -> Result<(&str, &str), Error> {
+    let Some(separator) = after_slash.rfind("/@") else {
+        return Err(invalid(
+            "a gh: specifier without `@` after the repository must end the path with `/@` and a tag or commit reference",
+        ));
+    };
+    let path = &after_slash[..separator];
+    let reference = &after_slash[separator + 2..];
+    if reference.contains('/') {
+        return Err(invalid(
+            "a gh: reference may not contain `/`; use a tag or a full commit SHA",
+        ));
+    }
+    Ok((reference, path))
 }
 
 fn parse_npm(rest: &str) -> Result<NormalizedSpecifier, Error> {

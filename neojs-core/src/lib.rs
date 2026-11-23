@@ -38,10 +38,22 @@
 //! direct load of that URL takes the verified path because the original
 //! specifier is not recoverable at load time; that is conservative
 //! verification, not a bypass. There is no lockfile, publisher signature, dist-tag,
-//! private registry, `npm:`, `node:`, `gh:`, or import-map support; a package
+//! private registry, `npm:`, `node:`, or import-map support; a package
 //! that imports those specifiers fails at resolution. Resolution is synchronous,
 //! so the first metadata request for a package or version blocks the isolate
 //! thread.
+//!
+//! With remote loading enabled, `gh:owner/repo@ref/path` and
+//! `github:owner/repo@ref/path` are accepted as an entry or an import, including
+//! from a verified `jsr:` module. Each is validated and normalized to one
+//! credential-free `https://raw.githubusercontent.com/owner/repo/ref/path` URL,
+//! then loaded as that HTTPS module, so the same limits, redirect policy, cache,
+//! identity, and relative-import base apply. The legacy
+//! `gh:owner/repo/path/@ref` spelling is also accepted. The reference is one
+//! path segment: a tag, a branch, or a commit SHA, but not a branch name
+//! containing `/`. Percent signs, `..` segments, backslashes, queries, and
+//! fragments are rejected. GitHub is not an allowlist: any `https:` URL is still
+//! allowed, and remote code is not sandboxed.
 //!
 //! It provides the `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`,
 //! `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid` built-in
@@ -349,6 +361,7 @@ mod crypto_cipher;
 mod crypto_hash;
 mod crypto_shamir;
 mod error;
+mod github;
 // Private groundwork and resolver for native `jsr:` imports. The loader is
 // installed only by `Runtime::with_remote`; a default runtime still rejects
 // every `jsr:` import. See `src/jsr.rs` for the deterministic core and

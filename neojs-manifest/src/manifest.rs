@@ -89,9 +89,11 @@ const RESERVED_FIELDS: &[(&str, &str)] = &[
 /// may not contain `..`, and may not start with `!`.
 ///
 /// `imports` is a map from a specifier key to a normalized target. npm, JSR,
-/// GitHub, and Node targets are accepted as metadata and report
-/// [`Support::Unsupported`]; local and HTTPS targets report
-/// [`Support::NormalizedOnly`] because the map is not installed in a runtime.
+/// and Node targets are accepted as metadata and report
+/// [`Support::Unsupported`]. Local, HTTPS, and GitHub targets report
+/// [`Support::NormalizedOnly`] because the map is not installed in a runtime;
+/// the V8 runtime can load a GitHub coordinate only as a direct specifier with
+/// remote loading enabled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     /// The scoped package name, such as `@scope/name`.

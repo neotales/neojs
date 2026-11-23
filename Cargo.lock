@@ -2064,6 +2064,7 @@ dependencies = [
  "hmac",
  "httpdate",
  "neojs-builtins",
+ "neojs-manifest",
  "neojs-module-policy",
  "neotales-age",
  "neotales-ssh",

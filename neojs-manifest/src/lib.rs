@@ -33,7 +33,8 @@
 //! );
 //! ```
 //!
-//! The `jsr:` mapping above is normalized but not loadable. Every specifier
+//! The `jsr:` mapping above is normalized but not installable: this crate does
+//! not install an import map. Every specifier
 //! reports its [`Support`] status, and no runtime transport is installed by this
 //! crate.
 //!
@@ -43,11 +44,12 @@
 //! | --- | --- |
 //! | JSONC parsing, duplicate-key detection, size limits | Implemented |
 //! | Manifest field validation | Implemented for the documented keys |
-//! | `gh:`, `npm:`, `jsr:`, and `node:` normalization | Implemented as metadata |
+//! | `gh:`, `github:`, `npm:`, `jsr:`, and `node:` normalization | Implemented as metadata |
 //! | Import-map application | Not implemented |
 //! | Workspace expansion | Not implemented |
 //! | `include` / `exclude` matching | Not implemented |
-//! | npm, JSR, GitHub, Node loading | Not implemented |
+//! | npm, JSR, and Node loading by this crate | Not implemented |
+//! | GitHub loading | Implemented by the V8 runtime, not this crate |
 //! | Node compatibility transform | Not implemented |
 //!
 //! No function in this crate reads the network or writes a file. [`Manifest::from_path`]

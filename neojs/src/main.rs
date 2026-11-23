@@ -242,9 +242,11 @@ fn parse_test_args(args: &[OsString], mut allow_remote: AllowRemote) -> Result<C
 
 /// Decides whether an input names a local path or a remote URL.
 ///
-/// Only `http:` and `https:` are treated as URLs. A Windows drive path such as
-/// `C:\work\main.js` parses as a one-letter URL scheme, and every other string
-/// is a path, so the existing path handling is unchanged.
+/// `http:`, `https:`, `gh:`, and `github:` are treated as URLs. A Windows drive
+/// path such as `C:\work\main.js` parses as a one-letter URL scheme, and every
+/// other string is a path, so the existing path handling is unchanged. A `gh:`
+/// or `github:` input still fails unless remote loading is enabled; the runtime
+/// performs the grammar check and the opt-in check.
 fn classify_input(input: &OsString) -> Input {
     if let Some(text) = input.to_str() {
         let https = text
@@ -253,7 +255,13 @@ fn classify_input(input: &OsString) -> Input {
         let http = text
             .get(..7)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"));
-        if https || http {
+        let github = text
+            .get(..3)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("gh:"))
+            || text
+                .get(..7)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("github:"));
+        if https || http || github {
             return Input::Url(text.to_string());
         }
     }
@@ -418,7 +426,7 @@ Run an ECMAScript module or erasable TypeScript file, or run test files.
 
 Usage:
   neojs <file>                    run one module
-  neojs --allow-remote <file-or-https-url>
+  neojs --allow-remote <file-or-url>
   neojs --no-allow-remote <file>
   neojs test <file-or-glob>...    run test files
   neojs test --allow-remote <file-or-glob>...
@@ -426,8 +434,8 @@ Usage:
   neojs --allow-remote test <file-or-glob>...
 
 Options:
-  --allow-remote   allow https: entry and imports and jsr: imports; off by
-                   default
+  --allow-remote   allow https:, gh:, and github: entry and imports, and
+                   jsr: imports; off by default
   --no-allow-remote
                    force remote loading off, overriding NEOJS_ALLOW_REMOTE
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -451,13 +459,15 @@ specifier, such as `neo:age` and `neo:test`; a bare name is not a built-in
 module. `Neo.getBuiltInModule` takes the same canonical specifier, such as
 `Neo.getBuiltInModule(\"neo:test\")`; the README lists every specifier.
 
-Remote loading is disabled by default. `--allow-remote` enables an https:
-entry, absolute https: imports, and jsr:@scope/name[@version][/subpath] imports
-from the public JSR registry; `--no-allow-remote` forces it off. Either flag
-may appear before the module, or before or after `test`. It is not SSRF
-protection and not a sandbox, and downloads are cached under `neojs/packages` in
-the user cache. JSR metadata and files use the same HTTPS limits and cache. npm:,
-node:, gh:, and import maps are not implemented.
+Remote loading is disabled by default. `--allow-remote` enables an https:,
+gh:, or github: entry, absolute https: imports, and
+jsr:@scope/name[@version][/subpath] imports from the public JSR registry;
+`--no-allow-remote` forces it off. Either flag may appear before the module, or
+before or after `test`. A gh:/github: specifier becomes a
+raw.githubusercontent.com https: URL. It is not SSRF protection, not a host
+allowlist, and not a sandbox. Downloads are cached under `neojs/packages` in the
+user cache. JSR metadata and files use the same HTTPS limits and cache. npm:,
+node:, and import maps are not implemented.
 
 `neojs test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh

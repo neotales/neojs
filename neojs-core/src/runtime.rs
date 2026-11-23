@@ -228,7 +228,11 @@ impl Runtime {
     /// absolute `https:` URL. Relative imports inside a remote module resolve
     /// against that module's URL and therefore stay remote.
     ///
-    /// Only `https:` is accepted. `http:`, `data:`, `blob:`, and `file:` are
+    /// Only `https:` and the GitHub specifiers `gh:` and `github:` are
+    /// accepted. A GitHub specifier is normalized to one credential-free
+    /// `https://raw.githubusercontent.com/owner/repo/ref/path` URL before it is
+    /// fetched, so it has the same limits, redirect policy, cache, and module
+    /// identity as that HTTPS URL. `http:`, `data:`, `blob:`, and `file:` are
     /// not remote transports, and a remote module cannot import `file:`.
     ///
     /// This opt-in also enables `jsr:@scope/name[@constraint][/subpath]`
@@ -250,7 +254,7 @@ impl Runtime {
     /// is not recoverable at load time; that is conservative verification, not
     /// a bypass. There is no
     /// lockfile, publisher signature, dist-tag, private registry, `npm:`,
-    /// `node:`, `gh:`, or import-map support.
+    /// `node:`, or import-map support.
     ///
     /// Redirects are followed one hop at a time: the target must be
     /// credential-free HTTPS and within `options.max_redirects`; a downgrade to
@@ -555,8 +559,11 @@ impl Runtime {
     ///
     /// This is [`Runtime::run_file`] for a URL. Remote loading must have been
     /// enabled with [`Runtime::with_remote`]; otherwise it returns
-    /// [`Error::RemoteDisabled`] without a network request. The URL must be
-    /// `https:`, must have a host, and must not contain a username or password.
+    /// [`Error::RemoteDisabled`] without a network request. The entry must be
+    /// an `https:` URL, which must have a host and no username or password, or
+    /// a `gh:`/`github:` GitHub specifier. A GitHub specifier is rewritten to
+    /// its raw HTTPS URL before fetching; see [`crate::github`] for the
+    /// accepted grammar.
     ///
     /// Entry preparation follows the same single-use rule as [`Runtime::run_file`]:
     /// a parse, scheme, fetch, limit, UTF-8, or unsupported-format failure
@@ -959,10 +966,19 @@ fn prepare_entry(path: &Path) -> Result<(Url, String), Error> {
 /// final URL, and `import.meta.url` is the final URL. Errors describe a
 /// sanitized URL, so a password in a malformed input is not echoed.
 fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, Error> {
-    let requested = Url::parse(url).map_err(|error| Error::RemoteEntry {
-        url: "<invalid URL>".to_string(),
-        reason: format!("invalid URL: {error}"),
-    })?;
+    let requested = match crate::github::github_url(url) {
+        Some(Ok(url)) => url,
+        Some(Err(reason)) => {
+            return Err(Error::RemoteEntry {
+                url: "<invalid GitHub specifier>".to_string(),
+                reason,
+            });
+        }
+        None => Url::parse(url).map_err(|error| Error::RemoteEntry {
+            url: "<invalid URL>".to_string(),
+            reason: format!("invalid URL: {error}"),
+        })?,
+    };
     validate_url(&requested).map_err(|reason| Error::RemoteEntry {
         url: display_url(&requested),
         reason,
