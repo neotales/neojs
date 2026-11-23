@@ -54,38 +54,26 @@ continue to reject `node:` imports.
 
 ## Rust-native module status
 
-The `node:child_process` method implementations and policy are in Rust
-(`neojs-node-builtins`). The QuickJS adapter now exposes a native C module
-(`Module::declare_def`/`ModuleDef`) whose exports are Rust functions; it has no
-JavaScript module source and no JSON bridge. The V8 adapter still delivers its
-exports through `child_process.js`, which marshals arguments over the JSON
-bridge. That V8 JS facade does **not** satisfy the no-JavaScript-built-in-modules
-requirement; it is a migration item, not a completed native module.
+The child-process implementations, policy, and bounded synchronous runner are
+Rust in `neojs-node-builtins`. Both adapters expose that core as native modules:
 
-The V8 adapter is blocked by the public `deno_core` 0.413.0 module seam:
+* The QuickJS adapter uses `Module::declare_def`/`ModuleDef`; its exports are
+  native QuickJS functions.
+* The V8 adapter calls `JsRuntime::register_native_module` from the workspace's
+  vendored `deno_core` 0.413.0 patch. Its exports are native V8 function objects
+  registered in the normal module map before user code runs.
 
-* `ModuleMap` is `pub(crate)`, and `JsRuntime::module_map()` is `pub(crate)` and
-  test-only. The public `ModuleMap::new_synthetic_module_from_exports_object`
-  therefore cannot be reached by this crate.
-* `ModuleLoader::load` can return only a `ModuleSource`/`ModuleSourceCode`, which
-  is source text; it cannot return a Rust-created module object.
-* `Extension::synthetic_esm_modules` maps a specifier to a **backing script
-  specifier**; building it calls `load_ext_script` and requires that script to
-  return an object. The only public path is another JS source file, i.e. the
-  facade this requirement excludes.
+Neither adapter has a JavaScript module source, a JSON bridge, a host op, or a
+global installation hook. Static imports, dynamic imports, and repeated imports
+see one module instance and the same function objects. The vendored patch adds
+only that public registration seam; provenance and the diff are in
+`vendor/deno_core/PATCH.md`. It is a separate, pinned patch from
+`vendor/rquickjs-sys`.
 
-The QuickJS binding exposes a native C-module seam (`Module::declare_def`,
-`ModuleDef`, and `Module::exports`), and `neojs-lite-node` now uses it. The
-module has no JavaScript source or bridge; its named/default exports are Rust
-functions. The V8 side has no safe public named synthetic-module registration,
-so its JS facade remains until that seam is available or a deliberate
-deno_core fork/extension design is approved.
-
-This change also does not migrate the existing NeoJS built-ins that are still
-implemented in JavaScript (`age`, `assert`, `chars`, `console`, `cron`, `crypto`,
-`os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid`). A
-repo-wide Rust-native built-ins migration is separate work and is not claimed
-here.
+The existing NeoJS built-ins still implemented in JavaScript are `age`,
+`assert`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
+`strings`, `test`, and `uuid`. `chars` is native in both runtimes. A repo-wide
+Rust-native migration of the rest is separate work and is not claimed here.
 
 ### Native property enumeration bound
 
@@ -155,19 +143,17 @@ Supported options are exactly `cwd`, `env`, `input` (a string), `timeout`,
 `maxBuffer`, and `encoding`. Every other option, including `shell` and `stdio`,
 throws `ERR_NODE_UNSUPPORTED`.
 
-The V8 JSON bridge request has a hard 4 MiB cap before parsing. The V8 op
-checks the V8 string length before copying it to Rust, and the guest wrapper
-caps input at 1,048,576 code units, arguments at 256 and 64 KiB total,
+Both adapters validate values directly; no request is serialized. Each caps
+input at 1,048,576 code units, arguments at 256 entries and 64 KiB total,
 environment at 128 entries and 64 KiB total, and each path at 4,096 code units.
-The QuickJS module is native: it validates values directly and enforces the same
-input, argument, environment, and path bounds without serialization. It reads a
-string's UTF-16 length through QuickJS's public string property API before
-converting it, so an oversized file, argument, environment value, or input is
-rejected before a large Rust String is allocated. UTF-8 conversion allocation is
-therefore bounded by four times the configured cap, and the actual UTF-8 length
-is checked after conversion. Public rquickjs does not expose an exact UTF-8
-length before conversion; the QuickJS length preflight is a single audited
-C-API function used only for this bound.
+The V8 adapter reads a V8 string's UTF-16 length before copying it to Rust. The
+QuickJS adapter reads the string length through QuickJS's public string property
+API before converting it, so an oversized file, argument, environment value, or
+input is rejected before a large Rust String is allocated. UTF-8 conversion
+allocation is bounded by four times the configured cap, and the actual UTF-8
+length is checked after conversion. Public rquickjs does not expose an exact
+UTF-8 length before conversion; the QuickJS preflight is a single audited C-API
+function used only for this bound.
 
 Other `node:` modules are rejected with `the Node module ... is not
 implemented`. Resolution never falls through to a `neo:` module.
@@ -181,7 +167,7 @@ implemented`. Resolution never falls through to a `neo:` module.
 | `ERR_NODE_CHILD_PROCESS_DENIED` | The canonical executable is not in the policy. |
 | `ERR_NODE_COMMAND_NOT_ABSOLUTE` | The program name was relative; there is no `PATH` lookup. |
 | `ERR_NODE_LIMIT` | A requested timeout, `maxBuffer`, or other size exceeds the policy. |
-| `ERR_NODE_REQUEST_TOO_LARGE` | A V8 bridge request or a native input/argument/environment/path field exceeds its hard cap. |
+| `ERR_NODE_REQUEST_TOO_LARGE` | A native input/argument/environment/path field, or a QuickJS key table, exceeds its hard cap. |
 | `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` | Bounded child-process completion is not implemented on this platform. |
 | `ETIMEDOUT` | The child was killed at the timeout. |
 | `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` | An output stream exceeded `maxBuffer`. |
@@ -219,13 +205,11 @@ resource bound, not a sandbox.
   killed.
 * An unexpected pipe read error is `ERR_NODE_CHILD_PROCESS_IO`; it is never
   treated as end-of-file or a successful exit.
-* The V8 guest uses intrinsics captured at bridge installation for
-  `JSON.stringify`, record/array creation, `Array.isArray`, and own-property
-  checks. Serialized request records and arrays have null prototypes, so
-  inherited `toJSON` hooks, getters, or a replaced global `JSON.stringify` are
-  not used, and the serialized request is capped before JSON parsing. The
-  QuickJS module has no JSON bridge: its native functions validate each field
-  and cap input, argument, environment, and path copies directly.
+* Both adapters are native and validate each field directly. They never invoke
+  `JSON.stringify`, `toJSON`, `Number.isInteger`, or a global bridge. Option
+  getters and a Proxy argument array's `length` are read once. Proxy options and
+  environments are rejected before `ownKeys` can run. The QuickJS adapter also
+  applies the bounded key/scan limits and atom cleanup described above.
 * A signal-terminated `execFileSync` child has `status: None`; it is not treated
   as status 0. `spawnSync` keeps `status: null` and reports the signal without an
   `.error` unless a timeout, overflow, incomplete read, or I/O failure occurred.
@@ -242,9 +226,9 @@ resource bound, not a sandbox.
   filesystem, network, and further process creation permitted by the operating
   system.
 
-The V8 op is synchronous and blocks the isolate thread, as Node's sync APIs do.
-QuickJS has no host-asynchrony loop in this runtime, so the lite adapter offers
-only the synchronous surface.
+Both adapters call the shared synchronous runner on the calling thread. V8
+blocks the isolate thread, as Node's sync APIs do. QuickJS has no host-asynchrony
+loop in this runtime, so the lite adapter offers only the synchronous surface.
 
 ## Tests
 
@@ -252,8 +236,10 @@ The shared core tests use real absolute system programs and fail if one is
 missing; they do not skip. Both adapters run the same real-operation, denial,
 registry-separation, unsupported-surface, timeout, overflow, inherited-pipe,
 hostile-serialization, and huge-request cases through their public `Runtime`
-constructors. V8 also covers pre-import bridge replacement; QuickJS covers the
-native module namespace with no bridge. The shared suite also verifies that
+constructors. V8 covers native module identity across static and dynamic
+imports, the absence of a bridge global, Proxy option/environment rejection,
+and large-input caps; QuickJS covers its bounded enumeration and atom cleanup.
+The shared suite also verifies that
 a descendant left holding the pipes is killed after the direct child exits, that
 an unsupported-platform seam rejects before spawning, that an injected
 post-spawn setup failure kills and reaps the child group, and that an injected

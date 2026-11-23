@@ -6,8 +6,11 @@ Opt-in Node compatibility adapter for the V8 `neojs-core` runtime. Enable the
 
 The only module is `node:child_process`; only `spawnSync` and `execFileSync` are
 implemented, with `encoding: "utf8"`. Every asynchronous form throws
-`ERR_NODE_UNSUPPORTED`. The module is not in the `Neo` registry and has no bare
-or `neo:` alias.
+`ERR_NODE_UNSUPPORTED`. The module is registered as a native V8 synthetic module
+before user code runs, so static and dynamic imports share one namespace and the
+same native function objects. There is no JavaScript source, JSON bridge, host
+op, or global installation hook. The module is not in the `Neo` registry and has
+no bare or `neo:` alias.
 
 A default `Runtime::new` rejects every `node:` import. In an opted-in runtime, a
 bare specifier that is a familiar Node module name (including `crypto`, `fs`,

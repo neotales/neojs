@@ -19,7 +19,8 @@ Process execution is disabled by default: a `ChildProcessPolicy` starts with no
 allowed programs. An embedding application adds exact canonical executable
 paths. There is no `PATH` lookup, no shell, no inherited environment, and no
 `stdio: inherit`. Time, input, output, argument count/bytes, and environment
-size are bounded. The serialized V8 bridge request is capped before parsing.
+size are bounded. Both adapters validate and copy values directly; there is no
+serialized request.
 
 The QuickJS adapter exposes this core through native `ModuleDef` exports with no
 JavaScript source or bridge. It preflights string fields through QuickJS's string
@@ -32,9 +33,9 @@ preserves JavaScript key order. Keys are limited to 4096 UTF-16 units; `options`
 to 6 keys and 64 scanned slots; `options.env` to 128 keys and 4096 scanned slots.
 See `vendor/rquickjs-sys/VENDOR.md` and `docs/node-compat.md`.
 
-The V8 adapter still uses a JavaScript export facade because deno_core 0.413.0
-has no public named synthetic-module seam; that is an explicit migration item,
-not a completed native module.
+The V8 adapter registers a native synthetic module through the workspace's
+vendored `deno_core` `register_native_module` seam. Its exports are native V8
+functions; it has no JavaScript source, bridge, or host op.
 
 On Unix, pipes are non-blocking and driven by `poll` on the calling thread; no
 reader or writer threads are created. A timeout, output overflow, or an
@@ -44,10 +45,9 @@ reported as an explicit incomplete error, never a successful status with
 possibly truncated output. An unexpected pipe read error is an explicit I/O
 error, never end-of-file. A descendant that creates a new process group and
 escapes is not tracked or killed. Other platforms return
-`ERR_NODE_CHILD_PROCESS_UNSUPPORTED` before spawning. The guest serializes
-null-prototype records and arrays with intrinsics captured at bridge
-installation, so inherited `toJSON` hooks or a replaced `JSON.stringify` are not
-used.
+`ERR_NODE_CHILD_PROCESS_UNSUPPORTED` before spawning. Both adapters validate
+natively, so `toJSON`, `JSON.stringify`, `Number.isInteger`, and a replaced
+global are not consulted.
 
 This is not a sandbox. An allowed executable runs with the authority of the
 NeoJS process. The allowlist matches canonical paths, not inodes or contents:
