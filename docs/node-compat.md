@@ -121,10 +121,12 @@ narrowing: option bags with more than 64 shape slots, or environment objects wit
 more than 4096 shape slots, are rejected instead of enumerated. Proxy argument
 arrays remain supported with a one-time `length` snapshot.
 
-Tests cover 0, 128 and 129 keys, 100,000-byte option and environment keys,
-deleted/non-enumerable/symbol slots, integer-key ordering, getters not being read
-during enumeration, a throwing getter followed by a successful call, Proxy
-`ownKeys` traps that must not run, and repeated failure cleanup.
+Tests cover 0, 128 and 129 keys, the inclusive 64-slot scan boundary,
+100,000-byte option and environment keys, deleted/non-enumerable/symbol slots,
+integer-key ordering, lone-surrogate keys, array and typed-array rejection,
+getters not being read during enumeration, a throwing getter followed by a
+successful call, Proxy `ownKeys` traps that must not run, and repeated failure
+cleanup.
 
 ## Implemented surface
 
