@@ -36,9 +36,10 @@
 //!
 //! # Direct HTTPS and the JSR graph
 //!
-//! Only a `jsr:` import, a relative import from a resolved JSR module, or an
-//! explicit `https://jsr.io` module URL imported by a resolved JSR module joins
-//! the verified JSR graph. An ordinary `https://jsr.io/...` import from a local
+//! Only a `jsr:` import, a relative import from a successfully loaded JSR
+//! module, or an explicit `https://jsr.io` module URL imported by a successfully
+//! loaded JSR module joins the verified JSR graph. An ordinary
+//! `https://jsr.io/...` import from a local
 //! or remote module keeps the HTTPS loader's semantics and is not checked
 //! against registry metadata, so a prepared `run_url` entry is used as-is. A
 //! canonical jsr.io URL first loaded as ordinary HTTPS cannot later be reused by
@@ -55,10 +56,12 @@
 //! A `jsr:` resolution is pending, not loaded. Only a successful verified load
 //! marks the identity as loaded and makes it a collision authority. An
 //! `import.meta.resolve` that never loads therefore does not refuse an ordinary
-//! redirect, and a failed load does not either. A pending resolution still
-//! selects the verified load path if V8 later loads the URL; the original
-//! specifier is not available at load time, and choosing verification is the
-//! safe direction.
+//! redirect, and a failed load does not either. A pending or failed resolution
+//! also does not classify a referrer as JSR: an ordinary module registered under
+//! the same URL keeps its relative imports on the ordinary remote path. A
+//! pending resolution still selects the verified load path if V8 later loads
+//! the URL; the original specifier is not available at load time, and choosing
+//! verification is the safe direction.
 //!
 //! # Graph boundary
 //!
@@ -538,7 +541,8 @@ impl JsrModuleLoader {
             .any(|identity| loaded.contains(identity))
     }
 
-    /// Handles an explicit `https://jsr.io` import from a resolved JSR module.
+    /// Handles an explicit `https://jsr.io` import from a successfully loaded
+    /// JSR module.
     ///
     /// Returns `None` when the specifier is not a `jsr.io` URL, so the caller
     /// can delegate it. A canonical module URL joins the verified JSR graph; a
@@ -741,7 +745,11 @@ impl ModuleLoader for JsrModuleLoader {
         if specifier.starts_with("jsr:") {
             return self.resolve_jsr(specifier, referrer);
         }
-        let referrer_is_jsr = Url::parse(referrer).is_ok_and(|url| self.is_jsr_candidate(&url));
+        // Only a successfully verified JSR module classifies its relative
+        // imports as JSR. A pending resolution, or a failed one, does not: an
+        // ordinary module may be registered under the same URL, and its
+        // relative graph must stay on the ordinary remote path.
+        let referrer_is_jsr = Url::parse(referrer).is_ok_and(|url| self.is_jsr_loaded(&url));
         if referrer_is_jsr {
             if is_relative_reference(specifier) {
                 return self.resolve_relative(specifier, referrer);
