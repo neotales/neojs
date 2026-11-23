@@ -9,6 +9,11 @@
 //! The binding reads and writes UTF-16 code units directly. Converting through
 //! a Rust `String` would replace a lone surrogate with U+FFFD and break the
 //! module's documented identity rule for lone surrogates.
+//!
+//! `indexOfFold` and `lastIndexOfFold` copy bounded windows instead of the
+//! whole string. V8's `write_v2` may traverse a rope's internal structure, so
+//! this binding claims bounded copied units and retained window memory, not a
+//! time bound for that internal traversal.
 
 use deno_core::FastStaticString;
 use deno_core::JsRuntime;
@@ -257,19 +262,22 @@ impl<'a, 's, 'i> Utf16Text<'a, 's, 'i> {
 }
 
 impl logic::Utf16Source for Utf16Text<'_, '_, '_> {
+    type Error = std::convert::Infallible;
+
     fn len(&self) -> usize {
         self.length
     }
 
-    fn set_read_limit(&mut self, end: usize) {
+    fn set_read_limit(&mut self, end: usize) -> Result<(), Self::Error> {
         self.read_limit = end;
+        Ok(())
     }
 
-    fn unit(&mut self, index: usize) -> u16 {
+    fn unit(&mut self, index: usize) -> Result<u16, Self::Error> {
         if index < self.window_start || index >= self.window_start + self.window.len() {
             self.load(index);
         }
-        self.window[index - self.window_start]
+        Ok(self.window[index - self.window_start])
     }
 }
 
@@ -394,7 +402,8 @@ fn index_of_fold<'s>(
     };
     match result {
         Ok(index) => set_index(&mut rv, index),
-        Err(error) => throw_range(scope, error.message()),
+        Err(logic::SearchError::Index(error)) => throw_range(scope, error.message()),
+        Err(logic::SearchError::Source(never)) => match never {},
     }
 }
 
@@ -419,7 +428,8 @@ fn last_index_of_fold<'s>(
     };
     match result {
         Ok(index) => set_index(&mut rv, index),
-        Err(error) => throw_range(scope, error.message()),
+        Err(logic::SearchError::Index(error)) => throw_range(scope, error.message()),
+        Err(logic::SearchError::Source(never)) => match never {},
     }
 }
 

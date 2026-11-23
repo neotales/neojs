@@ -78,3 +78,33 @@ fn the_read_work_grows_with_the_limit_not_the_text() {
         "the limit copied the whole {TEXT_UNITS}-unit text"
     );
 }
+
+#[test]
+fn an_adversarial_append_rope_copies_only_the_bounded_prefix() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = dir.path().join("main.js");
+    fs::write(
+        &file,
+        r#"
+import { lastIndexOfFold } from "neo:strings";
+let text = "";
+for (let index = 0; index < 50000; index += 1) text += "a";
+const result = lastIndexOfFold(text, "q", 10000);
+if (result !== -1) throw new Error(`unexpected result: ${result}`);
+"#,
+    )
+    .expect("write source");
+    let mut runtime = Runtime::new().expect("runtime");
+    test_support::reset_strings_text_reads();
+    runtime.run_file(&file).expect("rope search");
+    let (units, windows) = test_support::strings_text_reads();
+    // This asserts bounded copied units and retained window memory. It does
+    // not assert a time bound for V8's internal rope traversal in write_v2.
+    assert!(
+        units <= 10_000 + 64,
+        "rope search copied {units} units, expected at most {}",
+        10_000 + 64
+    );
+    assert!(windows <= 11, "rope search read {windows} windows");
+}
