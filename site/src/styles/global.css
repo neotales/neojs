@@ -1,0 +1,24 @@
+/* Tailwind v4 is loaded without preflight so Starlight's own base styles keep
+ * control of the document. Utilities are available to MDX pages and custom
+ * components; `dark:` follows Starlight's theme attribute rather than the
+ * operating-system preference. */
+@layer theme, base, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  --sl-color-accent-low: #0c4a6e;
+  --sl-color-accent: #0284c7;
+  --sl-color-accent-high: #bae6fd;
+  --sl-color-text-accent: #0369a1;
+}
+
+:root[data-theme="dark"] {
+  --sl-color-accent-low: #082f49;
+  --sl-color-accent: #38bdf8;
+  --sl-color-accent-high: #e0f2fe;
+  --sl-color-text-accent: #7dd3fc;
+}
