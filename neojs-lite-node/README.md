@@ -6,9 +6,14 @@ with `Runtime::with_node_compat`.
 
 This adapter is synchronous because NeoJS Lite has no host-asynchrony loop. It
 serves only `node:child_process` with `spawnSync` and `execFileSync`, and
-`encoding: "utf8"` is required. `spawn`, `exec`, `execFile`, `execSync`, `fork`,
-and `ChildProcess` throw `ERR_NODE_UNSUPPORTED`; none is faked as a blocking call
-or a resolved Promise.
+`encoding: "utf8"` is required. The module is a native QuickJS C module built
+with `Module::declare_def`/`ModuleDef`; it has no JavaScript module source and
+no JSON bridge, and its named/default exports are Rust functions. `spawn`,
+`exec`, `execFile`, `execSync`, `fork`, and `ChildProcess` throw
+`ERR_NODE_UNSUPPORTED`; none is faked as a blocking call or a resolved Promise.
+The native `ChildProcess` export is a throwing function, not a constructible
+class; `new ChildProcess()` is a `TypeError` rather than the coded unsupported
+error.
 
 A default `Runtime::new` rejects every `node:` import. In an opted-in runtime, a
 bare specifier that is a familiar Node module name is rejected rather than
