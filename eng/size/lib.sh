@@ -461,10 +461,11 @@ size_report_ledger() {
 
     if [ "$mode" = "all" ]; then
         jq_program='
-          ["measured_at", "status", "package", "target", "rustc", "features", "bytes", "sha256", "commit", "dirty", "tags"],
+          ["measured_at", "status", "source", "package", "target", "rustc", "features", "bytes", "sha256", "commit", "dirty", "tags"],
           (.[] | [
             .measured_at,
             .status,
+            .source.kind,
             .artifact.package,
             .platform.target,
             .toolchain.rustc,
@@ -479,7 +480,7 @@ size_report_ledger() {
         '
     else
         jq_program='
-          ["measured_at", "status", "package", "target", "rustc", "features", "bytes", "sha256", "commit", "dirty", "tags"],
+          ["measured_at", "status", "source", "package", "target", "rustc", "features", "bytes", "sha256", "commit", "dirty", "tags"],
           (sort_by(.measured_at)
            | group_by([
                .artifact.package,
@@ -494,6 +495,7 @@ size_report_ledger() {
            | .[] | [
                .measured_at,
                .status,
+               .source.kind,
                .artifact.package,
                .platform.target,
                .toolchain.rustc,
