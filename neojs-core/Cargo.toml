@@ -14,10 +14,12 @@ authors.workspace = true
 # default enables each one. Node modules are intentionally absent: there is no
 # `node:*` feature, so Node built-ins remain rejected by default.
 default = ["neo-strings"]
-# The `neo:strings` built-in and its `strings`/`neo:strings` import specifiers.
-# This is engine-local selection, not a security boundary: disabling it removes
-# the public module, its implementation, adapter, and registration from the
-# build, but executable code keeps the process's authority. Cargo features are
+# The `neo:strings` built-in and its canonical `neo:strings` import specifier.
+# Bare Neo names are legacy loader behavior in this branch base, not part of the
+# feature contract; new import code must use the `neo:` prefix. This is
+# engine-local selection, not a security boundary: disabling it removes the
+# public module, its implementation, adapter, and registration from the build,
+# but executable code keeps the process's authority. Cargo features are
 # additive and unify across the dependency graph, so a build that another
 # dependent enables a module for contains that module. Select modules through
 # features; never treat a disabled module as a sandbox.

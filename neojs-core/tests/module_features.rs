@@ -14,6 +14,11 @@
 //! A disabled module must be absent from the registry, the loader, and the
 //! error list. It is surface selection, not a security boundary; the tests do
 //! not claim otherwise.
+//!
+//! Imports here use the canonical `neo:strings` specifier only. The branch base
+//! still accepts bare Neo names as a legacy loader alias; these tests do not
+//! assert, bless, or extend that alias as future contract. `Neo.getBuiltInModule`
+//! keeps its bare registry key because it is a registry lookup, not an import.
 
 use std::fs;
 
@@ -50,27 +55,26 @@ fn advertised_builtins(message: &str) -> &str {
 }
 
 #[cfg(not(feature = "neo-strings"))]
-fn lists_neither_spelling(list: &str) -> bool {
-    !list
-        .split(", ")
-        .any(|specifier| specifier == "strings" || specifier == "neo:strings")
+fn advertises_strings(list: &str) -> bool {
+    list.split(", ").any(|specifier| specifier == "neo:strings")
 }
 
 #[cfg(feature = "neo-strings")]
 #[test]
-fn the_default_build_advertises_and_loads_strings() {
+fn the_default_build_advertises_and_loads_strings_by_canonical_specifier() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
+// `getBuiltInModule` takes the registry's bare name; it is not an import path.
 const registry = Neo.getBuiltInModule("strings");
 if (registry === undefined) throw new Error("strings is missing from the registry");
 if (strings.equalFold !== registry.equalFold) {
     throw new Error("the module and registry do not share identity");
 }
 if (!strings.equalFold("K", "\u212A")) throw new Error("strings did not run");
-if (import.meta.resolve("strings") !== "neo:strings") {
-    throw new Error("strings did not resolve canonically");
+if (import.meta.resolve("neo:strings") !== "neo:strings") {
+    throw new Error("the canonical strings specifier did not resolve to itself");
 }
 "#,
     );
@@ -90,17 +94,10 @@ if (Neo.getBuiltInModule("strings") !== undefined) {
 "#,
     );
 
-    let bare = run_js_error("import * as strings from \"strings\";\n");
-    assert!(bare.contains("not implemented"), "{bare}");
+    let canonical = run_js_error("import * as strings from \"neo:strings\";\n");
+    assert!(canonical.contains("not implemented"), "{canonical}");
     assert!(
-        lists_neither_spelling(advertised_builtins(&bare)),
-        "the disabled bare specifier is still advertised: {bare}"
-    );
-
-    let prefixed = run_js_error("import * as strings from \"neo:strings\";\n");
-    assert!(prefixed.contains("not implemented"), "{prefixed}");
-    assert!(
-        lists_neither_spelling(advertised_builtins(&prefixed)),
-        "the disabled prefixed specifier is still advertised: {prefixed}"
+        !advertises_strings(advertised_builtins(&canonical)),
+        "the disabled canonical specifier is still advertised: {canonical}"
     );
 }

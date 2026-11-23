@@ -1,5 +1,6 @@
-// The `strings` built-in module as seen by `import ... from "strings"` or
-// `import ... from "neo:strings"`.
+// The `strings` built-in module as seen by `import ... from "neo:strings"`.
+// The bare `strings` name is legacy loader behavior in this branch base; new
+// code must use the canonical `neo:` prefix.
 //
 // The implementations live in `strings.impl.js`, which `neo_shim` includes in
 // the realm shim only when the `neo-strings` feature is enabled. This adapter is

@@ -180,9 +180,11 @@ impl Runtime {
     ///
     /// The runtime has one realm. A default build caches the `age`, `assert`,
     /// `chars`, `console`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
-    /// `strings`, `test`, and `uuid` built-in modules in that realm, and both
-    /// bare and `neo:`-prefixed import specifiers resolve to them; a new `Runtime`
-    /// creates a new realm, new functions, and new module instances. The
+    /// `strings`, `test`, and `uuid` built-in modules in that realm, and the
+    /// canonical `neo:`-prefixed import specifiers resolve to them. The branch
+    /// base's bare-name loader alias is legacy and is not the import contract;
+    /// new code must use the prefix. A new `Runtime` creates a new realm, new
+    /// functions, and new module instances. The
     /// `age`, `crypto`, `path`, `ssh`, `stdio`, and `uuid` modules register their
     /// private host ops in that realm before user code runs; `chars`, `os`,
     /// `slices`, `strings`, and `test` are plain ECMAScript, and `assert` calls

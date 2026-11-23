@@ -15,6 +15,12 @@
 //! remaining code still runs with the process's authority. Node modules have no
 //! feature and remain rejected (`node:` is not implemented).
 //!
+//! Imports use the canonical `neo:<module>` specifier. This branch base still
+//! accepts bare Neo names in the loader as legacy behavior, but the module
+//! features do not bless, extend, or advertise that alias as future contract;
+//! bare specifiers are reserved for Node and packages. `Neo.getBuiltInModule`
+//! keeps its bare registry key because it is a registry lookup, not an import.
+//!
 //! The scripts here install globals that neojs supplies: currently
 //! [`neo_shim`], which defines the `Neo` object and its cached built-in
 //! modules. `chars`, `console`, `os`, `slices`, `strings`, and `test` are
@@ -93,7 +99,8 @@
 //! [`OS_SPECIFIER`], [`PATH_SPECIFIER`], [`SLICES_SPECIFIER`],
 //! [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], the `strings` specifier,
 //! [`TEST_SPECIFIER`], [`UUID_SPECIFIER`], [`UUID_V4_SPECIFIER`], and
-//! [`UUID_V7_SPECIFIER`], and for their bare names.
+//! [`UUID_V7_SPECIFIER`]. The bare-name loader alias in this branch base is
+//! legacy and is not the import contract.
 //! All read the public module objects installed by [`neo_shim`], so the registry
 //! and the module bindings share identity. `assert` is the frozen callable
 //! `assert` function itself, with its named assertions as properties; it also
@@ -365,12 +372,13 @@ pub(crate) const SLICES_SPECIFIER: &str = "neo:slices";
 /// a sandbox, or a cross-realm/cross-thread zero-copy mechanism.
 const SLICES_MODULE: &str = include_str!("builtins/slices.esm.js");
 
-/// The canonical module specifier for the `strings` built-in.
+/// The canonical import specifier for the `strings` built-in.
 ///
 /// It exists only with the `neo-strings` feature, which is enabled by default.
-/// Both `"strings"` and `"neo:strings"` resolve to this URL when enabled, so the
-/// engine caches one module instance for both spellings. It is not a `file:` URL
-/// and is never read from disk.
+/// New import code must use this `neo:` spelling. The bare registry name is only
+/// the key `Neo.getBuiltInModule` takes; this branch base also accepts the bare
+/// name in the loader as legacy behavior, which is not part of the feature
+/// contract. The specifier is not a `file:` URL and is never read from disk.
 #[cfg(feature = "neo-strings")]
 pub(crate) const STRINGS_SPECIFIER: &str = "neo:strings";
 
@@ -579,7 +587,9 @@ mod tests {
         let url = Url::parse("neo:strings").expect("valid specifier");
         #[cfg(feature = "neo-strings")]
         {
-            assert_eq!(super::resolve("strings"), Some(super::STRINGS_SPECIFIER));
+            // Only the canonical import spelling is part of this feature's
+            // contract. The bare-name resolver path is legacy and is not
+            // asserted here.
             assert_eq!(
                 super::resolve("neo:strings"),
                 Some(super::STRINGS_SPECIFIER)
@@ -589,10 +599,9 @@ mod tests {
         }
         #[cfg(not(feature = "neo-strings"))]
         {
-            assert_eq!(super::resolve("strings"), None);
             assert_eq!(super::resolve("neo:strings"), None);
             assert!(super::source(&url).is_none());
-            assert!(!super::implemented_specifiers().contains("strings"));
+            assert!(!super::implemented_specifiers().contains("neo:strings"));
         }
     }
 }

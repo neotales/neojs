@@ -40,15 +40,16 @@
 //!
 //! A default build provides the `age`, `assert`, `chars`, `console`, `crypto`,
 //! `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid`
-//! built-in modules through `Neo.getBuiltInModule(name)` and through the module
-//! specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`,
-//! `console`,
-//! `neo:console`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`,
-//! `slices`, `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`,
-//! `neo:strings`, `test`, `neo:test`, `uuid`, `neo:uuid`, `uuid/v4`,
-//! `neo:uuid/v4`, `uuid/v7`, and `neo:uuid/v7`. The `uuid/v4` and `uuid/v7`
-//! subpaths are thin modules whose named and default exports are the same
-//! functions as `uuid.v4` and `uuid.v7`.
+//! built-in modules through `Neo.getBuiltInModule(name)` (which takes the bare
+//! registry name) and imports through the canonical specifiers `neo:age`,
+//! `neo:assert`, `neo:chars`, `neo:console`, `neo:crypto`, `neo:os`,
+//! `neo:path`, `neo:slices`, `neo:ssh`, `neo:stdio`, `neo:strings`,
+//! `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`. The branch base
+//! also accepts bare Neo names in the loader as legacy behavior; new import
+//! code must use the `neo:` prefix, because bare specifiers are reserved for
+//! Node and packages. The `uuid/v4` and `uuid/v7` subpaths are thin modules
+//! whose named and default exports are the same functions as `uuid.v4` and
+//! `uuid.v7`.
 //!
 //! `assert` is a synchronous assertion surface inspired by Node's
 //! `assert/strict` and Deno's `@std/assert`. The registry object is the
