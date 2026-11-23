@@ -51,6 +51,7 @@ console.log(Object.isFrozen(Neo.getBuiltInModulesList()));
 console.log(typeof Neo.getBuiltInModule("neo:age"));
 console.log(typeof Neo.getBuiltInModule("age"));
 console.log(typeof Neo.getBuiltInModule("neo:chars"));
+console.log(typeof Neo.getBuiltInModule("neo:strings"));
 "#,
     );
     let file = dir.path().join("main.js");
@@ -59,7 +60,7 @@ console.log(typeof Neo.getBuiltInModule("neo:chars"));
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        "neo-lite\n1\ntrue\nundefined\nundefined\nobject\n"
+        "neo-lite\n2\ntrue\nundefined\nundefined\nobject\nobject\n"
     );
     assert_eq!(stderr(&output), "");
 }

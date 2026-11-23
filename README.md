@@ -346,32 +346,34 @@ Node modules: a `node:` opt-in is not implemented. The same frozen array is retu
 so a caller cannot change later results; a new `Runtime` allocates a new array. `Neo.getBuiltInModule`
 takes the same canonical `neo:` specifier: `Neo.getBuiltInModule("neo:age")` returns the module, and
 `Neo.getBuiltInModule("age")` returns `undefined`. Imports follow the same rule; the bare name `age`
-is not a built-in module specifier. The V8 build enables the positive `neo-chars` and `neo-slices`
-features by default; `--no-default-features` removes both modules, the native `chars` registration,
-their registry entries, and their loader entries. `chars` is a native Rust binding; there is no
-JavaScript implementation or ESM facade. `slices` is still JavaScript and is a separate source file
-included only when `neo-slices` is enabled, so a disabled build does not embed its bytes.
-`neo-slices` implies `neo-chars` because `CharSlice` captures the native
-`chars.toUpper`/`chars.toLower` functions. Features are additive across the dependency graph and are
-not a sandbox.
+is not a built-in module specifier. The V8 build enables the positive `neo-chars`, `neo-slices`,
+and `neo-strings` features by default; `--no-default-features` removes all three modules, the native
+`chars` and `strings` registrations, their registry entries, and their loader entries. `chars` and
+`strings` are native Rust bindings; there is no JavaScript implementation or ESM facade. `slices` is
+still JavaScript and is a separate source file included only when `neo-slices` is enabled, so a
+disabled build does not embed its bytes. `neo-slices` implies `neo-chars` because `CharSlice`
+captures the native `chars.toUpper`/`chars.toLower` functions. Features are additive across the
+dependency graph and are not a sandbox.
 
-Only `neo:chars` is a native Rust module in this change. Every other V8 built-in module — `neo:age`,
-`neo:assert`, `neo:console`, `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`, `neo:slices`,
-`neo:ssh`, `neo:stdio`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` —
+`neo:chars` and `neo:strings` are the native Rust modules in this change. Every other V8 built-in
+module — `neo:age`, `neo:assert`, `neo:console`, `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`,
+`neo:slices`, `neo:ssh`, `neo:stdio`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` —
 still has an ECMAScript module source and is not yet migrated to a native binding. Some of those
 modules call private Rust host ops, but a host op is not a native module. The QuickJS runtime
-implements only `neo:chars`; it does not implement the V8-only modules.
+implements the shared `neo:chars` and `neo:strings` modules; it does not implement the V8-only
+modules.
 
 The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"` and,
-with its default `neo-chars` feature, implements one shared built-in, `neo:chars`.
-`Neo.getBuiltInModulesList()` is one frozen array of canonical specifiers (`["neo:chars"]`), and
-`Neo.getBuiltInModule("neo:chars")` returns the frozen registry object whose named functions are the
-same function objects the `neo:chars` namespace exports; the namespace itself is a distinct object.
-With `default-features = false` the registry and list are empty. A bare `chars` name, another scheme,
-or any other specifier returns `undefined`; a non-string name throws `TypeError`. That list is not a
-claim that another V8 module is planned or available. The `chars` Rust logic comes from the
-engine-neutral `neojs-builtins` crate and is bound as a native QuickJS module; there is no JavaScript
-wrapper. See `neojs-builtins/README.md` for the shared contract and its Unicode-version limits.
+with its default `neo-chars` and `neo-strings` features, implements the shared built-ins
+`neo:chars` and `neo:strings`. `Neo.getBuiltInModulesList()` is one frozen array of canonical
+specifiers (`["neo:chars", "neo:strings"]`), and `Neo.getBuiltInModule(specifier)` returns the
+frozen registry object whose named functions are the same function objects the module namespace
+exports; the namespace itself is a distinct object. With `default-features = false` the registry and
+list are empty. A bare name, another scheme, or any other specifier returns `undefined`; a non-string
+name throws `TypeError`. That list is not a claim that another V8 module is planned or available.
+The `chars` and `strings` Rust logic comes from the engine-neutral `neojs-builtins` crate and is
+bound as native QuickJS modules; there is no JavaScript wrapper. See `neojs-builtins/README.md` for
+the shared contract and its Unicode-version limits.
 
 **Use the stdio built-in.** `Neo.getBuiltInModule("neo:stdio")` returns a frozen module object cached
 for the realm. `neo:stdio` is the canonical and only module specifier. It exports `Readable`,
@@ -656,8 +658,8 @@ with either API.
 that is cached for the realm. `neo:strings` is the canonical and only module specifier. The named
 exports are `equalFold`, `startsWithFold`, `endsWithFold`, `indexOfFold`, `lastIndexOfFold`, `trim`,
 `trimStart`, and `trimEnd`; each is the same function object as the matching registry property, and
-there is no default export. The module is plain ECMAScript: it calls no host op and adds no
-capability beyond the strings it is given.
+there is no default export. The module is a native Rust binding shared with NeoJS Lite: it calls no
+host op and adds no capability beyond the strings it is given.
 
 ```js
 import { equalFold, indexOfFold, lastIndexOfFold, trim } from "neo:strings";
@@ -668,14 +670,21 @@ console.log(lastIndexOfFold("aaa", "aa")); // 1 (overlapping)
 console.log(trim("file.txt...", ".")); // "file.txt"
 ```
 
-Folded matching uses ECMAScript's simple case folding, decided per code point by V8's own RegExp
-`/iu` canonicalization. It is locale-independent and is not a `toLowerCase()` comparison:
+Folded matching uses Unicode 16.0 simple case folding from a fixed table in the shared
+`neojs-builtins` crate. The table is generated by a checked-in script from the exact official
+unicode.org `CaseFolding.txt` 16.0.0 artifact; the artifact SHA-256, selection rules, and Unicode
+License V3 notice are in `neojs-builtins/data/unicode/README.md`. It is locale-independent, both
+engines classify the same input the same way, and it is not a `toLowerCase()` comparison:
 `equalFold("K", "\u212A")` is `true` (Kelvin sign) and `equalFold("s", "\u017F")` is `true` (long s),
 while `equalFold("I", "\u0131")` is `false` (dotless i) and `equalFold("ss", "ß")` is `false` (that
 is full folding). Indices are UTF-16 code unit offsets, like `String.prototype.indexOf`, not code
 point offsets; `indexOfFold` and `lastIndexOfFold` find overlapping occurrences, and an empty search
-returns the clamped start index or the string length. Searching is linear in the text plus the
-search string and uses O(search) extra memory: a repeated prefix cannot make it quadratic.
+returns the clamped start index or the string length. The KMP scan examines the text plus the search
+string and uses O(search) extra memory plus one fixed 1024-code-unit window: a repeated prefix cannot
+make the scan quadratic. Both engines read that window on demand instead of copying the whole
+string, so a small `fromIndex` copies only a bounded prefix. The binding claims bounded copied units
+and retained window memory; it does not claim a time bound for V8's internal rope traversal inside
+`write_v2`.
 `lastIndexOfFold` also stops as soon as no match can begin at or before `fromIndex`, so a small limit
 does not scan a long tail. A lone surrogate
 is compared as itself and never matches half of a surrogate pair. Argument values are not coerced:
@@ -1710,14 +1719,14 @@ promise still rejected without a handler when the queue empties is an error; rej
 primitive values and an Error's own data without invoking getters, proxies, `toString`, or `String`.
 It does **not** implement TypeScript, host asynchrony or timers, most `neo:` built-in modules,
 permissions, or a sandbox, and it does not claim parity with the V8 runtime. It installs a minimal
-`Neo` global whose engine is `"neo-lite"`; with the default `neo-chars` feature its built-in module
-list is the canonical `["neo:chars"]`. `Neo.getBuiltInModule("neo:chars")` returns the frozen
-registry object whose named functions are the same function objects the `neo:chars` namespace
-exports; the namespace itself is a distinct object. With `default-features = false` the list is empty.
-A bare name, another scheme, or any other specifier returns `undefined`, and a non-string name throws
-`TypeError`. The `chars` Rust logic comes from the engine-neutral `neojs-builtins` crate and is
-bound as a native QuickJS module; there is no JavaScript wrapper. The crate has no V8 or QuickJS
-dependency. Both runtimes
+`Neo` global whose engine is `"neo-lite"`; with the default `neo-chars` and `neo-strings` features
+its built-in module list is the canonical `["neo:chars", "neo:strings"]`.
+`Neo.getBuiltInModule(specifier)` returns the frozen registry object whose named functions are the
+same function objects the namespace exports; the namespace itself is a distinct object. With
+`default-features = false` the list is empty. A bare name, another scheme, or any other specifier
+returns `undefined`, and a non-string name throws `TypeError`. The `chars` and `strings` Rust logic
+comes from the engine-neutral `neojs-builtins` crate and is bound as native QuickJS modules; there
+is no JavaScript wrapper. The crate has no V8 or QuickJS dependency. Both runtimes
 share `neojs-module-policy` for executable-extension decisions and rejection reasons, so `.cjs`,
 JSX/TSX, declaration files, JSON, WebAssembly, and native addons fail with the same explanation in
 either.
@@ -1812,9 +1821,9 @@ surface, not the built-in modules: `Neo.engine` is `"neo-lite"`, its built-in mo
 - JSON and WebAssembly module files are rejected, both as the entry file and as imports. V8's
   `WebAssembly` global is present but untested.
 - There is no permission system. The loader reads any file the process can read. neojs is not a
-  sandbox. `console`, `os`, `slices`, and `strings` are plain ECMAScript and add no capability
-  beyond the globals they expose; `chars` is a native Rust module, not ECMAScript, and likewise
-  adds no capability. `os` holds two build-target constants and reads no host state, the
+  sandbox. `console`, `os`, and `slices` are plain ECMAScript and add no capability beyond the
+  globals they expose; `chars` and `strings` are native Rust modules, not ECMAScript, and likewise
+  add no capability. `os` holds two build-target constants and reads no host state, the
   `console` module writes to the process streams already used by the global console, and `slices`
   aliases Arrays and typed arrays the caller already has; it creates no buffer, opens no file,
   and is not a snapshot or an isolation boundary. `assert` calls

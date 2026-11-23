@@ -2046,6 +2046,7 @@ dependencies = [
 name = "neojs-builtins"
 version = "0.1.0"
 dependencies = [
+ "sha2 0.11.1",
  "unicode-general-category",
 ]
 

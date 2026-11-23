@@ -4,10 +4,10 @@
 //! The scripts here install globals that neojs supplies: currently
 //! [`neo_shim`], which defines the `Neo` object, its cached built-in modules,
 //! and the introspection surface `Neo.engine` and
-//! `Neo.getBuiltInModulesList`. `console`, `os`, `slices`, `strings`, and
-//! `test` are plain ECMAScript (the `os` module contains two build-target
-//! constants substituted by [`neo_shim`]); `chars` is a native Rust binding
-//! installed before the shim runs; `assert` calls one private host op registered
+//! `Neo.getBuiltInModulesList`. `console`, `os`, `slices`, and `test` are plain
+//! ECMAScript (the `os` module contains two build-target constants substituted
+//! by [`neo_shim`]); `chars` and `strings` are native Rust bindings installed
+//! before the shim runs; `assert` calls one private host op registered
 //! by [`crate::assert`] to observe a genuine native Promise. `cron` calls six
 //! private host ops registered by [`crate::cron`]: it parses a UTC five-field
 //! expression, computes the next occurrence, sleeps on the runtime's Tokio
@@ -42,16 +42,18 @@
 //! component. The `uuid/v4` and `uuid/v7` subpath modules expose one generator
 //! each as both the named and default export, backed by the same function
 //! objects. Parsing, validation, and other versions are not implemented.
-//! `strings` is plain ECMAScript: case-insensitive folded matching
-//! (`equalFold`, `startsWithFold`, `endsWithFold`, `indexOfFold`,
-//! `lastIndexOfFold`) and trimming of a caller-supplied code point set. The
-//! search functions are linear in the text plus the needle and use O(needle)
-//! extra memory; `lastIndexOfFold` also stops once no match can begin at or
-//! before its limit. It returns UTF-16 code unit indices like
-//! `String.prototype`, calls no host op,
-//! and adds no capability. Its folding is ECMAScript simple case folding,
-//! decided by the engine's own RegExp `/iu` canonicalization, so it is
-//! locale-independent and follows the Unicode data in the V8 build.
+//! `strings` is a native Rust binding shared with NeoJS Lite through
+//! `neojs-builtins`: case-insensitive folded matching (`equalFold`,
+//! `startsWithFold`, `endsWithFold`, `indexOfFold`, `lastIndexOfFold`) and
+//! trimming of a caller-supplied code point set. It operates on UTF-16 code
+//! units and preserves lone surrogates. The search scan examines the text plus
+//! the needle linearly and uses O(needle) extra memory plus one fixed window;
+//! `lastIndexOfFold` also stops once no match can begin at or before its limit,
+//! so a small limit does not copy the whole text. The binding bounds copied
+//! units and retained memory, not V8's internal rope traversal time. It calls no host op
+//! and adds no capability. Folding is Unicode 16.0 simple case folding from a
+//! fixed table in the shared crate, so it is locale-independent and both
+//! engines agree instead of following their own Unicode release.
 //! `slices` is plain ECMAScript too: fixed-range, live, mutable and read-only
 //! views over a JS Array or a genuine typed array, plus a `CharSlice` over a
 //! caller-owned `Uint32Array` of Unicode code points. Construction, nested
@@ -79,8 +81,8 @@
 //!
 //! [`AGE_MODULE`], [`ASSERT_MODULE`], [`CONSOLE_MODULE`],
 //! [`CRON_MODULE`], [`CRYPTO_MODULE`], [`OS_MODULE`], [`PATH_MODULE`],
-//! [`SLICES_MODULE`], [`SSH_MODULE`], [`STDIO_MODULE`], [`STRINGS_MODULE`],
-//! [`TEST_MODULE`], [`UUID_MODULE`], [`UUID_V4_MODULE`], and [`UUID_V7_MODULE`]
+//! [`SLICES_MODULE`], [`SSH_MODULE`], [`STDIO_MODULE`], [`TEST_MODULE`],
+//! [`UUID_MODULE`], [`UUID_V4_MODULE`], and [`UUID_V7_MODULE`]
 //! are not evaluated as scripts. They are the sources returned by the module
 //! loader for the canonical built-in specifiers [`AGE_SPECIFIER`],
 //! [`ASSERT_SPECIFIER`], [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`],
@@ -89,12 +91,14 @@
 //! [`STDIO_SPECIFIER`], [`STRINGS_SPECIFIER`], [`TEST_SPECIFIER`],
 //! [`UUID_SPECIFIER`], [`UUID_V4_SPECIFIER`], and [`UUID_V7_SPECIFIER`].
 //! Only those exact `neo:` specifiers are accepted: a bare name is not a
-//! built-in module specifier and the loader rejects it. `neo:chars` is a
-//! native V8 module registered by `crate::chars::install`; the loader source
-//! table returns only an empty deduplication sentinel for it. `SLICES_MODULE`
+//! built-in module specifier and the loader rejects it. `neo:chars` and
+//! `neo:strings` are native V8 modules registered by `crate::chars::install`
+//! and `crate::strings::install`; the loader source table returns only an empty
+//! deduplication sentinel for them. `SLICES_MODULE`
 //! exists only with `neo-slices`; with the feature off its name, source,
 //! registry entry, and loader entry are absent. All except the native `chars`
-//! module read the public module objects installed by [`neo_shim`], so the
+//! and `strings` modules read the public module objects installed by
+//! [`neo_shim`], so the
 //! registry and the module bindings share identity. `assert` is the frozen callable
 //! `assert` function itself, with its named assertions as properties; it also
 //! has a default export in its module namespace. `age`, `chars`, `cron`,
@@ -139,12 +143,19 @@ const OS_PLATFORM_TOKEN: &str = "__NEO_OS_PLATFORM__";
 /// The placeholder replaced with the build target's `std::env::consts::ARCH`.
 const OS_ARCH_TOKEN: &str = "__NEO_OS_ARCH__";
 
-/// The marker replaced with the native built-in registry entries.
+/// The marker replaced with the native `neo:chars` registry entry.
 ///
 /// The V8 runtime installs the native `neo:chars` object before this shim is
 /// evaluated. The marker is replaced with a spread of that entry array, so the
 /// `neo:chars` implementation never appears in JavaScript.
 const NATIVE_ENTRIES_TOKEN: &str = "// __NEO_NATIVE_ENTRIES__";
+
+/// The marker replaced with the native `neo:strings` registry entry.
+///
+/// This marker is at the `strings` position in the registry, so enabling the
+/// native binding does not reorder the introspection list. The implementation
+/// never appears in JavaScript.
+const NATIVE_STRINGS_TOKEN: &str = "// __NEO_NATIVE_STRINGS_ENTRY__";
 
 /// The marker replaced with the separate `slices` implementation source.
 ///
@@ -168,9 +179,11 @@ const SLICES_REGISTRY_TOKEN: &str = "// __NEO_SLICES_REGISTRY_ENTRY__";
 /// `std::env::consts::OS` and `std::env::consts::ARCH`, so the module reports the
 /// target the runtime was compiled for and reads no host state at runtime.
 ///
-/// `neo-chars` spreads the native entries installed by `crate::chars::install`
-/// into the registry and the introspection list. The object and every function
-/// are native V8 values; no ECMAScript implementation or facade is spliced in.
+/// `neo-chars` spreads the native entry installed by `crate::chars::install`
+/// into the registry and the introspection list, and `neo-strings` splices the
+/// entry installed by `crate::strings::install` at the `strings` position. The
+/// objects and every function are native V8 values; no ECMAScript
+/// implementation or facade is spliced in.
 /// `neo-slices` splices the separate `slices.impl.js` source and registry entry;
 /// it implies `neo-chars` because `CharSlice` captures `chars.toUpper` and
 /// `chars.toLower`, and reads the native object through the same entries global.
@@ -188,6 +201,14 @@ pub(crate) fn neo_shim() -> String {
     #[cfg(not(feature = "neo-chars"))]
     let shim = shim.replace(NATIVE_ENTRIES_TOKEN, "");
 
+    #[cfg(feature = "neo-strings")]
+    let shim = shim.replace(
+        NATIVE_STRINGS_TOKEN,
+        &format!("...globalThis.{},", crate::strings::NATIVE_ENTRIES_GLOBAL),
+    );
+    #[cfg(not(feature = "neo-strings"))]
+    let shim = shim.replace(NATIVE_STRINGS_TOKEN, "");
+
     #[cfg(feature = "neo-slices")]
     let shim = shim
         .replace(SLICES_IMPL_TOKEN, SLICES_IMPL_SOURCE)
@@ -198,6 +219,7 @@ pub(crate) fn neo_shim() -> String {
         .replace(SLICES_REGISTRY_TOKEN, "");
 
     debug_assert!(!shim.contains(NATIVE_ENTRIES_TOKEN));
+    debug_assert!(!shim.contains(NATIVE_STRINGS_TOKEN));
     debug_assert!(!shim.contains(SLICES_IMPL_TOKEN));
     debug_assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
     shim
@@ -404,17 +426,14 @@ const SLICES_MODULE: &str = include_str!("builtins/slices.esm.js");
 /// The canonical module specifier for the `strings` built-in.
 ///
 /// Only `neo:strings` resolves to this URL. It is the canonical and only module
-/// specifier for this built-in, so the engine caches one module instance for
-/// every importer. It is not a `file:` URL and is never read from disk.
+/// specifier for this built-in, so the engine caches one native module instance
+/// for every importer. It is not a `file:` URL and is never read from disk. The
+/// module is registered natively by `crate::strings::install`; the loader's
+/// source table returns only an empty deduplication sentinel. With
+/// `neo-strings` off, the specifier is absent from the name table and the
+/// loader rejects it.
+#[cfg(feature = "neo-strings")]
 pub(crate) const STRINGS_SPECIFIER: &str = "neo:strings";
-
-/// The ECMAScript module source served for [`STRINGS_SPECIFIER`].
-///
-/// It re-exports the function objects from the public `strings` module object,
-/// so the module and `Neo.getBuiltInModule("neo:strings")` share identity.
-/// The implementations are plain ECMAScript in [`neo_shim`]; no host op is
-/// called.
-const STRINGS_MODULE: &str = include_str!("builtins/strings.esm.js");
 
 /// The canonical module specifier for the `test` built-in.
 ///
@@ -492,6 +511,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("slices", SLICES_SPECIFIER),
     ("ssh", SSH_SPECIFIER),
     ("stdio", STDIO_SPECIFIER),
+    #[cfg(feature = "neo-strings")]
     ("strings", STRINGS_SPECIFIER),
     ("test", TEST_SPECIFIER),
     ("uuid", UUID_SPECIFIER),
@@ -552,7 +572,12 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         SLICES_SPECIFIER => Some(SLICES_MODULE),
         SSH_SPECIFIER => Some(SSH_MODULE),
         STDIO_SPECIFIER => Some(STDIO_MODULE),
-        STRINGS_SPECIFIER => Some(STRINGS_MODULE),
+        // `neo:strings` is registered natively before the shim runs. The loader
+        // still has to answer a load request for it, so it returns an empty
+        // sentinel; the module map deduplicates onto the already-registered
+        // native module and never compiles this source.
+        #[cfg(feature = "neo-strings")]
+        STRINGS_SPECIFIER => Some(""),
         TEST_SPECIFIER => Some(TEST_MODULE),
         UUID_SPECIFIER => Some(UUID_MODULE),
         UUID_V4_SPECIFIER => Some(UUID_V4_MODULE),
@@ -579,7 +604,9 @@ mod tests {
     use super::neo_shim;
     use super::resolve;
     use super::resolve_name;
-    use super::{NATIVE_ENTRIES_TOKEN, SLICES_IMPL_TOKEN, SLICES_REGISTRY_TOKEN};
+    use super::{
+        NATIVE_ENTRIES_TOKEN, NATIVE_STRINGS_TOKEN, SLICES_IMPL_TOKEN, SLICES_REGISTRY_TOKEN,
+    };
     use deno_core::url::Url;
 
     /// The shim is not valid JavaScript until the two `os` placeholders are
@@ -628,6 +655,7 @@ mod tests {
         assert!(!shim.contains(OS_PLATFORM_TOKEN));
         assert!(!shim.contains(OS_ARCH_TOKEN));
         assert!(!shim.contains(NATIVE_ENTRIES_TOKEN));
+        assert!(!shim.contains(NATIVE_STRINGS_TOKEN));
         assert!(!shim.contains(SLICES_IMPL_TOKEN));
         assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
         assert!(
@@ -670,6 +698,37 @@ mod tests {
             );
         }
 
+        #[cfg(feature = "neo-strings")]
+        {
+            assert!(
+                shim.contains("...globalThis.__neoNativeStrings,"),
+                "the native strings entry was not spliced into the registry"
+            );
+            assert!(
+                !shim.contains("const strings = Object.freeze("),
+                "a JavaScript strings implementation was spliced in"
+            );
+            assert!(
+                !shim.contains("function equalFold("),
+                "a JavaScript strings implementation is present"
+            );
+        }
+        #[cfg(not(feature = "neo-strings"))]
+        {
+            assert!(
+                !shim.contains("globalThis.__neoNativeStrings"),
+                "the disabled strings registry entry is present"
+            );
+            assert!(
+                !shim.contains("const strings = Object.freeze("),
+                "the disabled strings declaration is present"
+            );
+            assert!(
+                !shim.contains("function equalFold("),
+                "the disabled strings implementation is present"
+            );
+        }
+
         #[cfg(feature = "neo-slices")]
         {
             assert!(
@@ -701,8 +760,9 @@ mod tests {
     /// A disabled module must be absent from both the name table the loader
     /// consults and the source table it serves. The enabled module is present.
     #[test]
-    fn module_tables_follow_the_chars_and_slices_features() {
+    fn module_tables_follow_the_chars_strings_and_slices_features() {
         let chars = Url::parse("neo:chars").expect("valid chars specifier");
+        let strings = Url::parse("neo:strings").expect("valid strings specifier");
         let slices = Url::parse("neo:slices").expect("valid slices specifier");
 
         #[cfg(feature = "neo-chars")]
@@ -716,6 +776,22 @@ mod tests {
             assert_eq!(super::resolve("neo:chars"), None);
             assert!(super::source(&chars).is_none());
             assert!(!super::implemented_specifiers().contains("neo:chars"));
+        }
+
+        #[cfg(feature = "neo-strings")]
+        {
+            assert_eq!(
+                super::resolve("neo:strings"),
+                Some(super::STRINGS_SPECIFIER)
+            );
+            assert_eq!(super::source(&strings), Some(""));
+            assert!(super::implemented_specifiers().contains("neo:strings"));
+        }
+        #[cfg(not(feature = "neo-strings"))]
+        {
+            assert_eq!(super::resolve("neo:strings"), None);
+            assert!(super::source(&strings).is_none());
+            assert!(!super::implemented_specifiers().contains("neo:strings"));
         }
 
         #[cfg(feature = "neo-slices")]

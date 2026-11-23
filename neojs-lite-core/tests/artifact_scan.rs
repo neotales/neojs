@@ -1,7 +1,8 @@
-//! Artifact-level checks for the native `chars` binding in QuickJS builds.
+//! Artifact-level checks for the native `chars` and `strings` bindings in
+//! QuickJS builds.
 //!
-//! The needle is the Rust error text used by the native binding, not a marker.
-//! A disabled build does not link the binding, so the text is absent. It is
+//! The needles are Rust error texts used by the native bindings, not markers. A
+//! disabled build does not link the binding, so the text is absent. They are
 //! decoded from hex at runtime, so the test source does not satisfy its own scan.
 
 use std::fs;
@@ -11,6 +12,9 @@ use neojs_lite_core::Runtime;
 /// `NON_SCALAR_MESSAGE` from the Rust `chars` implementation and binding.
 const CHARS_SEQUENCE_ONE_HEX: &str =
     "76616c7565206d757374206265206120556e69636f6465207363616c61722076616c7565";
+
+/// `FROM_INDEX_NOT_INTEGER` from the Rust `strings` implementation and binding.
+const STRINGS_SEQUENCE_ONE_HEX: &str = "66726f6d496e646578206d75737420626520616e20696e7465676572";
 
 /// A string that is always in the shim, proving the scan reads real source bytes.
 const CONTROL_HEX: &str = "6765744275696c74496e4d6f64756c65734c697374";
@@ -41,7 +45,7 @@ fn assert_sequences(artifact: &[u8], sequences: &[&str], expected: bool, descrip
 }
 
 #[test]
-fn shared_chars_source_bytes_follow_the_feature() {
+fn shared_source_bytes_follow_the_features() {
     drop(Runtime::new().expect("runtime"));
 
     let artifact = fs::read(std::env::current_exe().expect("current exe")).expect("read artifact");
@@ -56,4 +60,10 @@ fn shared_chars_source_bytes_follow_the_feature() {
     assert_sequences(&artifact, &chars, true, "neo-chars is enabled");
     #[cfg(not(feature = "neo-chars"))]
     assert_sequences(&artifact, &chars, false, "neo-chars is disabled");
+
+    let strings = [STRINGS_SEQUENCE_ONE_HEX];
+    #[cfg(feature = "neo-strings")]
+    assert_sequences(&artifact, &strings, true, "neo-strings is enabled");
+    #[cfg(not(feature = "neo-strings"))]
+    assert_sequences(&artifact, &strings, false, "neo-strings is disabled");
 }
