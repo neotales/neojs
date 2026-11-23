@@ -43,10 +43,16 @@ def control_diff($p; $r):
            $r.build.target_specific_env.status == "not-captured") then
        "target-env-capture"
      else "target-env" end),
-    (if $p.build.effective_features != $r.build.effective_features then
-       "effective-features" else empty end),
-    (if $p.build.effective_linker != $r.build.effective_linker then
-       "effective-linker" else empty end),
+    (if $p.build.effective_features == $r.build.effective_features then empty
+     elif ($p.build.effective_features.status == "not-captured" or
+           $r.build.effective_features.status == "not-captured") then
+       "effective-features-capture"
+     else "effective-features" end),
+    (if $p.build.effective_linker == $r.build.effective_linker then empty
+     elif ($p.build.effective_linker.status == "not-captured" or
+           $r.build.effective_linker.status == "not-captured") then
+       "effective-linker-capture"
+     else "effective-linker" end),
     (if $p.build.v8_archive_status != $r.build.v8_archive_status or
         v8_identity($p) != v8_identity($r) then
        "v8-archive" else empty end),
