@@ -11,10 +11,14 @@
 //! `neo:uuid/v4`, and `neo:uuid/v7` ([`crate::builtins`]), and — only when the
 //! runtime was created with [`crate::Runtime::with_remote`] — absolute `https:`
 //! URLs. That opt-in also enables `jsr:` imports through
-//! [`crate::jsr_loader`]. Every other scheme is rejected with a reason that
-//! names the missing feature instead of failing later inside V8. A bare
-//! specifier is never a built-in module, even when it matches a registry name;
-//! `age` is rejected where `neo:age` resolves.
+//! [`crate::jsr_loader`] and the `gh:` and `github:` GitHub specifiers. A
+//! GitHub specifier is parsed and normalized to a credential-free
+//! `https://raw.githubusercontent.com/owner/repo/ref/path` URL before it is
+//! resolved, so it takes the same remote path as an explicit HTTPS import; see
+//! [`crate::github`] for the accepted grammar. Every other scheme is rejected
+//! with a reason that names the missing feature instead of failing later inside
+//! V8. A bare specifier is never a built-in module, even when it matches a
+//! registry name; `age` is rejected where `neo:age` resolves.
 //!
 //! A relative specifier in a remote module resolves against that module's URL,
 //! so it stays remote. A remote module cannot import `file:`; remote code gets
@@ -321,6 +325,20 @@ impl ModuleLoader for FileModuleLoader {
         // tab/newline characters, which would make `neo:ch\nars` resolve.
         if let Some(canonical) = case_insensitive_builtin(specifier) {
             return builtin_url(canonical);
+        }
+
+        // `gh:` and `github:` are not a transport of their own: they name one
+        // credential-free raw HTTPS URL. Resolving them here, before the
+        // referrer branch, makes them work from a local or a remote importer.
+        if let Some(github) = crate::github::github_url(specifier) {
+            return match github {
+                Ok(url) => self.resolve_https(url),
+                // The parser's reason is fixed text. The specifier itself is
+                // never echoed: a `gh:` URL is opaque to `url`, so its path can
+                // hold `user:secret@host` or a query-like token that no URL
+                // redaction would remove.
+                Err(reason) => Err(JsErrorBox::generic(with_referrer(reason, referrer))),
+            };
         }
 
         if let Ok(base) = Url::parse(referrer)

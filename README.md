@@ -31,7 +31,7 @@ cargo install --path neojs
 ```text
 Usage:
   neojs <file>                    run one module
-  neojs --allow-remote <file-or-https-url>
+  neojs --allow-remote <file-or-url>
   neojs --no-allow-remote <file>
   neojs test <file-or-glob>...    run test files
   neojs test --allow-remote <file-or-glob>...
@@ -39,8 +39,8 @@ Usage:
   neojs --allow-remote test <file-or-glob>...
 
 Options:
-  --allow-remote   allow https: entry and imports and jsr: imports; off by
-                   default
+  --allow-remote   allow https:, gh:, and github: entry and imports, and
+                   jsr: imports; off by default
   --no-allow-remote
                    force remote loading off, overriding NEOJS_ALLOW_REMOTE
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -167,8 +167,37 @@ deliberately, not in a shared shell profile.
 
 A relative import inside a remote module resolves against that module's URL, so it stays remote.
 `.js`, `.mjs`, `.ts`, and `.mts` work, statically and dynamically, and TypeScript is type-stripped
-as it is locally. Only `https:` is accepted. A remote module cannot import a `file:` URL: there is
-no implicit transition from remote code to the local filesystem.
+as it is locally. An entry may be an `https:` URL or a `gh:`/`github:` specifier; a module import
+may also be a `jsr:` specifier, which always resolves through the public JSR registry rather than
+an arbitrary host (see [Limits](#limits) for `jsr:` resolution). A remote module cannot import a
+`file:` URL: there is no implicit transition from remote code to the local filesystem.
+
+**GitHub specifiers.** With remote loading enabled, a `gh:` or `github:` specifier names one file
+in a GitHub repository:
+
+```sh
+neojs --allow-remote gh:owner/repo@v1.2.3/src/main.ts
+neojs --allow-remote github:owner/repo@0123456789abcdef0123456789abcdef01234567/src/main.ts
+```
+
+```js
+// main.js, run with `neojs --allow-remote main.js`
+import { parse } from "gh:owner/repo@v1.2.3/src/parse.ts";
+```
+
+The specifier is validated and rewritten to
+`https://raw.githubusercontent.com/owner/repo/<ref>/<path>`, then loaded exactly as that HTTPS
+module, so the body, byte, module, request, redirect, deadline, and cache rules are unchanged, and
+relative imports inside the file stay on the raw host. Both schemes produce the same URL and
+therefore the same module identity and cache entry. The reference is one segment: a tag, a branch,
+or a commit SHA. A branch name containing `/` cannot be expressed because the first `/` ends the
+reference; use a tag or a full commit SHA. The legacy `gh:owner/repo/path/@ref` spelling remains
+accepted. Empty segments, `.` and `..` segments, `%` escapes, backslashes, queries, fragments,
+whitespace, and control characters are rejected, as are owner, repository, and reference strings
+outside GitHub's safe character set. A `gh:` entry or import without `--allow-remote` (or
+`NEOJS_ALLOW_REMOTE`) fails with the same disabled message as an HTTPS one. GitHub is not an
+allowlist and not a sandbox: a `gh:` specifier is one way to name an HTTPS URL, not a restriction on
+which hosts may be fetched.
 
 When a redirect is followed, the final URL is the module's identity and the requested URL is an
 alias for it, as in a browser. `import.meta.url` is the final URL, relative imports resolve against
@@ -1631,11 +1660,11 @@ database providers and a JavaScript/Node adapter are not yet wired in. See the
 [database API notes](docs/db-api.md) for its scope and design decisions.
 
 The [`neojs-manifest` crate](docs/neo-jsonc.md) is the bounded foundation for `neo.jsonc`: strict
-JSONC parsing, schema validation, and canonical import-specifier normalization for `gh:`, `npm:`,
-`jsr:`, and `node:`. It does not install an import map, expand workspaces, apply
-`include`/`exclude`, or load npm, JSR, GitHub, or Node modules. The runtime loads `jsr:` imports
-only when remote loading is enabled; the manifest crate does not change that, and `npm:`, `gh:`,
-and `node:` remain rejected at runtime.
+JSONC parsing, schema validation, and canonical import-specifier normalization for `gh:`,
+`github:`, `npm:`, `jsr:`, and `node:`. It does not install an import map, expand workspaces, or
+apply `include`/`exclude`. A normalized `gh:`/`github:` coordinate is the raw HTTPS URL the V8
+runtime loads when remote loading is enabled; the runtime also loads `jsr:` imports only then. The
+manifest crate does not change either decision, and `npm:` and `node:` remain rejected at runtime.
 
 ### QuickJS runtime: neojs-lite-core
 
@@ -1695,7 +1724,8 @@ controls-incomplete rather than strict. The directory is self-contained: see
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
-local module loading, opt-in HTTPS module loading with explicit limits, opt-in `jsr:` resolution
+local module loading, opt-in HTTPS module loading with explicit limits, opt-in `gh:`/`github:`
+specifier loading, opt-in `jsr:` resolution
 through the public JSR registry with manifest length and SHA-256 verification, imports of the
 `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
 `strings`, `test`, and `uuid` built-ins by their canonical `neo:` specifiers, console output,
@@ -1718,7 +1748,13 @@ surface, not the built-in modules: `Neo.engine` is `"neo-lite"`, its built-in mo
   rejected by extension. CommonJS is rejected by the `.cjs` and `.cts` extensions; a `.js` file
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
-- `node:`, `npm:`, `gh:`, `http:`, `data:`, and `blob:` imports are rejected. `jsr:` imports are
+- `node:`, `npm:`, `http:`, `data:`, and `blob:` imports are rejected. `gh:` and `github:`
+  imports are rejected unless the runtime is created with remote loading enabled (`neojs
+  --allow-remote`, or `NEOJS_ALLOW_REMOTE=1`); when enabled, a validated specifier is rewritten to
+  one credential-free `https://raw.githubusercontent.com/owner/repo/ref/path` URL and loaded as
+  that HTTPS module. The legacy `gh:owner/repo/path/@ref` spelling is accepted. The reference is
+  one segment, so a branch name containing `/` cannot be written; use a tag or a full commit SHA.
+  GitHub is not an allowlist and not a sandbox. `jsr:` imports are
   rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`, or
   `NEOJS_ALLOW_REMOTE=1`); when enabled they resolve through the public JSR registry, and each file
   is checked against the version manifest's length and SHA-256 before it runs. The checksum proves
@@ -1731,7 +1767,7 @@ surface, not the built-in modules: `Neo.engine` is `"neo-lite"`, its built-in mo
   or a failed verified load), a later direct load of that URL takes the verified path because the
   original specifier is not recoverable at load time. That is conservative verification, not a
   bypass. JSR support covers
-  exported entrypoints and the relative modules they import; `npm:`, `node:`, `gh:`, dist-tags,
+  exported entrypoints and the relative modules they import; `npm:`, `node:`, dist-tags,
   private registries, authentication, import maps and `neo.jsonc`, lockfiles, offline policy, and
   publisher signatures are not implemented. A JSR package that imports one of those fails at
   resolution. The first metadata request for a package or version is synchronous and blocks the

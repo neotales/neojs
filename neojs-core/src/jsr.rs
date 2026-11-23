@@ -14,8 +14,11 @@
 //! imported inside a JSR graph is checked against the manifest.
 //!
 //! The integration imports a package's exported entrypoints and the relative
-//! modules they import. It does not implement `npm:`, `node:`, `gh:`, or import
-//! maps, so a JSR package that depends on one of those fails at resolution. It
+//! modules they import. A `gh:`/`github:` or absolute `https:` import is
+//! delegated to the remote loader, so it is an ordinary remote module rather
+//! than a verified registry one. It does not implement `npm:`, `node:`, or
+//! import maps, so a JSR package that depends on one of those fails at
+//! resolution. It
 //! has no lockfile, offline or frozen policy, dist-tags, private registry or
 //! authentication support, custom origin, or publisher signature. Metadata is
 //! trusted through HTTPS to the public `jsr.io` origin, and a file is executed

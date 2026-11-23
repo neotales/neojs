@@ -44,6 +44,7 @@ getrandom.workspace = true
 hmac.workspace = true
 httpdate.workspace = true
 neojs-builtins = { workspace = true, optional = true }
+neojs-manifest = { version = "0.1.0", path = "../neojs-manifest" }
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
 neojs-node = { version = "0.1.0", path = "../neojs-node", optional = true }
 neotales-age.workspace = true

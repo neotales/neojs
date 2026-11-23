@@ -66,8 +66,9 @@
 //! # Graph boundary
 //!
 //! A registry module may import another registry module, a relative module
-//! inside its exact package version, a built-in, or an absolute `https:` URL
-//! when remote loading is enabled. A canonical `jsr.io` URL joins the verified
+//! inside its exact package version, a built-in, an absolute `https:` URL, or a
+//! `gh:`/`github:` specifier that names one, when remote loading is enabled. A
+//! canonical `jsr.io` URL joins the verified
 //! graph; another origin is an ordinary remote module. It may not import
 //! `file:`: a registry module
 //! cannot use an import to read the user's files. Relative imports are resolved
@@ -83,7 +84,7 @@
 //!
 //! # Not implemented
 //!
-//! `npm:`, `node:`, and `gh:` imports, import maps and `neo.jsonc`, dist-tags,
+//! `npm:`, `node:`, import maps and `neo.jsonc`, dist-tags,
 //! lockfiles, offline or frozen policy, private registries, authentication,
 //! custom origins, JSR package tarballs, and the resolver's optional module
 //! graph hints are not implemented. A JSR package that imports any of those
