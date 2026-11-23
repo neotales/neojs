@@ -2913,6 +2913,53 @@ fn test_command_accepts_allow_remote_for_remote_imports() {
     }
 }
 
+/// `--allow-remote` must reach every per-file runtime, not just the first.
+///
+/// The files are passed as two separate arguments and each imports the same
+/// module from the seeded cache. If the flag reached only one runtime, the
+/// other file would fail with remote loading disabled.
+#[test]
+fn test_command_allow_remote_reaches_every_selected_file() {
+    let project = Project::new();
+    let cache_home = project.path("cache-home");
+    let loopback = HeldLoopback::new();
+    let first = write_remote_importing_test(&project, "first-remote.test.js", loopback.url());
+    let second = write_remote_importing_test(&project, "second-remote.test.js", loopback.url());
+    seed_remote_cache(&cache_home, loopback.url());
+    let first = first.to_str().expect("utf-8 path");
+    let second = second.to_str().expect("utf-8 path");
+
+    let output = run_args_with_cache_home(
+        &["--allow-remote", "test", first, second],
+        &cache_home,
+        Duration::from_secs(20),
+    );
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let printed = stdout(&output);
+    for name in ["first-remote.test.js", "second-remote.test.js"] {
+        let header = format!("{name}:");
+        assert!(
+            printed
+                .lines()
+                .any(|line| line.starts_with("test ") && line.ends_with(header.as_str())),
+            "missing a header for {name}: {printed}"
+        );
+    }
+    assert_eq!(
+        printed
+            .lines()
+            .filter(|line| *line == "ok 1 - remote import")
+            .count(),
+        2,
+        "{printed}"
+    );
+    assert!(
+        printed.contains("# 2 selected file(s): 2 test(s): 2 passed"),
+        "{printed}"
+    );
+}
+
 /// Without the flag the same selected test file must fail with remote loading
 /// disabled even when the remote module is already in the shared package cache,
 /// so the cache cannot mask a missing opt-in.
