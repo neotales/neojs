@@ -84,8 +84,9 @@ relabelled:
 - the V8 archive is `supplied-provenance-unknown`, `authenticated: false`.
 
 They therefore form their own strict series. The trend report labels the
-control differences when it compares them with a later, fully captured record.
-No missing control was invented.
+capture-status differences (`cargo-config-capture`, `target-env-capture`,
+`source-state-capture`) rather than pretending the underlying build control
+changed. No missing control was invented.
 
 ### Canonical series
 
