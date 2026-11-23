@@ -25,6 +25,8 @@ deno_error.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
 httpdate.workspace = true
+# Engine-neutral NEO1 envelope and CSPRNG backend shared with neojs-lite-core.
+neojs-crypto-core = { version = "0.1.0", path = "../neojs-crypto-core" }
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
 neotales-age.workspace = true
 neotales-ssh.workspace = true

@@ -2059,6 +2059,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "httpdate",
+ "neojs-crypto-core",
  "neojs-module-policy",
  "neotales-age",
  "neotales-ssh",
@@ -2075,6 +2076,14 @@ dependencies = [
  "ureq",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "neojs-crypto-core"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm 0.10.3",
+ "getrandom 0.4.3",
 ]
 
 [[package]]

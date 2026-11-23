@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "neojs-crypto-core",
     "neojs-core",
     "neojs",
     "neojs-dbapi",
@@ -11,7 +12,15 @@ members = [
 # The V8 runtime is the default build. QuickJS crates are opt-in with `-p`, so
 # `cargo build`, `cargo test`, and `cargo clippy` without a package selection do
 # not compile QuickJS or put `rquickjs` in the default dependency graph.
-default-members = ["neojs-core", "neojs", "neojs-dbapi", "neojs-module-policy"]
+# `neojs-crypto-core` is engine-neutral and part of the default V8 graph through
+# `neojs-core`, so its tests run with the default gate.
+default-members = [
+    "neojs-crypto-core",
+    "neojs-core",
+    "neojs",
+    "neojs-dbapi",
+    "neojs-module-policy",
+]
 
 [workspace.package]
 version = "0.1.0"

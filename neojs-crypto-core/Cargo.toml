@@ -1,0 +1,14 @@
+[package]
+name = "neojs-crypto-core"
+description = "Engine-neutral NEO1 AES-256-GCM envelope and CSPRNG backend shared by the V8 and QuickJS runtimes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[dependencies]
+aes-gcm.workspace = true
+getrandom.workspace = true
