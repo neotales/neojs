@@ -634,3 +634,107 @@ if (code !== "ERR_NODE_UNSUPPORTED_ENCODING") {
     )
     .expect("encoding opt-in");
 }
+
+#[test]
+fn hostile_prototype_setters_do_not_break_native_results_or_errors() {
+    require("/bin/echo");
+    require("/bin/sh");
+    run(
+        policy(&["/bin/echo", "/bin/sh"]),
+        r#"
+import { execFileSync, spawnSync } from "node:child_process";
+const boom = new Error("prototype setter ran");
+for (const name of ["pid", "stdout", "stderr", "status", "output", "signal", "error"]) {
+    Object.defineProperty(Object.prototype, name, {
+        configurable: true,
+        set() { throw boom; },
+    });
+}
+for (const name of ["code", "stderr"]) {
+    Object.defineProperty(Error.prototype, name, {
+        configurable: true,
+        set() { throw boom; },
+    });
+}
+for (const name of ["0", "1", "2"]) {
+    Object.defineProperty(Array.prototype, name, {
+        configurable: true,
+        set() { throw boom; },
+    });
+}
+try {
+    const result = spawnSync("/bin/echo", ["ok"], { encoding: "utf8" });
+    if (result.status !== 0 || result.stdout !== "ok\n" || result.output[1] !== "ok\n") {
+        throw new Error("spawn result changed");
+    }
+    if (!Object.prototype.hasOwnProperty.call(result, "pid")) throw new Error("pid is not own");
+    let failed = null;
+    try {
+        execFileSync("/bin/sh", ["-c", "exit 3"], { encoding: "utf8" });
+    } catch (error) {
+        failed = error;
+    }
+    if (!failed || failed.code !== "ERR_NODE_CHILD_PROCESS_EXIT" || failed.status !== 3) {
+        throw new Error(`exec error: ${failed && failed.code}`);
+    }
+    if (!Object.prototype.hasOwnProperty.call(failed, "code")) throw new Error("code is not own");
+} finally {
+    for (const name of ["pid", "stdout", "stderr", "status", "output", "signal", "error"]) {
+        delete Object.prototype[name];
+    }
+    for (const name of ["code", "stderr"]) delete Error.prototype[name];
+    for (const name of ["0", "1", "2"]) delete Array.prototype[name];
+}
+"#,
+    )
+    .expect("hostile prototype setters");
+}
+
+#[test]
+fn throwing_getters_propagate_unchanged_from_options_env_and_args() {
+    require("/bin/echo");
+    run(
+        policy(&["/bin/echo"]),
+        r#"
+import { spawnSync } from "node:child_process";
+const boom = new Error("getter boom");
+const option = { encoding: "utf8" };
+Object.defineProperty(option, "cwd", {
+    enumerable: true,
+    get() { throw boom; },
+});
+let caught = null;
+try {
+    spawnSync("/bin/echo", [], option);
+} catch (error) {
+    caught = error;
+}
+if (caught !== boom) throw new Error(`option getter: ${caught && caught.message}`);
+
+const environment = {};
+Object.defineProperty(environment, "KEY", {
+    enumerable: true,
+    get() { throw boom; },
+});
+caught = null;
+try {
+    spawnSync("/bin/echo", [], { encoding: "utf8", env: environment });
+} catch (error) {
+    caught = error;
+}
+if (caught !== boom) throw new Error(`env getter: ${caught && caught.message}`);
+
+const args = [];
+Object.defineProperty(args, "0", { get() { throw boom; } });
+args.length = 1;
+caught = null;
+try {
+    spawnSync("/bin/echo", args, { encoding: "utf8" });
+} catch (error) {
+    caught = error;
+}
+if (caught !== boom) throw new Error(`argument getter: ${caught && caught.message}`);
+"#,
+    )
+    .expect("getter propagation");
+}
