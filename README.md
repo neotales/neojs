@@ -32,20 +32,30 @@ cargo install --path neojs
 Usage:
   neojs <file>                    run one module
   neojs --allow-remote <file-or-https-url>
+  neojs --no-allow-remote <file>
   neojs test <file-or-glob>...    run test files
   neojs test --allow-remote <file-or-glob>...
+  neojs test --no-allow-remote <file-or-glob>...
   neojs --allow-remote test <file-or-glob>...
 
 Options:
   --allow-remote   allow https: entry and imports; off by default
+  --no-allow-remote
+                   force remote loading off, overriding NEOJS_ALLOW_REMOTE
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
   -V, --version    show the version; alone, or after `--allow-remote`
   --               end option parsing, for a file or pattern beginning with `-`
+
+Environment:
+  NEOJS_ALLOW_REMOTE  1 or true enables remote loading, 0 or false keeps it off
+                      (case-insensitive); an explicit flag overrides a valid
+                      setting, and an invalid value is rejected at startup
 ```
 
 With no arguments, `neojs` exits 2 and points at `--help`. `--allow-remote` is off by default and
-may appear before the module, or before or after `test`. The module sections below document each
-built-in; [Limits](#limits) lists the unsupported features and the exit codes.
+may appear before the module, or before or after `test`; `--no-allow-remote` forces it off even when
+`NEOJS_ALLOW_REMOTE` enables it. The module sections below document each built-in;
+[Limits](#limits) lists the unsupported features and the exit codes.
 
 ## What you can do ⚡
 
@@ -143,6 +153,16 @@ neojs --allow-remote https://example.com/main.js
 import { greet } from "https://example.com/greet.js";
 console.log(greet("world"));
 ```
+
+**Persist remote loading with `NEOJS_ALLOW_REMOTE`.** `--allow-remote` is a per-command
+choice. Setting `NEOJS_ALLOW_REMOTE=1` or `NEOJS_ALLOW_REMOTE=true` makes remote loading the
+default for every `neojs` run and `neojs test` in that environment; `0` and `false` keep it off.
+The words are case-insensitive, and any other value, including an empty one, is a startup error
+(exit 2) rather than an implicit opt-in. An explicit `--allow-remote` or `--no-allow-remote`
+overrides a valid setting; an invalid value is rejected even when an explicit flag is given, so a
+typo cannot hide. This is a security-relevant persistent switch: it lets every module and test file
+in that environment load and run remote code with the same authority as local code. Set it
+deliberately, not in a shared shell profile.
 
 A relative import inside a remote module resolves against that module's URL, so it stays remote.
 `.js`, `.mjs`, `.ts`, and `.mts` work, statically and dynamically, and TypeScript is type-stripped
@@ -808,23 +828,28 @@ ok 2 - adds asynchronously
 ```
 
 Remote loading is disabled for test files too. Give `--allow-remote` before or after `test` to let
-every selected file import absolute `https:` modules:
+every selected file import absolute `https:` modules; `--no-allow-remote` forces it off, and
+`NEOJS_ALLOW_REMOTE` selects the default for every selected file unless a flag overrides a valid
+setting:
 
 ```sh
 neojs --allow-remote test "tests/**/*.test.js"
 neojs test --allow-remote "tests/**/*.test.js"
+neojs test --no-allow-remote "tests/**/*.test.js"
 ```
 
 Each file still gets a fresh runtime, so each has its own default remote request, module, byte, and
 redirect limits. The user-profile package cache is shared across those fresh runtimes and with
 `neojs --allow-remote <file>`, because it is keyed by URL rather than by runtime. `--` ends option
-parsing, so a file literally named `--allow-remote` can still be selected after it. The remote rules
-are the same as for a run: only credential-free `https:` is accepted, relative imports inside a
-remote module stay remote, and the cache behavior described above applies.
+parsing, so a file literally named `--allow-remote` or `--no-allow-remote` can still be selected
+after it. The remote rules are the same as for a run: only credential-free `https:` is accepted,
+relative imports inside a remote module stay remote, and the cache behavior described above applies.
 
 The runner is registration-based, not Node's `node:test`. The CLI runs it after the entry module
 settles, so a test registered after a top-level `await` is included. A file that registers no tests
-fails. A rejected Promise, a rejected thenable, a returned generator object, a pending test, an
+fails. Remote loading stays off unless `--allow-remote`, `--no-allow-remote`, or
+`NEOJS_ALLOW_REMOTE` selects it, and it applies to every selected file's fresh runtime. A rejected
+Promise, a rejected thenable, a returned generator object, a pending test, an
 unhandled rejection, a test that does not settle within its timeout, and event-loop work that
 remains after a bounded settle window are failures, so none can look like a pass. The default
 timeout is 30 seconds and can be set per test:
@@ -1539,10 +1564,11 @@ list are not implemented.
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
 - `node:`, `npm:`, `jsr:`, `http:`, `data:`, and `blob:` imports are rejected. `https:` imports are
-  rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`), and
-  `http:` is always rejected. In particular, `node:test` is not an alias for the `test` built-in; a
-  Node-module opt-in is not implemented. The built-in modules are `age`, `assert`, `chars`,
-  `console`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid`,
+  rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`, or
+  `NEOJS_ALLOW_REMOTE=1`), and `http:` is always rejected. In particular, `node:test` is not an
+  alias for the `test` built-in; a Node-module opt-in is not implemented. The built-in modules are
+  `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
+  `strings`, `test`, and `uuid`,
   reached through `Neo.getBuiltInModule("age")`,
   `Neo.getBuiltInModule("assert")`, `Neo.getBuiltInModule("chars")`,
   `Neo.getBuiltInModule("console")`, `Neo.getBuiltInModule("crypto")`,

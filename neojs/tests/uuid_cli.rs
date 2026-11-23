@@ -3,6 +3,17 @@
 use std::fs;
 use std::process::Command;
 
+/// A spawned `neojs` with the persisted remote setting cleared.
+///
+/// The test process may inherit `NEOJS_ALLOW_REMOTE` from the developer's
+/// shell. An invalid or enabled setting must not change this smoke test's
+/// result, so each child starts from the documented default.
+fn neojs_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_neojs"));
+    command.env_remove("NEOJS_ALLOW_REMOTE");
+    command
+}
+
 /// Returns true when `value` has canonical lowercase text and the expected
 /// version nibble. The variant nibble must be RFC 9562 (`10xx`).
 fn is_uuid(value: &str, version: u8) -> bool {
@@ -43,10 +54,7 @@ console.log(v7());
     )
     .expect("write source");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_neojs"))
-        .arg(&file)
-        .output()
-        .expect("spawn neojs");
+    let output = neojs_command().arg(&file).output().expect("spawn neojs");
     assert!(
         output.status.success(),
         "neojs failed: {}",
@@ -58,4 +66,16 @@ console.log(v7());
     assert_eq!(lines.len(), 2, "unexpected stdout: {stdout:?}");
     assert!(is_uuid(lines[0], 4), "not a v4 UUID: {}", lines[0]);
     assert!(is_uuid(lines[1], 7), "not a v7 UUID: {}", lines[1]);
+}
+
+/// The helper must clear a setting inherited from the test runner, so an
+/// ambient `NEOJS_ALLOW_REMOTE` cannot make the smoke test fail under a shell
+/// that exports either a valid or an invalid value.
+#[test]
+fn cli_subprocess_does_not_inherit_the_remote_setting() {
+    let command = neojs_command();
+    let cleared = command
+        .get_envs()
+        .any(|(name, value)| name == "NEOJS_ALLOW_REMOTE" && value.is_none());
+    assert!(cleared, "NEOJS_ALLOW_REMOTE was not removed from the child");
 }
