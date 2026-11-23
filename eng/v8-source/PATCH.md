@@ -35,7 +35,9 @@ descriptor/dictionary insertion order.
 
 ## Pins
 
-From the verified `prepare.sh` inputs:
+Prepared and verified by procedure commit
+`3f925189837b7f0d3c334e43f9fae9eb38d8683b` in the read-only v8-build
+worktree. From the verified `prepare.sh` inputs:
 
 | Input | Pin |
 | --- | --- |
