@@ -7,6 +7,7 @@
 use neojs_manifest::Error;
 use neojs_manifest::ExportKey;
 use neojs_manifest::Exports;
+use neojs_manifest::MAX_MANIFEST_BYTES;
 use neojs_manifest::Manifest;
 use neojs_manifest::SpecifierKind;
 use neojs_manifest::Support;
@@ -89,10 +90,23 @@ fn parses_every_documented_field() {
     assert_eq!(
         manifest
             .imports
-            .first_unsupported()
+            .first_not_loadable()
             .map(|(key, support)| (key, matches!(support, Support::Unsupported(_)))),
         Some(("gh", true))
     );
+}
+
+#[test]
+fn the_readiness_guard_includes_normalized_only_entries() {
+    let manifest = Manifest::parse(r#"{"name":"@a/b","imports":{"local":"./mod.ts"}}"#)
+        .expect("valid manifest");
+    assert_eq!(
+        manifest.imports.first_not_loadable(),
+        Some(("local", Support::NormalizedOnly))
+    );
+
+    let empty = Manifest::parse(r#"{"name":"@a/b"}"#).expect("valid manifest");
+    assert_eq!(empty.imports.first_not_loadable(), None);
 }
 
 #[test]
@@ -160,9 +174,10 @@ fn rejects_a_version_range() {
 
 #[test]
 fn rejects_unknown_and_reserved_fields() {
-    let unknown = Manifest::parse(r#"{"name":"@scope/pkg","description":"x","wat":true}"#)
+    let unknown = Manifest::parse(r#"{"name":"@scope/pkg","secret-key-123":true}"#)
         .expect_err("unknown field");
-    assert!(matches!(unknown, Error::UnknownField { ref field } if field == "wat"));
+    assert!(matches!(unknown, Error::UnknownField));
+    assert!(!unknown.to_string().contains("secret-key-123"), "{unknown}");
 
     for (expected_field, text) in [
         ("node", r#"{"name":"@scope/pkg","node":true}"#),
@@ -174,7 +189,7 @@ fn rejects_unknown_and_reserved_fields() {
         assert!(
             matches!(
                 error,
-                Error::UnsupportedField { ref field, .. } if field == expected_field
+                Error::UnsupportedField { field: actual, .. } if actual == expected_field
             ),
             "{expected_field}: {error}"
         );
@@ -276,15 +291,26 @@ fn rejects_unportable_and_negated_patterns() {
 fn rejects_bare_and_insecure_import_targets() {
     for (target, expected) in [
         ("react", "relative path"),
-        ("http://example.com/mod.ts", "http:"),
-        ("data:text/javascript,0", "data:"),
-        ("blob:https://example.com/x", "blob:"),
-        ("git:owner/repo", "git:"),
+        ("http://example.com/mod.ts", "only https:"),
+        ("data:text/javascript,0", "data: and blob:"),
+        ("blob:https://example.com/x", "data: and blob:"),
+        ("git:owner/repo", "only https:,"),
     ] {
         let text = format!(r#"{{"name":"@a/b","imports":{{"x":"{target}"}}}}"#);
         let error = Manifest::parse(&text).expect_err(target);
         assert!(error.to_string().contains(expected), "{target}: {error}");
     }
+}
+
+#[test]
+fn unsupported_transport_errors_do_not_echo_the_scheme() {
+    let text = r#"{"name":"@a/b","imports":{"x":"secret-scheme-token:opaque"}}"#;
+    let error = Manifest::parse(text).expect_err("unknown scheme");
+    assert!(matches!(error, Error::UnsupportedTransport { .. }));
+    assert!(
+        !error.to_string().contains("secret-scheme-token"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -316,11 +342,60 @@ fn reads_a_manifest_from_an_explicit_path() {
 }
 
 #[test]
-fn missing_file_is_an_io_error() {
+fn missing_file_is_an_io_error_without_echoing_the_path() {
     let directory = tempfile::tempdir().expect("tempdir");
-    let error =
-        Manifest::from_path(directory.path().join("missing.jsonc")).expect_err("missing file");
+    let path = directory.path().join("secret-internal-name.jsonc");
+    let error = Manifest::from_path(&path).expect_err("missing file");
     assert!(matches!(error, Error::Io { .. }));
+    assert!(
+        !error.to_string().contains("secret-internal-name"),
+        "{error}"
+    );
+}
+
+#[test]
+fn accepts_a_manifest_of_exactly_the_size_limit() {
+    let mut text = String::from(r#"{"name":"@a/b"}"#);
+    text.push_str(&" ".repeat(MAX_MANIFEST_BYTES - text.len()));
+    assert_eq!(text.len(), MAX_MANIFEST_BYTES);
+    let manifest = Manifest::parse(&text).expect("exact limit");
+    assert_eq!(manifest.name.as_str(), "@a/b");
+}
+
+#[test]
+fn rejects_a_manifest_one_byte_over_the_size_limit() {
+    let mut text = String::from(r#"{"name":"@a/b"}"#);
+    text.push_str(&" ".repeat(MAX_MANIFEST_BYTES + 1 - text.len()));
+    let error = Manifest::parse(&text).expect_err("over limit");
+    assert!(matches!(
+        error,
+        Error::ManifestTooLarge { limit } if limit == MAX_MANIFEST_BYTES
+    ));
+}
+
+#[test]
+fn from_path_accepts_exactly_the_size_limit() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("neo.jsonc");
+    let mut text = String::from(r#"{"name":"@a/b"}"#);
+    text.push_str(&" ".repeat(MAX_MANIFEST_BYTES - text.len()));
+    std::fs::write(&path, text).expect("write manifest");
+    let manifest = Manifest::from_path(&path).expect("exact limit");
+    assert_eq!(manifest.name.as_str(), "@a/b");
+}
+
+#[test]
+fn from_path_rejects_a_file_one_byte_over_the_size_limit() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("neo.jsonc");
+    let mut text = String::from(r#"{"name":"@a/b"}"#);
+    text.push_str(&" ".repeat(MAX_MANIFEST_BYTES + 1 - text.len()));
+    std::fs::write(&path, text).expect("write manifest");
+    let error = Manifest::from_path(&path).expect_err("over limit");
+    assert!(matches!(
+        error,
+        Error::ManifestTooLarge { limit } if limit == MAX_MANIFEST_BYTES
+    ));
 }
 
 #[test]

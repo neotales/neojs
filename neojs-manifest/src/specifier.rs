@@ -333,7 +333,6 @@ pub fn normalize_specifier(raw: &str) -> Result<NormalizedSpecifier, Error> {
     }
     if raw.starts_with("http:") {
         return Err(Error::UnsupportedTransport {
-            scheme: "http".to_owned(),
             reason: "only https: module URLs are supported",
         });
     }
@@ -341,9 +340,7 @@ pub fn normalize_specifier(raw: &str) -> Result<NormalizedSpecifier, Error> {
         return parse_file_url(raw);
     }
     if raw.starts_with("data:") || raw.starts_with("blob:") {
-        let scheme = raw.split_once(':').map_or("data", |(scheme, _)| scheme);
         return Err(Error::UnsupportedTransport {
-            scheme: scheme.to_owned(),
             reason: "data: and blob: modules are not implemented",
         });
     }
@@ -363,9 +360,8 @@ pub fn normalize_specifier(raw: &str) -> Result<NormalizedSpecifier, Error> {
     if is_relative_path(raw) {
         return parse_relative_path(raw);
     }
-    if let Some(scheme) = scheme_of(raw) {
+    if scheme_of(raw).is_some() {
         return Err(Error::UnsupportedTransport {
-            scheme: scheme.to_owned(),
             reason: "only https:, file:, npm:, jsr:, gh:, node:, and relative paths are recognized",
         });
     }

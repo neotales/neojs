@@ -1,11 +1,9 @@
 //! Errors returned while reading, parsing, or validating a manifest.
 //!
-//! Every variant is a distinct programmatic cause. Messages name the field or
-//! limit that failed, but never echo field values, URLs, or file contents: a
-//! manifest can carry a signed query, an author name, or other text that should
-//! not appear in a log line.
-
-use std::path::PathBuf;
+//! Every variant is a distinct programmatic cause. Messages name static fields
+//! and limits, but never echo document text, field values, URLs, filesystem
+//! paths, unknown keys, or schemes: a manifest can carry a signed query, an
+//! author name, or another value that should not appear in a log line.
 
 use thiserror::Error;
 
@@ -13,13 +11,20 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Error {
     /// The manifest file could not be read.
-    #[error("could not read `{path}`: {source}")]
+    ///
+    /// The supplied path is not included in the message. The caller knows which
+    /// path it asked for, and a path can identify an internal location.
+    #[error("could not read the manifest: {source}")]
     Io {
-        /// The path supplied by the caller.
-        path: PathBuf,
         /// The operating-system failure.
         #[source]
         source: std::io::Error,
+    },
+    /// The manifest is larger than the accepted limit.
+    #[error("the manifest is over the {limit}-byte limit")]
+    ManifestTooLarge {
+        /// The maximum number of bytes [`crate::Manifest::parse`] accepts.
+        limit: usize,
     },
     /// The document is not valid JSONC.
     #[error("JSONC syntax error at line {line}, column {column}: {message}")]
@@ -60,17 +65,19 @@ pub enum Error {
     /// A field is recognised but deliberately not implemented.
     #[error("manifest field `{field}` is not implemented: {reason}")]
     UnsupportedField {
-        /// The field that is reserved for a future change.
-        field: String,
+        /// A reserved name from this crate's fixed schema.
+        field: &'static str,
         /// The feature that would have to exist first.
         reason: &'static str,
     },
     /// A field is not part of the accepted manifest.
-    #[error("unknown manifest field `{field}`")]
-    UnknownField {
-        /// The unrecognised key.
-        field: String,
-    },
+    ///
+    /// The key is not included. The manifest boundary rejects a typo without
+    /// turning an arbitrary key into a log entry.
+    #[error(
+        "unknown manifest field; accepted fields are name, version, description, authors, exports, include, exclude, imports, and workspaces"
+    )]
+    UnknownField,
     /// A specifier is syntactically invalid.
     #[error("specifier is invalid: {reason}")]
     InvalidSpecifier {
@@ -78,11 +85,12 @@ pub enum Error {
         reason: String,
     },
     /// The specifier names a transport that this project does not implement.
-    #[error("the `{scheme}:` transport is not implemented: {reason}")]
+    ///
+    /// The scheme is not included. An unrecognised scheme is caller text, not
+    /// a schema name.
+    #[error("the specifier uses an unsupported transport: {reason}")]
     UnsupportedTransport {
-        /// The URL scheme, without its colon.
-        scheme: String,
-        /// What would have to exist before the scheme could be loaded.
+        /// What would have to exist before the transport could be loaded.
         reason: &'static str,
     },
 }

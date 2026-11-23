@@ -180,18 +180,33 @@ fn normalizes_relative_paths_and_bare_names() {
 
 #[test]
 fn rejects_unsupported_transports_explicitly() {
-    for (input, scheme) in [
-        ("http://example.com/mod.ts", "http"),
-        ("data:text/javascript,0", "data"),
-        ("blob:https://example.com/x", "blob"),
-        ("git:owner/repo", "git"),
+    for (input, expected) in [
+        ("http://example.com/mod.ts", "only https:"),
+        ("data:text/javascript,0", "data: and blob:"),
+        ("blob:https://example.com/x", "data: and blob:"),
+        ("git:owner/repo", "only https:,"),
     ] {
         let error = normalize_specifier(input).expect_err(input);
         assert!(
-            matches!(&error, Error::UnsupportedTransport { scheme: actual, .. } if actual == scheme),
+            matches!(error, Error::UnsupportedTransport { .. }),
             "{input}: {error}"
         );
+        assert!(error.to_string().contains(expected), "{input}: {error}");
     }
+}
+
+#[test]
+fn errors_do_not_echo_unknown_schemes_or_names() {
+    let error = normalize_specifier("secret-scheme-token:opaque").expect_err("unknown scheme");
+    assert!(matches!(error, Error::UnsupportedTransport { .. }));
+    assert!(
+        !error.to_string().contains("secret-scheme-token"),
+        "{error}"
+    );
+
+    let error = normalize_specifier("npm:Secret_Token@1").expect_err("bad npm name");
+    assert!(matches!(error, Error::InvalidSpecifier { .. }));
+    assert!(!error.to_string().contains("Secret_Token"), "{error}");
 }
 
 #[test]

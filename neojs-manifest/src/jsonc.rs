@@ -399,9 +399,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_keys_at_any_depth() {
-        let error = parse(r#"{"a":{"b":1,"b":2}}"#).expect_err("duplicate");
+    fn rejects_duplicate_keys_at_any_depth_without_echoing_the_key() {
+        let error = parse(r#"{"secret-key-123":{"b":1,"b":2}}"#).expect_err("duplicate");
         assert!(matches!(error, Error::DuplicateKey { .. }));
+        assert!(!error.to_string().contains("secret-key-123"), "{error}");
+        assert!(!error.to_string().contains("\"b\""), "{error}");
     }
 
     #[test]

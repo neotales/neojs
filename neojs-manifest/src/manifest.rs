@@ -10,6 +10,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use neojs_module_policy::module_format;
@@ -128,6 +130,11 @@ impl Manifest {
     /// unsupported transport such as `http:` returns
     /// [`Error::UnsupportedTransport`].
     pub fn parse(text: &str) -> Result<Self, Error> {
+        if text.len() > MAX_MANIFEST_BYTES {
+            return Err(Error::ManifestTooLarge {
+                limit: MAX_MANIFEST_BYTES,
+            });
+        }
         let value = jsonc::parse(text)?;
         let Value::Object(object) = value else {
             return Err(invalid_field(
@@ -178,17 +185,31 @@ impl Manifest {
     /// Reads and validates a manifest from a caller-supplied path.
     ///
     /// This does not search parent directories and does not default to
-    /// [`MANIFEST_FILE_NAME`].
+    /// [`MANIFEST_FILE_NAME`]. The read is bounded: at most
+    /// `MAX_MANIFEST_BYTES + 1` bytes are read, so an oversized file is rejected
+    /// without loading it whole. The path is not included in an error message.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] when the file cannot be read, or any error from
-    /// [`Self::parse`].
+    /// [`Self::parse`], including [`Error::ManifestTooLarge`].
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
-        let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|source| Error::Io {
-            path: path.to_path_buf(),
-            source,
+        let file = File::open(path.as_ref()).map_err(|source| Error::Io { source })?;
+        let mut bytes = Vec::new();
+        let mut limited = file.take(MAX_MANIFEST_BYTES as u64 + 1);
+        limited
+            .read_to_end(&mut bytes)
+            .map_err(|source| Error::Io { source })?;
+        if bytes.len() > MAX_MANIFEST_BYTES {
+            return Err(Error::ManifestTooLarge {
+                limit: MAX_MANIFEST_BYTES,
+            });
+        }
+        let text = String::from_utf8(bytes).map_err(|_| Error::Io {
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the manifest is not valid UTF-8",
+            ),
         })?;
         Self::parse(&text)
     }
@@ -352,7 +373,7 @@ impl ExportKey {
         }
         if raw.contains('*') || raw.contains('?') {
             return Err(Error::UnsupportedField {
-                field: "exports".to_owned(),
+                field: "exports",
                 reason: "wildcard export keys are not implemented",
             });
         }
@@ -406,7 +427,7 @@ impl ExportTarget {
         }
         if path.contains('*') || path.contains('?') {
             return Err(Error::UnsupportedField {
-                field: "exports".to_owned(),
+                field: "exports",
                 reason: "wildcard export targets are not implemented",
             });
         }
@@ -486,7 +507,7 @@ impl Pattern {
         }
         if raw.starts_with('!') {
             return Err(Error::UnsupportedField {
-                field: field.to_owned(),
+                field,
                 reason: "negated glob patterns are not implemented",
             });
         }
@@ -555,18 +576,21 @@ impl ImportMap {
         self.entries.is_empty()
     }
 
-    /// Returns the first entry, in key order, whose transport is not
-    /// implemented.
+    /// Returns the first entry, in key order, that is not loadable.
     ///
-    /// A caller that intends to install this map must reject the returned
-    /// entry. This crate never installs it, so the method is a guard for a
-    /// future integration rather than a load path.
-    pub fn first_unsupported(&self) -> Option<(&str, Support)> {
+    /// This uses [`Support::is_supported`], so it includes
+    /// [`Support::NormalizedOnly`] entries as well as
+    /// [`Support::Unsupported`] ones. Because `is_supported` is false for every
+    /// kind today, a non-empty map always returns its first entry. A caller
+    /// that intends to install this map must reject that entry; this crate
+    /// never installs it.
+    pub fn first_not_loadable(&self) -> Option<(&str, Support)> {
         self.entries.iter().find_map(|(key, specifier)| {
             let support = specifier.support();
-            match support {
-                Support::NormalizedOnly => None,
-                Support::Unsupported(_) => Some((key.as_str(), support)),
+            if support.is_supported() {
+                None
+            } else {
+                Some((key.as_str(), support))
             }
         })
     }
@@ -659,13 +683,13 @@ fn parse_exports(value: &Value) -> Result<Exports, Error> {
                     Value::String(target) => ExportTarget::parse(target)?,
                     Value::Object(_) => {
                         return Err(Error::UnsupportedField {
-                            field: "exports".to_owned(),
+                            field: "exports",
                             reason: "conditional export objects are not implemented",
                         });
                     }
                     Value::Null => {
                         return Err(Error::UnsupportedField {
-                            field: "exports".to_owned(),
+                            field: "exports",
                             reason: "null export exclusions are not implemented",
                         });
                     }
@@ -843,17 +867,13 @@ fn invalid_field(field: &'static str, reason: impl Into<String>) -> Error {
 }
 
 fn unknown_field(field: &str) -> Error {
-    if let Some((_, reason)) = RESERVED_FIELDS
-        .iter()
-        .find(|(reserved, _)| *reserved == field)
-    {
-        Error::UnsupportedField {
-            field: field.to_owned(),
-            reason,
-        }
-    } else {
-        Error::UnknownField {
-            field: field.to_owned(),
+    for &(reserved, reason) in RESERVED_FIELDS {
+        if reserved == field {
+            return Error::UnsupportedField {
+                field: reserved,
+                reason,
+            };
         }
     }
+    Error::UnknownField
 }

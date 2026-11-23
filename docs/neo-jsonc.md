@@ -12,7 +12,8 @@ rather than ignored.
 
 The conventional name is `neo.jsonc`. The crate exposes the name as `MANIFEST_FILE_NAME`, but it
 never searches for the file. A caller passes an explicit path to `Manifest::from_path`, or passes
-the text to `Manifest::parse`.
+the text to `Manifest::parse`. `from_path` reads at most `MAX_MANIFEST_BYTES + 1` bytes, so an
+oversized file is rejected without being loaded whole.
 
 No command-line flag reads `neo.jsonc` yet. `neojs` still rejects `npm:`, `jsr:`, `gh:`, and
 `node:` imports at module resolution.
@@ -36,7 +37,8 @@ The parser is bounded:
 | Document bytes | 1 MiB (`MAX_JSONC_BYTES`, `MAX_MANIFEST_BYTES`) |
 | Nesting depth | 128 (`MAX_JSONC_DEPTH`) |
 
-Errors carry a line and byte column. They do not echo document text, field values, or specifiers.
+Errors carry a line and byte column when one is available. They do not echo document text, field
+values, unknown keys, schemes, filesystem paths, or specifiers.
 
 ## Fields
 
@@ -151,8 +153,11 @@ Targets are normalized by the same public function, `normalize_specifier`. Bare 
 | `gh:owner/repo/src/mod.ts/@v1.2.3` | `https://raw.githubusercontent.com/owner/repo/v1.2.3/src/mod.ts` | Unsupported |
 | `node:fs/promises` | `node:fs/promises` | Unsupported |
 
-`ImportMap::first_unsupported` identifies the first unsupported entry in key order. A caller that
-intends to install the map must reject that entry; this crate never installs it.
+`ImportMap::first_not_loadable` identifies the first entry, in key order, that
+`Support::is_supported` reports as not loadable. That includes `NormalizedOnly` entries, not only
+`Unsupported` ones. Because `is_supported` is false for every kind today, a non-empty map always
+returns its first entry. A caller that intends to install the map must reject that entry; this
+crate never installs it.
 
 #### `npm:`
 
@@ -211,8 +216,9 @@ alias.
 
 ## Reserved and unknown fields
 
-Unknown keys are rejected. These reserved names get a specific reason instead of a generic unknown
-field:
+Unknown keys are rejected. The key itself is not included in the error message, because an
+arbitrary key is caller text. These reserved names get a specific reason instead of a generic
+unknown field:
 
 | Field | Reason |
 | --- | --- |
@@ -244,11 +250,13 @@ field:
 
 ## Security notes
 
-- The crate reads no network. `Manifest::from_path` reads only the path it is given.
+- The crate reads no network. `Manifest::from_path` reads only the path it is given, and at most
+  `MAX_MANIFEST_BYTES + 1` bytes from it.
 - It reads no credential, environment variable, or cache.
-- Canonical HTTPS URLs may contain a query because a query is part of module identity. Error
-  messages never echo the URL or its query. A manifest author should still avoid putting a secret
-  in a committed import target.
+- Error messages omit the supplied filesystem path, unknown keys, unknown schemes, and specifier
+  text. Canonical HTTPS URLs may contain a query because a query is part of module identity, but
+  errors never echo the URL or its query. A manifest author should still avoid putting a secret in
+  a committed import target.
 - Validation is not authorization. A well-formed manifest does not prove a package, path, or host
   is safe to use.
 - Import mapping is not a sandbox. A future runtime integration must keep the existing remote
