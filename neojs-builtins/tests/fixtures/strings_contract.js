@@ -195,6 +195,51 @@ for (const index of [1.5, NaN]) {
     assert(threw, `a non-integer fromIndex was accepted: ${index}`);
 }
 
+// A surrogate pair straddles each 1024-code-unit engine window boundary:
+// the first pair starts at 1023 and the second at 2047. The search adapters
+// must read across the boundary without losing half a pair.
+const windowed =
+    "a".repeat(1023) +
+    "\u{1F600}" +
+    "b".repeat(1022) +
+    "\u{1F600}" +
+    "c";
+assert(windowed.length === 2050, "the cross-window fixture length changed");
+assert(strings.indexOfFold(windowed, "\u{1F600}", 0) === 1023, "first cross-window pair missed");
+assert(strings.indexOfFold(windowed, "\u{1F600}", 1024) === 2047, "second pair was not found after a mid-pair start");
+assert(strings.indexOfFold(windowed, "b", 1024) === 1025, "a mid-pair start did not move to the next boundary");
+assert(strings.lastIndexOfFold(windowed, "\u{1F600}", 1023) === 1023, "first pair at the limit was missed");
+assert(strings.lastIndexOfFold(windowed, "\u{1F600}", 1022) === -1, "a pair after the limit was reported");
+assert(strings.lastIndexOfFold(windowed, "\u{1F600}", 1024) === 1023, "a pair at a mid-pair limit was missed");
+assert(strings.lastIndexOfFold(windowed, "\u{1F600}", 2047) === 2047, "second pair at the limit was missed");
+assert(strings.lastIndexOfFold(windowed, "\u{1F600}", 2046) === 1023, "the last pair before the limit was missed");
+assert(strings.indexOfFold(windowed, "c", Infinity) === -1, "a search from Infinity matched");
+assert(strings.lastIndexOfFold(windowed, "c", Infinity) === 2049, "the final unit was not found last");
+
+// Empty searches clamp like String.prototype, including extreme values.
+assert(strings.indexOfFold(windowed, "", Infinity) === windowed.length, "empty search at Infinity");
+assert(strings.lastIndexOfFold(windowed, "", -Infinity) === 0, "empty search at -Infinity");
+assert(strings.indexOfFold(windowed, "", 1e300) === windowed.length, "empty search at 1e300");
+assert(strings.lastIndexOfFold(windowed, "", -1e300) === 0, "empty search at -1e300");
+assert(strings.indexOfFold("abc", "", Number.MAX_SAFE_INTEGER) === 3, "empty search at MAX_SAFE_INTEGER");
+assert(strings.lastIndexOfFold("abc", "", Number.MAX_SAFE_INTEGER) === 3, "empty last search at MAX_SAFE_INTEGER");
+
+// A match can start at the limit and continue beyond it.
+const beyondLimit = "a".repeat(1024) + "bc";
+assert(strings.indexOfFold(beyondLimit, "abc", 1023) === 1023, "a match beyond the limit was missed");
+assert(strings.lastIndexOfFold(beyondLimit, "abc", 1023) === 1023, "a last match beyond the limit was missed");
+assert(strings.lastIndexOfFold(beyondLimit, "abc", 1022) === -1, "a last match beyond the limit was reported");
+
+// A search longer than the text, a huge index, and a negative index.
+assert(strings.indexOfFold("abc", "abcdef", 0) === -1, "an overlong search matched");
+assert(strings.lastIndexOfFold("abc", "abcdef", Infinity) === -1, "an overlong last search matched");
+assert(strings.indexOfFold("abc", "a", Number.MAX_SAFE_INTEGER) === -1, "a huge index matched");
+assert(strings.lastIndexOfFold("abc", "a", Number.MAX_SAFE_INTEGER) === 0, "a huge last index missed");
+assert(strings.indexOfFold("abc", "a", -1e300) === 0, "a negative index did not clamp");
+assert(strings.lastIndexOfFold("abc", "a", -1e300) === 0, "a negative last index did not clamp");
+assert(strings.indexOfFold("abc", "b", -0) === 1, "minus zero changed indexOfFold");
+assert(strings.lastIndexOfFold("abc", "a", -0) === 0, "minus zero changed lastIndexOfFold");
+
 const registry = Neo.getBuiltInModule("__STRINGS_REGISTRY_KEY__");
 assert(registry !== undefined, "the registry object is missing");
 assert(registry === Neo.getBuiltInModule("__STRINGS_REGISTRY_KEY__"), "the lookup is not cached");
