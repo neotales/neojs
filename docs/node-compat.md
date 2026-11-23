@@ -129,10 +129,12 @@ Tests cover 0, 128 and 129 keys, the inclusive 64-slot scan boundary,
 integer-key ordering, lone-surrogate keys, array and typed-array rejection,
 getters not being read during enumeration, a throwing getter followed by a
 successful call, Proxy `ownKeys` traps that must not run, and repeated failure
-cleanup. A test-only entry point forces the table allocation to fail and checks
-that both option and environment mappings surface the QuickJS `out of memory`
-exception, not `ERR_NODE_UNSUPPORTED` or `ERR_NODE_REQUEST_TOO_LARGE`, that the
-context remains usable, and that repeated failures do not grow the runtime heap.
+cleanup. Test-only entry points force the table allocation and an atom conversion
+after the table exists to fail. The tests check that both option and environment
+mappings surface the QuickJS `out of memory` exception, not
+`ERR_NODE_UNSUPPORTED` or `ERR_NODE_REQUEST_TOO_LARGE`, that the context remains
+usable, and that repeated failures leave the runtime heap unchanged, which
+exercises the atom-table RAII cleanup.
 
 ## Implemented surface
 
