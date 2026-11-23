@@ -9,8 +9,14 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::mpsc;
+use std::task::Context;
+use std::task::Poll;
+use std::task::Wake;
+use std::task::Waker;
 use std::time::Duration;
 
 use neojs_core::Error;
@@ -101,6 +107,28 @@ fn runtime(server: &Arc<Server>) -> Runtime {
         .expect("runtime")
 }
 
+struct WakeSignal(mpsc::Sender<()>);
+
+impl Wake for WakeSignal {
+    fn wake(self: Arc<Self>) {
+        let _ = self.0.send(());
+    }
+}
+
+/// Polls a future to completion on the current thread, without a Tokio runtime.
+fn block_on_std<F: Future>(future: F) -> F::Output {
+    let (sender, receiver) = mpsc::channel();
+    let waker = Waker::from(Arc::new(WakeSignal(sender)));
+    let mut context = Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => receiver.recv().expect("the future must wake the thread"),
+        }
+    }
+}
+
 #[test]
 fn runs_a_gh_entry_with_nested_relative_typescript_and_dynamic_imports() {
     let server = Server::new(&[
@@ -156,6 +184,65 @@ export { answer };
             "https://raw.githubusercontent.com/acme/widgets/v1.2.3/src/nested/thing.js",
             "https://raw.githubusercontent.com/acme/widgets/v1.2.3/src/shared.ts",
         ]
+    );
+}
+
+#[test]
+fn runs_a_github_entry_asynchronously_without_tokio() {
+    let server = Server::new(&[
+        (
+            "https://raw.githubusercontent.com/acme/widgets/v1/src/main.ts",
+            Reply::ok(
+                r#"
+import { value } from "./lib/dep.ts";
+if (value !== 3) throw new Error("async GitHub graph failed");
+"#,
+            ),
+        ),
+        (
+            "https://raw.githubusercontent.com/acme/widgets/v1/src/lib/dep.ts",
+            Reply::ok("export const value: number = 3;\n"),
+        ),
+    ]);
+    let mut runtime = runtime(&server);
+
+    block_on_std(runtime.run_url_async("github:acme/widgets@v1/src/main.ts"))
+        .expect("asynchronous GitHub entry");
+
+    assert_eq!(
+        server.seen(),
+        [
+            "https://raw.githubusercontent.com/acme/widgets/v1/src/main.ts",
+            "https://raw.githubusercontent.com/acme/widgets/v1/src/lib/dep.ts",
+        ]
+    );
+}
+
+#[test]
+fn the_request_budget_applies_through_github_loading() {
+    let server = Server::new(&[
+        (
+            "https://raw.githubusercontent.com/acme/widgets/v1/main.js",
+            Reply::ok("import \"./dep.js\";\n"),
+        ),
+        (
+            "https://raw.githubusercontent.com/acme/widgets/v1/dep.js",
+            Reply::ok("export const value = 1;\n"),
+        ),
+    ]);
+    let options = RemoteOptions::new().with_max_requests(1).without_cache();
+    let mut runtime = Runtime::with_remote_transport(options, server.transport()).expect("runtime");
+
+    let error = runtime
+        .run_url("gh:acme/widgets@v1/main.js")
+        .expect_err("the second request exceeds the budget");
+    let Error::Core(error) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert!(error.to_string().contains("1 request limit"), "{error}");
+    assert_eq!(
+        server.seen(),
+        ["https://raw.githubusercontent.com/acme/widgets/v1/main.js"]
     );
 }
 
@@ -331,8 +418,11 @@ fn malformed_github_specifiers_fail_before_any_request() {
 }
 
 #[test]
-fn a_malformed_authority_cannot_leak_a_credential_into_the_error() {
+fn a_malformed_github_specifier_is_never_echoed_in_an_error() {
     let server = Server::new(&[]);
+
+    // Entry path: neither the placeholder URL nor the reason may contain the
+    // input, which `url` treats as an opaque path and so cannot redact.
     let error = runtime(&server)
         .run_url("gh:user:secret@host/repo@v1/main.js")
         .expect_err("must fail");
@@ -341,5 +431,33 @@ fn a_malformed_authority_cannot_leak_a_credential_into_the_error() {
     };
     assert!(!reason.contains("secret"), "{reason}");
     assert!(!url.contains("secret"), "{url}");
+    assert_eq!(url, "<invalid GitHub specifier>");
+    assert_eq!(server.seen(), Vec::<String>::new());
+
+    // Import path: the same redaction must hold for a local and a remote
+    // importer, for a credential-shaped owner, an encoded traversal, and a
+    // query-like token in the path.
+    let dir = tempfile::tempdir().expect("dir");
+    for (name, specifier) in [
+        ("credential.js", "gh:user:secret@host/repo@v1/main.js"),
+        ("traversal.js", "github:acme/widgets@v1/%2e%2e/secret.ts"),
+        ("query.js", "github:acme/widgets@v1/main.js?token=secret"),
+    ] {
+        let file = dir.path().join(name);
+        fs::write(&file, format!("import \"{specifier}\";\n")).expect("write source");
+        let mut runtime = runtime(&server);
+        let error = runtime.run_file(&file).expect_err("import must fail");
+        let Error::Core(error) = error else {
+            panic!("{name}: unexpected error: {error:?}");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("GitHub specifier is invalid"),
+            "{name}: {message}"
+        );
+        assert!(!message.contains("secret"), "{name}: {message}");
+        assert!(!message.contains("token"), "{name}: {message}");
+    }
+
     assert_eq!(server.seen(), Vec::<String>::new());
 }

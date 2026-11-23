@@ -240,13 +240,11 @@ impl ModuleLoader for FileModuleLoader {
         if let Some(github) = crate::github::github_url(specifier) {
             return match github {
                 Ok(url) => self.resolve_https(url),
-                Err(reason) => Err(JsErrorBox::generic(with_referrer(
-                    format!(
-                        "cannot resolve `{}`: {reason}",
-                        display_specifier(specifier)
-                    ),
-                    referrer,
-                ))),
+                // The parser's reason is fixed text. The specifier itself is
+                // never echoed: a `gh:` URL is opaque to `url`, so its path can
+                // hold `user:secret@host` or a query-like token that no URL
+                // redaction would remove.
+                Err(reason) => Err(JsErrorBox::generic(with_referrer(reason, referrer))),
             };
         }
 
