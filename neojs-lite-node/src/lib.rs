@@ -999,6 +999,27 @@ mod bounded_key_tests {
     }
 
     #[test]
+    fn the_scan_bound_counts_every_shape_slot_and_is_inclusive() {
+        // One enumerable property plus 63 symbol slots is exactly 64 slots.
+        let found = keys(
+            "(() => { const o = { visible: 1 }; for (let i = 0; i < 63; i += 1) o[Symbol(`s${i}`)] = i; return o; })()",
+            16,
+            64,
+            64,
+        );
+        assert_eq!(found, ["visible"]);
+        assert_eq!(
+            error(
+                "(() => { const o = { visible: 1 }; for (let i = 0; i < 64; i += 1) o[Symbol(`s${i}`)] = i; return o; })()",
+                16,
+                64,
+                64,
+            ),
+            BoundedKeysError::ScanLimit
+        );
+    }
+
+    #[test]
     fn a_key_longer_than_the_bound_is_rejected_before_conversion() {
         assert_eq!(
             error(r#"({ ok: 1, ["x".repeat(100000)]: 2 })"#, 16, 64, 4_096,),
