@@ -134,25 +134,23 @@ separate file, `neojs-core/src/builtins/slices.impl.js`, included only under
 removed it from the evaluated text at runtime; that is no longer how a disabled
 build is produced.
 
-## Integration state and known conflicts
+## Integration state
 
-* **Canonical registry branch (in flight, not merged here).** The canonical
-  registry contract makes `Neo.getBuiltInModule("neo:chars")` the only lookup
-  and `Neo.getBuiltInModulesList()` canonical-only, and wrappers use canonical
-  keys. This crate already follows that contract: `SPECIFIER`, `MODULE`, and the
-  canonical wrapper all use `neo:chars`, and Lite implements it end to end. The
-  V8 branch base this crate is developed on still uses the bare `chars` registry
-  key and bare import alias for every built-in, so `neojs-core/src/builtins.rs`
-  splices the implementation into the bare-key realm shim and
-  `neojs-core/src/builtins/chars.esm.js` reads the bare key. At integration,
-  that adapter changes to `neo:chars`; the shared implementation, wrapper, and
-  contract do not. The V8-shared contract test notes the same two tokens.
+* **Canonical registry contract.** The canonical registry contract makes
+  `Neo.getBuiltInModule("neo:chars")` the only lookup and
+  `Neo.getBuiltInModulesList()` canonical-only, and wrappers use canonical
+  keys. Both engines implement it. This crate's `SPECIFIER`, `MODULE`, and
+  canonical wrapper all use `neo:chars`; `neojs-core/src/builtins.rs` splices the
+  implementation into the canonical realm shim, and
+  `neojs-core/src/builtins/chars.esm.js` reads the canonical key. The V8-shared
+  contract test uses the canonical specifier as both tokens.
 * **Per-module strings branch (in flight, separate).** `strings` is being
   extracted independently behind an engine-local feature. This crate
   deliberately shares **`chars`**, not `strings`, so the two changes do not
   duplicate an implementation or touch the same source file. `chars` remains a
   separate module; `slices` captures `chars.toUpper`/`chars.toLower`, and the V8
   shim still defines `chars` before `slices`, so that dependency is unchanged.
-* **No V8 registry rewrite here.** This branch does not change the registry
-  shape for the other V8 built-ins. Doing that in two places would conflict with
-  the canonical branch; the adapter boundary above is the only V8 change.
+* **No V8 registry rewrite in this change.** Extracting `chars` did not change
+  the registry shape for the other V8 built-ins. Those remain canonical `neo:`
+  modules owned by the V8 runtime; the shared crate contributes only the
+  `chars` descriptor, implementation, and wrapper.

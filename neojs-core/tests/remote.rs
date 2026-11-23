@@ -245,14 +245,16 @@ fn a_remote_module_imports_only_canonical_builtin_specifiers() {
             "https://mods.test/builtin.js",
             Reply::ok(
                 r#"
-import { isLetter } from "neo:chars";
-export const letter = isLetter(65);
+import { equalFold } from "neo:strings";
+export const folded = equalFold("a", "A");
 "#,
             ),
         ),
         (
             "https://mods.test/bare-builtin.js",
-            Reply::ok("import { isLetter } from \"chars\";\nexport const letter = isLetter(65);\n"),
+            Reply::ok(
+                "import { equalFold } from \"strings\";\nexport const folded = equalFold(\"a\", \"A\");\n",
+            ),
         ),
     ]);
 
@@ -267,7 +269,7 @@ export const letter = isLetter(65);
         .expect_err("a remote module must not import a bare builtin name");
     let message = error.to_string();
     assert!(message.contains("canonical `neo:` specifier"), "{message}");
-    assert!(message.contains("neo:chars"), "{message}");
+    assert!(message.contains("neo:strings"), "{message}");
 }
 
 #[test]

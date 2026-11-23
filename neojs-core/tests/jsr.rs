@@ -269,7 +269,7 @@ fn error_message(result: Result<(), Error>) -> String {
     }
 }
 
-const MOD_TS: &[u8] = b"import { isDigit } from \"neo:chars\";\nimport { helper } from \"./lib/helper.ts\";\ninterface Box { value: number }\nexport const value: number = helper();\nexport const label: string = \"typed\";\nexport const builtin: boolean = isDigit(55);\n";
+const MOD_TS: &[u8] = b"import { equalFold } from \"neo:strings\";\nimport { helper } from \"./lib/helper.ts\";\ninterface Box { value: number }\nexport const value: number = helper();\nexport const label: string = \"typed\";\nexport const builtin: boolean = equalFold(\"a\", \"A\");\n";
 const HELPER_TS: &[u8] = b"export function helper(): number { return 7; }\n";
 const JOIN_JS: &[u8] = b"export function join(a, b) { return a + b; }\n";
 
