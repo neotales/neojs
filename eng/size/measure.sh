@@ -1,0 +1,495 @@
+#!/usr/bin/env bash
+# Measure release-profile neojs and neojs-lite binaries and append the result
+# to the size ledger.
+#
+# The script does not copy, strip, compress or install the binary. It reports
+# the on-disk length and SHA-256 of the executable Cargo produced. Re-running
+# the same measurement is a no-op; a missing package is recorded explicitly
+# and makes the run fail unless --allow-missing is passed.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
+ROOT=$(size_repo_root)
+DEFAULT_LEDGER="$ROOT/eng/size/measurements.jsonl"
+DEFAULT_TARGET_DIR="$ROOT/target/size"
+TOOLCHAIN_FILE="$SCRIPT_DIR/toolchain"
+
+size_require jq sha256sum flock git cargo rustc cc c++
+
+usage() {
+    cat <<'USAGE'
+Usage: eng/size/measure.sh [options]
+
+Measures release-profile workspace binaries and records one JSON object per
+artifact in eng/size/measurements.jsonl (or --ledger). The default packages
+are neojs and neojs-lite.
+
+Options:
+  --package NAME          Measure NAME; repeat for more than one package.
+                          Default: neojs and neojs-lite.
+  --target TRIPLE         Cargo target triple. Default: the rustc host.
+  --toolchain NAME        rustup toolchain. Default: eng/size/toolchain.
+  --features LIST         Comma-separated Cargo features to enable.
+  --no-default-features   Build without the package's default features.
+  --ledger PATH           Append to PATH instead of eng/size/measurements.jsonl.
+  --target-dir PATH       Cargo target directory. Default: target/size.
+  --note TEXT             Note to attach to each record.
+  --allow-missing         Record missing packages and exit 0 instead of 3.
+  --allow-env-overrides   Allow artifact-affecting environment variables and
+                          record them. Without this, such variables are refused.
+  --online                Let Cargo use the network. Default is --offline.
+  --dry-run               Print commands and missing packages; build nothing.
+  --no-record             Build and print the record, but do not append it.
+  -h, --help              Show this help.
+
+Exit status: 0 success, 1 configuration/build/validation error, 2 usage error,
+3 one or more requested artifacts are missing (unless --allow-missing).
+USAGE
+}
+
+PACKAGES=(neojs neojs-lite)
+LEDGER=$DEFAULT_LEDGER
+TARGET_DIR=$DEFAULT_TARGET_DIR
+TOOLCHAIN=""
+TARGET=""
+FEATURES=()
+NO_DEFAULT_FEATURES=0
+ALLOW_MISSING=0
+ALLOW_ENV_OVERRIDES=0
+ONLINE=0
+DRY_RUN=0
+NO_RECORD=0
+NOTE=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --package)
+            [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+            if [ "${PACKAGES[*]:-}" = "neojs neojs-lite" ]; then
+                PACKAGES=()
+            fi
+            PACKAGES+=("$2")
+            shift 2
+            ;;
+        --target)
+            [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+            TARGET=$2
+            shift 2
+            ;;
+        --toolchain)
+            [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+            TOOLCHAIN=$2
+            shift 2
+            ;;
+        --features)
+            [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+            FEATURES+=("$2")
+            shift 2
+            ;;
+        --no-default-features)
+            NO_DEFAULT_FEATURES=1
+            shift
+            ;;
+        --ledger)
+            [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+            LEDGER=$2
+            shift 2
+            ;;
+        --target-dir)
+            [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+            TARGET_DIR=$2
+            shift 2
+            ;;
+        --note)
+            [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+            NOTE=$2
+            shift 2
+            ;;
+        --allow-missing)
+            ALLOW_MISSING=1
+            shift
+            ;;
+        --allow-env-overrides)
+            ALLOW_ENV_OVERRIDES=1
+            shift
+            ;;
+        --online)
+            ONLINE=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --no-record)
+            NO_RECORD=1
+            shift
+            ;;
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        *)
+            printf 'size: error: unknown argument: %s\n' "$1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+[ "${#PACKAGES[@]}" -gt 0 ] || size_die "no packages requested"
+
+if [ -z "$TOOLCHAIN" ]; then
+    [ -f "$TOOLCHAIN_FILE" ] || size_die "toolchain file not found: $TOOLCHAIN_FILE"
+    TOOLCHAIN=$(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+        "$TOOLCHAIN_FILE" | sed '/^$/d' | head -n 1)
+    [ -n "$TOOLCHAIN" ] || size_die "no toolchain pinned in $TOOLCHAIN_FILE"
+fi
+
+mkdir -p -- "$TARGET_DIR" "$TARGET_DIR/tmp"
+
+# Builds are compared with each other only when the inputs that can move the
+# byte count are the same. Refuse the ambient ones instead of quietly
+# attributing their effect to the commit.
+ENV_OVERRIDES='{}'
+check_ambient_var() {
+    local name=$1 value
+    value=${!name:-}
+    [ -z "$value" ] && return 0
+    if [ "$ALLOW_ENV_OVERRIDES" -ne 1 ]; then
+        size_die "$name is set and can change the artifact; unset it or pass --allow-env-overrides (the value will be recorded)"
+    fi
+    ENV_OVERRIDES=$(jq -c --arg name "$name" --arg value "$value" \
+        '. + {($name): $value}' <<<"$ENV_OVERRIDES")
+}
+
+for ambient in \
+    CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CARGO_BUILD_TARGET \
+    RUSTFLAGS RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
+    CC CXX CFLAGS CXXFLAGS AR RANLIB LDFLAGS LD \
+    MACOSX_DEPLOYMENT_TARGET SOURCE_DATE_EPOCH \
+    V8_FROM_SOURCE GN_ARGS EXTRA_GN_ARGS CLANG_BASE_PATH; do
+    check_ambient_var "$ambient"
+done
+while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    check_ambient_var "$name"
+done < <(compgen -e | grep -E '^CARGO_PROFILE_RELEASE_' | sort || true)
+
+V8_ARCHIVE_JSON='null'
+if [ -n "${RUSTY_V8_ARCHIVE:-}" ]; then
+    [ -r "$RUSTY_V8_ARCHIVE" ] ||
+        size_die "RUSTY_V8_ARCHIVE is set but not readable: $RUSTY_V8_ARCHIVE"
+    V8_ARCHIVE_JSON=$(jq -n \
+        --arg name "$(basename -- "$RUSTY_V8_ARCHIVE")" \
+        --arg sha256 "$(sha256sum "$RUSTY_V8_ARCHIVE" | awk '{print $1}')" \
+        '{name: $name, sha256: $sha256}')
+fi
+
+RUSTC_VERSION=$(rustc "+$TOOLCHAIN" -V)
+CARGO_VERSION=$(cargo "+$TOOLCHAIN" -V)
+RUSTC_VV=$(rustc "+$TOOLCHAIN" -vV)
+HOST=$(sed -n 's/^host: //p' <<<"$RUSTC_VV")
+LLVM_VERSION=$(sed -n 's/^LLVM version: //p' <<<"$RUSTC_VV")
+[ -n "$HOST" ] || size_die "could not determine the rustc host triple"
+[ -n "$TARGET" ] || TARGET=$HOST
+
+CC_VERSION=$(cc --version 2>/dev/null | head -n 1 || true)
+CXX_VERSION=$(c++ --version 2>/dev/null | head -n 1 || true)
+[ -n "$CC_VERSION" ] || CC_VERSION="unavailable"
+[ -n "$CXX_VERSION" ] || CXX_VERSION="unavailable"
+
+OS_NAME=$(uname -s)
+OS_ARCH=$(uname -m)
+OS_KERNEL=$(uname -r)
+
+GIT_COMMIT=$(git -C "$ROOT" rev-parse HEAD)
+GIT_BRANCH=$(git -C "$ROOT" symbolic-ref -q --short HEAD 2>/dev/null || echo detached)
+GIT_DESCRIBE=$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo unknown)
+GIT_TAGS_JSON=$(git -C "$ROOT" tag --points-at HEAD | jq -R -s 'split("\n") | map(select(length > 0))')
+if [ "$(git -C "$ROOT" status --porcelain | wc -l)" -gt 0 ]; then
+    GIT_DIRTY=true
+else
+    GIT_DIRTY=false
+fi
+if [ "$(jq 'length' <<<"$GIT_TAGS_JSON")" -gt 0 ]; then
+    SOURCE_KIND=tag
+else
+    SOURCE_KIND=commit
+fi
+
+[ -f "$ROOT/Cargo.lock" ] || size_die "Cargo.lock not found in $ROOT"
+LOCK_SHA256=$(sha256sum "$ROOT/Cargo.lock" | awk '{print $1}')
+WORKSPACE_PATH_SHA256=$(printf '%s' "$ROOT" | sha256sum | awk '{print $1}')
+
+FEATURES_JSON='[]'
+if [ "${#FEATURES[@]}" -gt 0 ]; then
+    FEATURES_JSON=$(printf '%s\n' "${FEATURES[@]}" | tr ',' '\n' |
+        sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | sed '/^$/d' |
+        sort -u | jq -R -s 'split("\n") | map(select(length > 0))')
+fi
+FEATURES_CSV=$(jq -r 'join(",")' <<<"$FEATURES_JSON")
+
+NO_DEFAULT_JSON=false
+if [ "$NO_DEFAULT_FEATURES" -eq 1 ]; then
+    NO_DEFAULT_JSON=true
+fi
+
+OFFLINE_JSON=true
+METADATA_NETWORK=()
+BUILD_NETWORK=()
+if [ "$ONLINE" -eq 1 ]; then
+    OFFLINE_JSON=false
+else
+    METADATA_NETWORK+=(--offline)
+    BUILD_NETWORK+=(--offline)
+fi
+
+METADATA=""
+load_metadata() {
+    [ -n "$METADATA" ] && return 0
+    local error_file="$TARGET_DIR/metadata.err"
+    if ! METADATA=$(cargo "+$TOOLCHAIN" metadata --no-deps --format-version 1 \
+        --locked "${METADATA_NETWORK[@]}" 2>"$error_file"); then
+        cat "$error_file" >&2
+        size_die "cargo metadata failed; fix Cargo.toml/Cargo.lock before measuring"
+    fi
+}
+
+MISSING_COUNT=0
+MEASURED_COUNT=0
+
+make_record() {
+    local status=$1
+    local package=$2
+    local bin=$3
+    local artifact_path=$4
+    local bytes_json=$5
+    local sha256=$6
+    local file_type=$7
+    local command=$8
+    local missing_reason=$9
+    local measured_at=${10}
+    local notes_json=${11}
+
+    jq -n \
+        --arg status "$status" \
+        --arg package "$package" \
+        --arg bin "$bin" \
+        --arg artifact_path "$artifact_path" \
+        --argjson bytes "$bytes_json" \
+        --arg sha256 "$sha256" \
+        --arg file_type "$file_type" \
+        --arg command "$command" \
+        --arg missing_reason "$missing_reason" \
+        --arg measured_at "$measured_at" \
+        --argjson notes "$notes_json" \
+        --arg git_commit "$GIT_COMMIT" \
+        --arg git_branch "$GIT_BRANCH" \
+        --argjson git_dirty "$GIT_DIRTY" \
+        --arg git_describe "$GIT_DESCRIBE" \
+        --argjson git_tags "$GIT_TAGS_JSON" \
+        --arg source_kind "$SOURCE_KIND" \
+        --arg target "$TARGET" \
+        --arg host "$HOST" \
+        --arg os "$OS_NAME" \
+        --arg arch "$OS_ARCH" \
+        --arg kernel "$OS_KERNEL" \
+        --arg toolchain "$TOOLCHAIN" \
+        --arg rustc "$RUSTC_VERSION" \
+        --arg cargo "$CARGO_VERSION" \
+        --arg llvm "$LLVM_VERSION" \
+        --arg cc "$CC_VERSION" \
+        --arg cxx "$CXX_VERSION" \
+        --argjson features "$FEATURES_JSON" \
+        --argjson no_default_features "$NO_DEFAULT_JSON" \
+        --argjson offline "$OFFLINE_JSON" \
+        --arg lock_sha256 "$LOCK_SHA256" \
+        --arg workspace_path_sha256 "$WORKSPACE_PATH_SHA256" \
+        --argjson v8_archive "$V8_ARCHIVE_JSON" \
+        --argjson env_overrides "$ENV_OVERRIDES" \
+        '{
+          schema: 1,
+          status: $status,
+          artifact: {
+            package: $package,
+            bin: $bin,
+            kind: "release-binary",
+            path: $artifact_path
+          },
+          source: {
+            git_commit: $git_commit,
+            git_branch: $git_branch,
+            git_dirty: $git_dirty,
+            git_describe: $git_describe,
+            git_tags: $git_tags,
+            kind: $source_kind,
+            measured_from: "worktree"
+          },
+          platform: {
+            target: $target,
+            host: $host,
+            os: $os,
+            arch: $arch,
+            kernel: $kernel
+          },
+          toolchain: {
+            requested: $toolchain,
+            rustc: $rustc,
+            cargo: $cargo,
+            llvm: $llvm,
+            cc: $cc,
+            cxx: $cxx
+          },
+          build: {
+            profile: "release",
+            features: $features,
+            no_default_features: $no_default_features,
+            offline: $offline,
+            locked: true,
+            command: (if $status == "ok" then $command else "" end),
+            cargo_lock_sha256: $lock_sha256,
+            workspace_path_sha256: $workspace_path_sha256,
+            v8_archive: $v8_archive,
+            env_overrides: $env_overrides
+          },
+          measurement: {
+            method: (if $status == "ok" then "file-length-bytes" else null end),
+            bytes: (if $status == "ok" then $bytes else null end),
+            sha256: (if $status == "ok" then $sha256 else null end),
+            file: (if $status == "ok" then $file_type else null end)
+          },
+          missing_reason: (if $missing_reason == "" then null else $missing_reason end),
+          measured_at: $measured_at,
+          notes: $notes
+        }'
+}
+
+record_missing() {
+    local package=$1
+    local reason=$2
+    local bin=$3
+    local measured_at notes_json record
+    measured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    notes_json=$(jq -Rn --arg note "$NOTE" 'if $note == "" then null else $note end')
+    record=$(make_record "missing" "$package" "$bin" "$bin" "null" "" "" "" \
+        "$reason" "$measured_at" "$notes_json")
+    if [ "$NO_RECORD" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+        printf '%s\n' "$record"
+    else
+        size_append_record "$LEDGER" "$record" "$TARGET_DIR/ledger.lock"
+    fi
+}
+
+measure_package() {
+    local package=$1
+    local bin=$2
+    local binary
+    local build_cmd
+    local command
+    local log
+    local bytes sha256 file_type measured_at notes_json record
+
+    build_cmd=(cargo "+$TOOLCHAIN" build --release --locked --target "$TARGET" -p "$package")
+    if [ "${#BUILD_NETWORK[@]}" -gt 0 ]; then
+        build_cmd+=("${BUILD_NETWORK[@]}")
+    fi
+    if [ "$NO_DEFAULT_FEATURES" -eq 1 ]; then
+        build_cmd+=(--no-default-features)
+    fi
+    if [ -n "$FEATURES_CSV" ]; then
+        build_cmd+=(--features "$FEATURES_CSV")
+    fi
+
+    binary="$TARGET_DIR/$TARGET/release/$bin"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf 'size: dry run: %s %s\n' "$package" "$(printf '%q ' "${build_cmd[@]}")"
+        printf 'size: dry run: artifact would be %s\n' "$binary"
+        return 0
+    fi
+
+    command=$(printf '%q ' "${build_cmd[@]}")
+    command=${command% }
+    log="$TARGET_DIR/build-$package.log"
+    printf 'size: building %s (%s)\n' "$package" "$TARGET"
+    if ! "${build_cmd[@]}" >"$log" 2>&1; then
+        tail -n 50 "$log" >&2
+        size_die "build failed for $package; full log: $log"
+    fi
+
+    [ -f "$binary" ] || size_die "build succeeded but binary is missing: $binary"
+    bytes=$(wc -c <"$binary" | tr -d '[:space:]')
+    sha256=$(sha256sum "$binary" | awk '{print $1}')
+    if command -v file >/dev/null 2>&1; then
+        file_type=$(file -b "$binary")
+    else
+        file_type=""
+    fi
+    measured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    notes_json=$(jq -Rn --arg note "$NOTE" 'if $note == "" then null else $note end')
+    record=$(make_record "ok" "$package" "$bin" "$bin" "$bytes" "$sha256" \
+        "$file_type" "$command" "" "$measured_at" "$notes_json")
+
+    MEASURED_COUNT=$((MEASURED_COUNT + 1))
+    if [ "$NO_RECORD" -eq 1 ]; then
+        printf '%s\n' "$record"
+    else
+        size_append_record "$LEDGER" "$record" "$TARGET_DIR/ledger.lock"
+    fi
+}
+
+for package in "${PACKAGES[@]}"; do
+    if [ ! -f "$ROOT/$package/Cargo.toml" ]; then
+        printf 'size: missing: %s (package-not-in-workspace)\n' "$package" >&2
+        record_missing "$package" "package-not-in-workspace" "$package"
+        MISSING_COUNT=$((MISSING_COUNT + 1))
+        continue
+    fi
+
+    load_metadata
+    package_exists=$(jq -r --arg package "$package" \
+        'any(.packages[]; .name == $package)' <<<"$METADATA")
+    if [ "$package_exists" != "true" ]; then
+        printf 'size: missing: %s (not-a-workspace-member)\n' "$package" >&2
+        record_missing "$package" "not-a-workspace-member" "$package"
+        MISSING_COUNT=$((MISSING_COUNT + 1))
+        continue
+    fi
+
+    bins=$(jq -r --arg package "$package" '
+        .packages[] | select(.name == $package)
+        | .targets[] | select(.kind | index("bin"))
+        | .name
+    ' <<<"$METADATA")
+    bin_count=$(grep -c . <<<"$bins" || true)
+    if [ "$bin_count" -eq 0 ]; then
+        printf 'size: missing: %s (no-bin-target)\n' "$package" >&2
+        record_missing "$package" "no-bin-target" "$package"
+        MISSING_COUNT=$((MISSING_COUNT + 1))
+        continue
+    fi
+    if [ "$bin_count" -gt 1 ]; then
+        size_die "package $package has more than one binary target: $(tr '\n' ' ' <<<"$bins")"
+    fi
+    bin=$(head -n 1 <<<"$bins")
+
+    measure_package "$package" "$bin"
+done
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    printf 'size: dry run complete: %d requested package(s), %d missing\n' \
+        "${#PACKAGES[@]}" "$MISSING_COUNT"
+    if [ "$MISSING_COUNT" -gt 0 ] && [ "$ALLOW_MISSING" -ne 1 ]; then
+        exit 3
+    fi
+    exit 0
+fi
+
+printf 'size: measured %d package(s), missing %d\n' "$MEASURED_COUNT" "$MISSING_COUNT"
+if [ "$MISSING_COUNT" -gt 0 ] && [ "$ALLOW_MISSING" -ne 1 ]; then
+    exit 3
+fi

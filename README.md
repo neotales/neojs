@@ -1495,6 +1495,16 @@ or a sandbox, and it does not claim parity with the V8 runtime. Both runtimes sh
 `neojs-module-policy` for executable-extension decisions and rejection reasons, so `.cjs`, JSX/TSX,
 declaration files, JSON, WebAssembly, and native addons fail with the same explanation in either.
 
+### Binary size tracking
+
+`eng/size/` measures the release-profile `neojs` and `neojs-lite` executables and
+appends each result to an append-only JSONL ledger. A record carries the exact
+bytes and SHA-256, but also the artifact, target, pinned toolchain, feature set,
+Cargo lock hash and V8 archive digest, so two numbers are not compared when they
+describe different builds. The directory is self-contained: see
+[`eng/size/README.md`](eng/size/README.md) for the methodology and
+`eng/size/check.sh` for the deterministic checks.
+
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
