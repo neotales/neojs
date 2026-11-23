@@ -299,6 +299,7 @@ assert_contains "$TMP/stdout" "controls-differ" "trend labels a controls-differ 
 assert_contains "$TMP/stdout" "toolchain" "trend names the differing control"
 assert_contains "$TMP/stdout" "-5678" "trend shows a signed delta"
 
+
 UNCAPPED=$(rewrite_with_ids '
   .build.cargo_config = {status: "not-captured", files: []}
   | .build.target_specific_env = {status: "not-captured", names: []}
@@ -434,6 +435,11 @@ expect_status 0 "target-specific env is recorded when explicitly allowed" \
 DRIFT_LEDGER="$TMP/drift-append.jsonl"
 size_append_record "$DRIFT_LEDGER" "$VALID" >/dev/null 2>&1
 size_append_record "$DRIFT_LEDGER" "$DRIFT" >"$TMP/drift.log" 2>&1
+if (size_append_record "$DRIFT_LEDGER" "$TOOL2") >/dev/null 2>&1; then
+    ok "append tolerates an existing conflict"
+else
+    fail "existing conflict blocked a new measurement"
+fi
 assert_contains "$TMP/drift.log" "same strict series" "non-reproducible build is warned about"
 
 expect_status 0 "dry run succeeds" \
