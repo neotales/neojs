@@ -34,6 +34,9 @@ use crate::crypto::neojs_crypto;
 use crate::crypto_cipher::neojs_crypto_cipher;
 use crate::crypto_hash::neojs_crypto_hash;
 use crate::crypto_shamir::neojs_crypto_shamir;
+use crate::jsr_loader::JsrModuleLoader;
+use crate::jsr_loader::Limits as JsrLimits;
+use crate::jsr_loader::RemoteRegistry;
 use crate::loader::FileModuleLoader;
 use crate::loader::ModuleFormat;
 use crate::loader::PreparedEntry;
@@ -92,13 +95,13 @@ const CONSOLE_SHIM: &str = r#"
 "#;
 
 /// An ECMAScript runtime with a local-file module loader and optional HTTPS
-/// module loading.
+/// and JSR module loading.
 ///
 /// A runtime runs at most one entry module. Create a new [`Runtime`] for each
 /// entry module. `.ts` and `.mts` entry and imported files are type-stripped
 /// before V8 sees them. The loader reads any path the process can read and, when
-/// remote loading is enabled, fetches `https:` URLs. It does not check
-/// permissions, so this type is not a sandbox.
+/// remote loading is enabled, fetches `https:` URLs and resolves `jsr:` imports.
+/// It does not check permissions, so this type is not a sandbox.
 pub struct Runtime {
     /// The isolate. It is an `Option` so `Drop` can destroy it before the
     /// drivers are stopped; it is `None` only while dropping.
@@ -224,6 +227,18 @@ impl Runtime {
     ///
     /// Only `https:` is accepted. `http:`, `data:`, `blob:`, and `file:` are
     /// not remote transports, and a remote module cannot import `file:`.
+    ///
+    /// This opt-in also enables `jsr:@scope/name[@constraint][/subpath]`
+    /// imports. They resolve through the public JSR registry: package metadata
+    /// selects an exact version, version metadata resolves the entrypoint, and
+    /// each file's length and SHA-256 are verified against the version manifest
+    /// before it reaches TypeScript stripping or V8. Metadata and files use this
+    /// runtime's HTTPS client, redirect policy, deadlines, request/byte budgets,
+    /// and user cache. Resolution is synchronous, so the first request for a
+    /// package or version blocks the isolate thread. There is no lockfile,
+    /// publisher signature, dist-tag, private registry, `npm:`, `node:`, `gh:`,
+    /// or import-map support.
+    ///
     /// Redirects are followed one hop at a time: the target must be
     /// credential-free HTTPS and within `options.max_redirects`; a downgrade to
     /// HTTP or another scheme is refused before the target is requested.
@@ -365,14 +380,24 @@ impl Runtime {
     /// Creates a runtime with an optional remote client.
     ///
     /// The remote client's file loader is kept separately so a prepared remote
-    /// entry can be handed to it before loading starts.
+    /// entry can be handed to it before loading starts. When remote loading is
+    /// enabled, the loader is a [`JsrModuleLoader`] so `jsr:` imports resolve
+    /// through the same transport, cache, and limits.
     fn build(
         console: &'static str,
         builtins: String,
         remote: Option<RemoteClient>,
     ) -> Result<Self, Error> {
-        let loader = Rc::new(FileModuleLoader::new(remote.clone()));
-        Self::assemble(console, builtins, loader.clone(), Some(loader), remote)
+        let files = Rc::new(FileModuleLoader::new(remote.clone()));
+        let module_loader: Rc<dyn deno_core::ModuleLoader> = match remote.clone() {
+            Some(remote_client) => Rc::new(JsrModuleLoader::new(
+                Rc::new(RemoteRegistry::new(remote_client)),
+                files.clone(),
+                JsrLimits::default(),
+            )),
+            None => files.clone(),
+        };
+        Self::assemble(console, builtins, module_loader, Some(files), remote)
     }
 
     /// Builds the runtimes, isolate, extensions, and shims.

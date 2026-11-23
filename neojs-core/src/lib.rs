@@ -21,6 +21,19 @@
 //! [`RemoteOptions`] sets the per-module deadline, body, aggregate byte,
 //! module-count, and redirect limits, and the cache directory.
 //!
+//! With remote loading enabled, `jsr:@scope/name[@constraint][/subpath]` imports
+//! resolve through the public JSR registry. The package's `meta.json` selects an
+//! exact version, the version metadata resolves the entrypoint through the
+//! package exports, and every file is checked against the version manifest's
+//! length and SHA-256 before it is type-stripped and executed. The same HTTPS
+//! client, redirect policy, deadlines, and user cache are used, and metadata and
+//! files are cached by URL. A `jsr:` import with remote loading disabled is
+//! rejected. There is no lockfile, publisher signature, dist-tag, private
+//! registry, `npm:`, `node:`, `gh:`, or import-map support; a package that
+//! imports those specifiers fails at resolution. Resolution is synchronous, so
+//! the first metadata request for a package or version blocks the isolate
+//! thread.
+//!
 //! It provides the `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`,
 //! `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid` built-in
 //! modules through `Neo.getBuiltInModule(name)` and through the module
@@ -322,15 +335,13 @@ mod crypto_cipher;
 mod crypto_hash;
 mod crypto_shamir;
 mod error;
-// Private groundwork for native `jsr:` imports. `Runtime::new` does not install
-// a JSR-capable loader, so every public `jsr:` import is still rejected; see
-// `src/jsr.rs` for the implemented core and the work that remains.
-#[allow(dead_code)]
+// Private groundwork and resolver for native `jsr:` imports. The loader is
+// installed only by `Runtime::with_remote`; a default runtime still rejects
+// every `jsr:` import. See `src/jsr.rs` for the deterministic core and
+// `src/jsr_loader.rs` for the transport integration.
 mod jsr;
-// Test-only loader wiring for the private JSR resolver. It is not compiled
-// into a normal build, and `Runtime::new` never installs it, so public `jsr:`
-// imports remain rejected until an HTTPS transport and cache policy land.
-#[cfg(test)]
+// The transport-backed loader for the private JSR resolver. `Runtime::new` does
+// not install it, so a public `jsr:` import requires the remote-loading opt-in.
 mod jsr_loader;
 mod loader;
 mod path;

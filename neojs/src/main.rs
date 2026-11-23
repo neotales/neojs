@@ -282,11 +282,12 @@ fn run(input: Input, allow_remote: bool) -> ExitCode {
     }
 }
 
-/// Creates a runtime, with remote loading only when explicitly enabled.
+/// Creates a runtime, with remote and JSR loading only when explicitly enabled.
 ///
 /// Each call gets its own default [`RemoteOptions`], so a fresh runtime also
 /// gets a fresh remote request, module, and byte budget. The default package
-/// cache is shared per user profile, as for a normal run.
+/// cache is shared per user profile, as for a normal run. The JSR loader uses
+/// the same client, limits, and cache for `jsr:` metadata and files.
 fn create_runtime(allow_remote: bool) -> Result<Runtime, Error> {
     if allow_remote {
         Runtime::with_remote(RemoteOptions::new())
@@ -425,7 +426,8 @@ Usage:
   neojs --allow-remote test <file-or-glob>...
 
 Options:
-  --allow-remote   allow https: entry and imports; off by default
+  --allow-remote   allow https: entry and imports and jsr: imports; off by
+                   default
   --no-allow-remote
                    force remote loading off, overriding NEOJS_ALLOW_REMOTE
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -449,10 +451,12 @@ including the uuid/v4 and uuid/v7 subpaths. Import one by bare name or with the
 `Neo.getBuiltInModule(\"uuid\")`; the README lists every specifier.
 
 Remote loading is disabled by default. `--allow-remote` enables an https:
-entry and absolute https: imports; `--no-allow-remote` forces it off. Either flag
+entry, absolute https: imports, and jsr:@scope/name[@version][/subpath] imports
+from the public JSR registry; `--no-allow-remote` forces it off. Either flag
 may appear before the module, or before or after `test`. It is not SSRF
 protection and not a sandbox, and downloads are cached under `neojs/packages` in
-the user cache.
+the user cache. JSR metadata and files use the same HTTPS limits and cache. npm:,
+node:, gh:, and import maps are not implemented.
 
 `neojs test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh

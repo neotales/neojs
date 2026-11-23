@@ -2,18 +2,22 @@
 //!
 //! # Status
 //!
-//! This module is private and is not wired into [`crate::loader`] for a normal
-//! build. Every public `jsr:` import is still rejected with
-//! `jsr: modules are not implemented`; the test-only `jsr_loader` module
-//! exercises this core without exposing it. Nothing here downloads, reads,
-//! caches, or executes a JSR package, and no public API is exposed. It is the
-//! deterministic part of a loader integration: strict specifier parsing,
-//! registry-metadata parsing, version selection, entrypoint resolution, and
-//! per-file size and checksum verification. Fetching, transport, extraction,
-//! module loading, lockfiles, and cache policy are deliberately absent here. A
-//! caller must not treat this module as evidence that native JSR imports work. Only the public registry's documented metadata
-//! shape is modeled; private registries, authentication, credentials, and
-//! custom origins are out of scope.
+//! This module is the deterministic core of `jsr:` support: strict specifier
+//! parsing, registry-metadata parsing, version selection, entrypoint
+//! resolution, and per-file size and checksum verification. It performs no I/O.
+//! The crate-private [`crate::jsr_loader`] wires it to deno_core's module loader
+//! over the opt-in HTTPS transport in [`crate::remote`].
+//! [`crate::Runtime::with_remote`] and `neojs --allow-remote` enable it; a
+//! default runtime still rejects every `jsr:` import.
+//!
+//! The integration imports a package's exported entrypoints and the relative
+//! modules they import. It does not implement `npm:`, `node:`, `gh:`, or import
+//! maps, so a JSR package that depends on one of those fails at resolution. It
+//! has no lockfile, offline or frozen policy, dist-tags, private registry or
+//! authentication support, custom origin, or publisher signature. Metadata is
+//! trusted through HTTPS to the public `jsr.io` origin, and a file is executed
+//! only after its length and SHA-256 match the version metadata. That is content
+//! integrity against a corrupted or substituted file, not publisher identity.
 //!
 //! # Scope
 //!
@@ -76,25 +80,28 @@
 //! lockfile must not inherit. The `moduleGraph1` and `moduleGraph2` fields are
 //! not interpreted; they are a fetch optimization, not part of module identity.
 //!
-//! # Remaining integration
+//! # Integration and limits
 //!
-//! The test-only `jsr_loader` module wires this core to deno_core's module
-//! loader for crate tests, using an injected in-memory registry. That proves
-//! the resolution, exact-version identity, relative-path containment, manifest
-//! verification, and file, byte, and metadata-document bounds through real V8
-//! evaluation. It is compiled only for tests and is not reachable from
-//! [`crate::Runtime::new`], so every public `jsr:` import is still rejected.
+//! [`crate::jsr_loader`] uses a [`crate::jsr_loader::RemoteRegistry`] over the
+//! remote client. The package metadata, version metadata, and each file are
+//! ordinary HTTPS GETs to `https://jsr.io/...`; the remote client caches them by
+//! URL under its own freshness and revalidation policy. A cached body is still
+//! checked against this module's manifest length and checksum before use.
 //!
-//! A later change must fetch packages and metadata over HTTPS with an `Accept`
-//! header that does not include `text/html`, select and pin a version, fetch
-//! the selected version's metadata and module graph, verify each file, store
-//! bytes under the exact package/version identity, and only then teach the
-//! loader to resolve `jsr:` and stop rejecting it. The loader's registry calls
-//! are synchronous because [`deno_core::ModuleLoader::resolve`] is synchronous;
-//! a real transport must prefetch metadata or use an asynchronous resolution
-//! stage instead of blocking the isolate thread. Cache layout, lockfile format,
-//! offline and frozen policy, redirect and time limits, and permission
-//! reporting are undecided and deliberately not implemented here.
+//! [`deno_core::ModuleLoader::resolve`] is synchronous, so the first import of a
+//! package or version fetches its metadata on the isolate thread, using the same
+//! blocking transport as remote module loading. That is a latency limitation,
+//! not a trust boundary; avoiding it needs a prefetch or an asynchronous
+//! resolution stage. Parsed package and version metadata are cached for the
+//! runtime's lifetime, so a second import of the same package does no metadata
+//! I/O.
+//!
+//! Redirects are followed by the remote client, one checked hop at a time,
+//! under its HTTPS-only and redirect-limit policy; the loader never follows one
+//! itself. Private registries, authentication, custom origins, lockfiles,
+//! offline or frozen policy, dist-tags, package tarballs, the optional
+//! `moduleGraph1`/`moduleGraph2` hints, and the QuickJS runtime are not in
+//! scope. The public `jsr.io` origin is the only registry origin.
 //!
 //! # Limits
 //!
@@ -254,6 +261,7 @@ pub(crate) struct Subpath(String);
 
 impl Subpath {
     /// Returns the subpath text without its leading `/`.
+    #[cfg(test)]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -655,6 +663,7 @@ pub(crate) struct ExportTarget {
 impl ExportTarget {
     /// Verifies downloaded bytes against this entry's declared length and
     /// SHA-256 checksum.
+    #[cfg(test)]
     pub(crate) fn verify(&self, bytes: &[u8]) -> Result<(), Error> {
         verify_bytes(&self.path, self.size, &self.checksum, bytes)
     }
@@ -850,8 +859,10 @@ impl ResolvedModule {
     /// Returns the registry-relative module path, without the `https://jsr.io/`
     /// origin: `@scope/name/version/file`.
     ///
-    /// The path is not URL-encoded. A later transport must encode it; this
-    /// groundwork does not perform network requests.
+    /// The path is not URL-encoded. [`crate::jsr_loader::RemoteRegistry`]
+    /// encodes it and builds the request URL; see [`Self::canonical_specifier`]
+    /// for the JavaScript-facing form.
+    #[cfg(test)]
     pub(crate) fn registry_path(&self) -> String {
         let file = self
             .target
@@ -862,6 +873,7 @@ impl ResolvedModule {
     }
 
     /// Verifies downloaded bytes against the resolved manifest entry.
+    #[cfg(test)]
     pub(crate) fn verify(&self, bytes: &[u8]) -> Result<(), Error> {
         self.target.verify(bytes)
     }

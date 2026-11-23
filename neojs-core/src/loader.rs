@@ -11,8 +11,9 @@
 //! `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`, `neo:test`, `uuid`,
 //! `neo:uuid`, `uuid/v4`, `neo:uuid/v4`, `uuid/v7`, and `neo:uuid/v7`
 //! ([`crate::builtins`]), and — only when the runtime was created with
-//! [`crate::Runtime::with_remote`] — absolute `https:` URLs. Every other scheme
-//! is rejected with a reason that names the missing feature instead of failing
+//! [`crate::Runtime::with_remote`] — absolute `https:` URLs. That opt-in also
+//! enables `jsr:` imports through [`crate::jsr_loader`]. Every other scheme is
+//! rejected with a reason that names the missing feature instead of failing
 //! later inside V8.
 //!
 //! A relative specifier in a remote module resolves against that module's URL,
@@ -454,7 +455,10 @@ fn unsupported_scheme(url: &Url) -> String {
         }
         "node" => "Node.js built-in modules are not implemented".to_string(),
         "npm" => "npm: modules are not implemented".to_string(),
-        "jsr" => "jsr: modules are not implemented".to_string(),
+        "jsr" => {
+            "jsr: modules require remote module loading; create the Runtime with Runtime::with_remote (neojs --allow-remote) to enable them"
+                .to_string()
+        }
         "http" => "only https: module URLs are supported, not http:".to_string(),
         "https" => {
             "remote module loading is disabled; create the Runtime with Runtime::with_remote"
