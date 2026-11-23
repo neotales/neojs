@@ -156,13 +156,22 @@ def stream_matches(path, size, batch, what):
 
 
 def walk_paths(root):
-    """Yield every non-directory path relative to root, excluding .git.
+    """Yield every non-directory path relative to root.
 
+    Only the root repository's `.git` metadata is skipped. A nested `.git`
+    directory or gitdir file is unverified content and is rejected.
     Symlinked directories are reported as paths and not descended.
     """
+    root = os.path.abspath(root)
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        if ".git" in dirnames:
-            dirnames.remove(".git")
+        if dirpath == root:
+            if ".git" in dirnames:
+                dirnames.remove(".git")
+            if ".git" in filenames:
+                filenames.remove(".git")
+        elif ".git" in dirnames or ".git" in filenames:
+            rel = os.path.relpath(dirpath, root).replace(os.sep, "/")
+            raise Mismatch(f"nested .git metadata under {rel}")
         for name in list(dirnames):
             full = os.path.join(dirpath, name)
             if os.path.islink(full):
@@ -174,9 +183,14 @@ def walk_paths(root):
 
 
 def check_symlinks(root):
+    root = os.path.abspath(root)
+    real_root = os.path.realpath(root)
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        if ".git" in dirnames:
-            dirnames.remove(".git")
+        if dirpath == root:
+            if ".git" in dirnames:
+                dirnames.remove(".git")
+            if ".git" in filenames:
+                filenames.remove(".git")
         for entry in dirnames + filenames:
             path = os.path.join(dirpath, entry)
             if not os.path.islink(path):
@@ -185,7 +199,6 @@ def check_symlinks(root):
             if os.path.isabs(target):
                 raise Mismatch(f"absolute symlink: {path} -> {target}")
             resolved = os.path.realpath(os.path.join(dirpath, target))
-            real_root = os.path.realpath(root)
             if resolved != real_root and not resolved.startswith(real_root + os.sep):
                 raise Mismatch(f"escaping symlink: {path} -> {target}")
 

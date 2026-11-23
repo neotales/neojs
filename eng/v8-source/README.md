@@ -86,7 +86,7 @@ tree, use a scratch copy of the workspace; never edit the canonical checkout.
 cache=${NEOTALES_V8_CACHE:?}
 scratch=$(mktemp -d)
 tar -C . --exclude=.git --exclude=target -cf - . | tar -C "$scratch" -xf -
-eng/v8-source/patch_workspace.py "$scratch/Cargo.toml" "$cache/src/v8/v8-150.4.0"
+python3 eng/v8-source/patch_workspace.py "$scratch/Cargo.toml" "$cache/src/v8/v8-150.4.0"
 cd "$scratch"
 cargo build --release --offline
 ```
@@ -117,7 +117,9 @@ Two alternatives do **not** work and should not be used:
   comparison uses `git ls-tree` and `git cat-file`, not the index. Working trees
   are materialised by `materialize_git_tree.py` from the commit tree, not
   checked out: no index, filters or ignored content participate. Every extra
-  path is rejected, including ignored files; only `gn/out/` is allowed.
+  path is rejected, including ignored files; only `gn/out/` is allowed. Only the
+  root `.git` metadata is skipped: a nested `.git` directory or gitdir file is
+  extra content and fails verification.
 - **Archives**: `validate_tar.py` rejects absolute paths, `..`, escaping
   symlinks and hardlinks, symlink/file ancestors, devices/fifos, duplicate
   members and setuid/setgid bits. Extraction is staged under the cache and
@@ -161,17 +163,18 @@ identical, no network.
 
 ## Tests
 
-`eng/v8-source/test.sh` runs 45 deterministic tests with no network and no real
+`eng/v8-source/test.sh` runs 48 deterministic tests with no network and no real
 V8 inputs: hostile archives (traversal, absolute paths, escaping symlinks and
 hardlinks, symlink ancestors, fifo, setuid, duplicates), safe extraction,
 tamper detection, partial-extraction replacement, quarantine, content and
 mode-aware tree digests, git content verification against a commit, ignored
-file and `include` config rejection, executable-hook rejection, commit-tree
-materialisation including exec bits and escaping symlinks, a stream-mismatch
-deadlock test (`timeout 10`, exits 2), TOML path serialisation with quotes,
-backslash and newline, environment quoting with spaces/dollars/quotes, isolated
-git/curl argument and environment checks, and a missing-cache `--verify-only`
-check that proves no directory is created.
+file and `include` config rejection, executable-hook rejection, nested `.git`
+rejection, commit-tree materialisation including exec bits and escaping
+symlinks, a stream-mismatch deadlock test (`timeout 10`, exits 2), TOML path
+serialisation with quotes, backslash and newline, environment quoting with
+spaces/dollars/quotes, isolated git/curl argument and environment checks, and a
+missing-cache `--verify-only` check that proves no directory is created. Python
+helpers are run with `python3`; only the shell entry points are executable.
 
 Tamper tests against the real review cache:
 

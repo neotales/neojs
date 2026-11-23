@@ -13,6 +13,11 @@ RUN=$ROOT/tests/run.$(date -u +%Y%m%dT%H%M%SZ).$$
 mkdir -p "$RUN"/{cache,fixtures,mockbin,out}
 export LC_ALL=C
 
+command -v timeout >/dev/null 2>&1 || {
+    printf 'test: timeout (GNU coreutils) is required\n' >&2
+    exit 1
+}
+
 pass=0
 fail=0
 ok() { pass=$((pass + 1)); printf 'ok   %s\n' "$1"; }
@@ -282,6 +287,39 @@ erev=$(git -C "$mrepo" rev-parse HEAD)
 expect_fail "materialise refuses escaping symlink" \
     python3 "$SCRIPT_DIR/materialize_git_tree.py" "$mrepo" "$erev" "$RUN/out/mat-escape" --home "$ISO_HOME"
 
+# --- nested .git metadata must be rejected --------------------------------
+nrepo=$RUN/fixtures/nested
+git init -q "$nrepo"
+git -C "$nrepo" config user.email t@example.test
+git -C "$nrepo" config user.name test
+mkdir -p "$nrepo/sub"
+printf 'keep\n' > "$nrepo/sub/keep"
+git -C "$nrepo" add sub/keep
+git -C "$nrepo" commit -qm one
+nrev=$(git -C "$nrepo" rev-parse HEAD)
+write_git_config "$nrepo"
+
+mkdir -p "$nrepo/sub/.git"
+if out=$(python3 "$SCRIPT_DIR/verify_git_tree.py" "$nrepo" "$nrev" --home "$ISO_HOME" 2>&1); then rc=0; else rc=$?; fi
+case "$out" in
+    *"nested .git metadata"*)
+        if [ "$rc" = 2 ]; then ok "nested .git directory is rejected"; else notok "nested .git dir exit $rc"; fi
+        ;;
+    *) notok "nested .git directory not rejected: $out" ;;
+esac
+rmdir "$nrepo/sub/.git"
+
+printf 'gitdir: /tmp/elsewhere\n' > "$nrepo/sub/.git"
+if out=$(python3 "$SCRIPT_DIR/verify_git_tree.py" "$nrepo" "$nrev" --home "$ISO_HOME" 2>&1); then rc=0; else rc=$?; fi
+case "$out" in
+    *"nested .git metadata"*)
+        if [ "$rc" = 2 ]; then ok "nested .git gitdir file is rejected"; else notok "nested .git file exit $rc"; fi
+        ;;
+    *) notok "nested .git gitdir file not rejected: $out" ;;
+esac
+rm -f "$nrepo/sub/.git"
+expect_ok "root .git metadata is ignored" verify_git_checkout "$nrepo" "$nrev"
+
 # --- verifier must not deadlock on an early stream mismatch ---------------
 big=$RUN/fixtures/bigrepo
 git init -q "$big"
@@ -293,15 +331,15 @@ git -C "$big" commit -qm big
 brev=$(git -C "$big" rev-parse HEAD)
 write_git_config "$big"
 : > "$big/big"
-if command -v timeout >/dev/null 2>&1; then
-    set +e
-    timeout 10 python3 "$SCRIPT_DIR/verify_git_tree.py" "$big" "$brev" --home "$ISO_HOME" >/dev/null 2>&1
-    rc=$?
-    set -e
-    if [ "$rc" = 124 ]; then notok "verifier deadlocked on stream mismatch"; else ok "verifier terminates on stream mismatch (exit $rc)"; fi
-else
-    ok "verifier deadlock test skipped (no timeout)"
-fi
+set +e
+timeout 10 python3 "$SCRIPT_DIR/verify_git_tree.py" "$big" "$brev" --home "$ISO_HOME" >/dev/null 2>&1
+rc=$?
+set -e
+case $rc in
+    2) ok "verifier terminates on stream mismatch with the expected exit 2" ;;
+    124) notok "verifier deadlocked on stream mismatch" ;;
+    *) notok "verifier returned unexpected exit $rc on stream mismatch" ;;
+esac
 
 # --- tree digest includes modes -------------------------------------------
 mkdir -p "$RUN/out/modes/sub"
