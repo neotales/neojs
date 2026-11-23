@@ -1484,6 +1484,12 @@ The [`neojs-dbapi` crate](neojs-dbapi/README.md) is the SQLite-only database fou
 database providers and a JavaScript/Node adapter are not yet wired in. See the
 [database API notes](docs/db-api.md) for its scope and design decisions.
 
+The [`neojs-manifest` crate](docs/neo-jsonc.md) is the bounded foundation for `neo.jsonc`: strict
+JSONC parsing, schema validation, and canonical import-specifier normalization for `gh:`, `npm:`,
+`jsr:`, and `node:`. It does not install an import map, expand workspaces, apply
+`include`/`exclude`, or load npm, JSR, GitHub, or Node modules. Those transports remain rejected at
+runtime.
+
 ### QuickJS runtime: neojs-lite-core
 
 `neojs-lite-core` is the primary, embeddable QuickJS runtime, with `neojs-lite` as a secondary
