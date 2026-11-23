@@ -8,7 +8,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
-size_require jq sha256sum bash
+size_require jq sha256sum bash git
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/neojs-size-test.XXXXXX")
 trap 'rm -rf -- "$TMP"' EXIT
@@ -231,6 +231,25 @@ if [ "$(wc -l <"$TMP/append.jsonl" | tr -d '[:space:]')" -eq 2 ]; then
     ok "a different artifact appends"
 else
     fail "a different artifact did not append"
+fi
+
+REPO="$TMP/repo"
+mkdir -p "$REPO"
+git -c init.defaultBranch=dev init -q "$REPO"
+printf 'base\n' >"$REPO/ledger.jsonl"
+git -C "$REPO" add ledger.jsonl
+git -C "$REPO" -c user.name=Test -c user.email=test@example.com commit -q -m base
+printf '%s\n' "$VALID" >>"$REPO/ledger.jsonl"
+if size_git_dirty "$REPO" "$REPO/ledger.jsonl"; then
+    fail "ledger changes are excluded from the dirty check"
+else
+    ok "ledger changes are excluded from the dirty check"
+fi
+printf 'change\n' >"$REPO/source.txt"
+if size_git_dirty "$REPO" "$REPO/ledger.jsonl"; then
+    ok "source changes are included in the dirty check"
+else
+    fail "source changes are excluded from the dirty check"
 fi
 
 DRIFT_LEDGER="$TMP/drift-append.jsonl"

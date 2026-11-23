@@ -125,6 +125,21 @@ size_sha256_stream() {
     sha256sum | awk '{print $1}'
 }
 
+# True when the source tree is dirty. The ledger is the tracker's output, not
+# an input to the artifact, so a ledger inside the repository is excluded;
+# otherwise every appended measurement would make the next run look dirty and
+# derive a different record key.
+size_git_dirty() {
+    local root=$1 ledger=$2
+    local paths=(.) ledger_rel
+    ledger_rel=$(realpath -m --relative-to="$root" "$ledger" 2>/dev/null || true)
+    case "$ledger_rel" in
+        "" | /* | ../*) ;;
+        *) paths+=(":(exclude)$ledger_rel") ;;
+    esac
+    [ "$(git -C "$root" status --porcelain -- "${paths[@]}" | wc -l)" -gt 0 ]
+}
+
 size_record_key() {
     jq -S -c "$(size_record_key_filter)" <<<"$1" | size_sha256_stream
 }
