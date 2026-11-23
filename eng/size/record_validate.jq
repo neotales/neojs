@@ -13,12 +13,12 @@ def status_in($allowed): .status as $s | ($allowed | index($s)) != null;
 try (
 [
   (if type != "object" then "record must be a JSON object" else empty end),
-  (if .schema != 2 then "schema must be 2" else empty end),
+  (if .schema != 3 then "schema must be 3" else empty end),
   (if .status != "ok" and .status != "missing" then
      "status must be \"ok\" or \"missing\""
    else empty end),
   (if has("context_key") then
-     "legacy context_key is not part of schema 2"
+     "legacy context_key is not part of schema 3"
    else empty end),
 
   # Artifact
@@ -107,7 +107,7 @@ try (
   (if (.build | type) != "object" then
      "build must be an object"
    elif (.build | has("features") or has("no_default_features")) then
-     "schema 2 uses requested_features and requested_no_default_features"
+     "schema 3 uses requested_features and requested_no_default_features"
    elif .build.profile != "release" then
      "build.profile must be \"release\""
    else empty end),
@@ -136,8 +136,8 @@ try (
   (if (.build.offline | type) != "boolean" then
      "build.offline must be a boolean"
    else empty end),
-  (if .build.locked != true then
-     "build.locked must be true"
+  (if (.build.locked | type) != "boolean" then
+     "build.locked must be a boolean"
    else empty end),
   (if (.build.cargo_lock_sha256 | asstr | hex64 | not) then
      "build.cargo_lock_sha256 must be a sha256"
@@ -172,6 +172,23 @@ try (
    elif .build.target_specific_env.status != "captured" and
         (.build.target_specific_env.names | length) != 0 then
      "build.target_specific_env.names must be empty unless captured"
+   else empty end),
+  (if (.build.target_dir | type) != "object" then
+     "build.target_dir must be an object"
+   elif .build.target_dir.lock != "cooperating-measure-script-only" and
+        .build.target_dir.lock != "not-recorded" then
+     "build.target_dir.lock must be cooperating-measure-script-only or not-recorded"
+   elif .build.target_dir.ownership != "exclusive-required" and
+        .build.target_dir.ownership != "not-claimed" then
+     "build.target_dir.ownership must be exclusive-required or not-claimed"
+   elif .build.target_dir.external_writer_safety != "not-claimed" then
+     "build.target_dir.external_writer_safety must remain not-claimed"
+   elif .build.target_dir.lock == "not-recorded" and
+        .build.target_dir.ownership != "not-claimed" then
+     "an unrecorded target lock cannot claim exclusive ownership"
+   elif .build.target_dir.lock == "cooperating-measure-script-only" and
+        .build.target_dir.ownership != "exclusive-required" then
+     "a cooperating target lock requires exclusive target ownership"
    else empty end),
   (if (.build.v8_archive_status | asstr |
        test("^(supplied-provenance-unknown|not-supplied-not-captured|not-applicable)$") | not) then

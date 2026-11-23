@@ -18,6 +18,30 @@ def v8_identity($r):
     sha256: $r.build.v8_archive.sha256
   }
   end;
+def target_lock($r):
+  if $r.build.target_dir.lock == "cooperating-measure-script-only" then
+    "cooperative"
+  elif $r.build.target_dir.lock == "not-recorded" then
+    "not-recorded"
+  else
+    "unknown"
+  end;
+# A strict comparison needs every control to be observed. Effective features
+# and linker are not captured by this version; a V8 archive with unknown
+# provenance/use is not observed either. Do not call a comparison strict when
+# any of those is unknown.
+def controls_complete($r):
+  ($r.build.effective_features.status == "captured") and
+  ($r.build.effective_linker.status == "captured") and
+  ($r.build.cargo_config.status == "captured") and
+  ($r.build.target_specific_env.status != "not-captured") and
+  ($r.source.state_status == "captured") and
+  ($r.build.v8_archive_status != "supplied-provenance-unknown") and
+  ($r.build.v8_archive_status != "not-supplied-not-captured");
+def controls_text($r):
+  if controls_complete($r) then "complete" else "incomplete" end;
+# Reasons derived from the controls that define series_id. Offline and locked
+# are build controls and belong here; source state is reported separately.
 def control_diff($p; $r):
   [
     (if $p.toolchain != $r.toolchain then "toolchain" else empty end),
@@ -27,6 +51,8 @@ def control_diff($p; $r):
     (if $p.build.requested_no_default_features != $r.build.requested_no_default_features then
        "requested-no-default" else empty end),
     (if $p.build.profile != $r.build.profile then "profile" else empty end),
+    (if $p.build.offline != $r.build.offline then "offline" else empty end),
+    (if $p.build.locked != $r.build.locked then "locked" else empty end),
     (if $p.build.cargo_lock_sha256 != $r.build.cargo_lock_sha256 then
        "cargo-lock" else empty end),
     (if $p.build.workspace_path_sha256 != $r.build.workspace_path_sha256 then
@@ -55,14 +81,19 @@ def control_diff($p; $r):
      else "effective-linker" end),
     (if $p.build.v8_archive_status != $r.build.v8_archive_status or
         v8_identity($p) != v8_identity($r) then
-       "v8-archive" else empty end),
+       "v8-archive" else empty end)
+  ] | join(",");
+def source_diff($p; $r):
+  [
+    (if $p.source.git_commit != $r.source.git_commit then "commit" else empty end),
     (if $p.source.git_canonical != $r.source.git_canonical then
-       "source-canonical"
-     elif $p.source.state_sha256 == $r.source.state_sha256 then empty
+       "canonical" else empty end),
+    (if ($p.source.state_sha256 // $p.source.state_status) ==
+        ($r.source.state_sha256 // $r.source.state_status) then empty
      elif ($p.source.state_status == "not-captured" or
            $r.source.state_status == "not-captured") then
-       "source-state-capture"
-     else "source-state" end)
+       "state-capture"
+     else "state" end)
   ] | join(",");
 def same_source_state($p; $r):
   ($p.source.git_commit == $r.source.git_commit) and
@@ -83,8 +114,9 @@ def conflict_series($all):
 . as $all
 | (conflict_series($all)) as $conflicts
 | if $mode == "trend" then
-    (["family", "measured_at", "commit", "canonical", "bytes", "delta",
-      "delta-kind", "controls-changed", "series", "conflict"] | @tsv),
+    (["family", "package", "target", "measured_at", "commit", "canonical",
+      "target-lock", "controls", "bytes", "delta", "delta-kind",
+      "controls-changed", "source-changed", "series", "conflict"] | @tsv),
     (sort_by([.family_id, .measured_at])
      | group_by(.family_id)[]
      | sort_by(.measured_at) as $g
@@ -102,30 +134,41 @@ def conflict_series($all):
               same_source_state($p; $r) and
               $r.measurement.sha256 != $p.measurement.sha256) then "conflict"
         elif ($r.series_id == $p.series_id and
-              $r.source.git_canonical == $p.source.git_canonical and
-              $r.source.state_sha256 == $p.source.state_sha256) then "strict"
-        elif $r.series_id == $p.series_id then "source-state"
+              ((controls_complete($p) and controls_complete($r)) | not)) then
+          "controls-incomplete"
+        elif ($r.series_id == $p.series_id and
+              ($r.source.git_canonical != $p.source.git_canonical or
+               $r.source.state_sha256 != $p.source.state_sha256)) then
+          "source-state"
+        elif $r.series_id == $p.series_id then "strict"
         else "controls-differ" end) as $kind
      | (if $p == null then "-"
         else (control_diff($p; $r) | if . == "" then "-" else . end) end) as $changed
+     | (if $p == null then "-"
+        else (source_diff($p; $r) | if . == "" then "-" else . end) end) as $source_changed
      | [
          ($r.family_id | short),
+         $r.artifact.package,
+         $r.platform.target,
          $r.measured_at,
          ($r.source.git_commit | short),
          (if $r.source.git_canonical then "yes" else "no" end),
+         target_lock($r),
+         controls_text($r),
          bytes_text($r),
          (if $delta == null then "-"
           elif $delta > 0 then "+\($delta)"
           else ($delta | tostring) end),
          $kind,
          $changed,
+         $source_changed,
          ($r.series_id | short),
          (if ($conflicts | index($r.series_id)) then "yes" else "no" end)
        ] | @tsv)
   elif $mode == "all" then
     (["measured_at", "status", "source", "family", "series", "package",
-      "target", "rustc", "requested-features", "bytes", "sha256", "commit",
-      "canonical", "v8"] | @tsv),
+      "target", "rustc", "requested-features", "target-lock", "controls",
+      "bytes", "sha256", "commit", "canonical", "v8"] | @tsv),
     (sort_by(.measured_at)[]
      | [
          .measured_at,
@@ -137,6 +180,8 @@ def conflict_series($all):
          .platform.target,
          .toolchain.rustc,
          feature_text(.),
+         target_lock(.),
+         controls_text(.),
          bytes_text(.),
          digest_text(.),
          (.source.git_commit | short),
@@ -144,9 +189,9 @@ def conflict_series($all):
          .build.v8_archive_status
        ] | @tsv)
   else
-    (["series", "family", "measured_at", "status", "source", "package",
-      "target", "rustc", "requested-features", "bytes", "sha256", "commit",
-      "canonical", "v8", "conflict"] | @tsv),
+    (["series", "family", "package", "target", "measured_at", "status",
+      "source", "target-lock", "controls", "rustc", "requested-features",
+      "bytes", "sha256", "commit", "canonical", "v8", "conflict"] | @tsv),
     (sort_by(.measured_at)
      | group_by(.series_id)
      | map(last)
@@ -155,11 +200,13 @@ def conflict_series($all):
      | [
          ($r.series_id | short),
          ($r.family_id | short),
+         $r.artifact.package,
+         $r.platform.target,
          $r.measured_at,
          $r.status,
          $r.source.kind,
-         $r.artifact.package,
-         $r.platform.target,
+         target_lock($r),
+         controls_text($r),
          $r.toolchain.rustc,
          feature_text($r),
          bytes_text($r),

@@ -1503,7 +1503,8 @@ bytes and SHA-256, the source state, artifact, target, toolchain, requested
 features, Cargo and lockfile inputs, and explicitly labels effective features,
 linker and V8-archive provenance as captured or unknown. Strict comparison
 series and a labelled trend report keep a toolchain or config change from being
-read as a source-code delta. The directory is self-contained: see
+read as a source-code delta; a comparison with any uncaptured control is marked
+controls-incomplete rather than strict. The directory is self-contained: see
 [`eng/size/README.md`](eng/size/README.md) for the methodology and
 `eng/size/check.sh` for the deterministic checks.
 

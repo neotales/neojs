@@ -34,8 +34,11 @@ There are two identifiers on every record:
 
 - **`series_id`** — the strict comparison series. It covers every documented
   control that can move the byte count, but not the source commit and not the
-  measured bytes. Two records with the same `series_id` are directly
-  comparable.
+  measured bytes. Two records with the same `series_id` share controls, but a
+  delta is labelled **strict** only when every control is actually captured.
+  Effective features, effective linker, Cargo config, target-specific
+  environment, source state and a V8 input with unknown provenance/use are
+  checked; if any is unknown the delta is **controls-incomplete**.
 - **`family_id`** — the intended longitudinal artifact: binary, target,
   profile, requested features. The trend report compares records in one family
   even when a control changed, and labels the delta.
@@ -51,7 +54,9 @@ There are two identifiers on every record:
   current implementation does not capture effective values; it records
   `"status": "not-captured"` rather than claiming a feature set or linker it
   did not observe;
-- `build.offline` and `build.locked`;
+- `build.offline` and `build.locked`. Generated records use
+  `--offline --locked`, so `locked` is true; the field is still recorded as a
+  boolean, and a false value is a different series and not comparable;
 - `build.cargo_lock_sha256`;
 - `build.workspace_path_sha256` — the build path, hashed. Rust embeds source
   paths in some strings, so two worktrees can differ by a few bytes even at the
@@ -72,21 +77,23 @@ clean commit. If a control changes, the trend report says which one.
 
 ### Baseline honesty
 
-The first two records predate the schema-2 control capture. They are retained
-because their bytes and source commit are real, but they are explicitly
-relabelled:
+The first two records predate the control capture. They are retained because
+their bytes and source commit are real, but they are explicitly relabelled:
 
 - `source.state_status: "not-captured"`, `state_sha256: null`;
 - `build.cargo_config.status: "not-captured"`;
 - `build.target_specific_env.status: "not-captured"`;
 - `build.effective_features.status: "not-captured"`;
 - `build.effective_linker.status: "not-captured"`;
-- the V8 archive is `supplied-provenance-unknown`, `authenticated: false`.
+- the V8 archive is `supplied-provenance-unknown`, `authenticated: false`;
+- `build.target_dir` is `lock: not-recorded`, `ownership: not-claimed`,
+  `external_writer_safety: not-claimed`.
 
-They therefore form their own strict series. The trend report labels the
-capture-status differences (`cargo-config-capture`, `target-env-capture`,
-`source-state-capture`) rather than pretending the underlying build control
-changed. No missing control was invented.
+They therefore form their own series with incomplete controls. The trend
+report labels capture-status differences (`cargo-config-capture`,
+`target-env-capture`, and `state-capture` in the source-changed column) rather
+than pretending the underlying build control changed. No missing control was
+invented.
 
 ### Canonical series
 
@@ -106,10 +113,12 @@ the commit alone. `--allow-dirty` records it with
 `source.git_canonical: false`, and the report shows `canonical no`.
 
 The script fingerprints the source state before and after each build. The
-fingerprint covers the status, the tracked diff (including binary content) and
-the contents of untracked files, with the ledger excluded. If the commit or that
-fingerprint changes while a build runs, the measurement is refused: a binary
-that cannot be attributed to the captured state is not recorded.
+fingerprint covers the status, the unstaged tracked diff, the **staged** diff
+(including binary content) and the contents of untracked files, with the ledger
+excluded. The commit captured immediately before the build must equal the
+commit captured at the start of the run. If the commit or that fingerprint
+changes while a build runs, the measurement is refused: a binary that cannot be
+attributed to the captured state is not recorded.
 
 For a claimed **release** measurement, check out the release tag, verify the
 tree is clean, and record the tag. A measurement from `dev` is a commit
@@ -155,9 +164,19 @@ reporting `already recorded`.
 ### Build serialization
 
 Builds sharing a target directory are serialized with an inode lock at
-`<target-dir>/.size-build.lock`. A second measurement waits rather than compiling
-into the same directory concurrently. The lock is in the dedicated target
-directory and is never committed.
+`<target-dir>/.size-build.lock`. A second `measure.sh` waits rather than
+compiling into the same directory concurrently. The lock is in the dedicated
+target directory and is never committed.
+
+**The lock is cooperative.** It coordinates `measure.sh` processes only. It
+cannot stop a manual `cargo build`, `cargo test`, an IDE, another tool, or any
+other process from writing into the same target directory. The operator must
+give the tracker exclusive ownership of `--target-dir` for the duration of a
+run. Every record states this contract:
+`build.target_dir.lock = "cooperating-measure-script-only"`,
+`ownership = "exclusive-required"`,
+`external_writer_safety = "not-claimed"`. A record does not imply that an
+external writer was absent, and the tool makes no such claim.
 
 ### Missing artifacts
 
@@ -190,6 +209,9 @@ bytes and no digest; it is never a zero.
   refused unless `--allow-env-overrides` is passed, in which case their values
   are recorded. The same applies to `RUSTFLAGS`, `RUSTDOCFLAGS`, compiler
   variables, `V8_FROM_SOURCE`, `GN_ARGS` and similar inputs.
+- **Target-dir contract.** See "Build serialization" above. The lock is
+  cooperating-only; exclusive target-dir ownership is required; external-writer
+  safety is not claimed.
 - **V8 archive.** `RUSTY_V8_ARCHIVE` is recorded as
   `supplied-provenance-unknown` with
   `provenance: "operator-supplied-local-file"` and
@@ -212,7 +234,7 @@ point of the record.
 Example (abridged; real records have every field):
 
 ```json
-{"schema":2,"status":"ok","artifact":{"package":"neojs","bin":"neojs","kind":"release-binary","path":"neojs"},"source":{"git_commit":"...","git_dirty":false,"git_canonical":true,"git_tags":[],"kind":"commit","state_status":"captured","state_sha256":"..."},"platform":{"target":"x86_64-unknown-linux-gnu","host":"x86_64-unknown-linux-gnu","os":"Linux","arch":"x86_64"},"toolchain":{"requested":"1.100.0","rustc":"rustc 1.100.0 (...)","cargo":"cargo 1.100.0 (...)","cc":"cc (GCC) 16.2.1"},"build":{"profile":"release","requested_features":[],"requested_no_default_features":false,"effective_features":{"status":"not-captured"},"effective_linker":{"status":"not-captured"},"offline":true,"locked":true,"cargo_lock_sha256":"...","workspace_path_sha256":"...","cargo_config":{"status":"captured","files":[{"scope":"cargo-home","sha256":"..."}]},"env_overrides":{},"target_specific_env":{"status":"absent","names":[]},"v8_archive_status":"supplied-provenance-unknown","v8_archive":{"name":"...","sha256":"...","archive_sha256":"...","provenance":"operator-supplied-local-file","authenticated":false}},"measurement":{"method":"file-length-bytes","bytes":12345678,"sha256":"..."},"missing_reason":null,"measured_at":"2026-11-22T00:00:00Z","notes":null,"series_id":"...","family_id":"...","key":"..."}
+{"schema":3,"status":"ok","artifact":{"package":"neojs","bin":"neojs","kind":"release-binary","path":"neojs"},"source":{"git_commit":"...","git_dirty":false,"git_canonical":true,"git_tags":[],"kind":"commit","state_status":"captured","state_sha256":"..."},"platform":{"target":"x86_64-unknown-linux-gnu","host":"x86_64-unknown-linux-gnu","os":"Linux","arch":"x86_64"},"toolchain":{"requested":"1.100.0","rustc":"rustc 1.100.0 (...)","cargo":"cargo 1.100.0 (...)","cc":"cc (GCC) 16.2.1"},"build":{"profile":"release","requested_features":[],"requested_no_default_features":false,"effective_features":{"status":"not-captured"},"effective_linker":{"status":"not-captured"},"offline":true,"locked":true,"cargo_lock_sha256":"...","workspace_path_sha256":"...","cargo_config":{"status":"captured","files":[{"scope":"cargo-home","sha256":"..."}]},"env_overrides":{},"target_specific_env":{"status":"absent","names":[]},"target_dir":{"lock":"cooperating-measure-script-only","ownership":"exclusive-required","external_writer_safety":"not-claimed"},"v8_archive_status":"supplied-provenance-unknown","v8_archive":{"name":"...","sha256":"...","archive_sha256":"...","provenance":"operator-supplied-local-file","authenticated":false}},"measurement":{"method":"file-length-bytes","bytes":12345678,"sha256":"..."},"missing_reason":null,"measured_at":"2026-11-22T00:00:00Z","notes":null,"series_id":"...","family_id":"...","key":"..."}
 ```
 
 Rules:
@@ -222,14 +244,17 @@ Rules:
   hand edit fails the check.
 - **Append-only.** Do not rewrite or delete history. A correction is a new
   record with a `note`; the report's latest-per-series view uses the newest.
-  The schema-1 baseline was relabelled once, before this branch was handed off,
-  because it predated the schema; no measured bytes, commit or timestamp moved.
+  The baseline was relabelled once, before this branch was handed off, when the
+  schema gained explicit control and provenance fields; no measured bytes,
+  commit or timestamp moved.
 - **No binary artifacts.** The ledger is metadata. The executable stays in
   `target/`, which is gitignored. Do not attach or commit the binary.
 - **`key`** covers the artifact, source state, controls and measured digest. It
   is what makes the second identical run a no-op.
 - **`series_id`** covers the controls but not the source commit or measurement.
   **`family_id`** covers the intended artifact family.
+- **`build.target_dir`** records the cooperative lock and the ownership/safety
+  contract. It is not an artifact control and is not part of either id.
 - **Conflicts are evidence, not poison.** If one strict series, commit and
   source state produce two different digests, the records are kept. Strict
   `validate.sh` fails; `validate.sh --allow-conflicts` and `report.sh` still
@@ -258,9 +283,11 @@ That runs:
 - `test.sh` — shell syntax, schema acceptance and rejection, key/series/family
   tampering, duplicate keys, provenance labels, conflict modes, target-directory
   lock contention, relative target-dir normalization, dirty-tree refusal,
-  source-state change during build, Cargo config capture, environment override
-  refusal, missing package handling, dry-run behaviour, trend/report rendering,
-  and idempotent append, all in a temporary directory;
+  staged binary state changes, source-state change and checkout race during
+  build, Cargo config capture, environment override refusal, missing package
+  handling, dry-run behaviour, controls-complete versus controls-incomplete,
+  offline/locked trend reasons, package/target columns, target-dir contract,
+  trend/report rendering and idempotent append, all in a temporary directory;
 - `validate.sh` — strict schema, integrity, unique keys and conflict detection
   for the committed ledger.
 
@@ -312,21 +339,27 @@ delta has a known origin.
 ## Failure modes this is designed around
 
 - A green check that skipped Lite: missing artifacts are recorded and exit `3`.
-- Two runs compiling into one target directory: an inode lock serializes them.
+- Two cooperating runs compiling into one target directory: an inode lock
+  serializes them. An external writer is outside that guarantee and is not
+  claimed safe.
 - A dirty tree presented as a canonical commit: refused, or explicitly
   `canonical no` with `--allow-dirty`.
-- A build that changes the source state: detected by before/after fingerprints
-  and refused.
+- A build that changes the source state, stages a binary change, or checks out
+  a different commit: detected by before/after fingerprints and refused.
 - A number quoted without its target: the target is in every record and every
   report row.
 - A toolchain upgrade masquerading as a size regression: the toolchain is
-  pinned in `toolchain` and recorded; the trend names the change.
+  pinned in `toolchain` and recorded; the trend names the change, including
+  offline/locked and other series controls.
 - A stale `Cargo.lock`, Cargo config, or ambient `RUSTFLAGS`: recorded if
   captured or refused if not allowed, never silently attributed.
 - An archive hash mistaken for authentication: provenance is labelled
   `operator-supplied-local-file`, `authenticated: false`.
 - Effective features or linker assumed from the command line: labelled
-  `not-captured`.
+  `not-captured`, and a delta with them unknown is `controls-incomplete`, never
+  `strict`.
+- A V8 input with unknown provenance/use: a delta with it is
+  `controls-incomplete`, never `strict`.
 - A duplicate entry after re-running: deduplicated by `key`.
 - A conflicting rebuild poisoning the report: kept, marked, and still
   reportable under `--allow-conflicts`.

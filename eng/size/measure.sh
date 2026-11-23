@@ -400,7 +400,7 @@ make_record() {
         --argjson v8_archive "$v8_archive_json" \
         --argjson env_overrides "$ENV_OVERRIDES" \
         '{
-          schema: 2,
+          schema: 3,
           status: $status,
           artifact: {
             package: $package,
@@ -449,6 +449,11 @@ make_record() {
             cargo_config: $cargo_config,
             env_overrides: $env_overrides,
             target_specific_env: $target_specific_env,
+            target_dir: {
+              lock: "cooperating-measure-script-only",
+              ownership: "exclusive-required",
+              external_writer_safety: "not-claimed"
+            },
             v8_archive_status: $v8_archive_status,
             v8_archive: $v8_archive
           },
@@ -546,6 +551,9 @@ measure_package() {
     fi
     after_commit=$(git -C "$ROOT" rev-parse HEAD)
     after_state=$(size_git_state_sha256 "$ROOT" "$LEDGER")
+    if [ "$before_commit" != "$GIT_COMMIT" ]; then
+        size_die "commit changed after the initial source-state capture and before building $package; refusing to record the binary"
+    fi
     if [ "$before_commit" != "$after_commit" ] || [ "$before_state" != "$after_state" ]; then
         size_die "source commit or dirty state changed while building $package; refusing to record a binary that cannot be attributed to the captured source state"
     fi

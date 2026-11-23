@@ -62,7 +62,7 @@ expect_validation_failure() {
 
 fixture() {
     jq -n '{
-      schema: 2,
+      schema: 3,
       status: "ok",
       artifact: {
         package: "neojs",
@@ -111,6 +111,11 @@ fixture() {
         cargo_config: {status: "captured", files: [{scope: "workspace", sha256: ("f" * 64)}]},
         env_overrides: {},
         target_specific_env: {status: "absent", names: []},
+        target_dir: {
+          lock: "cooperating-measure-script-only",
+          ownership: "exclusive-required",
+          external_writer_safety: "not-claimed"
+        },
         v8_archive_status: "not-applicable",
         v8_archive: null
       },
@@ -191,7 +196,7 @@ fi
 printf '{\n' >"$TMP/bad-json.jsonl"
 expect_validation_failure "invalid JSON rejected" "$TMP/bad-json.jsonl"
 
-printf '%s\n' "$(rewrite_with_ids '.schema = 1' "$VALID")" >"$TMP/bad-schema.jsonl"
+printf '%s\n' "$(rewrite_with_ids '.schema = 2' "$VALID")" >"$TMP/bad-schema.jsonl"
 expect_validation_failure "wrong schema rejected" "$TMP/bad-schema.jsonl"
 
 printf '%s\n' "$(rewrite_with_ids '.measurement.bytes = 0' "$VALID")" >"$TMP/zero.jsonl"
@@ -236,6 +241,23 @@ expect_validation_failure "authenticated V8 archive claim rejected" "$TMP/v8-aut
 
 printf '%s\n' "$(rewrite_with_ids '.build.command = "/home/dev/neojs/target/release/neojs"' "$VALID")" >"$TMP/machine-command.jsonl"
 expect_validation_failure "machine path in command rejected" "$TMP/machine-command.jsonl"
+
+printf '%s\n' "$(rewrite_with_ids '.build.target_dir.lock = "promised"' "$VALID")" >"$TMP/bad-target-lock.jsonl"
+expect_validation_failure "invented target-lock guarantee rejected" "$TMP/bad-target-lock.jsonl"
+
+UNTRACKED_TARGET=$(rewrite_with_ids '
+  .build.target_dir = {
+    lock: "not-recorded",
+    ownership: "not-claimed",
+    external_writer_safety: "not-claimed"
+  }
+' "$VALID")
+printf '%s\n' "$UNTRACKED_TARGET" >"$TMP/untracked-target.jsonl"
+if (size_validate_ledger "$TMP/untracked-target.jsonl" 0) >/dev/null 2>&1; then
+    ok "unrecorded target contract accepted without a safety claim"
+else
+    fail "unrecorded target contract rejected"
+fi
 
 printf '%s\n' "$(jq -c '.key = ("0" * 64)' <<<"$VALID")" >"$TMP/bad-key.jsonl"
 expect_validation_failure "hand-edited key rejected" "$TMP/bad-key.jsonl"
@@ -311,20 +333,95 @@ printf '%s\n%s\n' "$UNCAPPED" "$VALID" >"$TMP/capture-trend.jsonl"
 expect_status 0 "trend labels capture-status changes" \
     bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/capture-trend.jsonl" --trend
 assert_contains "$TMP/stdout" "cargo-config-capture" "trend distinguishes unknown-to-captured config"
-assert_contains "$TMP/stdout" "source-state-capture" "trend distinguishes unknown-to-captured source state"
+assert_contains "$TMP/stdout" "state-capture" "trend distinguishes unknown-to-captured source state"
+assert_contains "$TMP/stdout" "neojs" "trend includes the package"
+assert_contains "$TMP/stdout" "x86_64-unknown-linux-gnu" "trend includes the target"
 
-DIRTYVALID=$(rewrite_with_ids '
+INCOMPLETE2=$(rewrite_with_ids '
+  .source.git_commit = ("d" * 40)
+  | .measurement.bytes = 12345679
+  | .measurement.sha256 = ("e" * 64)
+  | .measured_at = "2026-11-23T02:00:00Z"
+' "$VALID")
+printf '%s\n%s\n' "$VALID" "$INCOMPLETE2" >"$TMP/incomplete-trend.jsonl"
+expect_status 0 "incomplete controls are not called strict" \
+    bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/incomplete-trend.jsonl" --trend
+assert_contains "$TMP/stdout" "controls-incomplete" "trend flags a same-series comparison with unknown controls"
+assert_contains "$TMP/stdout" "incomplete" "trend shows the incomplete controls label"
+
+COMPLETE=$(rewrite_with_ids '
+  .build.effective_features = {status: "captured", values: []}
+  | .build.effective_linker = {status: "captured", value: "cc"}
+  | .build.v8_archive_status = "not-applicable"
+  | .build.v8_archive = null
+' "$VALID")
+COMPLETE2=$(rewrite_with_ids '
+  .source.git_commit = ("d" * 40)
+  | .measurement.bytes = 12345679
+  | .measurement.sha256 = ("e" * 64)
+  | .measured_at = "2026-11-23T03:00:00Z"
+' "$COMPLETE")
+printf '%s\n%s\n' "$COMPLETE" "$COMPLETE2" >"$TMP/complete-trend.jsonl"
+expect_status 0 "complete controls can be strict" \
+    bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/complete-trend.jsonl" --trend
+assert_contains "$TMP/stdout" "strict" "trend calls a complete same-series comparison strict"
+assert_contains "$TMP/stdout" "complete" "trend shows the complete controls label"
+assert_contains "$TMP/stdout" "+1" "trend shows the strict delta"
+
+V8A=$(rewrite_with_ids '
+  .build.v8_archive_status = "supplied-provenance-unknown"
+  | .build.v8_archive = {
+      name: "local-v8.a.gz",
+      sha256: ("a" * 64),
+      archive_sha256: ("b" * 64),
+      provenance: "operator-supplied-local-file",
+      authenticated: false
+    }
+  | .source.git_commit = ("1" * 40)
+  | .measured_at = "2026-11-23T04:00:00Z"
+' "$COMPLETE")
+V8B=$(rewrite_with_ids '
+  .source.git_commit = ("2" * 40)
+  | .measurement.bytes = 12345679
+  | .measurement.sha256 = ("e" * 64)
+  | .measured_at = "2026-11-23T05:00:00Z"
+' "$V8A")
+printf '%s\n%s\n' "$V8A" "$V8B" >"$TMP/v8-unknown-trend.jsonl"
+expect_status 0 "unknown V8 input is not called strict" \
+    bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/v8-unknown-trend.jsonl" --trend
+assert_contains "$TMP/stdout" "controls-incomplete" "trend flags an unverified V8 input"
+
+OFFLINE=$(rewrite_with_ids '
+  .build.offline = false
+  | .source.git_commit = ("3" * 40)
+  | .measured_at = "2026-11-23T06:00:00Z"
+' "$COMPLETE")
+printf '%s\n%s\n' "$COMPLETE" "$OFFLINE" >"$TMP/offline-trend.jsonl"
+expect_status 0 "offline change is a control reason" \
+    bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/offline-trend.jsonl" --trend
+assert_contains "$TMP/stdout" "offline" "trend names an offline control change"
+
+UNLOCKED=$(rewrite_with_ids '
+  .build.locked = false
+  | .source.git_commit = ("4" * 40)
+  | .measured_at = "2026-11-23T07:00:00Z"
+' "$COMPLETE")
+printf '%s\n%s\n' "$COMPLETE" "$UNLOCKED" >"$TMP/locked-trend.jsonl"
+expect_status 0 "locked change is a control reason" \
+    bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/locked-trend.jsonl" --trend
+assert_contains "$TMP/stdout" "locked" "trend names a locked control change"
+
+DIRTYCOMPLETE=$(rewrite_with_ids '
   .source.git_dirty = true
   | .source.git_canonical = false
   | .source.state_sha256 = ("9" * 64)
-  | .measured_at = "2026-11-23T02:00:00Z"
-' "$VALID")
-printf '%s\n%s\n' "$VALID" "$DIRTYVALID" >"$TMP/dirty-trend.jsonl"
+  | .measured_at = "2026-11-23T08:00:00Z"
+' "$COMPLETE")
+printf '%s\n%s\n' "$COMPLETE" "$DIRTYCOMPLETE" >"$TMP/dirty-trend.jsonl"
 expect_status 0 "trend labels source-state deltas" \
     bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/dirty-trend.jsonl" --trend
 assert_contains "$TMP/stdout" "source-state" "trend labels a non-canonical source delta"
-assert_contains "$TMP/stdout" "source-canonical" "trend names the canonical change"
-
+assert_contains "$TMP/stdout" "canonical" "trend names the canonical change"
 
 : >"$TMP/append.jsonl"
 size_append_record "$TMP/append.jsonl" "$VALID" >"$TMP/append.log" 2>&1
@@ -391,6 +488,18 @@ if [ "$STATE_ONE" != "$STATE_TWO" ]; then
     ok "state fingerprint detects content changes behind the same dirty status"
 else
     fail "state fingerprint ignored a content change"
+fi
+
+printf '\000\001' >"$REPO/staged.bin"
+git -C "$REPO" add staged.bin
+STAGED_ONE=$(size_git_state_sha256 "$REPO" "$REPO/ledger.jsonl")
+printf '\000\002' >"$REPO/staged.bin"
+git -C "$REPO" add staged.bin
+STAGED_TWO=$(size_git_state_sha256 "$REPO" "$REPO/ledger.jsonl")
+if [ "$STAGED_ONE" != "$STAGED_TWO" ]; then
+    ok "state fingerprint includes staged binary content"
+else
+    fail "state fingerprint ignored staged binary content"
 fi
 
 # The build lock must exclude a second process for the same target directory.
@@ -541,6 +650,33 @@ expect_status 1 "source state change during build is refused" \
     --target-dir "$TMP/change-build" --ledger "$TMP/change-ledger.jsonl"
 assert_contains "$TMP/stderr" "changed while building" "state-change refusal explains the reason"
 
+RACEROOT="$TMP/raceroot"
+make_workspace "$RACEROOT" neojs
+cat >"$RACEROOT/neojs/build.rs" <<'RS'
+use std::process::Command;
+
+fn main() {
+    let status = Command::new("git")
+        .args([
+            "-C",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/.."),
+            "checkout",
+            "--detach",
+            "HEAD^",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+RS
+git -C "$RACEROOT" add neojs/build.rs
+git -C "$RACEROOT" -c user.name=Test -c user.email=test@example.com commit -q -m build-script
+git -C "$RACEROOT" -c user.name=Test -c user.email=test@example.com commit --allow-empty -q -m race
+expect_status 1 "checkout race during build is refused" \
+    bash "$RACEROOT/eng/size/measure.sh" --no-record --package neojs \
+    --target-dir "$TMP/race-build" --ledger "$TMP/race-ledger.jsonl"
+assert_contains "$TMP/stderr" "changed while building" "checkout race refusal explains the reason"
+
 CONFIGROOT="$TMP/configroot"
 make_workspace "$CONFIGROOT" neojs
 mkdir -p "$CONFIGROOT/.cargo"
@@ -563,6 +699,8 @@ expect_status 0 "report renders a valid ledger" \
     bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/valid.jsonl"
 assert_contains "$TMP/stdout" "neojs" "report includes the package"
 assert_contains "$TMP/stdout" "12345678" "report includes the byte count"
+assert_contains "$TMP/stdout" "cooperative" "report shows the cooperative target lock"
+assert_contains "$TMP/stdout" "incomplete" "report shows incomplete controls"
 
 if [ "$FAILED" -ne 0 ]; then
     printf 'size: test failures\n' >&2

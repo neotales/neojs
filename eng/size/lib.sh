@@ -228,6 +228,7 @@ size_git_state_sha256() {
     {
         git -C "$root" status --porcelain -- "${paths[@]}"
         git -C "$root" diff --binary -- "${paths[@]}"
+        git -C "$root" diff --cached --binary -- "${paths[@]}"
         while IFS= read -r -d '' file; do
             printf 'untracked %s\n' "$file"
             sha256sum "$root/$file"
