@@ -551,3 +551,14 @@ Rust APIs. It does not modify or vendor them.
 The neojs code decides redirect policy, request headers, size limits,
 deadlines, cache layout, and error messages; those decisions are not upstream
 code. No Deno source is copied.
+
+## JSR test fixtures
+
+`neojs-core/tests/fixtures/jsr/neotales/` contains unmodified metadata and
+source captured from the public JSR packages `@neotales/chars@0.0.0` and
+`@neotales/slices@0.0.0`, used only by the offline JSR integration tests. The
+source URLs and SHA-256 values are recorded in
+`neojs-core/tests/fixtures/jsr/neotales/README.md`.
+
+The captured source is MIT-licensed, copyright 2022-2026 Neotales. The full
+license text is `neojs-core/tests/fixtures/jsr/neotales/LICENSE.md`.
