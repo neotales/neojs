@@ -1959,6 +1959,25 @@ fn github_imports_are_refused_without_the_flag() {
 /// `NEOJS_ALLOW_REMOTE` is the persistent form of the same opt-in: a malformed
 /// GitHub entry is parsed instead of being refused as disabled, while an
 /// explicit `0` keeps it disabled.
+/// A malformed GitHub import is reported without echoing the specifier, which
+/// can hold a credential-shaped authority or a query-like token.
+#[test]
+fn a_malformed_github_import_never_echoes_the_input() {
+    let project = Project::new();
+    let file = project.write(
+        "main.js",
+        "import \"gh:user:secret@host/repo@v1/main.js\";\n",
+    );
+    let path = file.to_str().expect("utf-8 path");
+
+    let output = run_args(&["--allow-remote", path]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("GitHub specifier is invalid"), "{message}");
+    assert!(!message.contains("secret"), "{message}");
+    assert!(!message.contains("token"), "{message}");
+}
+
 #[test]
 fn the_environment_opt_in_reaches_github_entries() {
     let output = run_args_with_env(&["gh:acme/widgets@v1"], &[("NEOJS_ALLOW_REMOTE", "1")]);
