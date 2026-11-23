@@ -30,7 +30,7 @@
 //! * A minimal `Neo` global reports `engine` `"neo-lite"`.
 //!   `Neo.getBuiltInModulesList()` returns one frozen empty array because this
 //!   runtime has no built-in modules, and `Neo.getBuiltInModule(name)` returns
-//!   `undefined` for every name.
+//!   `undefined` for every string name. A non-string name throws `TypeError`.
 //!
 //! # What is not implemented yet
 //!

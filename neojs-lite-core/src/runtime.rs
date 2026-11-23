@@ -40,27 +40,29 @@ globalThis.console = Object.freeze({
 ///
 /// The engine is `neo-lite`. This runtime has no built-in modules, so the list
 /// is one frozen empty array and `getBuiltInModule` returns `undefined` for
-/// every name. The object and global property are frozen and non-writable, and
-/// the same array is returned for every list lookup. This is not the V8
-/// runtime's surface: no `neo:` module is implemented here, and the list does
-/// not claim any.
+/// every string name; a non-string name throws the intrinsic `TypeError`
+/// captured when the shim was installed. The object and global property are
+/// frozen and non-writable, and the same array is returned for every list
+/// lookup. This is not the V8 runtime's surface: no `neo:` module is implemented
+/// here, and the list does not claim any.
 const NEO_SHIM: &str = r#"
 (() => {
     "use strict";
 
     const freeze = Object.freeze;
     const defineProperty = Object.defineProperty;
+    const makeTypeError = TypeError;
     const builtInModuleList = freeze([]);
 
     /**
-     * Return `undefined` for every name because this runtime has no built-in
-     * modules. The shape matches the V8 registry lookup.
+     * Return `undefined` for every string name because this runtime has no
+     * built-in modules. The shape matches the V8 registry lookup.
      *
      * @throws {TypeError} when the name is not a string.
      */
     function getBuiltInModule(name) {
         if (typeof name !== "string") {
-            throw new TypeError("module name must be a string");
+            throw new makeTypeError("module name must be a string");
         }
         return undefined;
     }
@@ -397,10 +399,11 @@ impl Runtime {
     ///
     /// `Neo.engine` is `"neo-lite"`. This runtime has no built-in modules, so
     /// `Neo.getBuiltInModulesList()` returns one frozen empty array and
-    /// `Neo.getBuiltInModule(name)` returns `undefined`; it does not claim the
-    /// V8 runtime's built-ins. This performs no filesystem access. An error
-    /// means QuickJS could not allocate its runtime or context, or a shim could
-    /// not be installed.
+    /// `Neo.getBuiltInModule(name)` returns `undefined` for a string name; a
+    /// non-string name throws `TypeError`. It does not claim the V8 runtime's
+    /// built-ins. This performs no filesystem access. An error means QuickJS
+    /// could not allocate its runtime or context, or a shim could not be
+    /// installed.
     pub fn new() -> Result<Self, Error> {
         let runtime = rquickjs::Runtime::new().map_err(|error| Error::Init {
             message: error.to_string(),

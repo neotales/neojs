@@ -51,9 +51,9 @@ imported files still go through the loader and shared extension policy.
 The runtime installs a minimal `Neo` global. Its `engine` property is
 `"neo-lite"`. This runtime has no built-in modules, so
 `Neo.getBuiltInModulesList()` returns one frozen empty array and
-`Neo.getBuiltInModule(name)` returns `undefined` for every name. The `Neo`
-object and the global property are frozen and non-writable, and the empty list
-is the same array for every lookup.
+`Neo.getBuiltInModule(name)` returns `undefined` for every string name. A
+non-string name throws `TypeError`. The `Neo` object and the global property are
+frozen and non-writable, and the empty list is the same array for every lookup.
 
 ```js
 console.log(Neo.engine); // "neo-lite"
@@ -88,8 +88,9 @@ This crate does **not** claim parity with the V8-based `neojs`:
 * **No host asynchrony.** There are no timers or host Promise integration. A
   top-level `await` works only when QuickJS's own job queue can settle it.
 * **No built-in `neo:` modules.** Local ECMAScript files only. The `Neo`
-  global is introspection only: its list is empty and `getBuiltInModule`
-  returns `undefined` for every name.
+  global is introspection only: its list is empty,
+  `getBuiltInModule` returns `undefined` for every string name, and a
+  non-string name throws `TypeError`.
 * **No permissions or sandbox.** None are implemented.
 
 Both runtimes share `neojs-module-policy` for executable-extension decisions, so

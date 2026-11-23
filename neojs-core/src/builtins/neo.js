@@ -7264,9 +7264,8 @@
         return builtInModuleList;
     }
 
-    // The engine name is `neo` for this V8 runtime. The QuickJS runtime is
-    // `neo-lite`; it does not install this global yet and has no built-in
-    // modules to list.
+    // The engine name is `neo` for this V8 runtime. The QuickJS runtime reports
+    // `neo-lite` with an empty built-in module list.
     const engine = "neo";
 
     Object.defineProperty(globalThis, "Neo", {

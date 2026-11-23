@@ -89,6 +89,37 @@ if (list.length !== 0) throw new Error("the module list changed");
 }
 
 #[test]
+fn neo_lookup_uses_the_intrinsic_type_error_after_a_global_replacement() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "memory.js",
+            r#"
+const IntrinsicTypeError = TypeError;
+let substitutedCalls = 0;
+globalThis.TypeError = function (...args) {
+    substitutedCalls += 1;
+    return new IntrinsicTypeError(`substituted:${args.length}`);
+};
+
+let caught;
+try {
+    Neo.getBuiltInModule(1);
+} catch (error) {
+    caught = error;
+}
+
+if (substitutedCalls !== 0) throw new Error("the substituted TypeError ran");
+if (!(caught instanceof IntrinsicTypeError)) throw new Error("not the intrinsic TypeError");
+if (caught.message !== "module name must be a string") {
+    throw new Error(`message: ${caught.message}`);
+}
+"#,
+        )
+        .expect("intrinsic TypeError");
+}
+
+#[test]
 fn relative_static_imports_resolve_from_the_entry_file() {
     let dir = tempfile::tempdir().expect("temp dir");
     write(
