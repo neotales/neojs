@@ -28,15 +28,11 @@ fn expected_specifiers() -> String {
     if cfg!(feature = "neo-slices") {
         entries.push("neo:slices");
     }
-    entries.extend([
-        "neo:ssh",
-        "neo:stdio",
-        "neo:strings",
-        "neo:test",
-        "neo:uuid",
-        "neo:uuid/v4",
-        "neo:uuid/v7",
-    ]);
+    entries.extend(["neo:ssh", "neo:stdio"]);
+    if cfg!(feature = "neo-strings") {
+        entries.push("neo:strings");
+    }
+    entries.extend(["neo:test", "neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]);
     format!(
         "[{}]",
         entries

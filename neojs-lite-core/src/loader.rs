@@ -140,9 +140,9 @@ impl Resolver for FileResolver {
         // A shared built-in is a canonical `neo:` specifier. It is exact: the
         // shared crate does not accept a bare name, another scheme, a query, or
         // a fragment. Resolving to the same string gives the engine one module
-        // identity for static and dynamic imports. With `neo-chars` off the
-        // dependency is absent and this block is not compiled.
-        #[cfg(feature = "neo-chars")]
+        // identity for static and dynamic imports. With both module features
+        // off the dependency is absent and this block is not compiled.
+        #[cfg(any(feature = "neo-chars", feature = "neo-strings"))]
         if let Some(builtin) = neojs_builtins::module(name) {
             return Ok(builtin.specifier.to_owned());
         }
@@ -263,10 +263,28 @@ impl Loader for FileLoader {
 
         // A shared canonical module is a native QuickJS module. The module
         // declaration is the only interface; its evaluation exports the function
-        // objects created by `crate::chars`. No ECMAScript source is read.
-        #[cfg(feature = "neo-chars")]
-        if neojs_builtins::module(name).is_some() {
-            return Module::declare_def::<crate::chars::CharsModule, _>(ctx.clone(), name);
+        // objects created by the matching binding. No ECMAScript source is read.
+        #[cfg(any(feature = "neo-chars", feature = "neo-strings"))]
+        if let Some(builtin) = neojs_builtins::module(name) {
+            match builtin.specifier {
+                #[cfg(feature = "neo-chars")]
+                neojs_builtins::chars::SPECIFIER => {
+                    return Module::declare_def::<crate::chars::CharsModule, _>(ctx.clone(), name);
+                }
+                #[cfg(feature = "neo-strings")]
+                neojs_builtins::strings::SPECIFIER => {
+                    return Module::declare_def::<crate::strings::StringsModule, _>(
+                        ctx.clone(),
+                        name,
+                    );
+                }
+                _ => {
+                    return Err(Error::new_loading_message(
+                        name,
+                        "the shared built-in has no native binding in this build",
+                    ));
+                }
+            }
         }
         let path = Path::new(name);
         match module_format(path) {

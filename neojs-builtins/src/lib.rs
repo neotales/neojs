@@ -21,12 +21,13 @@
 //!
 //! # Module selection
 //!
-//! Every shared module has its own Cargo feature. `chars` is the first. The
-//! feature is off by default; a dependent that wants the module enables it.
-//! `neojs-core` and `neojs-lite-core` enable it in their default feature sets.
-//! Cargo features are additive and unify across the dependency graph, so a build
-//! that another dependent enables a module for contains that module. Selecting
-//! modules is compile-time surface selection, not a sandbox.
+//! Every shared module has its own Cargo feature. `chars` and `strings` are the
+//! current modules. The features are off by default; a dependent that wants a
+//! module enables it. `neojs-core` and `neojs-lite-core` enable them in their
+//! default feature sets. Cargo features are additive and unify across the
+//! dependency graph, so a build that another dependent enables a module for
+//! contains that module. Selecting modules is compile-time surface selection,
+//! not a sandbox.
 //!
 //! # Precise limits
 //!
@@ -63,14 +64,16 @@ pub struct BuiltinModule {
 
 #[cfg(feature = "chars")]
 pub mod chars;
+#[cfg(feature = "strings")]
+pub mod strings;
 
 /// Every shared module this build selected, in registration order.
-#[cfg(feature = "chars")]
-pub static MODULES: &[BuiltinModule] = &[chars::MODULE];
-
-/// Every shared module this build selected. Empty when no module feature is on.
-#[cfg(not(feature = "chars"))]
-pub static MODULES: &[BuiltinModule] = &[];
+pub static MODULES: &[BuiltinModule] = &[
+    #[cfg(feature = "chars")]
+    chars::MODULE,
+    #[cfg(feature = "strings")]
+    strings::MODULE,
+];
 
 /// Returns the shared module for a canonical specifier, or `None`.
 ///
@@ -91,7 +94,6 @@ mod tests {
     fn the_registry_is_canonical_and_exact() {
         #[cfg(feature = "chars")]
         {
-            assert_eq!(MODULES.len(), 1);
             assert_eq!(
                 module("neo:chars").map(|builtin| builtin.specifier),
                 Some("neo:chars")
@@ -100,15 +102,34 @@ mod tests {
             assert!(module("NEO:chars").is_none());
             assert!(module("neo:chars?x").is_none());
             assert!(module("neo:chars#x").is_none());
-            assert!(module("neo:strings").is_none());
             assert_eq!(chars::MODULE.specifier, "neo:chars");
             assert_eq!(chars::MODULE.backend, Backend::Rust);
         }
         #[cfg(not(feature = "chars"))]
         {
-            assert!(MODULES.is_empty());
             assert!(module("neo:chars").is_none());
         }
+
+        #[cfg(feature = "strings")]
+        {
+            assert_eq!(
+                module("neo:strings").map(|builtin| builtin.specifier),
+                Some("neo:strings")
+            );
+            assert!(module("strings").is_none());
+            assert!(module("NEO:strings").is_none());
+            assert!(module("neo:strings?x").is_none());
+            assert!(module("neo:strings#x").is_none());
+            assert_eq!(strings::MODULE.specifier, "neo:strings");
+            assert_eq!(strings::MODULE.backend, Backend::Rust);
+        }
+        #[cfg(not(feature = "strings"))]
+        {
+            assert!(module("neo:strings").is_none());
+        }
+
+        #[cfg(not(any(feature = "chars", feature = "strings")))]
+        assert!(MODULES.is_empty());
     }
 
     #[test]

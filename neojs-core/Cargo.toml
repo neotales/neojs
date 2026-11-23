@@ -9,16 +9,17 @@ rust-version.workspace = true
 authors.workspace = true
 
 [features]
-# A default V8 build keeps the existing surface: the native `neo:chars`
-# binding and `neo:slices`, which depends on it. `neo-slices` implies
-# `neo-chars` because `CharSlice` captures `chars.toUpper`/`chars.toLower`.
-# With default features off, both public modules, the native registration, the
-# registry entries, and the loader entries are absent. The `slices`
-# implementation is a separate file included only under `neo-slices`, so it is
-# not embedded in a disabled binary. Features are additive and unify across the
-# dependency graph; this is surface selection, not a sandbox.
-default = ["neo-chars", "neo-slices"]
-# The native `chars` binding and its bare/canonical V8 adapter. This enables
+# A default V8 build keeps the existing surface: the native `neo:chars` and
+# `neo:strings` bindings and `neo:slices`, which depends on `chars`.
+# `neo-slices` implies `neo-chars` because `CharSlice` captures
+# `chars.toUpper`/`chars.toLower`. With default features off, every public
+# module, the native registration, the registry entries, and the loader entries
+# are absent. The `slices` implementation is a separate file included only
+# under `neo-slices`, so it is not embedded in a disabled binary. Features are
+# additive and unify across the dependency graph; this is surface selection,
+# not a sandbox.
+default = ["neo-chars", "neo-slices", "neo-strings"]
+# The native `chars` binding and its canonical V8 registration. This enables
 # the optional `neojs-builtins` dependency and its `chars` module.
 neo-chars = ["dep:neojs-builtins", "neojs-builtins/chars"]
 # `slices` and its loader/registry entries. It cannot be built without `chars`:
@@ -28,6 +29,9 @@ neo-slices = ["neo-chars"]
 # when a runtime is created with `Runtime::with_node_compat`; the default V8
 # graph does not compile the Node adapter or its shared crate.
 node-compat = ["dep:neojs-node"]
+# The native `strings` binding and its canonical V8 registration. This enables
+# the optional `neojs-builtins` dependency and its `strings` module.
+neo-strings = ["dep:neojs-builtins", "neojs-builtins/strings"]
 # Test-only fault injection for the peer-close reply branch. Never enabled by a
 # normal build; `neojs` enables it only for its own dev/test targets.
 test-support = []

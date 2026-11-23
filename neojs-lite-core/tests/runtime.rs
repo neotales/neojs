@@ -30,18 +30,24 @@ console.log(value);
     runtime.run_file(&file).expect("run file");
 }
 
+fn expected_list() -> &'static str {
+    match (cfg!(feature = "neo-chars"), cfg!(feature = "neo-strings")) {
+        (true, true) => r#"["neo:chars", "neo:strings"]"#,
+        (true, false) => r#"["neo:chars"]"#,
+        (false, true) => r#"["neo:strings"]"#,
+        (false, false) => "[]",
+    }
+}
+
 #[cfg(feature = "neo-chars")]
 #[test]
 fn neo_reports_the_lite_engine_and_the_canonical_shared_module() {
     let mut runtime = Runtime::new().expect("runtime");
-    runtime
-        .run_source(
-            "memory.js",
-            r#"
+    let source = r#"
 const list = Neo.getBuiltInModulesList();
 if (Neo.engine !== "neo-lite") throw new Error(`engine: ${Neo.engine}`);
 if (!Array.isArray(list)) throw new Error("module list is not an array");
-if (JSON.stringify(list) !== JSON.stringify(["neo:chars"])) {
+if (JSON.stringify(list) !== JSON.stringify(__EXPECTED_LIST__)) {
     throw new Error(`unexpected module list: ${JSON.stringify(list)}`);
 }
 if (Neo.getBuiltInModulesList() !== list) {
@@ -95,9 +101,20 @@ try {
     mutationThrew = error instanceof TypeError;
 }
 if (!mutationThrew) throw new Error("a list mutation did not throw TypeError");
-if (list.length !== 1) throw new Error("the module list changed");
-"#,
-        )
+if (list.length !== __EXPECTED_LENGTH__) throw new Error("the module list changed");
+"#;
+    let source = source
+        .replace("__EXPECTED_LIST__", expected_list())
+        .replace(
+            "__EXPECTED_LENGTH__",
+            if cfg!(feature = "neo-strings") {
+                "2"
+            } else {
+                "1"
+            },
+        );
+    runtime
+        .run_source("memory.js", &source)
         .expect("Neo introspection");
 }
 
