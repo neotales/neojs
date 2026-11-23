@@ -221,6 +221,7 @@ git -C "$repo" add a
 git -C "$repo" commit -qm one
 rev=$(git -C "$repo" rev-parse HEAD)
 git clone -q "file://$repo" "$RUN/out/clone"
+write_git_config "$RUN/out/clone"
 expect_ok "git checkout at pinned commit verifies" verify_git_checkout "$RUN/out/clone" "$rev"
 printf 'b\n' >> "$RUN/out/clone/a"
 expect_fail "git checkout rejects modified tracked file" verify_git_checkout "$RUN/out/clone" "$rev"
@@ -231,13 +232,119 @@ rm -f "$RUN/out/clone/escape"
 printf 'extra\n' > "$RUN/out/clone/extra"
 expect_fail "git checkout rejects unexpected untracked file" verify_git_checkout "$RUN/out/clone" "$rev"
 expect_ok "git checkout allows an explicitly allowed untracked path" \
-    verify_git_checkout "$RUN/out/clone" "$rev" --allow-untracked extra
+    verify_git_checkout "$RUN/out/clone" "$rev" --allow-extra extra
 rm -f "$RUN/out/clone/extra"
 rm -f "$RUN/out/clone/a"
 expect_fail "git checkout rejects deleted tracked file" verify_git_checkout "$RUN/out/clone" "$rev"
 git -C "$RUN/out/clone" checkout -q -- a
 
+# --- ignored content, git config and hooks --------------------------------
+printf 'secret\n' > "$RUN/out/clone/secret"
+printf 'secret\n' >> "$RUN/out/clone/.git/info/exclude"
+expect_fail "git checkout rejects ignored extra file" verify_git_checkout "$RUN/out/clone" "$rev"
+rm -f "$RUN/out/clone/secret"
+printf '\n[include]\n\tpath = /etc/passwd\n' >> "$RUN/out/clone/.git/config"
+expect_fail "git checkout rejects include/url-rewrite config" verify_git_checkout "$RUN/out/clone" "$rev"
+write_git_config "$RUN/out/clone"
+printf '#!/bin/sh\nexit 0\n' > "$RUN/out/clone/.git/hooks/post-checkout"
+chmod 755 "$RUN/out/clone/.git/hooks/post-checkout"
+expect_fail "git checkout rejects executable hook" verify_git_checkout "$RUN/out/clone" "$rev"
+rm -f "$RUN/out/clone/.git/hooks/post-checkout"
+
+# --- materialisation from the commit tree ---------------------------------
+mrepo=$RUN/fixtures/mat
+git init -q "$mrepo"
+git -C "$mrepo" config user.email t@example.test
+git -C "$mrepo" config user.name test
+printf 'plain\n' > "$mrepo/plain"
+printf '#!/bin/sh\n' > "$mrepo/run"
+chmod 755 "$mrepo/run"
+ln -s plain "$mrepo/link"
+git -C "$mrepo" add plain run link
+git -C "$mrepo" commit -qm one
+mrev=$(git -C "$mrepo" rev-parse HEAD)
+write_git_config "$mrepo"
+if python3 "$SCRIPT_DIR/materialize_git_tree.py" "$mrepo" "$mrev" "$RUN/out/mat" --home "$ISO_HOME"; then
+    if [ "$(cat "$RUN/out/mat/plain")" = plain ] &&
+       [ -x "$RUN/out/mat/run" ] && [ "$(readlink "$RUN/out/mat/link")" = plain ]; then
+        ok "materialise writes exact content, exec bit and symlink"
+    else
+        notok "materialise content"
+    fi
+else
+    notok "materialise failed"
+fi
+# Materialise must refuse an escaping symlink in the commit.
+ln -s ../../etc/passwd "$mrepo/escape"
+git -C "$mrepo" add escape
+git -C "$mrepo" commit -qm escape
+erev=$(git -C "$mrepo" rev-parse HEAD)
+expect_fail "materialise refuses escaping symlink" \
+    python3 "$SCRIPT_DIR/materialize_git_tree.py" "$mrepo" "$erev" "$RUN/out/mat-escape" --home "$ISO_HOME"
+
+# --- verifier must not deadlock on an early stream mismatch ---------------
+big=$RUN/fixtures/bigrepo
+git init -q "$big"
+git -C "$big" config user.email t@example.test
+git -C "$big" config user.name test
+head -c 8388608 /dev/zero > "$big/big"
+git -C "$big" add big
+git -C "$big" commit -qm big
+brev=$(git -C "$big" rev-parse HEAD)
+write_git_config "$big"
+: > "$big/big"
+if command -v timeout >/dev/null 2>&1; then
+    set +e
+    timeout 10 python3 "$SCRIPT_DIR/verify_git_tree.py" "$big" "$brev" --home "$ISO_HOME" >/dev/null 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" = 124 ]; then notok "verifier deadlocked on stream mismatch"; else ok "verifier terminates on stream mismatch (exit $rc)"; fi
+else
+    ok "verifier deadlock test skipped (no timeout)"
+fi
+
+# --- tree digest includes modes -------------------------------------------
+mkdir -p "$RUN/out/modes/sub"
+printf 'x\n' > "$RUN/out/modes/sub/file"
+md1=$(tree_digest "$RUN/out/modes")
+chmod 755 "$RUN/out/modes/sub/file"
+md2=$(tree_digest "$RUN/out/modes")
+if [ "$md1" != "$md2" ]; then ok "tree digest changes on executable bit"; else notok "tree digest exec bit"; fi
+chmod 700 "$RUN/out/modes/sub"
+md3=$(tree_digest "$RUN/out/modes")
+if [ "$md2" != "$md3" ]; then ok "tree digest changes on directory mode"; else notok "tree digest dir mode"; fi
+
+# --- workspace patch serialisation ---------------------------------------
+cat > "$RUN/out/Cargo.toml" <<'EOF'
+[workspace]
+members = []
+
+[patch.crates-io]
+deno_core = { path = "vendor/deno_core" }
+EOF
+weird="$RUN/out/v8 \"quote\" \\slash
+newline"
+if python3 "$SCRIPT_DIR/patch_workspace.py" "$RUN/out/Cargo.toml" "$weird" >/dev/null 2>&1; then
+    if python3 - "$RUN/out/Cargo.toml" "$weird" <<'PY2'
+import sys, tomllib
+d = tomllib.load(open(sys.argv[1], "rb"))
+raise SystemExit(0 if d["patch"]["crates-io"]["v8"]["path"] == sys.argv[2] else 1)
+PY2
+    then ok "patch_workspace round-trips quotes, backslash and newline"
+    else notok "patch_workspace round-trip"
+    fi
+else
+    notok "patch_workspace failed on hostile path"
+fi
+printf '[workspace]\nmembers = []\n' > "$RUN/out/Cargo-no-patch.toml"
+expect_fail "patch_workspace fails when section is absent" \
+    python3 "$SCRIPT_DIR/patch_workspace.py" "$RUN/out/Cargo-no-patch.toml" /tmp/v8
+printf '[workspace]\nmembers = []\n\n[patch.crates-io]\nv8 = { path = "/tmp/old" }\n' > "$RUN/out/Cargo-dup.toml"
+expect_fail "patch_workspace refuses an existing v8 entry" \
+    python3 "$SCRIPT_DIR/patch_workspace.py" "$RUN/out/Cargo-dup.toml" /tmp/v8
+
 # --- env quoting -----------------------------------------------------------
+
 GN_BIN="$RUN/out/dir with space/gn \$dollar"
 CLANG_DIR="$RUN/out/clang 'quote'"
 WORK="$RUN/out/work dir"

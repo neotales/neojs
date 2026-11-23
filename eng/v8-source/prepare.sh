@@ -9,8 +9,10 @@
 # Security properties:
 #   * downloads use an isolated curl config: no ~/.curlrc, no netrc, no proxy
 #     environment, HTTPS only, no redirects, host allowlist;
-#   * git uses an isolated config: no system/global config, no credential
-#     helper or askpass, HTTPS only, redirects disabled;
+#   * git uses an isolated config: no system/global config, a controlled local
+#     config with no includes/remotes/url rewrite/hooks/fsmonitor, no credential
+#     helper or askpass, HTTPS only, redirects disabled; every fetch names the
+#     pinned URL explicitly;
 #   * archives are validated for traversal, escaping links, device members and
 #     duplicate/ancestor-symlink tricks before extraction;
 #   * extraction is staged under the cache and swapped in atomically; a tree
@@ -34,6 +36,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 VALIDATOR=$SCRIPT_DIR/validate_tar.py
 VERIFY_TREE=$SCRIPT_DIR/verify_git_tree.py
+MATERIALIZE=$SCRIPT_DIR/materialize_git_tree.py
 
 LIB_MODE=${V8_PREPARE_LIB:-0}
 VERIFY_ONLY=0
@@ -156,9 +159,11 @@ tree_digest() {
     (
         cd "$dir"
         {
+            find . -type d -printf 'D %m %p\n'
             find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum
-            find . -type l -printf 'L %p -> %l\n' | LC_ALL=C sort
-        } | sha256sum | cut -d' ' -f1
+            find . -type f -printf 'F %m %p\n'
+            find . -type l -printf 'L %m %p -> %l\n'
+        } | LC_ALL=C sort | sha256sum | cut -d' ' -f1
     )
 }
 
@@ -186,15 +191,61 @@ git_iso() {
         GIT_SSH_COMMAND=false GIT_ALLOW_PROTOCOL="$GIT_PROTOCOLS" \
         GIT_PROTOCOL_FROM_USER=0 GIT_OPTIONAL_LOCKS=0 \
         git --no-optional-locks \
-        -c credential.helper= -c core.askPass= -c http.followRedirects=false \
-        -c http.proxy= -c https.proxy= -c http.sslVerify=true \
-        -c protocol.version=2 "$@"
+        -c credential.helper= -c core.askPass= -c core.hooksPath=/nonexistent \
+        -c core.fsmonitor=false -c core.autocrlf=false -c core.safecrlf=false \
+        -c http.followRedirects=false -c http.proxy= -c https.proxy= \
+        -c http.sslVerify=true -c protocol.version=2 "$@"
+}
+
+check_git_url() {
+    local url=$1
+    case $url in
+        https://*)
+            local host=${url#https://}
+            host=${host%%/*}
+            case " $ALLOWED_GIT_HOSTS " in
+                *" $host "*) ;;
+                *) die "refusing unpinned git host: $host" ;;
+            esac
+            ;;
+        file://*) [ "$TEST_MODE" = 1 ] || die "refusing non-HTTPS git URL: $url" ;;
+        *) die "refusing git URL: $url" ;;
+    esac
+}
+
+git_config_content() {
+    printf '[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n'
+}
+
+write_git_config() {
+    local dir=$1
+    [ "$VERIFY_ONLY" = 0 ] || die "internal error: writing .git/config during verify-only"
+    git_config_content > "$dir/.git/config"
+    chmod 644 "$dir/.git/config"
+}
+
+verify_git_config() {
+    local dir=$1
+    [ -d "$dir/.git" ] || die "missing .git directory: $dir"
+    [ ! -L "$dir/.git" ] || die ".git is a symlink: $dir"
+    [ -f "$dir/.git/config" ] || die "missing .git/config: $dir"
+    [ ! -L "$dir/.git/config" ] || die ".git/config is a symlink: $dir"
+    cmp -s <(git_config_content) "$dir/.git/config" ||
+        die "unexpected .git/config (includes/url rewrites/remotes): $dir"
+    [ ! -e "$dir/.git/config.worktree" ] || die "unexpected .git/config.worktree: $dir"
+    if find "$dir/.git" -type l -print -quit | grep -q .; then
+        die "symlink inside .git: $dir"
+    fi
+    if find "$dir/.git/hooks" -type f -perm /111 ! -name '*.sample' -print -quit |
+        grep -q .; then
+        die "executable hook inside .git: $dir"
+    fi
 }
 
 verify_git_checkout() {
     local dir=$1 rev=$2
     shift 2
-    [ -d "$dir/.git" ] || die "not a git checkout: $dir"
+    verify_git_config "$dir"
     local head
     head=$(git_iso -C "$dir" rev-parse HEAD) || die "cannot read HEAD in $dir"
     [ "$head" = "$rev" ] || die "commit mismatch in $dir: got $head, want $rev"
@@ -276,30 +327,30 @@ fetch_commit() {
     local name=$1 url=$2 rev=$3
     shift 3
     local dir=$SRC/$name
-    if [ -d "$dir/.git" ] && [ "$(git_iso -C "$dir" rev-parse HEAD 2>/dev/null || true)" = "$rev" ]; then
-        verify_git_checkout "$dir" "$rev" "$@"
-        return 0
+    if [ -d "$dir/.git" ]; then
+        local err
+        if err=$( (verify_git_checkout "$dir" "$rev" "$@") 2>&1 ); then
+            return 0
+        fi
+        [ "$VERIFY_ONLY" = 0 ] ||
+            die "unverified git checkout: $dir @ $rev: ${err:-unknown error}"
     fi
     [ "$VERIFY_ONLY" = 0 ] || die "missing or unverified git checkout: $dir @ $rev"
-    case $url in
-        https://*)
-            local host=${url#https://}
-            host=${host%%/*}
-            case " $ALLOWED_GIT_HOSTS " in
-                *" $host "*) ;;
-                *) die "refusing unpinned git host: $host" ;;
-            esac
-            ;;
-        file://*) [ "$TEST_MODE" = 1 ] || die "refusing non-HTTPS git URL: $url" ;;
-        *) die "refusing git URL: $url" ;;
-    esac
+    check_git_url "$url"
     printf 'fetch %s @ %s\n' "$url" "$rev"
     quarantine "$dir"
     mkdir -p "$dir"
     git_iso -C "$dir" init -q
-    git_iso -C "$dir" remote add origin "$url"
-    git_iso -C "$dir" fetch -q --depth 1 origin "$rev"
-    git_iso -C "$dir" checkout -q FETCH_HEAD
+    write_git_config "$dir"
+    git_iso -C "$dir" fetch -q --no-tags --depth 1 "$url" "$rev"
+    local fetched
+    fetched=$(git_iso -C "$dir" rev-parse FETCH_HEAD) || die "cannot read FETCH_HEAD in $dir"
+    [ "$fetched" = "$rev" ] || die "fetched commit mismatch in $dir: got $fetched, want $rev"
+    git_iso -C "$dir" update-ref refs/heads/main "$rev"
+    git_iso -C "$dir" symbolic-ref HEAD refs/heads/main
+    env -i PATH="$PATH" HOME="$ISO_HOME" LC_ALL=C \
+        python3 "$MATERIALIZE" "$dir" "$rev" "$dir" --allow-existing-git --home "$ISO_HOME" ||
+        die "cannot materialise $rev into $dir"
     verify_git_checkout "$dir" "$rev" "$@"
 }
 
@@ -378,7 +429,7 @@ ensure_gn() {
     local stamp=$STAMPS/gn.stamp
     local dir=$GN_DIR
     if [ -d "$dir/.git" ]; then
-        verify_git_checkout "$dir" "$GN_REV"
+        verify_git_checkout "$dir" "$GN_REV" --allow-extra out/
     else
         [ "$VERIFY_ONLY" = 0 ] || die "missing GN checkout: $dir"
     fi
@@ -392,7 +443,8 @@ ensure_gn() {
     fi
     [ "$VERIFY_ONLY" = 0 ] || die "missing or unverified GN binary: $GN_BIN"
     if [ "$(git_iso -C "$dir" rev-parse --is-shallow-repository)" = true ]; then
-        git_iso -C "$dir" fetch -q --unshallow origin
+        check_git_url "$GN_URL"
+        git_iso -C "$dir" fetch -q --unshallow --tags "$GN_URL"
     fi
     (
         cd "$dir"
@@ -494,7 +546,7 @@ prepare() {
     ensure_rust_and_icu_checkouts
     ensure_toolchain
     ensure_clang
-    fetch_commit gn "$GN_URL" "$GN_REV" --allow-untracked out/
+    fetch_commit gn "$GN_URL" "$GN_REV" --allow-extra out/
     ensure_gn
     ensure_prepared
     write_env
@@ -508,7 +560,7 @@ verify_all() {
     ensure_rust_and_icu_checkouts
     ensure_toolchain
     ensure_clang
-    fetch_commit gn "$GN_URL" "$GN_REV" --allow-untracked out/
+    fetch_commit gn "$GN_URL" "$GN_REV" --allow-extra out/
     ensure_gn
     ensure_prepared
     verify_env

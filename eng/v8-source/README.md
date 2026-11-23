@@ -86,21 +86,18 @@ tree, use a scratch copy of the workspace; never edit the canonical checkout.
 cache=${NEOTALES_V8_CACHE:?}
 scratch=$(mktemp -d)
 tar -C . --exclude=.git --exclude=target -cf - . | tar -C "$scratch" -xf -
-python3 - "$scratch/Cargo.toml" "$cache/src/v8/v8-150.4.0" <<'PY'
-import pathlib, sys
-p, v8 = pathlib.Path(sys.argv[1]), sys.argv[2]
-s = p.read_text()
-s = s.replace("[patch.crates-io]",
-              '[patch.crates-io]\nv8 = { path = "%s" }' % v8, 1)
-p.write_text(s)
-PY
+eng/v8-source/patch_workspace.py "$scratch/Cargo.toml" "$cache/src/v8/v8-150.4.0"
 cd "$scratch"
 cargo build --release --offline
 ```
 
-This changes only the scratch copy's lock; Cargo reports that it is adding `v8`
-as a path package. `cargo metadata` on the scratch copy resolves
-`v8 v150.4.0` to `<cache>/src/v8/v8-150.4.0` with `source: null` (tested).
+`patch_workspace.py` requires `[patch.crates-io]` to exist, refuses an existing
+`v8` entry, serialises the path with `json.dumps` (JSON escapes are valid TOML
+basic-string escapes for quotes, backslashes and newlines), and re-parses the
+result with `tomllib` before writing. This changes only the scratch copy's lock;
+Cargo reports that it is adding `v8` as a path package. `cargo metadata` on the
+scratch copy resolves `v8 v150.4.0` to `<cache>/src/v8/v8-150.4.0` with
+`source: null` (tested).
 
 Two alternatives do **not** work and should not be used:
 
@@ -112,18 +109,22 @@ Two alternatives do **not** work and should not be used:
 ## Verification model
 
 - **Downloads**: SHA-256 and, where `DEPS` gives one, size.
-- **Git checkouts**: `HEAD` equals the pin, `git fsck` passes, and every
-  tracked file is compared byte-for-byte and mode-for-mode against the commit's
-  tree by `verify_git_tree.py`. The comparison uses `git ls-tree` and
-  `git cat-file`, not the index, so it is correct on a read-only checkout and
-  catches modified, deleted, extra and symlink-escaping content. Extra untracked
-  paths are rejected unless explicitly allowed (`gn/out/` only).
+- **Git checkouts**: the repository config is a controlled minimal file (no
+  includes, remotes, URL rewrites, hooks or fsmonitor); every fetch names the
+  pinned HTTPS URL explicitly, including `unshallow`. `HEAD` equals the pin,
+  `git fsck` passes, and every tracked file is compared byte-for-byte and
+  mode-for-mode against the commit's tree by `verify_git_tree.py`. The
+  comparison uses `git ls-tree` and `git cat-file`, not the index. Working trees
+  are materialised by `materialize_git_tree.py` from the commit tree, not
+  checked out: no index, filters or ignored content participate. Every extra
+  path is rejected, including ignored files; only `gn/out/` is allowed.
 - **Archives**: `validate_tar.py` rejects absolute paths, `..`, escaping
   symlinks and hardlinks, symlink/file ancestors, devices/fifos, duplicate
   members and setuid/setgid bits. Extraction is staged under the cache and
   swapped in atomically; modes and ownership are normalised.
-- **Extracted trees**: a content digest (file bytes plus link targets) is
-  recorded in `$CACHE/.stamps/`; a mismatch fails `--verify-only` and causes
+- **Extracted trees**: a digest over file bytes, symlink targets, directory
+  modes (including `.`) and each file's normalised executable bit is recorded
+  in `$CACHE/.stamps/`; a mismatch fails `--verify-only` and causes
   `prepare.sh` to re-extract from the verified archive. The old tree is moved
   to `.quarantine/`, not deleted.
 - **Prepared tree**: a digest covering the crate, Rust vendor tree, toolchain
@@ -141,31 +142,36 @@ Two alternatives do **not** work and should not be used:
 ### Read-only and no-exec proof
 
 `--verify-only` was run under bubblewrap with the whole filesystem read-only,
-the network unshared, and non-executable copies of `gn`, `rustc`, `cargo`,
-`clang` and `rustdoc` bind-mounted over the cached binaries:
+the network unshared, and an `LD_PRELOAD` guard that blocks `execve` of any path
+under the cache. Modes are not changed, so mode-aware digests remain valid.
 
 ```sh
+cc -shared -fPIC -o exec_guard.so exec_guard.c -ldl
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net \
-  --ro-bind <copy>/gn     "$CACHE/src/gn/out/gn" \
-  --ro-bind <copy>/rustc  "$CACHE/src/rust-toolchain/bin/rustc" \
-  --ro-bind <copy>/clang  "$CACHE/src/clang/bin/clang" \
-  --chdir <repo> --setenv NEOTALES_V8_CACHE "$CACHE" \
+  --chdir <repo> \
+  --setenv NEOTALES_V8_CACHE "$CACHE" \
+  --setenv LD_PRELOAD <abs>/exec_guard.so \
+  --setenv V8_EXEC_GUARD_ROOT "$CACHE" \
   eng/v8-source/prepare.sh --verify-only
 ```
 
-Result: exit 0, cache snapshot before/after identical, no network. If
-`--verify-only` had executed or written anything, the bind mounts would have
-failed it.
+The guard was checked to block a deliberate exec of `$CACHE/src/gn/out/gn`
+(exit 126). Result of the real run: exit 0, cache snapshot before/after
+identical, no network.
 
 ## Tests
 
-`eng/v8-source/test.sh` runs 34 deterministic tests with no network and no real
+`eng/v8-source/test.sh` runs 45 deterministic tests with no network and no real
 V8 inputs: hostile archives (traversal, absolute paths, escaping symlinks and
 hardlinks, symlink ancestors, fifo, setuid, duplicates), safe extraction,
-tamper detection, partial-extraction replacement, quarantine, content/tree
-digests, git content verification against a commit, environment quoting with
-spaces/dollars/quotes, isolated git/curl argument and environment checks, and a
-missing-cache `--verify-only` check that proves no directory is created.
+tamper detection, partial-extraction replacement, quarantine, content and
+mode-aware tree digests, git content verification against a commit, ignored
+file and `include` config rejection, executable-hook rejection, commit-tree
+materialisation including exec bits and escaping symlinks, a stream-mismatch
+deadlock test (`timeout 10`, exits 2), TOML path serialisation with quotes,
+backslash and newline, environment quoting with spaces/dollars/quotes, isolated
+git/curl argument and environment checks, and a missing-cache `--verify-only`
+check that proves no directory is created.
 
 Tamper tests against the real review cache:
 
@@ -174,6 +180,9 @@ Tamper tests against the real review cache:
 | prepared-tree ICU data | fails (`tree digest mismatch`) | rebuilds prepared tree, quarantines old |
 | pristine crate file | fails (`tree digest mismatch`) | re-extracts crate, rebuilds prepared tree |
 | toolchain file | fails (`tree digest mismatch`) | re-extracts toolchain, rebuilds prepared tree |
+| prepared-tree executable bit | fails (`tree digest mismatch`) | rebuilds prepared tree |
+| ignored file in Rust checkout | fails (`unverified git checkout`) | re-fetches and re-materialises |
+| `.git/config` `include` | fails (`unverified git checkout`) | re-fetches with controlled config |
 | environment file | fails (`stale or unquoted`) | rewrites it |
 
 ## Reproducibility
@@ -220,11 +229,12 @@ are not signature-verified by this script.
 | bash | 5.3.20 | `%q` escaping and process substitution are required. |
 | coreutils / findutils | 9.12 / 4.11 | `sha256sum`, `stat`, `realpath`, `readlink`, `cmp`, `find`, `xargs`, `sort`. |
 | tar / xz | 1.35 / 5.8.4 | Archives are opened by Python's `tarfile`, not by `tar`. |
-| python3 | 3.14.8 | Archive validation and git content verification. |
-| git | 2.56.0 | Isolated config; HTTPS only. |
+| python3 | 3.14.8 | Archive validation and git content verification. `patch_workspace.py` also needs `tomllib` (3.11+). |
+| git | 2.56.0 | Controlled local config; explicit HTTPS URL per fetch; no hooks. |
 | curl | 8.23.0 (OpenSSL 3.6.5) | Isolated config; no `.curlrc`, no netrc, no proxy, no redirects. |
 | ninja | 1.13.2 | Host tool. `v8/DEPS` pins CIPD `1.12.1.chromium.4`; this is the one unpinned host tool. |
-| C++ compiler | system clang++ 23.1.3 | Used only to build GN from source. |
+| C++ compiler | system clang++ 23.1.3 | Used only to build GN from source; also compiles the exec guard for the proof. |
+| timeout | GNU coreutils 9.12 | Deadlock test only. |
 | bubblewrap | 0.13.1 | Tests only. |
 
 The V8 build uses the cached Chromium clang and Chromium Rust toolchain, not the
@@ -250,6 +260,12 @@ isolated configuration and an empty home.
 - Git pins are SHA-1, not SHA-256.
 - Local tree stamps can be forged by anyone who can write the cache; they are
   drift detection, not signatures.
+- Cached working trees are materialised from the commit and must have exactly
+  the controlled `.git/config`; a cache written by an older version is
+  re-fetched. Escaping symlinks and gitlinks are rejected; the three pins
+  contain neither.
+- `patch_workspace.py` requires an existing `[patch.crates-io]` section and
+  refuses to add a second `v8` entry.
 - V8's and LLVM's license texts are absent from the archives.
 - Not verified in this review: Windows/macOS, musl, cross-compilation,
   pointer-compression, sandbox, or `v8_enable_v8_checks` variants. The native
