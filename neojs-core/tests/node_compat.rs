@@ -463,6 +463,40 @@ if (lengthReads !== 1) throw new Error(`length reads: ${lengthReads}`);
 }
 
 #[test]
+fn numeric_options_reject_coercing_objects_and_replaced_integer_checks() {
+    run(
+        policy(&["/bin/echo"]),
+        r#"
+import { spawnSync } from "node:child_process";
+Number.isInteger = () => true;
+let coerced = 0;
+let serialized = 0;
+const options = {
+    encoding: "utf8",
+    timeout: {
+        valueOf() { coerced += 1; return 1; },
+        toJSON() { serialized += 1; return "x".repeat(1000000); },
+    },
+    maxBuffer: {
+        valueOf() { coerced += 1; return 1024; },
+        toJSON() { serialized += 1; return "x".repeat(1000000); },
+    },
+};
+let code = null;
+try {
+    spawnSync("/bin/echo", ["x"], options);
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_INVALID_ARG_VALUE") throw new Error(`code: ${code}`);
+if (coerced !== 0) throw new Error(`coercion calls: ${coerced}`);
+if (serialized !== 0) throw new Error(`serialization calls: ${serialized}`);
+"#,
+    )
+    .expect("primitive numeric validation");
+}
+
+#[test]
 fn unsupported_asynchronous_forms_throw_instead_of_faking_a_promise() {
     run(
         policy(&[]),

@@ -37,6 +37,7 @@ pub const BRIDGE_SHIM: &str = r#"
     const create = Object.create;
     const setPrototypeOf = Object.setPrototypeOf;
     const isArray = Array.isArray;
+    const isInteger = Number.isInteger;
     const hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
     const record = () => create(null);
     const list = () => {
@@ -45,7 +46,7 @@ pub const BRIDGE_SHIM: &str = r#"
         return value;
     };
     Object.defineProperty(globalThis, "__neojsNodeChildProcess", {
-        value: Object.freeze({ runSync, stringify, record, list, isArray, hasOwn }),
+        value: Object.freeze({ runSync, stringify, record, list, isArray, isInteger, hasOwn }),
         writable: false,
         enumerable: false,
         configurable: false,

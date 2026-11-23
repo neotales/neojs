@@ -24,6 +24,7 @@ if (
     typeof bridge.record !== "function" ||
     typeof bridge.list !== "function" ||
     typeof bridge.isArray !== "function" ||
+    typeof bridge.isInteger !== "function" ||
     typeof bridge.hasOwn !== "function"
 ) {
     throw new Error("node:child_process is not installed in this runtime");
@@ -33,6 +34,7 @@ const stringify = bridge.stringify;
 const record = bridge.record;
 const list = bridge.list;
 const isArray = bridge.isArray;
+const isInteger = bridge.isInteger;
 const hasOwn = bridge.hasOwn;
 
 const SUPPORTED_OPTIONS = record();
@@ -188,13 +190,17 @@ function normalizeOptions(options) {
         normalized.input = inputOption;
     }
     if (timeoutOption !== undefined) {
-        if (!Number.isInteger(timeoutOption) || timeoutOption < 0) {
+        if (typeof timeoutOption !== "number" || !isInteger(timeoutOption) || timeoutOption < 0) {
             throw invalid("options.timeout must be a non-negative integer");
         }
         normalized.timeout = timeoutOption;
     }
     if (maxBufferOption !== undefined) {
-        if (!Number.isInteger(maxBufferOption) || maxBufferOption <= 0) {
+        if (
+            typeof maxBufferOption !== "number" ||
+            !isInteger(maxBufferOption) ||
+            maxBufferOption <= 0
+        ) {
             throw invalid("options.maxBuffer must be a positive integer");
         }
         normalized.maxBuffer = maxBufferOption;

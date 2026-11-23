@@ -52,6 +52,7 @@ fn bridge_shim(max_request_chars: usize) -> String {
     const create = Object.create;
     const setPrototypeOf = Object.setPrototypeOf;
     const isArray = Array.isArray;
+    const isInteger = Number.isInteger;
     const hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
     const max = {max_request_chars};
 
@@ -80,7 +81,7 @@ fn bridge_shim(max_request_chars: usize) -> String {
     }});
 
     defineProperty(globalThis, "{bridge_global}", {{
-        value: freeze({{ runSync, stringify, record, list, isArray, hasOwn }}),
+        value: freeze({{ runSync, stringify, record, list, isArray, isInteger, hasOwn }}),
         writable: false,
         enumerable: false,
         configurable: false,
