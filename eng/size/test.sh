@@ -8,7 +8,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
-size_require jq sha256sum bash git
+size_require jq sha256sum bash git mktemp
 
 ROOT=$(size_repo_root)
 mkdir -p "$ROOT/target/size/tmp"
@@ -206,8 +206,8 @@ printf '%s\n%s\n' "$VALID" "$DRIFT" >"$TMP/drift.jsonl"
 expect_validation_failure "same context with a different digest rejected" "$TMP/drift.jsonl"
 
 : >"$TMP/append.jsonl"
-size_append_record "$TMP/append.jsonl" "$VALID" "$TMP/append.lock" >"$TMP/append.log" 2>&1
-size_append_record "$TMP/append.jsonl" "$VALID" "$TMP/append.lock" >>"$TMP/append.log" 2>&1
+size_append_record "$TMP/append.jsonl" "$VALID" >"$TMP/append.log" 2>&1
+size_append_record "$TMP/append.jsonl" "$VALID" >>"$TMP/append.log" 2>&1
 if [ "$(wc -l <"$TMP/append.jsonl" | tr -d '[:space:]')" -eq 1 ]; then
     ok "second identical append is a no-op"
 else
@@ -216,7 +216,7 @@ fi
 assert_contains "$TMP/append.log" "already recorded" "idempotent append reports the existing key"
 
 RAW=$(fixture)
-size_append_record "$TMP/raw.jsonl" "$RAW" "$TMP/raw.lock" >/dev/null 2>"$TMP/raw.err"
+size_append_record "$TMP/raw.jsonl" "$RAW" >/dev/null 2>"$TMP/raw.err"
 if jq -e '.key and .context_key' "$TMP/raw.jsonl" >/dev/null 2>&1; then
     ok "append derives keys for a record that lacks them"
 else
@@ -229,7 +229,7 @@ SECOND=$(jq -c '
   | .artifact.bin = "neojs-lite"
   | .artifact.path = "neojs-lite"
 ' <<<"$VALID" | add_keys)
-size_append_record "$TMP/append.jsonl" "$SECOND" "$TMP/append.lock" >/dev/null 2>&1
+size_append_record "$TMP/append.jsonl" "$SECOND" >/dev/null 2>&1
 if [ "$(wc -l <"$TMP/append.jsonl" | tr -d '[:space:]')" -eq 2 ]; then
     ok "a different artifact appends"
 else
@@ -256,8 +256,8 @@ else
 fi
 
 DRIFT_LEDGER="$TMP/drift-append.jsonl"
-size_append_record "$DRIFT_LEDGER" "$VALID" "$TMP/drift.lock" >/dev/null 2>&1
-size_append_record "$DRIFT_LEDGER" "$DRIFT" "$TMP/drift.lock" >"$TMP/drift.log" 2>&1
+size_append_record "$DRIFT_LEDGER" "$VALID" >/dev/null 2>&1
+size_append_record "$DRIFT_LEDGER" "$DRIFT" >"$TMP/drift.log" 2>&1
 assert_contains "$TMP/drift.log" "not reproducing itself" "non-reproducible build is warned about"
 
 expect_status 0 "dry run succeeds" \

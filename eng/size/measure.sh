@@ -18,7 +18,7 @@ DEFAULT_LEDGER="$ROOT/eng/size/measurements.jsonl"
 DEFAULT_TARGET_DIR="$ROOT/target/size"
 TOOLCHAIN_FILE="$SCRIPT_DIR/toolchain"
 
-size_require jq sha256sum flock git cargo rustc cc c++
+size_require jq sha256sum flock git cargo rustc cc c++ realpath
 
 usage() {
     cat <<'USAGE'
@@ -406,7 +406,7 @@ record_missing() {
     if [ "$NO_RECORD" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
         printf '%s\n' "$record"
     else
-        size_append_record "$LEDGER" "$record" "$TARGET_DIR/ledger.lock"
+        size_append_record "$LEDGER" "$record"
     fi
 }
 
@@ -468,7 +468,7 @@ measure_package() {
     if [ "$NO_RECORD" -eq 1 ]; then
         printf '%s\n' "$record"
     else
-        size_append_record "$LEDGER" "$record" "$TARGET_DIR/ledger.lock"
+        size_append_record "$LEDGER" "$record"
     fi
 }
 

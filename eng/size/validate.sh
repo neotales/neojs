@@ -12,7 +12,7 @@ ROOT=$(size_repo_root)
 LEDGER="$ROOT/eng/size/measurements.jsonl"
 ALLOW_EMPTY=0
 
-size_require jq sha256sum
+size_require jq sha256sum mktemp
 
 usage() {
     cat <<'USAGE'

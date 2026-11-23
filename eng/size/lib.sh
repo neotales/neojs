@@ -332,7 +332,7 @@ size_record_errors() {
 size_validate_ledger() {
     local ledger=$1
     local allow_empty=${2:-0}
-    local line line_no=0 error key expected actual
+    local line line_no=0 error key expected actual context_key
     local keys_file errors=0
     local context_errors
 
@@ -413,7 +413,7 @@ size_validate_ledger() {
 }
 
 size_append_record() {
-    local ledger=$1 record=$2 lock=$3
+    local ledger=$1 record=$2
     local key context_key existing_key other_key errors
 
     # The keys are derived from the record, not supplied by the caller, so add
@@ -428,8 +428,11 @@ size_append_record() {
     errors=$(size_record_errors "$record")
     [ -z "$errors" ] || size_die "refusing to append an invalid record: $errors"
 
-    mkdir -p -- "$(dirname -- "$ledger")" "$(dirname -- "$lock")"
-    exec 200>"$lock"
+    mkdir -p -- "$(dirname -- "$ledger")"
+    # Lock the ledger itself. A lock file in a target directory would not
+    # exclude another run that chose a different target directory but the same
+    # ledger.
+    exec 200>>"$ledger"
     flock 200
     if [ -s "$ledger" ]; then
         jq -e . "$ledger" >/dev/null 2>&1 ||
@@ -449,7 +452,7 @@ size_append_record() {
             size_warn "same build context already recorded with a different digest ($other_key); this build is not reproducing itself and both measurements are being kept"
         fi
     fi
-    printf '%s\n' "$record" >>"$ledger"
+    printf '%s\n' "$record" >&200
     flock -u 200
     exec 200>&-
     printf 'size: recorded: %s\n' "$key"
