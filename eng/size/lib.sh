@@ -35,10 +35,35 @@ size_repo_root() {
 }
 
 # Fields that identify a measurement. Two records with the same key describe
-# the same artifact built from the same inputs, so re-running the same
-# measurement is a no-op instead of a duplicate line.
+# the same artifact built from the same inputs and measured the same way, so
+# re-running the same measurement is a no-op instead of a duplicate line.
+#
+# The key deliberately excludes notes, measured_at and the provenance labels:
+# relabelling where an operator-supplied archive came from does not change the
+# artifact. It also excludes the command string, which is a description of how
+# the script invoked Cargo and can change as the script evolves.
 size_record_key_filter() {
     cat <<'JQ'
+def build_controls:
+  {
+    profile: .build.profile,
+    requested_features: .build.requested_features,
+    requested_no_default_features: .build.requested_no_default_features,
+    effective_features: .build.effective_features,
+    effective_linker: .build.effective_linker,
+    offline: .build.offline,
+    locked: .build.locked,
+    cargo_lock_sha256: .build.cargo_lock_sha256,
+    workspace_path_sha256: .build.workspace_path_sha256,
+    cargo_config: .build.cargo_config,
+    env_overrides: .build.env_overrides,
+    target_specific_env: .build.target_specific_env,
+    v8_archive_status: .build.v8_archive_status,
+    v8_archive: (if .build.v8_archive == null then null else {
+      name: .build.v8_archive.name,
+      sha256: .build.v8_archive.sha256
+    } end)
+  };
 {
   schema,
   status,
@@ -50,33 +75,26 @@ size_record_key_filter() {
   },
   source: {
     git_commit: .source.git_commit,
-    git_dirty: .source.git_dirty
+    git_dirty: .source.git_dirty,
+    git_canonical: .source.git_canonical,
+    state_status: .source.state_status,
+    state_sha256: .source.state_sha256
   },
   platform: {
     target: .platform.target,
     host: .platform.host
   },
   toolchain: {
+    requested: .toolchain.requested,
     rustc: .toolchain.rustc,
     cargo: .toolchain.cargo,
     llvm: .toolchain.llvm,
     cc: .toolchain.cc,
     cxx: .toolchain.cxx
   },
-  build: {
-    profile: .build.profile,
-    features: .build.features,
-    no_default_features: .build.no_default_features,
-    offline: .build.offline,
-    cargo_lock_sha256: .build.cargo_lock_sha256,
-    workspace_path_sha256: .build.workspace_path_sha256,
-    v8_archive: (if .build.v8_archive == null then null else {
-      name: .build.v8_archive.name,
-      sha256: .build.v8_archive.sha256
-    } end),
-    env_overrides: .build.env_overrides
-  },
+  build: build_controls,
   measurement: {
+    method: (.measurement.method // null),
     bytes: (.measurement.bytes // null),
     sha256: (.measurement.sha256 // null)
   }
@@ -84,10 +102,58 @@ size_record_key_filter() {
 JQ
 }
 
-# Fields that identify the build context, without the measured bytes. A
-# second, different digest for the same context means the build is not
-# reproducing itself and is worth surfacing.
-size_context_key_filter() {
+# A strict comparison series: every documented control that can move the byte
+# count, but not the source commit or the measurement. Two records in one
+# series are directly comparable byte for byte.
+size_series_id_filter() {
+    cat <<'JQ'
+def build_controls:
+  {
+    profile: .build.profile,
+    requested_features: .build.requested_features,
+    requested_no_default_features: .build.requested_no_default_features,
+    effective_features: .build.effective_features,
+    effective_linker: .build.effective_linker,
+    offline: .build.offline,
+    locked: .build.locked,
+    cargo_lock_sha256: .build.cargo_lock_sha256,
+    workspace_path_sha256: .build.workspace_path_sha256,
+    cargo_config: .build.cargo_config,
+    env_overrides: .build.env_overrides,
+    target_specific_env: .build.target_specific_env,
+    v8_archive_status: .build.v8_archive_status,
+    v8_archive: (if .build.v8_archive == null then null else {
+      name: .build.v8_archive.name,
+      sha256: .build.v8_archive.sha256
+    } end)
+  };
+{
+  artifact: {
+    package: .artifact.package,
+    bin: .artifact.bin,
+    kind: .artifact.kind
+  },
+  platform: {
+    target: .platform.target,
+    host: .platform.host
+  },
+  toolchain: {
+    requested: .toolchain.requested,
+    rustc: .toolchain.rustc,
+    cargo: .toolchain.cargo,
+    llvm: .toolchain.llvm,
+    cc: .toolchain.cc,
+    cxx: .toolchain.cxx
+  },
+  build: build_controls
+}
+JQ
+}
+
+# A longitudinal family: the artifact the user meant to compare over time,
+# ignoring incidental build-environment changes. Deltas inside a family are
+# labelled strict or controls-differ in the trend report.
+size_family_id_filter() {
     cat <<'JQ'
 {
   artifact: {
@@ -95,33 +161,11 @@ size_context_key_filter() {
     bin: .artifact.bin,
     kind: .artifact.kind
   },
-  source: {
-    git_commit: .source.git_commit,
-    git_dirty: .source.git_dirty
-  },
-  platform: {
-    target: .platform.target,
-    host: .platform.host
-  },
-  toolchain: {
-    rustc: .toolchain.rustc,
-    cargo: .toolchain.cargo,
-    llvm: .toolchain.llvm,
-    cc: .toolchain.cc,
-    cxx: .toolchain.cxx
-  },
+  platform: { target: .platform.target },
   build: {
     profile: .build.profile,
-    features: .build.features,
-    no_default_features: .build.no_default_features,
-    offline: .build.offline,
-    cargo_lock_sha256: .build.cargo_lock_sha256,
-    workspace_path_sha256: .build.workspace_path_sha256,
-    v8_archive: (if .build.v8_archive == null then null else {
-      name: .build.v8_archive.name,
-      sha256: .build.v8_archive.sha256
-    } end),
-    env_overrides: .build.env_overrides
+    requested_features: .build.requested_features,
+    requested_no_default_features: .build.requested_no_default_features
   }
 }
 JQ
@@ -150,191 +194,55 @@ size_record_key() {
     jq -S -c "$(size_record_key_filter)" <<<"$1" | size_sha256_stream
 }
 
-size_context_key() {
-    jq -S -c "$(size_context_key_filter)" <<<"$1" | size_sha256_stream
+size_series_id() {
+    jq -S -c "$(size_series_id_filter)" <<<"$1" | size_sha256_stream
+}
+
+size_family_id() {
+    jq -S -c "$(size_family_id_filter)" <<<"$1" | size_sha256_stream
+}
+
+size_git_status_text() {
+    local root=$1 ledger=$2
+    local paths=(.) ledger_rel
+    ledger_rel=$(realpath -m --relative-to="$root" "$ledger" 2>/dev/null || true)
+    case "$ledger_rel" in
+        "" | /* | ../*) ;;
+        *) paths+=(":(exclude)$ledger_rel") ;;
+    esac
+    git -C "$root" status --porcelain -- "${paths[@]}"
+}
+
+size_git_status_sha256() {
+    printf '%s' "$(size_git_status_text "$1" "$2")" | size_sha256_stream
+}
+
+# Add the derived identity fields. Keys are derived from the record, never
+# accepted from the caller.
+size_finalize_record() {
+    local record=$1 key series_id family_id
+    key=$(size_record_key "$record") ||
+        size_die "could not derive a record key; the record is malformed"
+    series_id=$(size_series_id "$record") ||
+        size_die "could not derive a series id; the record is malformed"
+    family_id=$(size_family_id "$record") ||
+        size_die "could not derive a family id; the record is malformed"
+    jq -c --arg key "$key" --arg series_id "$series_id" --arg family_id "$family_id" \
+        'del(.context_key) | .series_id = $series_id | .family_id = $family_id | .key = $key' \
+        <<<"$record"
 }
 
 # Print one error per line for an invalid record, or nothing for a valid one.
 size_record_errors() {
-    jq -r '
-    def asstr: (. // "") | tostring;
-    def slug: test("^[a-z][a-z0-9_-]*$");
-    def triple: test("^[A-Za-z0-9_.-]+$");
-    def hex64: test("^[0-9a-f]{64}$");
-    def commit: test("^([0-9a-f]{40}|[0-9a-f]{64})$");
-    def iso: test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
-    def missing_reason: test("^[a-z0-9][a-z0-9-]*$");
-    def isint: (type == "number") and (. == floor);
-    try (
-    [
-      (if type != "object" then "record must be a JSON object" else empty end),
-      (if .schema != 1 then "schema must be 1" else empty end),
-      (if .status != "ok" and .status != "missing" then
-         "status must be \"ok\" or \"missing\""
-       else empty end),
-      (if (.artifact | type) != "object" then
-         "artifact must be an object"
-       elif (.artifact.package | asstr | slug | not) then
-         "artifact.package must be a lowercase package name"
-       else empty end),
-      (if (.artifact.bin | asstr | slug | not) then
-         "artifact.bin must be a lowercase binary name"
-       else empty end),
-      (if .artifact.kind != "release-binary" then
-         "artifact.kind must be \"release-binary\""
-       else empty end),
-      (if (.artifact.path | asstr | test("^[^/\\\\]+$") | not) then
-         "artifact.path must be a basename without a directory"
-       else empty end),
-      (if (.source | type) != "object" then
-         "source must be an object"
-       elif (.source.git_commit | asstr | commit | not) then
-         "source.git_commit must be a 40 or 64 character lowercase hex id"
-       else empty end),
-      (if (.source.git_dirty | type) != "boolean" then
-         "source.git_dirty must be a boolean"
-       else empty end),
-      (if (.source.git_branch | asstr | length) == 0 then
-         "source.git_branch must not be empty"
-       else empty end),
-      (if .source.kind != "tag" and .source.kind != "commit" then
-         "source.kind must be \"tag\" or \"commit\""
-       else empty end),
-      (if .source.measured_from != "worktree" then
-         "source.measured_from must be \"worktree\""
-       else empty end),
-      (if (.source.git_tags | type) != "array" then
-         "source.git_tags must be an array"
-       elif any(.source.git_tags[]; type != "string") then
-         "source.git_tags must contain only strings"
-       else empty end),
-      (if (.platform | type) != "object" then
-         "platform must be an object"
-       elif (.platform.target | asstr | triple | not) then
-         "platform.target must be a target triple"
-       else empty end),
-      (if (.platform.host | asstr | triple | not) then
-         "platform.host must be a target triple"
-       else empty end),
-      (if (.platform.os | asstr | length) == 0 then
-         "platform.os must not be empty"
-       else empty end),
-      (if (.platform.arch | asstr | length) == 0 then
-         "platform.arch must not be empty"
-       else empty end),
-      (if (.toolchain | type) != "object" then
-         "toolchain must be an object"
-       elif (.toolchain.requested | asstr | length) == 0 then
-         "toolchain.requested must not be empty"
-       else empty end),
-      (if (.toolchain.rustc | asstr | startswith("rustc ") | not) then
-         "toolchain.rustc must start with \"rustc \""
-       else empty end),
-      (if (.toolchain.cargo | asstr | startswith("cargo ") | not) then
-         "toolchain.cargo must start with \"cargo \""
-       else empty end),
-      (if (.build | type) != "object" then
-         "build must be an object"
-       elif .build.profile != "release" then
-         "build.profile must be \"release\""
-       else empty end),
-      (if (.build.features | type) != "array" then
-         "build.features must be an array"
-       elif any(.build.features[]; type != "string") then
-         "build.features must contain only strings"
-       else empty end),
-      (if (.build.no_default_features | type) != "boolean" then
-         "build.no_default_features must be a boolean"
-       else empty end),
-      (if (.build.env_overrides | type) != "object" then
-         "build.env_overrides must be an object"
-       elif any(.build.env_overrides[]; type != "string") then
-         "build.env_overrides must contain only string values"
-       else empty end),
-      (if (.build.offline | type) != "boolean" then
-         "build.offline must be a boolean"
-       else empty end),
-      (if .build.locked != true then
-         "build.locked must be true"
-       else empty end),
-      (if (.build.cargo_lock_sha256 | asstr | hex64 | not) then
-         "build.cargo_lock_sha256 must be a sha256"
-       else empty end),
-      (if (.build.workspace_path_sha256 | asstr | hex64 | not) then
-         "build.workspace_path_sha256 must be a sha256"
-       else empty end),
-      (if (.build.v8_archive | type) != "null" then
-         if (.build.v8_archive | type) != "object" then
-           "build.v8_archive must be null or an object"
-         elif (.build.v8_archive.name | asstr | test("^[^/\\\\]+$") | not) then
-           "build.v8_archive.name must be a basename"
-         elif (.build.v8_archive.sha256 | asstr | hex64 | not) then
-           "build.v8_archive.sha256 must be a sha256"
-         elif (.build.v8_archive.archive_sha256 != null and
-               (.build.v8_archive.archive_sha256 | asstr | hex64 | not)) then
-           "build.v8_archive.archive_sha256 must be a sha256 when present"
-         else empty end
-       else empty end),
-      (if .status == "ok" then
-         if (.build.command | asstr | length) == 0 then
-           "build.command must not be empty for a measured artifact"
-         elif (.build.command | contains("--release") | not) then
-           "build.command must contain --release"
-         elif (.build.command | contains("--locked") | not) then
-           "build.command must contain --locked"
-         elif (.build.command | contains("--target") | not) then
-           "build.command must contain --target"
-         else empty end
-       else empty end),
-      (if .status == "ok" then
-         if (.measurement | type) != "object" then
-           "measurement must be an object"
-         elif .measurement.method != "file-length-bytes" then
-           "measurement.method must be \"file-length-bytes\""
-         elif (.measurement.bytes | isint | not) then
-           "measurement.bytes must be an integer"
-         elif (.measurement.bytes <= 0) then
-           "measurement.bytes must be greater than zero"
-         elif (.measurement.sha256 | asstr | hex64 | not) then
-           "measurement.sha256 must be a sha256"
-         else empty end
-       else
-         if (.measurement | type) != "object" then
-           "measurement must be an object"
-         elif (.measurement.bytes != null or .measurement.sha256 != null) then
-           "a missing artifact must not have bytes or a sha256"
-         else empty end
-       end),
-      (if .status == "missing" then
-         if (.missing_reason | asstr | missing_reason | not) then
-           "missing_reason must be a lowercase reason"
-         else empty end
-       elif .missing_reason != null then
-         "missing_reason must be null for a measured artifact"
-       else empty end),
-      (if (.measured_at | asstr | iso | not) then
-         "measured_at must be UTC ISO-8601 with second precision"
-       else empty end),
-      (if (.notes | type) != "null" and (.notes | type) != "string" then
-         "notes must be null or a string"
-       else empty end),
-      (if (.key | asstr | hex64 | not) then
-         "key must be a sha256"
-       else empty end),
-      (if (.context_key | asstr | hex64 | not) then
-         "context_key must be a sha256"
-       else empty end)
-    ] | .[]
-    ) catch "record shape is invalid: \(.)"
-    ' <<<"$1"
+    jq -r -f "$(dirname -- "${BASH_SOURCE[0]}")/record_validate.jq" <<<"$1"
 }
 
 size_validate_ledger() {
     local ledger=$1
     local allow_empty=${2:-0}
-    local line line_no=0 error key expected actual context_key
-    local keys_file errors=0
-    local context_errors
+    local mode=${3:-strict}
+    local line line_no=0 error key expected series_id family_id
+    local keys_file errors=0 conflicts
 
     [ -f "$ledger" ] || size_die "ledger not found: $ledger"
     if [ ! -s "$ledger" ]; then
@@ -366,19 +274,27 @@ size_validate_ledger() {
         key=$(jq -r '.key // empty' <<<"$line")
         if [ -n "$key" ]; then
             expected=$(size_record_key "$line")
-            actual=$key
-            if [ "$expected" != "$actual" ]; then
+            if [ "$expected" != "$key" ]; then
                 printf 'size: %s:%d: key does not match record contents\n' \
                     "$ledger" "$line_no" >&2
                 errors=$((errors + 1))
             fi
-            printf '%s\n' "$actual" >>"$keys_file"
+            printf '%s\n' "$key" >>"$keys_file"
         fi
-        context_key=$(jq -r '.context_key // empty' <<<"$line")
-        if [ -n "$context_key" ]; then
-            expected=$(size_context_key "$line")
-            if [ "$expected" != "$context_key" ]; then
-                printf 'size: %s:%d: context_key does not match record contents\n' \
+        series_id=$(jq -r '.series_id // empty' <<<"$line")
+        if [ -n "$series_id" ]; then
+            expected=$(size_series_id "$line")
+            if [ "$expected" != "$series_id" ]; then
+                printf 'size: %s:%d: series_id does not match record contents\n' \
+                    "$ledger" "$line_no" >&2
+                errors=$((errors + 1))
+            fi
+        fi
+        family_id=$(jq -r '.family_id // empty' <<<"$line")
+        if [ -n "$family_id" ]; then
+            expected=$(size_family_id "$line")
+            if [ "$expected" != "$family_id" ]; then
+                printf 'size: %s:%d: family_id does not match record contents\n' \
                     "$ledger" "$line_no" >&2
                 errors=$((errors + 1))
             fi
@@ -394,19 +310,30 @@ size_validate_ledger() {
     fi
     rm -f "$keys_file"
 
-    context_errors=$(jq -s -r '
-      map(select(.status == "ok"))
-      | group_by(.context_key)
-      | map(select((map(.measurement.sha256) | unique | length) > 1))
-      | map("same build context has \(map(.measurement.sha256) | unique | length) artifact digests: \(.[0].artifact.package) \(.[0].platform.target) \(.[0].toolchain.rustc)")
-      | .[]
-    ' "$ledger" 2>/dev/null || true)
-    if [ -n "$context_errors" ]; then
-        while IFS= read -r error; do
-            [ -n "$error" ] || continue
-            printf 'size: %s: %s\n' "$ledger" "$error" >&2
-            errors=$((errors + 1))
-        done <<<"$context_errors"
+    if [ "$errors" -eq 0 ]; then
+        conflicts=$(jq -s -r '
+          map(select(.status == "ok"))
+          | group_by([
+              .series_id,
+              .source.git_commit,
+              .source.git_dirty,
+              (.source.state_sha256 // .source.state_status)
+            ])
+          | map(select((map(.measurement.sha256) | unique | length) > 1))
+          | map("conflicting digests for series \(.[0].series_id[0:12]) at commit \(.[0].source.git_commit[0:12]): \(map(.measurement.sha256[0:12]) | join(","))")
+          | .[]
+        ' "$ledger" 2>/dev/null || true)
+        if [ -n "$conflicts" ]; then
+            while IFS= read -r error; do
+                [ -n "$error" ] || continue
+                if [ "$mode" = "strict" ]; then
+                    printf 'size: %s: %s\n' "$ledger" "$error" >&2
+                    errors=$((errors + 1))
+                else
+                    size_warn "$error"
+                fi
+            done <<<"$conflicts"
+        fi
     fi
 
     [ "$errors" -eq 0 ] || size_die "$errors validation error(s) in $ledger"
@@ -414,16 +341,10 @@ size_validate_ledger() {
 
 size_append_record() {
     local ledger=$1 record=$2
-    local key context_key existing_key other_key errors
+    local key existing_key conflict_key errors series_id commit state
 
-    # The keys are derived from the record, not supplied by the caller, so add
-    # them before validating; size_record_errors checks both.
-    key=$(size_record_key "$record") ||
-        size_die "could not derive a record key; the record is malformed"
-    context_key=$(size_context_key "$record") ||
-        size_die "could not derive a context key; the record is malformed"
-    record=$(jq -c --arg key "$key" --arg context_key "$context_key" \
-        '.key = $key | .context_key = $context_key' <<<"$record")
+    record=$(size_finalize_record "$record")
+    key=$(jq -r '.key' <<<"$record")
 
     errors=$(size_record_errors "$record")
     [ -z "$errors" ] || size_die "refusing to append an invalid record: $errors"
@@ -435,9 +356,10 @@ size_append_record() {
     exec 200>>"$ledger"
     flock 200
     if [ -s "$ledger" ]; then
-        # Refuse to append to a ledger that is already invalid: an append must
-        # not deepen corruption or silently mix incompatible records.
-        size_validate_ledger "$ledger" 0
+        # Schema and integrity errors are fatal. Reproducibility conflicts are
+        # tolerated here and recorded: a conflicting measurement is evidence,
+        # and refusing it would hide the thing the ledger exists to show.
+        size_validate_ledger "$ledger" 0 allow-conflicts
         existing_key=$(jq -r --arg key "$key" 'select(.key == $key) | .key' \
             "$ledger" | head -n 1)
         if [ -n "$existing_key" ]; then
@@ -446,11 +368,23 @@ size_append_record() {
             exec 200>&-
             return 0
         fi
-        other_key=$(jq -r --arg context_key "$context_key" --arg key "$key" \
-            'select(.context_key == $context_key and .key != $key and .status == "ok") | .key' \
-            "$ledger" | head -n 1)
-        if [ -n "$other_key" ] && [ "$(jq -r '.status' <<<"$record")" = "ok" ]; then
-            size_warn "same build context already recorded with a different digest ($other_key); this build is not reproducing itself and both measurements are being kept"
+        if [ "$(jq -r '.status' <<<"$record")" = "ok" ]; then
+            series_id=$(jq -r '.series_id' <<<"$record")
+            commit=$(jq -r '.source.git_commit' <<<"$record")
+            state=$(jq -r '.source.state_sha256 // .source.state_status' <<<"$record")
+            conflict_key=$(jq -r --arg series_id "$series_id" --arg commit "$commit" \
+                --arg state "$state" --arg key "$key" '
+                  select(
+                    .status == "ok"
+                    and .series_id == $series_id
+                    and .source.git_commit == $commit
+                    and (.source.state_sha256 // .source.state_status) == $state
+                    and .key != $key
+                  ) | .key
+                ' "$ledger" | head -n 1)
+            if [ -n "$conflict_key" ]; then
+                size_warn "same strict series, commit and source state already recorded with a different digest ($conflict_key); recording the conflict instead of hiding or overwriting it"
+            fi
         fi
     fi
     printf '%s\n' "$record" >&200
@@ -461,58 +395,79 @@ size_append_record() {
 
 size_report_ledger() {
     local ledger=$1 mode=${2:-latest}
-    local jq_program
+    jq -r -s -f "$(dirname -- "${BASH_SOURCE[0]}")/report.jq" \
+        --arg mode "$mode" "$ledger" | column -t -s $'\t'
+}
 
-    if [ "$mode" = "all" ]; then
-        jq_program='
-          ["measured_at", "status", "source", "package", "target", "rustc", "features", "bytes", "sha256", "commit", "dirty", "tags"],
-          (.[] | [
-            .measured_at,
-            .status,
-            .source.kind,
-            .artifact.package,
-            .platform.target,
-            .toolchain.rustc,
-            (if (.build.features | length) == 0 then "-" else (.build.features | join(",")) end),
-            (if .measurement.bytes == null then "-" else (.measurement.bytes | tostring) end),
-            (if .measurement.sha256 == null then "-" else .measurement.sha256[0:12] end),
-            .source.git_commit[0:12],
-            (if .source.git_dirty then "yes" else "no" end),
-            (if (.source.git_tags | length) == 0 then "-" else (.source.git_tags | join(",")) end)
-          ])
-          | @tsv
-        '
-    else
-        jq_program='
-          ["measured_at", "status", "source", "package", "target", "rustc", "features", "bytes", "sha256", "commit", "dirty", "tags"],
-          (sort_by(.measured_at)
-           | group_by([
-               .artifact.package,
-               .platform.target,
-               .toolchain.rustc,
-               .build.profile,
-               (.build.features | sort),
-               .build.no_default_features
-             ])
-           | map(last)
-           | sort_by(.artifact.package, .platform.target, .toolchain.rustc)
-           | .[] | [
-               .measured_at,
-               .status,
-               .source.kind,
-               .artifact.package,
-               .platform.target,
-               .toolchain.rustc,
-               (if (.build.features | length) == 0 then "-" else (.build.features | join(",")) end),
-               (if .measurement.bytes == null then "-" else (.measurement.bytes | tostring) end),
-               (if .measurement.sha256 == null then "-" else .measurement.sha256[0:12] end),
-               .source.git_commit[0:12],
-               (if .source.git_dirty then "yes" else "no" end),
-               (if (.source.git_tags | length) == 0 then "-" else (.source.git_tags | join(",")) end)
-             ])
-          | @tsv
-        '
-    fi
+# Capture the Cargo configuration files that Cargo would read when run from
+# the workspace root: the workspace's .cargo, its ancestors, and CARGO_HOME.
+# Only scope labels and content hashes are recorded, never machine paths. An
+# empty list means "no config files found", not "config was ignored".
+size_cargo_config_json() {
+    local root=$1
+    local cargo_home=${CARGO_HOME:-$HOME/.cargo}
+    local entries_file
+    local files_json
 
-    jq -r -s "$jq_program" "$ledger" | column -t -s $'\t'
+    entries_file=$(mktemp "${TMPDIR:-/tmp}/neojs-size-cargo-config.XXXXXX")
+
+    add_cargo_config() {
+        local scope=$1 file=$2
+        [ -f "$file" ] || return 0
+        [ -r "$file" ] || size_die "Cargo config is not readable: $file"
+        printf '%s\t%s\n' "$scope" "$file" >>"$entries_file"
+    }
+
+    # CARGO_HOME first so it wins the de-duplication when it is also an
+    # ancestor of the workspace.
+    add_cargo_config "cargo-home" "$cargo_home/config.toml"
+    add_cargo_config "cargo-home" "$cargo_home/config"
+
+    local dir=$root depth=0 name file scope
+    while :; do
+        if [ "$dir" = "$root" ]; then
+            scope="workspace"
+        else
+            scope="ancestor-$depth"
+        fi
+        for name in config.toml config; do
+            file="$dir/.cargo/$name"
+            add_cargo_config "$scope" "$file"
+        done
+        [ "$dir" = "/" ] && break
+        dir=$(dirname -- "$dir")
+        depth=$((depth + 1))
+    done
+
+    # De-duplicate by resolved path, keeping the first scope label. Hash the
+    # content, not the path.
+    files_json=$(
+        awk -F $'\t' '!seen[$2]++' "$entries_file" |
+            while IFS=$'\t' read -r scope file; do
+                [ -n "$scope" ] || continue
+                printf '%s\t%s\n' "$scope" "$file"
+            done |
+            while IFS=$'\t' read -r scope file; do
+                jq -n --arg scope "$scope" \
+                    --arg sha256 "$(sha256sum "$file" | awk '{print $1}')" \
+                    '{scope: $scope, sha256: $sha256}'
+            done |
+            jq -s 'sort_by([.scope, .sha256])'
+    )
+    rm -f "$entries_file"
+    jq -n --argjson files "$files_json" '{status: "captured", files: $files}'
+}
+
+# Serialize build+measure for one target directory. The descriptor is global
+# to the calling shell; the lock is released when the shell exits.
+size_lock_target_dir() {
+    local lock=$1
+    mkdir -p -- "$(dirname -- "$lock")"
+    exec 201>"$lock"
+    flock 201
+}
+
+size_unlock_target_dir() {
+    flock -u 201
+    exec 201>&-
 }

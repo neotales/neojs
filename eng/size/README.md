@@ -18,7 +18,8 @@ before anyone quotes it.
 | Value | `st_size` of the executable Cargo wrote, in bytes. |
 | Digest | SHA-256 of the same file. |
 | Scope | On-disk executable, before stripping, compression, signing, packaging or installation. |
-| Source | A git commit, with `source.kind` `tag` or `commit`; `source.git_dirty` says whether the tree was clean. |
+| Source | A git commit, `source.kind` `tag` or `commit`, and the exact source state fingerprint. |
+| Canonical | `source.git_canonical` is true only for a clean tree. A dirty tree is refused unless `--allow-dirty` is passed, and then the record is explicitly non-canonical. |
 
 The measurement is deliberately not one of these:
 
@@ -27,35 +28,64 @@ The measurement is deliberately not one of these:
 - a peak RSS, a compressed archive, or an installed `.deb`/`.rpm` size;
 - a "typical" number averaged across machines.
 
-## What makes two numbers comparable
+## Comparison model
 
-Only records with the same **series** are comparable. The ledger stores every
-input that can move the byte count:
+There are two identifiers on every record:
 
-- `platform.target` and `platform.host` — a cross build is a different series;
-- `toolchain.rustc`, `toolchain.cargo`, `toolchain.llvm`, and the C/C++
-  compiler versions, because `neojs-lite` compiles QuickJS and `neojs` links
-  V8;
-- `build.features` and `build.no_default_features`;
-- `build.v8_archive` — the prebuilt V8 archive name, the SHA-256 of the
-  **decompressed** static library, and the SHA-256 of the supplied `.a.gz` as
-  provenance, when one is supplied **and the package's dependency graph reaches
-  V8**. The decompressed digest is the comparable input; the wrapper digest is
-  not part of the key, because two machines can gzip the same `.a` differently.
-  A `neojs-lite` record does not claim an archive its QuickJS build never read;
-- `build.cargo_lock_sha256` — the dependency graph;
+- **`series_id`** — the strict comparison series. It covers every documented
+  control that can move the byte count, but not the source commit and not the
+  measured bytes. Two records with the same `series_id` are directly
+  comparable.
+- **`family_id`** — the intended longitudinal artifact: binary, target,
+  profile, requested features. The trend report compares records in one family
+  even when a control changed, and labels the delta.
+
+### Strict series controls
+
+- `artifact.package`, `artifact.bin`, `artifact.kind`;
+- `platform.target` and `platform.host`;
+- `toolchain.requested`, `rustc`, `cargo`, `llvm`, `cc`, `cxx`;
+- `build.profile`;
+- `build.requested_features` and `build.requested_no_default_features`;
+- `build.effective_features` and `build.effective_linker` **status**. The
+  current implementation does not capture effective values; it records
+  `"status": "not-captured"` rather than claiming a feature set or linker it
+  did not observe;
+- `build.offline` and `build.locked`;
+- `build.cargo_lock_sha256`;
 - `build.workspace_path_sha256` — the build path, hashed. Rust embeds source
   paths in some strings, so two worktrees can differ by a few bytes even at the
-  same commit. The hash keeps two paths from being deduplicated as the same
-  measurement without putting a machine path in the ledger;
-- `build.env_overrides` — artifact-affecting variables that the operator
-  explicitly allowed.
+  same commit;
+- `build.cargo_config` — the discovered Cargo config files, by scope and
+  content hash only. A `not-captured` status means the record predates this
+  capture or the value was not observed; it is not treated as "no config";
+- `build.env_overrides` — artifact-affecting variables the operator explicitly
+  allowed, with values;
+- `build.target_specific_env` — `absent`, `captured` or `not-captured`, with
+  variable names;
+- `build.v8_archive_status` and, when supplied, the archive name and
+  decompressed content SHA-256.
 
-`source.git_commit` is the variable a time series is supposed to move. Every
-other input is a control. If a control changes, say so when comparing.
+`source.git_commit` is the variable a time series is supposed to move. The
+source state is recorded separately so a dirty tree is never confused with a
+clean commit. If a control changes, the trend report says which one.
 
-The first measurement in a series is the baseline. A later measurement is a
-delta only when the series fields above match.
+### Baseline honesty
+
+The first two records predate the schema-2 control capture. They are retained
+because their bytes and source commit are real, but they are explicitly
+relabelled:
+
+- `source.state_status: "not-captured"`, `state_sha256: null`;
+- `build.cargo_config.status: "not-captured"`;
+- `build.target_specific_env.status: "not-captured"`;
+- `build.effective_features.status: "not-captured"`;
+- `build.effective_linker.status: "not-captured"`;
+- the V8 archive is `supplied-provenance-unknown`, `authenticated: false`.
+
+They therefore form their own strict series. The trend report labels the
+control differences when it compares them with a later, fully captured record.
+No missing control was invented.
 
 ### Canonical series
 
@@ -69,6 +99,15 @@ eng/size/measure.sh --target x86_64-unknown-linux-gnu
 
 with a clean tree. That uses `cargo +1.100.0`, `--release --locked --offline`,
 and a dedicated target directory at `target/size/`.
+
+The default refuses a dirty tree because a dirty record is not attributable to
+the commit alone. `--allow-dirty` records it with
+`source.git_canonical: false`, and the report shows `canonical no`.
+
+The script fingerprints the source state before and after each build. If the
+commit or dirty-state hash changes while a build runs, the measurement is
+refused: a binary that cannot be attributed to the captured state is not
+recorded.
 
 For a claimed **release** measurement, check out the release tag, verify the
 tree is clean, and record the tag. A measurement from `dev` is a commit
@@ -92,17 +131,31 @@ eng/size/measure.sh --package neojs-lite \
     --target x86_64-unknown-linux-gnu \
     --features some,feature
 
-# Latest table, or the full history.
+# A non-canonical measurement from a dirty tree, explicitly labelled.
+eng/size/measure.sh --allow-dirty
+
+# Latest per strict series, longitudinal deltas, or raw history.
 eng/size/report.sh
+eng/size/report.sh --trend
 eng/size/report.sh --all
 ```
+
+A relative `--target-dir` or `--ledger` is resolved against the caller's
+working directory and then normalized to an absolute path.
 
 Exit status: `0` success, `1` configuration/build/validation error, `2` usage
 error, `3` a requested artifact is missing.
 
 Re-running an identical measurement is a no-op: `measure.sh` derives the record
-key from the artifact, source and all build controls, and exits `0` after
+key from the artifact, source state and all build controls, and exits `0` after
 reporting `already recorded`.
+
+### Build serialization
+
+Builds sharing a target directory are serialized with an inode lock at
+`<target-dir>/.size-build.lock`. A second measurement waits rather than compiling
+into the same directory concurrently. The lock is in the dedicated target
+directory and is never committed.
 
 ### Missing artifacts
 
@@ -121,15 +174,31 @@ binary. `--allow-missing` records the same explicit missing entry and exits `0`
 only when the caller has said the absence is expected. A missing record has no
 bytes and no digest; it is never a zero.
 
-### Offline builds
+### Build controls and unknowns
 
-Cargo is invoked with `--offline` by default. That flag does not stop a Cargo
-build script from downloading its own inputs, notably the prebuilt V8 archive.
-To keep a V8 build offline, set `RUSTY_V8_ARCHIVE` to a matching
-`librusty_v8_*.a.gz` file. The tracker records the archive basename, the
-decompressed content digest and the wrapper digest under `build.v8_archive`; it
-does not trust the filename alone. `--online` exists for a fresh CI cache, but
-it is opt-in and is recorded as `"offline": false`.
+- **Requested, not effective, features.** `requested_features` and
+  `requested_no_default_features` are what the command asked for. Effective
+  features and the effective linker are labelled `not-captured`; no claim is
+  made about them.
+- **Cargo config.** Files Cargo would read from the workspace, its ancestors and
+  `CARGO_HOME` are recorded by scope and content hash. Paths are not recorded.
+  A missing file list with `status: captured` means none were found.
+- **Target-specific environment.** `CARGO_TARGET_*` (except `CARGO_TARGET_DIR`,
+  which this tool owns) and `CARGO_PROFILE_*`/`CARGO_BUILD_*` variables are
+  refused unless `--allow-env-overrides` is passed, in which case their values
+  are recorded. The same applies to `RUSTFLAGS`, `RUSTDOCFLAGS`, compiler
+  variables, `V8_FROM_SOURCE`, `GN_ARGS` and similar inputs.
+- **V8 archive.** `RUSTY_V8_ARCHIVE` is recorded as
+  `supplied-provenance-unknown` with
+  `provenance: "operator-supplied-local-file"` and
+  `authenticated: false`. The content hash says which bytes were supplied; it
+  does **not** prove the archive is the official upstream artifact, that it was
+  authenticated, or that the build independently consumed it. When no archive
+  is supplied, the status is `not-supplied-not-captured` (V8 package) or
+  `not-applicable` (non-V8 package).
+- **Offline.** Cargo is invoked with `--offline` by default. That flag does not
+  stop a build script from downloading its own inputs. `--online` is opt-in and
+  recorded as `"offline": false`.
 
 ## Ledger
 
@@ -141,30 +210,35 @@ point of the record.
 Example (abridged; real records have every field):
 
 ```json
-{"schema":1,"status":"ok","artifact":{"package":"neojs","bin":"neojs","kind":"release-binary","path":"neojs"},"source":{"git_commit":"...","git_dirty":false,"git_tags":[],"kind":"commit"},"platform":{"target":"x86_64-unknown-linux-gnu","host":"x86_64-unknown-linux-gnu","os":"Linux","arch":"x86_64"},"toolchain":{"requested":"1.100.0","rustc":"rustc 1.100.0 (...)","cargo":"cargo 1.100.0 (...)","cc":"cc (GCC) 15.2.1"},"build":{"profile":"release","features":[],"no_default_features":false,"offline":true,"locked":true,"cargo_lock_sha256":"...","workspace_path_sha256":"...","v8_archive":null,"env_overrides":{}},"measurement":{"method":"file-length-bytes","bytes":12345678,"sha256":"..."},"missing_reason":null,"measured_at":"2026-11-22T00:00:00Z","notes":null,"key":"...","context_key":"..."}
+{"schema":2,"status":"ok","artifact":{"package":"neojs","bin":"neojs","kind":"release-binary","path":"neojs"},"source":{"git_commit":"...","git_dirty":false,"git_canonical":true,"git_tags":[],"kind":"commit","state_status":"captured","state_sha256":"..."},"platform":{"target":"x86_64-unknown-linux-gnu","host":"x86_64-unknown-linux-gnu","os":"Linux","arch":"x86_64"},"toolchain":{"requested":"1.100.0","rustc":"rustc 1.100.0 (...)","cargo":"cargo 1.100.0 (...)","cc":"cc (GCC) 16.2.1"},"build":{"profile":"release","requested_features":[],"requested_no_default_features":false,"effective_features":{"status":"not-captured"},"effective_linker":{"status":"not-captured"},"offline":true,"locked":true,"cargo_lock_sha256":"...","workspace_path_sha256":"...","cargo_config":{"status":"captured","files":[{"scope":"cargo-home","sha256":"..."}]},"env_overrides":{},"target_specific_env":{"status":"absent","names":[]},"v8_archive_status":"supplied-provenance-unknown","v8_archive":{"name":"...","sha256":"...","archive_sha256":"...","provenance":"operator-supplied-local-file","authenticated":false}},"measurement":{"method":"file-length-bytes","bytes":12345678,"sha256":"..."},"missing_reason":null,"measured_at":"2026-11-22T00:00:00Z","notes":null,"series_id":"...","family_id":"...","key":"..."}
 ```
 
 Rules:
 
 - **Generated, not typed.** `measure.sh` is the only writer; `validate.sh`
-  recomputes `key` and `context_key` from the record contents, so a hand edit
-  fails the check.
+  recomputes `key`, `series_id` and `family_id` from the record contents, so a
+  hand edit fails the check.
 - **Append-only.** Do not rewrite or delete history. A correction is a new
   record with a `note`; the report's latest-per-series view uses the newest.
+  The schema-1 baseline was relabelled once, before this branch was handed off,
+  because it predated the schema; no measured bytes, commit or timestamp moved.
 - **No binary artifacts.** The ledger is metadata. The executable stays in
   `target/`, which is gitignored. Do not attach or commit the binary.
-- **`key`** covers the artifact, source, controls and measured digest. It is
-  what makes the second identical run a no-op.
-- **`context_key`** covers the controls but not the measured digest. Two records
-  with one context and different digests mean the build is not reproducing
-  itself; the validator rejects that ledger until the cause is understood or a
-  missing control is recorded.
+- **`key`** covers the artifact, source state, controls and measured digest. It
+  is what makes the second identical run a no-op.
+- **`series_id`** covers the controls but not the source commit or measurement.
+  **`family_id`** covers the intended artifact family.
+- **Conflicts are evidence, not poison.** If one strict series, commit and
+  source state produce two different digests, the records are kept. Strict
+  `validate.sh` fails; `validate.sh --allow-conflicts` and `report.sh` still
+  work and mark the series `conflict yes`. `measure.sh` records a conflicting
+  measurement with a warning instead of hiding or overwriting it.
 - **The ledger is not a source change.** When the ledger is inside the
-  repository, it is excluded from the `git_dirty` decision; otherwise appending
-  the first measurement would make every later run look dirty and derive a new
-  key. Other modified or untracked files still mark the tree dirty.
-- **A `git_dirty: true` record is not a release measurement.** It is still a
-  real measurement of that tree, but the commit alone does not identify its
+  repository, it is excluded from the `git_dirty`/state fingerprint; otherwise
+  appending the first measurement would make every later run look dirty. Other
+  modified or untracked files still mark the tree dirty.
+- **A non-canonical record is not a release measurement.** It is still a real
+  measurement of that tree, but the commit alone does not identify its
   contents.
 
 Fields that are intentionally absent: absolute build paths, user names, host
@@ -179,17 +253,20 @@ eng/size/check.sh
 
 That runs:
 
-- `test.sh` — shell syntax, schema acceptance and rejection, key tampering,
-  duplicate keys, context drift, idempotent append, dry-run behaviour, missing
-  package handling, and report rendering, all in a temporary directory;
-- `validate.sh` — the committed ledger must parse, satisfy the schema, have
-  unique keys and reproducible contexts.
+- `test.sh` — shell syntax, schema acceptance and rejection, key/series/family
+  tampering, duplicate keys, provenance labels, conflict modes, target-directory
+  lock contention, relative target-dir normalization, dirty-tree refusal,
+  source-state change during build, Cargo config capture, environment override
+  refusal, missing package handling, dry-run behaviour, trend/report rendering,
+  and idempotent append, all in a temporary directory;
+- `validate.sh` — strict schema, integrity, unique keys and conflict detection
+  for the committed ledger.
 
-The suite does not build a binary, touch the network, or modify the ledger. Its
+The suite does not touch the network or modify the committed ledger. Its
 scratch files live under `target/size/tmp/`, not the shared system temporary
 directory. A measurement run is a separate, deliberate action.
 
-Lint the scripts separately when `shellcheck` is available:
+Lint the scripts separately:
 
 ```sh
 shellcheck -x -P eng/size eng/size/*.sh
@@ -201,7 +278,23 @@ For a local drill that exercises the whole path without writing:
 eng/size/measure.sh --dry-run      # command construction
 eng/size/measure.sh --no-record    # real build and measurement, printed only
 eng/size/validate.sh               # schema and integrity of the committed ledger
+eng/size/report.sh --trend         # longitudinal deltas and control changes
 ```
+
+## Platform requirements
+
+The tooling is written for GNU/Linux:
+
+- Bash 4+;
+- GNU coreutils (`realpath`, `sha256sum`, `mktemp`, `wc`, `sort`, `uniq`);
+- util-linux `flock`;
+- `jq` 1.6 or newer;
+- `gzip` when `RUSTY_V8_ARCHIVE` is used;
+- `rustup`, Cargo and the pinned Rust toolchain;
+- a C and C++ compiler for the C dependencies.
+
+macOS/BSD need GNU versions of these tools; the scripts do not claim to run
+there unchanged.
 
 ## Adding a platform or a package
 
@@ -209,21 +302,31 @@ eng/size/validate.sh               # schema and integrity of the committed ledge
   The target and host are recorded; do not compare it with the host series.
 - **Package:** pass `--package <name>`; it must be a workspace member with
   exactly one binary target. Multiple binary targets fail rather than guessing.
-  Features are recorded per measurement.
+  Requested features are recorded per measurement.
 
-A new series should start with a baseline record from a clean tree, so the first
+A new family should start with a baseline record from a clean tree, so the first
 delta has a known origin.
 
 ## Failure modes this is designed around
 
 - A green check that skipped Lite: missing artifacts are recorded and exit `3`.
+- Two runs compiling into one target directory: an inode lock serializes them.
+- A dirty tree presented as a canonical commit: refused, or explicitly
+  `canonical no` with `--allow-dirty`.
+- A build that changes the source state: detected by before/after fingerprints
+  and refused.
 - A number quoted without its target: the target is in every record and every
   report row.
 - A toolchain upgrade masquerading as a size regression: the toolchain is
-  pinned in `toolchain` and recorded.
-- A stale `Cargo.lock` or ambient `RUSTFLAGS`: refused, not silently attributed.
+  pinned in `toolchain` and recorded; the trend names the change.
+- A stale `Cargo.lock`, Cargo config, or ambient `RUSTFLAGS`: recorded if
+  captured or refused if not allowed, never silently attributed.
+- An archive hash mistaken for authentication: provenance is labelled
+  `operator-supplied-local-file`, `authenticated: false`.
+- Effective features or linker assumed from the command line: labelled
+  `not-captured`.
 - A duplicate entry after re-running: deduplicated by `key`.
-- A build that changes size without changing a recorded input: flagged by
-  `context_key` and rejected by the validator.
+- A conflicting rebuild poisoning the report: kept, marked, and still
+  reportable under `--allow-conflicts`.
 - A machine-specific binary in git: the ledger is JSONL and `target/` is
   ignored.
