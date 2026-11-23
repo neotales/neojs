@@ -13,6 +13,11 @@ use rquickjs::{
 
 use crate::loader::{FileLoader, FileResolver};
 
+#[cfg(feature = "node-compat")]
+type NodeConfig = neojs_lite_node::NodeOptions;
+#[cfg(not(feature = "node-compat"))]
+type NodeConfig = std::convert::Infallible;
+
 /// The most QuickJS jobs one entry may execute.
 ///
 /// QuickJS has no cancellation or fairness hook exposed by this binding. A
@@ -404,7 +409,45 @@ impl Runtime {
     /// built-ins. This performs no filesystem access. An error means QuickJS
     /// could not allocate its runtime or context, or a shim could not be
     /// installed.
+    ///
+    /// This constructor rejects every `node:` specifier. Use
+    /// [`Runtime::with_node_compat`] for the explicit Node opt-in.
     pub fn new() -> Result<Self, Error> {
+        Self::create(None)
+    }
+
+    /// Creates a QuickJS runtime with opt-in Node compatibility.
+    ///
+    /// The only implemented Node module is `node:child_process`, and only the
+    /// synchronous `spawnSync` and `execFileSync` functions are available, with
+    /// `encoding: "utf8"` required. The module is not added to the `Neo`
+    /// registry, has no bare or `neo:` alias, and is not substituted by any Neo
+    /// module. The default [`Runtime::new`] rejects every `node:` import. In
+    /// this opted-in runtime, a bare name that is a familiar Node module name is
+    /// rejected rather than resolved as a Neo module.
+    ///
+    /// A [`neojs_lite_node::ChildProcessPolicy`] starts with no allowed
+    /// programs, so importing the module is safe but every execution is denied.
+    /// The policy permits exact canonical executable paths only: there is no
+    /// `PATH` lookup, shell, inherited environment, or `stdio: inherit`, and
+    /// time, input, output, argument, and environment sizes are bounded.
+    ///
+    /// The host bridge is synchronous because this runtime has no host
+    /// asynchronous event loop. No asynchronous `ChildProcess` surface is
+    /// offered or imitated.
+    ///
+    /// This is **not a sandbox**. An allowed executable runs with the authority
+    /// of the neojs-lite process, including filesystem, network, and further
+    /// process creation permitted by the operating system. The timeout kills
+    /// the direct child only.
+    #[cfg(feature = "node-compat")]
+    pub fn with_node_compat(options: neojs_lite_node::NodeOptions) -> Result<Self, Error> {
+        Self::create(Some(options))
+    }
+
+    /// Builds a runtime, optionally installing the Node compatibility bridge.
+    fn create(node: Option<NodeConfig>) -> Result<Self, Error> {
+        let node_enabled = node.is_some();
         let runtime = rquickjs::Runtime::new().map_err(|error| Error::Init {
             message: error.to_string(),
         })?;
@@ -417,12 +460,17 @@ impl Runtime {
                     .record(&ctx, promise, reason, handled);
             },
         )));
-        runtime.set_loader(FileResolver, FileLoader);
+        runtime.set_loader(
+            FileResolver { node: node_enabled },
+            FileLoader { node: node_enabled },
+        );
         let context = Context::full(&runtime).map_err(|error| Error::Init {
             message: error.to_string(),
         })?;
+        #[cfg(not(feature = "node-compat"))]
+        let _ = node;
         context
-            .with(|ctx| -> rquickjs::Result<()> {
+            .with(move |ctx| -> rquickjs::Result<()> {
                 let write =
                     Function::new(ctx.clone(), |stream: String, text: String| {
                         match stream.as_str() {
@@ -433,6 +481,10 @@ impl Runtime {
                 ctx.globals().set("__neojsLiteWrite", write)?;
                 ctx.eval::<(), _>(CONSOLE_SHIM)?;
                 ctx.eval::<(), _>(NEO_SHIM)?;
+                #[cfg(feature = "node-compat")]
+                if let Some(options) = node {
+                    neojs_lite_node::install(&ctx, options)?;
+                }
                 #[cfg(test)]
                 install_test_gc(&ctx)?;
                 Ok(())

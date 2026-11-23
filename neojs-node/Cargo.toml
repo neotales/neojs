@@ -1,0 +1,14 @@
+[package]
+name = "neojs-node"
+description = "Opt-in Node compatibility adapter for the V8 neojs runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[dependencies]
+deno_core.workspace = true
+neojs-node-builtins = { version = "0.1.0", path = "../neojs-node-builtins" }

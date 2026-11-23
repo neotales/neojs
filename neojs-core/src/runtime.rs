@@ -139,13 +139,30 @@ pub struct Runtime {
     ops: Option<tokio::runtime::Runtime>,
 }
 
-/// Cumulative counts from the `test` built-in in one runtime.
+/// Whether a runtime was built with the Node compatibility opt-in.
 ///
-/// `total` counts executed tests, including pending ones. `passed`, `failed`,
-/// and `pending` partition it. `unhandled` is separate: it counts unhandled
-/// Promise rejections observed while the test module was active. A run is
-/// successful only when [`TestReport::all_passed`] is true, which requires no
-/// failure, no pending test, and no unhandled rejection.
+/// The options are present only when the crate's `node-compat` feature is
+/// compiled. A default build has `enabled == false` everywhere and never names
+/// the Node adapter.
+#[derive(Default)]
+struct NodeMode {
+    #[cfg_attr(not(feature = "node-compat"), allow(dead_code))]
+    enabled: bool,
+    #[cfg(feature = "node-compat")]
+    options: Option<neojs_node::NodeOptions>,
+}
+
+#[cfg(feature = "node-compat")]
+impl NodeMode {
+    fn enabled(options: neojs_node::NodeOptions) -> Self {
+        Self {
+            enabled: true,
+            options: Some(options),
+        }
+    }
+}
+
+/// Cumulative counts from the `test` built-in in one runtime.
 ///
 /// The counts are cumulative across explicit `run()` calls and the host's
 /// final call, so catching a failure from `run()` cannot hide it from the host.
@@ -337,6 +354,51 @@ impl Runtime {
         )
     }
 
+    /// Creates a local runtime with opt-in Node compatibility.
+    ///
+    /// This constructor is compiled only with the crate's `node-compat`
+    /// feature. It changes three things and nothing else:
+    ///
+    /// * the module loader accepts the exact specifier `node:child_process`;
+    /// * the runtime installs the synchronous `node:child_process` bridge;
+    /// * [`neojs_node::NodeOptions`] supplies the process policy.
+    ///
+    /// The default [`Runtime::new`] rejects every `node:` import with
+    /// "Node compatibility is disabled". Importing a Node module never consults
+    /// the `Neo` registry, never maps to a `neo:` module, and never accepts a
+    /// bare name such as `child_process`. In this opted-in runtime, a bare name
+    /// that is a familiar Node module name (for example `crypto`, `fs`, `os`, or
+    /// `path`) is rejected rather than resolved to the Neo module of that name;
+    /// use `neo:` for the Neo module.
+    ///
+    /// # Implemented surface
+    ///
+    /// Only `spawnSync` and `execFileSync` are implemented, and both require
+    /// `encoding: "utf8"`. The supported options are `cwd`, `env`, `input` (a
+    /// string), `timeout`, `maxBuffer`, and `encoding`. `spawn`, `exec`,
+    /// `execFile`, `execSync`, `fork`, and `ChildProcess` throw
+    /// `ERR_NODE_UNSUPPORTED`; no asynchronous form is faked.
+    ///
+    /// There is no shell, no `PATH` lookup, no inherited environment, no
+    /// `stdio: inherit`, and no detached process. A requested program must be an
+    /// absolute path whose canonical form is in the policy. The policy starts
+    /// empty, so importing the module is safe but every execution is denied
+    /// until the embedding application calls
+    /// [`neojs_node::ChildProcessPolicy::allow_program`].
+    ///
+    /// The op is synchronous: it blocks the isolate thread until the direct
+    /// child exits or the policy timeout kills it. A timeout or output overflow
+    /// returns partial output and an error flag. Descendants are not tracked.
+    ///
+    /// This is **not a sandbox**. An allowed program runs with the authority of
+    /// the neojs process, including filesystem, network, and further process
+    /// creation permitted by the operating system. The policy is a permission
+    /// gate and a resource bound, not containment.
+    #[cfg(feature = "node-compat")]
+    pub fn with_node_compat(options: neojs_node::NodeOptions) -> Result<Self, Error> {
+        Self::build_node(CONSOLE_SHIM, neo_shim(), options)
+    }
+
     /// Creates a runtime and installs the given shim scripts.
     ///
     /// [`Runtime::new`] passes the production shims. The parameters exist so a
@@ -349,7 +411,11 @@ impl Runtime {
     /// [`Runtime`]'s `Drop`, which does not block. Building the runtimes is the
     /// only failure before a `Runtime` exists.
     fn with_shims(console: &'static str, builtins: String) -> Result<Self, Error> {
-        Self::with_module_loader(console, builtins, Rc::new(FileModuleLoader::new(None)))
+        Self::with_module_loader(
+            console,
+            builtins,
+            Rc::new(FileModuleLoader::new(None, false)),
+        )
     }
 
     /// Creates a runtime with an explicit module loader.
@@ -362,7 +428,14 @@ impl Runtime {
         builtins: String,
         module_loader: Rc<dyn deno_core::ModuleLoader>,
     ) -> Result<Self, Error> {
-        Self::assemble(console, builtins, module_loader, None, None)
+        Self::assemble(
+            console,
+            builtins,
+            module_loader,
+            None,
+            None,
+            NodeMode::default(),
+        )
     }
 
     /// Creates a runtime with an optional remote client.
@@ -374,8 +447,38 @@ impl Runtime {
         builtins: String,
         remote: Option<RemoteClient>,
     ) -> Result<Self, Error> {
-        let loader = Rc::new(FileModuleLoader::new(remote.clone()));
-        Self::assemble(console, builtins, loader.clone(), Some(loader), remote)
+        let loader = Rc::new(FileModuleLoader::new(remote.clone(), false));
+        Self::assemble(
+            console,
+            builtins,
+            loader.clone(),
+            Some(loader),
+            remote,
+            NodeMode::default(),
+        )
+    }
+
+    /// Creates a local runtime with the explicit Node compatibility opt-in.
+    ///
+    /// The Node module registry is still separate from `Neo`: only the exact
+    /// `node:` specifiers are resolved, and only a runtime built through this
+    /// constructor has them. A default [`Runtime::new`] rejects every `node:`
+    /// import with a reason.
+    #[cfg(feature = "node-compat")]
+    fn build_node(
+        console: &'static str,
+        builtins: String,
+        options: neojs_node::NodeOptions,
+    ) -> Result<Self, Error> {
+        let loader = Rc::new(FileModuleLoader::new(None, true));
+        Self::assemble(
+            console,
+            builtins,
+            loader.clone(),
+            Some(loader),
+            None,
+            NodeMode::enabled(options),
+        )
     }
 
     /// Builds the runtimes, isolate, extensions, and shims.
@@ -385,7 +488,10 @@ impl Runtime {
         module_loader: Rc<dyn deno_core::ModuleLoader>,
         loader: Option<Rc<FileModuleLoader>>,
         remote: Option<RemoteClient>,
+        node: NodeMode,
     ) -> Result<Self, Error> {
+        #[cfg(not(feature = "node-compat"))]
+        let _ = &node;
         let driver = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             // Bounded pool for `neo:crypto` asynchronous hashing and password
@@ -429,6 +535,10 @@ impl Runtime {
         extensions.push(crate::cron::test_support_extension());
         #[cfg(feature = "test-support")]
         extensions.push(crate::crypto_hash::test_support_extension());
+        #[cfg(feature = "node-compat")]
+        if let Some(options) = node.options.clone() {
+            extensions.push(neojs_node::extension(options));
+        }
         let redactions = remote.as_ref().map(RemoteClient::redactions);
         let js = {
             let _guard = driver.enter();
@@ -455,6 +565,11 @@ impl Runtime {
             .map_err(|error| Error::Core(error.into()))?;
         js.execute_script("<neojs:builtins>", builtins)
             .map_err(|error| Error::Core(error.into()))?;
+        #[cfg(feature = "node-compat")]
+        if node.enabled {
+            js.execute_script("<neojs:node>", neojs_node::BRIDGE_SHIM)
+                .map_err(|error| Error::Core(error.into()))?;
+        }
         Ok(runtime)
     }
 

@@ -7570,7 +7570,7 @@
      * `uuid/v4` and `uuid/v7` subpaths and both spellings of every module are
      * present. The array is frozen and the same array is returned for every
      * call, so a caller cannot change later results. It lists no Node modules:
-     * a `node:` opt-in is not implemented.
+     * Node support is a separate opt-in and never enters this registry.
      */
     function getBuiltInModulesList() {
         return builtInModuleList;

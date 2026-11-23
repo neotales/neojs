@@ -355,8 +355,8 @@ const STRINGS_MODULE: &str = include_str!("builtins/strings.esm.js");
 ///
 /// Both `"test"` and `"neo:test"` resolve to this URL, so the engine caches one
 /// module instance for both spellings. It is not a `file:` URL and is never
-/// read from disk. `node:test` is deliberately not an alias while neojs has no
-/// explicit Node-module opt-in.
+/// read from disk. `node:test` is deliberately not an alias, even when the
+/// separate Node compatibility opt-in is enabled.
 pub(crate) const TEST_SPECIFIER: &str = "neo:test";
 
 /// The ECMAScript module source served for [`TEST_SPECIFIER`].

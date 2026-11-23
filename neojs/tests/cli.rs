@@ -1691,7 +1691,8 @@ the user cache.
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
 runtime. There is no default discovery, and a file that registers no tests fails.
 Remote loading follows the flag or setting for every selected file.
-Node modules (`node:`) are rejected; there is no Node-module opt-in.
+Node modules (`node:`) are rejected; this command does not expose a Node-module
+opt-in.
 
 Exit codes:
   0  the module finished, or every test file passed
@@ -3578,7 +3579,7 @@ fn test_command_rejects_node_test_without_an_opt_in() {
     assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
     let message = stderr(&output);
     assert!(
-        message.contains("Node.js built-in modules are not implemented"),
+        message.contains("Node compatibility is disabled"),
         "{message}"
     );
     assert!(message.contains("node:test"), "{message}");

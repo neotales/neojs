@@ -10,6 +10,10 @@ authors.workspace = true
 
 [features]
 default = []
+# Opt-in Node compatibility. It adds `node:child_process` to the loader only
+# when a runtime is created with `Runtime::with_node_compat`; the default V8
+# graph does not compile the Node adapter or its shared crate.
+node-compat = ["dep:neojs-node"]
 # Test-only fault injection for the peer-close reply branch. Never enabled by a
 # normal build; `neojs` enables it only for its own dev/test targets.
 test-support = []
@@ -26,6 +30,7 @@ getrandom.workspace = true
 hmac.workspace = true
 httpdate.workspace = true
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
+neojs-node = { version = "0.1.0", path = "../neojs-node", optional = true }
 neotales-age.workspace = true
 neotales-ssh.workspace = true
 pbkdf2.workspace = true

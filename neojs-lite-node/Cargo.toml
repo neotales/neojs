@@ -1,0 +1,16 @@
+[package]
+name = "neojs-lite-node"
+description = "Opt-in Node compatibility adapter for the QuickJS NeoJS Lite runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[dependencies]
+neojs-node-builtins = { version = "0.1.0", path = "../neojs-node-builtins" }
+# Pinned for the same reason as neojs-lite-core: the C API and Rust API change
+# between minor releases. 0.14.0 is the reviewed version in this workspace.
+rquickjs = { version = "=0.14.0", default-features = false, features = ["loader", "std"] }

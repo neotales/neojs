@@ -9,8 +9,15 @@ rust-version.workspace = true
 authors.workspace = true
 readme = "README.md"
 
+[features]
+default = []
+# Opt-in Node compatibility. It is compiled only when this feature is enabled
+# and is installed only by `Runtime::with_node_compat`.
+node-compat = ["dep:neojs-lite-node"]
+
 [dependencies]
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
+neojs-lite-node = { version = "0.1.0", path = "../neojs-lite-node", optional = true }
 # Pinned: the C API and Rust API change between minor releases. 0.14.0 is the
 # version reviewed for this crate; `loader` supplies the module resolver and
 # loader traits, and `std` supplies filesystem resolution helpers.

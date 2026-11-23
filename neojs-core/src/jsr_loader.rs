@@ -161,7 +161,7 @@ impl JsrModuleLoader {
         Self {
             registry,
             limits,
-            files: FileModuleLoader::new(None),
+            files: FileModuleLoader::new(None, false),
             packages: RefCell::new(BTreeMap::new()),
             versions: RefCell::new(BTreeMap::new()),
             graph: RefCell::new(GraphState::default()),

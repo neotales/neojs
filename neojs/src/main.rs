@@ -458,7 +458,8 @@ the user cache.
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
 runtime. There is no default discovery, and a file that registers no tests fails.
 Remote loading follows the flag or setting for every selected file.
-Node modules (`node:`) are rejected; there is no Node-module opt-in.
+Node modules (`node:`) are rejected; this command does not expose a Node-module
+opt-in.
 
 Exit codes:
   0  the module finished, or every test file passed

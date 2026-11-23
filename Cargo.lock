@@ -2060,6 +2060,7 @@ dependencies = [
  "hmac",
  "httpdate",
  "neojs-module-policy",
+ "neojs-node",
  "neotales-age",
  "neotales-ssh",
  "pbkdf2",
@@ -2100,11 +2101,20 @@ dependencies = [
 name = "neojs-lite-core"
 version = "0.1.0"
 dependencies = [
+ "neojs-lite-node",
  "neojs-module-policy",
  "rquickjs",
  "tempfile",
  "thiserror",
  "url",
+]
+
+[[package]]
+name = "neojs-lite-node"
+version = "0.1.0"
+dependencies = [
+ "neojs-node-builtins",
+ "rquickjs",
 ]
 
 [[package]]
@@ -2122,6 +2132,24 @@ dependencies = [
 [[package]]
 name = "neojs-module-policy"
 version = "0.1.0"
+
+[[package]]
+name = "neojs-node"
+version = "0.1.0"
+dependencies = [
+ "deno_core",
+ "neojs-node-builtins",
+]
+
+[[package]]
+name = "neojs-node-builtins"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "neotales-age"

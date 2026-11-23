@@ -1,0 +1,18 @@
+[package]
+name = "neojs-node-builtins"
+description = "Engine-neutral, opt-in Node built-in policy and synchronous child_process core for NeoJS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

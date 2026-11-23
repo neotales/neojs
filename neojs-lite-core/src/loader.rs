@@ -4,6 +4,12 @@
 //! also the module identity. The loader accepts only formats that QuickJS can
 //! execute: `.js`, `.mjs`, and names without an extension. The format decision
 //! comes from `neojs-module-policy`, the same policy the V8 runtime uses.
+//!
+//! With the off-by-default `node-compat` feature, a runtime built with
+//! `Runtime::with_node_compat` also resolves the exact `node:child_process`
+//! specifier to a built-in module source. That source is never read from disk,
+//! has no bare or `neo:` alias, and is not added to the `Neo` registry. A
+//! default runtime rejects every `node:` specifier.
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +24,30 @@ use url::Url;
 const BARE_SPECIFIER_REASON: &str = "bare module specifiers are not implemented in neojs-lite; use a relative path, an absolute path, or a file: URL";
 const TYPE_ATTRIBUTE_REASON: &str =
     "import attributes are not implemented; neojs-lite loads ECMAScript modules only";
+
+/// Returns the default-runtime rejection, naming the requested module.
+fn node_disabled(specifier: &str) -> String {
+    format!(
+        "Node compatibility is disabled for `{specifier}`; create the runtime with Runtime::with_node_compat and an explicit process policy"
+    )
+}
+
+/// Returns why an unsupported Node specifier is not resolved.
+///
+/// With the feature enabled, the shared crate owns the supported set. Without
+/// it, the same message is produced locally so a default runtime never points a
+/// Node specifier at a Neo module.
+#[cfg(feature = "node-compat")]
+fn node_unsupported(specifier: &str) -> String {
+    neojs_lite_node::unsupported_module_reason(specifier)
+}
+
+#[cfg(not(feature = "node-compat"))]
+fn node_unsupported(specifier: &str) -> String {
+    format!(
+        "the Node module `{specifier}` is not implemented; supported Node modules: node:child_process"
+    )
+}
 
 /// Rejects any non-empty import attribute bag.
 ///
@@ -45,11 +75,19 @@ fn reject_attributes(
 /// Resolves relative paths, absolute paths, and `file:` URLs to one canonical
 /// absolute path.
 ///
+/// With the `node-compat` feature, a resolver built for an opted-in runtime
+/// also accepts the exact `node:child_process` specifier. A resolver built for a
+/// default runtime rejects every `node:` specifier with a reason. A bare Node
+/// name is never accepted, even when the feature is enabled.
+///
 /// The canonical path is the module identity, so the same file reached by two
 /// spellings is evaluated once. Bare specifiers and every other URL scheme are
 /// rejected with a reason. The returned name is always valid UTF-8 because
 /// QuickJS module names are strings.
-pub(super) struct FileResolver;
+pub(super) struct FileResolver {
+    /// Whether this resolver belongs to a runtime built with Node compatibility.
+    pub(super) node: bool,
+}
 
 impl Resolver for FileResolver {
     fn resolve<'js>(
@@ -60,6 +98,40 @@ impl Resolver for FileResolver {
         attributes: Option<ImportAttributes<'js>>,
     ) -> Result<String> {
         reject_attributes(base, name, attributes)?;
+        if name == "node:child_process" {
+            if self.node {
+                return Ok(name.to_owned());
+            }
+            return Err(Error::new_resolving_message(
+                base,
+                name,
+                node_disabled(name),
+            ));
+        }
+        if name.starts_with("node:") {
+            if self.node {
+                return Err(Error::new_resolving_message(
+                    base,
+                    name,
+                    node_unsupported(name),
+                ));
+            }
+            return Err(Error::new_resolving_message(
+                base,
+                name,
+                node_disabled(name),
+            ));
+        }
+        #[cfg(feature = "node-compat")]
+        if self.node && neojs_lite_node::is_known_node_bare_name(name) {
+            return Err(Error::new_resolving_message(
+                base,
+                name,
+                format!(
+                    "Node built-in modules must use the `node:` prefix; `{name}` is not resolved as a Node or Neo module"
+                ),
+            ));
+        }
         let path = candidate_path(base, name)?;
         let canonical = std::fs::canonicalize(&path).map_err(|error| {
             Error::new_resolving_message(
@@ -141,7 +213,16 @@ fn is_windows_drive_path(specifier: &str) -> bool {
 /// TypeScript is classified by the shared policy and rejected here because this
 /// runtime has no type stripper. Every unsupported extension carries the shared
 /// policy's reason. Read errors name the resolved module.
-pub(super) struct FileLoader;
+///
+/// A loader built for an opted-in runtime serves the exact
+/// `node:child_process` source from `neojs-lite-node`. It never reads that
+/// module from disk. A default loader rejects every `node:` name before this
+/// point, and this loader re-checks the opt-in rather than trusting the
+/// resolver alone.
+pub(super) struct FileLoader {
+    /// Whether this loader belongs to a runtime built with Node compatibility.
+    pub(super) node: bool,
+}
 
 impl Loader for FileLoader {
     fn load<'js>(
@@ -150,6 +231,26 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
+        if name == "node:child_process" {
+            if !self.node {
+                return Err(Error::new_loading_message(name, node_disabled(name)));
+            }
+            #[cfg(feature = "node-compat")]
+            if let Some(source) = neojs_lite_node::module_source(name) {
+                return Module::declare(ctx.clone(), name, source.as_bytes().to_vec());
+            }
+            #[cfg(not(feature = "node-compat"))]
+            return Err(Error::new_loading_message(
+                name,
+                "the Node compatibility adapter is not compiled into this neojs-lite-core",
+            ));
+            #[cfg(feature = "node-compat")]
+            return Err(Error::new_loading_message(name, node_unsupported(name)));
+        }
+        if name.starts_with("node:") {
+            return Err(Error::new_loading_message(name, node_unsupported(name)));
+        }
+
         let path = Path::new(name);
         match module_format(path) {
             Ok(ModuleFormat::JavaScript) => {}

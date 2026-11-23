@@ -1,0 +1,22 @@
+# neojs-lite-node
+
+Opt-in Node compatibility adapter for the QuickJS `neojs-lite-core` runtime.
+Enable the `node-compat` feature on `neojs-lite-core` and construct the runtime
+with `Runtime::with_node_compat`.
+
+This adapter is synchronous because NeoJS Lite has no host-asynchrony loop. It
+serves only `node:child_process` with `spawnSync` and `execFileSync`, and
+`encoding: "utf8"` is required. `spawn`, `exec`, `execFile`, `execSync`, `fork`,
+and `ChildProcess` throw `ERR_NODE_UNSUPPORTED`; none is faked as a blocking call
+or a resolved Promise.
+
+A default `Runtime::new` rejects every `node:` import. In an opted-in runtime, a
+bare specifier that is a familiar Node module name is rejected rather than
+resolved as a Neo module; use the `neo:` prefix for any future Neo module.
+Process execution requires an explicit `ChildProcessPolicy` allowlist; an empty
+policy denies every execution. There is no shell, `PATH` lookup, inherited
+environment, or `stdio: inherit`, and all resources are bounded. An allowed
+executable still runs with the full authority of the process; this is not a
+sandbox.
+
+See `neojs-node-builtins` for the shared support matrix and limits.

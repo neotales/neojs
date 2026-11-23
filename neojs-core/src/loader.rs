@@ -27,6 +27,11 @@
 //! a single module instance however many spellings or importers use. They are
 //! never read from disk.
 //!
+//! Only a runtime built with `Runtime::with_node_compat` (feature
+//! `node-compat`) accepts the exact `node:child_process` specifier; it is served
+//! from the shared Node adapter and is not added to the `Neo` registry or given
+//! a bare alias. Every default runtime rejects `node:` imports with a reason.
+//!
 //! A `.ts` or `.mts` module is read as text and type-stripped before V8 sees it
 //! ([`crate::typescript`]). A file that cannot be reduced to ECMAScript fails
 //! with the stripper's reason, naming the module.
@@ -83,6 +88,31 @@ pub(crate) fn unsupported_module_type(requested: &RequestedModuleType) -> Option
     ))
 }
 
+/// Returns why an unsupported Node specifier was not resolved.
+///
+/// The shared crate owns the supported set when the feature is built. Without
+/// the feature, the message still names the only specifier this repository
+/// defines, so a default runtime never suggests that a Neo module is a Node
+/// substitute.
+#[cfg(feature = "node-compat")]
+fn node_unsupported(specifier: &str) -> String {
+    neojs_node::unsupported_module_reason(specifier)
+}
+
+#[cfg(not(feature = "node-compat"))]
+fn node_unsupported(specifier: &str) -> String {
+    format!(
+        "the Node module `{specifier}` is not implemented; supported Node modules: node:child_process"
+    )
+}
+
+/// Returns the default-runtime rejection, naming the requested module.
+fn node_disabled(specifier: &str) -> String {
+    format!(
+        "Node compatibility is disabled for `{specifier}`; create the Runtime with Runtime::with_node_compat and an explicit process policy"
+    )
+}
+
 /// A loader for local and, when enabled, remote ECMAScript and TypeScript
 /// modules.
 ///
@@ -98,6 +128,10 @@ pub(crate) fn unsupported_module_type(requested: &RequestedModuleType) -> Option
 /// rejected instead of silently reading the local filesystem.
 pub(crate) struct FileModuleLoader {
     remote: Option<RemoteClient>,
+    /// Whether this loader was built for a runtime with the explicit Node
+    /// compatibility opt-in. A default runtime rejects every `node:` specifier
+    /// with a reason instead of falling through to a file or Neo module.
+    node: bool,
     /// A remote entry module prepared before loading starts.
     ///
     /// The runtime fetches and type-strips an entry before consuming itself, so
@@ -119,9 +153,12 @@ pub(crate) struct PreparedEntry {
 
 impl FileModuleLoader {
     /// Creates a loader. `remote` is `None` when remote loading is disabled.
-    pub(crate) fn new(remote: Option<RemoteClient>) -> Self {
+    /// `node` is true only when the runtime was built with the Node
+    /// compatibility opt-in.
+    pub(crate) fn new(remote: Option<RemoteClient>, node: bool) -> Self {
         Self {
             remote,
+            node,
             entry: RefCell::new(None),
         }
     }
@@ -206,6 +243,24 @@ impl ModuleLoader for FileModuleLoader {
         referrer: &str,
         kind: ResolutionKind,
     ) -> ModuleResolveResponse {
+        if specifier == "node:child_process" {
+            if self.node {
+                return builtin_url("node:child_process");
+            }
+            return Err(JsErrorBox::generic(node_disabled(specifier)));
+        }
+        if specifier.starts_with("node:") {
+            if self.node {
+                return Err(JsErrorBox::generic(node_unsupported(specifier)));
+            }
+            return Err(JsErrorBox::generic(node_disabled(specifier)));
+        }
+        #[cfg(feature = "node-compat")]
+        if self.node && neojs_node::is_known_node_bare_name(specifier) {
+            return Err(JsErrorBox::generic(format!(
+                "Node built-in modules must use the `node:` prefix; `{specifier}` is not resolved as a Node or Neo module"
+            )));
+        }
         if let Some(canonical) = builtins::resolve(specifier) {
             return builtin_url(canonical);
         }
@@ -258,6 +313,27 @@ impl ModuleLoader for FileModuleLoader {
     ) -> ModuleLoadResponse {
         let display = display_url(module_specifier);
         if let Some(reason) = unsupported_module_type(&options.requested_module_type) {
+            return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                "cannot load {display}: {reason}"
+            ))));
+        }
+        if module_specifier.scheme() == "node" {
+            #[cfg(feature = "node-compat")]
+            if self.node
+                && let Some(source) = neojs_node::module_source(module_specifier.as_str())
+            {
+                return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
+                    ModuleType::JavaScript,
+                    ModuleSourceCode::String(source.to_string().into()),
+                    module_specifier,
+                    None,
+                )));
+            }
+            let reason = if self.node {
+                node_unsupported(module_specifier.as_str())
+            } else {
+                node_disabled(module_specifier.as_str())
+            };
             return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
                 "cannot load {display}: {reason}"
             ))));
@@ -452,7 +528,7 @@ fn unsupported_scheme(url: &Url) -> String {
                 )
             }
         }
-        "node" => "Node.js built-in modules are not implemented".to_string(),
+        "node" => node_unsupported(&format!("node:{}", url.path())),
         "npm" => "npm: modules are not implemented".to_string(),
         "jsr" => "jsr: modules are not implemented".to_string(),
         "http" => "only https: module URLs are supported, not http:".to_string(),

@@ -52,8 +52,7 @@ const NPM_REASON: &str =
 const JSR_REASON: &str =
     "JSR metadata resolution, artifact download, and cache policy are not implemented";
 const GH_REASON: &str = "the GitHub specifier is normalized to a raw HTTPS URL, but manifest import maps are not installed and GitHub fetching is not tested";
-const NODE_REASON: &str =
-    "Node built-in modules and a Node compatibility transform are not implemented";
+const NODE_REASON: &str = "this manifest layer does not load Node built-in modules; runtime Node compatibility is a separate opt-in";
 const BARE_REASON: &str = "bare import-map targets are not implemented";
 
 /// The kind of canonical specifier produced by [`normalize_specifier`].

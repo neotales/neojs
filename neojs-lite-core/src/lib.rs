@@ -31,6 +31,10 @@
 //!   `Neo.getBuiltInModulesList()` returns one frozen empty array because this
 //!   runtime has no built-in modules, and `Neo.getBuiltInModule(name)` returns
 //!   `undefined` for every string name. A non-string name throws `TypeError`.
+//! * With the off-by-default `node-compat` feature and
+//!   [`Runtime::with_node_compat`], the exact specifier `node:child_process`
+//!   loads a synchronous `spawnSync`/`execFileSync` module. It is not added to
+//!   the `Neo` registry and has no bare alias. The default runtime rejects it.
 //!
 //! # What is not implemented yet
 //!
@@ -55,3 +59,10 @@ mod loader;
 mod runtime;
 
 pub use runtime::{Error, Runtime};
+
+#[cfg(feature = "node-compat")]
+pub use neojs_lite_node::{
+    CHILD_PROCESS_SPECIFIER, ChildProcessError, ChildProcessPolicy, Limits, NodeOptions,
+    PolicyError, SUPPORTED_MODULES, is_known_node_bare_name, module_source,
+    unsupported_module_reason,
+};

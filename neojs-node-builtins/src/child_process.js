@@ -1,0 +1,370 @@
+// node:child_process — opt-in, synchronous, bounded subset.
+//
+// This module is served only by a runtime constructed with Node compatibility.
+// It calls the private host bridge installed by that runtime. The bridge runs
+// the engine-neutral `neojs-node-builtins` core, which enforces an exact
+// executable allowlist, an empty inherited environment, and finite time, input,
+// output, argument, and environment limits.
+//
+// Supported: spawnSync, execFileSync, with encoding: "utf8" required.
+// Not implemented: spawn, exec, execFile, execSync, fork, ChildProcess, and
+// every callback, stream, and Promise form. Those names throw a clear error;
+// none is faked with a blocking call or a resolved Promise.
+"use strict";
+
+const bridge = globalThis.__neojsNodeChildProcess;
+if (!bridge || typeof bridge.runSync !== "function") {
+    throw new Error("node:child_process is not installed in this runtime");
+}
+const runSync = bridge.runSync;
+
+const SUPPORTED_OPTIONS = ["cwd", "env", "input", "timeout", "maxBuffer", "encoding"];
+
+function makeError(code, message, properties) {
+    const error = new Error(message);
+    Object.defineProperty(error, "code", {
+        value: code,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+    });
+    if (properties !== undefined) {
+        for (const key of Object.keys(properties)) {
+            const value = properties[key];
+            if (value !== undefined) {
+                Object.defineProperty(error, key, {
+                    value,
+                    enumerable: true,
+                    configurable: true,
+                    writable: true,
+                });
+            }
+        }
+    }
+    return error;
+}
+
+function unsupported(name) {
+    return makeError(
+        "ERR_NODE_UNSUPPORTED",
+        `node:child_process.${name} is not implemented; use spawnSync or execFileSync with encoding: "utf8"`,
+    );
+}
+
+function unsupportedFunction(name) {
+    return function unsupportedOperation() {
+        throw unsupported(name);
+    };
+}
+
+function invalid(message) {
+    return makeError("ERR_INVALID_ARG_VALUE", message);
+}
+
+function requireString(value, what) {
+    if (typeof value !== "string") {
+        throw makeError("ERR_INVALID_ARG_TYPE", `${what} must be a string`);
+    }
+    return value;
+}
+
+function normalizeOptions(options) {
+    if (options === undefined) {
+        options = {};
+    }
+    if (options === null || typeof options !== "object" || Array.isArray(options)) {
+        throw makeError("ERR_INVALID_ARG_TYPE", "options must be an object");
+    }
+    for (const key of Object.keys(options)) {
+        if (!SUPPORTED_OPTIONS.includes(key)) {
+            throw makeError(
+                "ERR_NODE_UNSUPPORTED",
+                `the node:child_process option \`${key}\` is not implemented`,
+            );
+        }
+    }
+
+    const encoding = options.encoding;
+    if (typeof encoding !== "string" || encoding.toLowerCase().replace("-", "") !== "utf8") {
+        throw makeError(
+            "ERR_NODE_UNSUPPORTED_ENCODING",
+            'node:child_process requires encoding: "utf8" in this opt-in slice',
+        );
+    }
+
+    const normalized = {};
+    if (options.cwd !== undefined) {
+        const cwd = requireString(options.cwd, "options.cwd");
+        if (cwd.includes("\0")) {
+            throw invalid("options.cwd must not contain a NUL byte");
+        }
+        normalized.cwd = cwd;
+    }
+    if (options.env !== undefined) {
+        const env = options.env;
+        if (env === null || typeof env !== "object" || Array.isArray(env)) {
+            throw makeError("ERR_INVALID_ARG_TYPE", "options.env must be an object");
+        }
+        const copy = Object.create(null);
+        for (const name of Object.keys(env)) {
+            if (name.length === 0 || name.includes("=") || name.includes("\0")) {
+                throw invalid("an environment name is not valid");
+            }
+            const value = env[name];
+            if (typeof value !== "string") {
+                throw makeError("ERR_INVALID_ARG_TYPE", "environment values must be strings");
+            }
+            if (value.includes("\0")) {
+                throw invalid("an environment value must not contain a NUL byte");
+            }
+            copy[name] = value;
+        }
+        normalized.env = copy;
+    }
+    if (options.input !== undefined) {
+        const input = options.input;
+        if (typeof input !== "string") {
+            throw makeError(
+                "ERR_NODE_UNSUPPORTED",
+                "node:child_process input must be a string in this opt-in slice",
+            );
+        }
+        normalized.input = input;
+    }
+    if (options.timeout !== undefined) {
+        if (!Number.isInteger(options.timeout) || options.timeout < 0) {
+            throw invalid("options.timeout must be a non-negative integer");
+        }
+        normalized.timeout = options.timeout;
+    }
+    if (options.maxBuffer !== undefined) {
+        if (!Number.isInteger(options.maxBuffer) || options.maxBuffer <= 0) {
+            throw invalid("options.maxBuffer must be a positive integer");
+        }
+        normalized.maxBuffer = options.maxBuffer;
+    }
+    return normalized;
+}
+
+function normalizeArgs(args) {
+    if (args === undefined) {
+        return [];
+    }
+    if (!Array.isArray(args)) {
+        throw makeError("ERR_INVALID_ARG_TYPE", "arguments must be an array");
+    }
+    return args.map((argument) => {
+        if (typeof argument === "string") {
+            if (argument.includes("\0")) {
+                throw invalid("an argument must not contain a NUL byte");
+            }
+            return argument;
+        }
+        if (
+            typeof argument === "number" ||
+            typeof argument === "boolean" ||
+            typeof argument === "bigint"
+        ) {
+            return String(argument);
+        }
+        throw makeError(
+            "ERR_INVALID_ARG_TYPE",
+            "arguments must be strings, numbers, booleans, or bigints",
+        );
+    });
+}
+
+function normalizeCall(file, args, options) {
+    const program = requireString(file, "file");
+    if (program.length === 0) {
+        throw invalid("file must not be empty");
+    }
+    if (program.includes("\0")) {
+        throw invalid("file must not contain a NUL byte");
+    }
+    const normalizedArgs = normalizeArgs(args);
+    const normalizedOptions = normalizeOptions(options);
+    return { program, args: normalizedArgs, options: normalizedOptions };
+}
+
+function call(operation, call_) {
+    const request = {
+        operation,
+        file: call_.program,
+        args: call_.args,
+        options: call_.options,
+    };
+    let text;
+    try {
+        text = runSync(JSON.stringify(request));
+    } catch {
+        throw makeError(
+            "ERR_NODE_BRIDGE_FAILURE",
+            "the node:child_process host bridge failed",
+        );
+    }
+    let response;
+    try {
+        response = JSON.parse(text);
+    } catch {
+        throw makeError(
+            "ERR_NODE_BRIDGE_FAILURE",
+            "the node:child_process host bridge returned an invalid response",
+        );
+    }
+    if (response === null || typeof response !== "object") {
+        throw makeError(
+            "ERR_NODE_BRIDGE_FAILURE",
+            "the node:child_process host bridge returned an invalid response",
+        );
+    }
+    if (response.ok !== true) {
+        const code =
+            response.error && typeof response.error.code === "string"
+                ? response.error.code
+                : "ERR_NODE_CHILD_PROCESS";
+        const message =
+            response.error && typeof response.error.message === "string"
+                ? response.error.message
+                : "the child process failed";
+        throw makeError(code, message);
+    }
+    const result = response.result;
+    if (result === null || typeof result !== "object") {
+        throw makeError(
+            "ERR_NODE_BRIDGE_FAILURE",
+            "the node:child_process host bridge returned an invalid result",
+        );
+    }
+    if (
+        typeof result.pid !== "number" ||
+        typeof result.stdout !== "string" ||
+        typeof result.stderr !== "string" ||
+        (result.status !== null && typeof result.status !== "number") ||
+        (result.signalName !== null && typeof result.signalName !== "string") ||
+        typeof result.timedOut !== "boolean" ||
+        typeof result.limitExceeded !== "boolean"
+    ) {
+        throw makeError(
+            "ERR_NODE_BRIDGE_FAILURE",
+            "the node:child_process host bridge returned an invalid result",
+        );
+    }
+    return result;
+}
+
+function resultFields(result) {
+    return {
+        pid: result.pid,
+        output: [null, result.stdout, result.stderr],
+        stdout: result.stdout,
+        stderr: result.stderr,
+        status: result.status,
+        signal: result.signalName,
+    };
+}
+
+/**
+ * Runs a program to completion and returns a Node-shaped result object.
+ *
+ * The result has `pid`, `output`, `stdout`, `stderr`, `status`, and `signal`.
+ * A timeout or output overflow sets `error` and leaves `status` null. A spawn
+ * failure that Node reports as `error` (ENOENT or EACCES) is returned the same
+ * way; a policy denial or argument error throws.
+ */
+function spawnSync(file, args, options) {
+    if (args !== undefined && !Array.isArray(args)) {
+        options = args;
+        args = [];
+    }
+    const call_ = normalizeCall(file, args, options);
+    let result;
+    try {
+        result = call("spawnSync", call_);
+    } catch (error) {
+        if (error && (error.code === "ENOENT" || error.code === "EACCES")) {
+            return {
+                pid: 0,
+                output: [null, "", ""],
+                stdout: "",
+                stderr: "",
+                status: null,
+                signal: null,
+                error,
+            };
+        }
+        throw error;
+    }
+
+    const fields = resultFields(result);
+    if (result.timedOut) {
+        fields.error = makeError("ETIMEDOUT", "child process timed out");
+    } else if (result.limitExceeded) {
+        fields.error = makeError(
+            "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+            "child process output exceeded maxBuffer",
+        );
+    }
+    return fields;
+}
+
+/**
+ * Runs a program to completion and returns its standard output as a string.
+ *
+ * A non-zero exit, a signal, a timeout, an output overflow, a spawn failure, or
+ * a policy denial throws. The thrown error carries the same result fields as
+ * `spawnSync` where they exist.
+ */
+function execFileSync(file, args, options) {
+    if (args !== undefined && !Array.isArray(args)) {
+        options = args;
+        args = [];
+    }
+    const call_ = normalizeCall(file, args, options);
+    const result = call("execFileSync", call_);
+    const fields = resultFields(result);
+    if (result.timedOut) {
+        throw makeError("ETIMEDOUT", "child process timed out", fields);
+    }
+    if (result.limitExceeded) {
+        throw makeError(
+            "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+            "child process output exceeded maxBuffer",
+            fields,
+        );
+    }
+    if (result.status !== 0) {
+        throw makeError(
+            "ERR_NODE_CHILD_PROCESS_EXIT",
+            "child process exited with a non-zero status",
+            fields,
+        );
+    }
+    return result.stdout;
+}
+
+class ChildProcess {
+    constructor() {
+        throw unsupported("ChildProcess");
+    }
+}
+
+const spawn = unsupportedFunction("spawn");
+const exec = unsupportedFunction("exec");
+const execFile = unsupportedFunction("execFile");
+const execSync = unsupportedFunction("execSync");
+const fork = unsupportedFunction("fork");
+
+const api = Object.freeze({
+    spawn,
+    spawnSync,
+    exec,
+    execFile,
+    execFileSync,
+    execSync,
+    fork,
+    ChildProcess,
+});
+
+export { ChildProcess, exec, execFile, execFileSync, execSync, fork, spawn, spawnSync };
+export default api;
