@@ -1,17 +1,24 @@
 //! End-to-end tests for opt-in `jsr:` module loading.
 //!
-//! The HTTPS transport is scripted: every request is answered from an in-memory
-//! table, no network is used, and no host is real. Request URLs use the public
-//! registry's shapes, so the production URL builder, resolver, integrity
-//! checks, and cache path are exercised through real V8 evaluation.
+//! Most tests use scripted responses: every request is answered from an
+//! in-memory table, no network is used, and no host is real. Request URLs use
+//! the public registry's shapes, so the production URL builder, resolver,
+//! integrity checks, and cache path are exercised through real V8 evaluation.
+//!
+//! The `neotales` tests use unmodified captures of public `jsr.io` metadata and
+//! source. See `tests/fixtures/jsr/neotales/README.md` for source URLs and
+//! SHA-256 values. They run offline through the same scripted transport.
 
 #![cfg(feature = "test-support")]
 
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use neojs_core::Error;
 use neojs_core::RemoteOptions;
@@ -142,15 +149,39 @@ fn file_url(scope: &str, name: &str, version: &str, path: &str) -> String {
     format!("{REGISTRY}/@{scope}/{name}/{version}{path}")
 }
 
-fn checksum(bytes: &[u8]) -> String {
+fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
-    let digest = Sha256::digest(bytes);
-    let mut text = String::from("sha256-");
-    for byte in digest {
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         let _ = write!(text, "{byte:02x}");
     }
     text
+}
+
+fn checksum(bytes: &[u8]) -> String {
+    format!("sha256-{}", hex(&Sha256::digest(bytes)))
+}
+
+/// Writes one entry in the remote cache's on-disk format.
+///
+/// This intentionally lets a test rewrite both a manifest and a body so the
+/// documented cache limitation can be exercised.
+fn write_cache_entry(dir: &Path, url: &str, body: &[u8]) {
+    let name = hex(&Sha256::digest(url.as_bytes()));
+    let stored = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs();
+    let metadata = format!(
+        "stored={stored}\ninitial-age=0\nbody-length={}\nbody-sha256={}\ngeneration=test\nrepresentation={}\nmax-age=3600\n",
+        body.len(),
+        hex(&Sha256::digest(body)),
+        hex(b"test"),
+    );
+    let mut entry = format!("neojs-remote-cache 5\n{}\n{metadata}", metadata.len()).into_bytes();
+    entry.extend_from_slice(body);
+    std::fs::write(dir.join(name), entry).expect("write cache entry");
 }
 
 fn package_metadata(scope: &str, name: &str, versions: &[(&str, bool)]) -> String {
@@ -220,6 +251,24 @@ fn error_message(result: Result<(), Error>) -> String {
 const MOD_TS: &[u8] = b"import { isDigit } from \"chars\";\nimport { helper } from \"./lib/helper.ts\";\ninterface Box { value: number }\nexport const value: number = helper();\nexport const label: string = \"typed\";\nexport const builtin: boolean = isDigit(55);\n";
 const HELPER_TS: &[u8] = b"export function helper(): number { return 7; }\n";
 const JOIN_JS: &[u8] = b"export function join(a, b) { return a + b; }\n";
+
+// Real registry fixtures captured from the public `jsr.io` origin. See
+// `tests/fixtures/jsr/neotales/README.md` for source URLs and SHA-256 values.
+// They are unmodified captures, not hand-written documents.
+const REAL_CHARS_META: &str = include_str!("fixtures/jsr/neotales/chars/meta.json");
+const REAL_CHARS_VERSION_META: &str = include_str!("fixtures/jsr/neotales/chars/0.0.0_meta.json");
+const REAL_CHARS_IS_DIGIT: &str = include_str!("fixtures/jsr/neotales/chars/0.0.0/is_digit.ts");
+const REAL_CHARS_ND: &str = include_str!("fixtures/jsr/neotales/chars/0.0.0/tables/nd.ts");
+const REAL_CHARS_LATIN1: &str = include_str!("fixtures/jsr/neotales/chars/0.0.0/tables/latin1.ts");
+const REAL_CHARS_TO_LOWER: &str = include_str!("fixtures/jsr/neotales/chars/0.0.0/to_lower.ts");
+const REAL_CHARS_TO_UPPER: &str = include_str!("fixtures/jsr/neotales/chars/0.0.0/to_upper.ts");
+const REAL_CHARS_CASE: &str = include_str!("fixtures/jsr/neotales/chars/0.0.0/tables/case.ts");
+const REAL_CHARS_CONSTANTS: &str = include_str!("fixtures/jsr/neotales/chars/0.0.0/constants.ts");
+const REAL_SLICES_META: &str = include_str!("fixtures/jsr/neotales/slices/meta.json");
+const REAL_SLICES_VERSION_META: &str = include_str!("fixtures/jsr/neotales/slices/0.0.0_meta.json");
+const REAL_SLICES_CAPITALIZE: &str =
+    include_str!("fixtures/jsr/neotales/slices/0.0.0/capitalize.ts");
+const REAL_SLICES_UTILS: &str = include_str!("fixtures/jsr/neotales/slices/0.0.0/utils.ts");
 
 // Integration test through the actual runtime and the real registry URL
 // builder: a range, an exact version, a subpath, a dynamic import, erasable
@@ -600,6 +649,301 @@ fn loads_a_jsr_dependency() {
     .expect("a JSR package may import another JSR package");
     assert_eq!(server.request_count(&meta_url("scope", "pkg")), 1);
     assert_eq!(server.request_count(&meta_url("scope", "dep")), 1);
+}
+
+// Integration test with an unmodified public-registry fixture: a real subpath
+// entrypoint, its relative dependencies, and type-only imports that must not be
+// fetched at runtime.
+#[test]
+fn loads_a_real_registry_package_subpath() {
+    let server = Arc::new(
+        Server::new()
+            .with(meta_url("neotales", "chars"), Reply::ok(REAL_CHARS_META))
+            .with(
+                version_url("neotales", "chars", "0.0.0"),
+                Reply::ok(REAL_CHARS_VERSION_META),
+            )
+            .with(
+                file_url("neotales", "chars", "0.0.0", "/is_digit.ts"),
+                Reply::ok(REAL_CHARS_IS_DIGIT),
+            )
+            .with(
+                file_url("neotales", "chars", "0.0.0", "/tables/nd.ts"),
+                Reply::ok(REAL_CHARS_ND),
+            )
+            .with(
+                file_url("neotales", "chars", "0.0.0", "/tables/latin1.ts"),
+                Reply::ok(REAL_CHARS_LATIN1),
+            ),
+    );
+
+    run(
+        &server,
+        r#"
+import { isDigit } from "jsr:@neotales/chars@0.0.0/is-digit";
+if (!isDigit(0x31)) throw new Error("did not detect a digit");
+if (isDigit(0x41)) throw new Error("detected a letter as a digit");
+const resolved = import.meta.resolve("jsr:@neotales/chars@0.0.0/is-digit");
+if (resolved !== "https://jsr.io/@neotales/chars/0.0.0/is_digit.ts") {
+    throw new Error(`unexpected canonical URL ${resolved}`);
+}
+"#,
+    )
+    .expect("the real chars subpath must load");
+    assert!(
+        server.seen().iter().all(|url| !url.ends_with("/types.ts")),
+        "a type-only import must not be fetched: {:?}",
+        server.seen()
+    );
+}
+
+// Integration test with unmodified public-registry fixtures: a real package's
+// `jsr:` dependency on another package, its version range, and the relative
+// graph inside both packages.
+#[test]
+fn loads_a_real_cross_package_jsr_graph() {
+    let server = Arc::new(
+        Server::new()
+            .with(meta_url("neotales", "slices"), Reply::ok(REAL_SLICES_META))
+            .with(
+                version_url("neotales", "slices", "0.0.0"),
+                Reply::ok(REAL_SLICES_VERSION_META),
+            )
+            .with(
+                file_url("neotales", "slices", "0.0.0", "/capitalize.ts"),
+                Reply::ok(REAL_SLICES_CAPITALIZE),
+            )
+            .with(
+                file_url("neotales", "slices", "0.0.0", "/utils.ts"),
+                Reply::ok(REAL_SLICES_UTILS),
+            )
+            .with(meta_url("neotales", "chars"), Reply::ok(REAL_CHARS_META))
+            .with(
+                version_url("neotales", "chars", "0.0.0"),
+                Reply::ok(REAL_CHARS_VERSION_META),
+            )
+            .with(
+                file_url("neotales", "chars", "0.0.0", "/to_lower.ts"),
+                Reply::ok(REAL_CHARS_TO_LOWER),
+            )
+            .with(
+                file_url("neotales", "chars", "0.0.0", "/to_upper.ts"),
+                Reply::ok(REAL_CHARS_TO_UPPER),
+            )
+            .with(
+                file_url("neotales", "chars", "0.0.0", "/tables/case.ts"),
+                Reply::ok(REAL_CHARS_CASE),
+            )
+            .with(
+                file_url("neotales", "chars", "0.0.0", "/constants.ts"),
+                Reply::ok(REAL_CHARS_CONSTANTS),
+            ),
+    );
+
+    run(
+        &server,
+        r#"
+import { capitalize } from "jsr:@neotales/slices@0.0.0/capitalize";
+const capitalized = String.fromCodePoint(...capitalize("hello"));
+if (capitalized !== "Hello") throw new Error(`capitalize returned ${capitalized}`);
+const resolved = import.meta.resolve("jsr:@neotales/slices@0.0.0/capitalize");
+if (resolved !== "https://jsr.io/@neotales/slices/0.0.0/capitalize.ts") {
+    throw new Error(`unexpected canonical URL ${resolved}`);
+}
+"#,
+    )
+    .expect("the real cross-package JSR graph must load");
+    assert_eq!(
+        server.request_count(&meta_url("neotales", "chars")),
+        1,
+        "the dependency's package metadata must be fetched once"
+    );
+}
+
+// Integration test: a direct `https://jsr.io/...` import from a local module
+// keeps the ordinary HTTPS loader's semantics. It must not fetch registry
+// metadata or verify the body against a manifest.
+#[test]
+fn a_direct_https_registry_url_keeps_ordinary_remote_semantics() {
+    let url = file_url("neotales", "chars", "0.0.0", "/mod.ts");
+    let body = b"export const value = 7;\n";
+    let server = Arc::new(Server::new().with(url.clone(), Reply::ok(body.as_slice())));
+    let source = format!(
+        "import {{ value }} from \"{url}\";\nif (value !== 7) throw new Error(`bad value ${{value}}`);\n"
+    );
+
+    run(&server, &source).expect("a direct HTTPS registry URL must load as ordinary remote");
+    assert_eq!(
+        server.seen(),
+        vec![url],
+        "a direct HTTPS import must make exactly its own request"
+    );
+}
+
+// Integration test: `run_url` fetches its prepared entry once and the loader
+// consumes it. A one-request budget proves a direct jsr.io entry does not fetch
+// registry metadata or the file a second time, even with the cache disabled.
+#[test]
+fn run_url_reuses_the_prepared_registry_entry_with_one_request() {
+    let url = file_url("neotales", "chars", "0.0.0", "/mod.ts");
+    let body = b"export const value = 9;\n";
+    let server = Arc::new(Server::new().with(url.clone(), Reply::ok(body.as_slice())));
+    let mut runtime = Runtime::with_remote_transport(
+        RemoteOptions::new().without_cache().with_max_requests(1),
+        server.transport(),
+    )
+    .expect("runtime");
+
+    runtime
+        .run_url(&url)
+        .expect("the prepared entry must load with one request");
+    assert_eq!(
+        server.seen(),
+        vec![url],
+        "the prepared entry must not be fetched again"
+    );
+}
+
+// Integration test: an explicit jsr.io URL imported by a JSR graph module is
+// verified against the manifest. An unlisted file and a non-canonical URL are
+// both refused instead of falling through to the ordinary remote loader.
+#[test]
+fn a_jsr_graph_import_cannot_bypass_manifest_verification() {
+    let cases = [
+        (
+            "https://jsr.io/@scope/pkg/1.0.0/evil.js",
+            "not listed in the manifest",
+        ),
+        (
+            "https://jsr.io/@scope/pkg/1.0.0/evil.js?x=1",
+            "canonical https://jsr.io module URL",
+        ),
+    ];
+    for (target, expected) in cases {
+        let root = format!("import \"{target}\";\n");
+        let root_bytes = root.as_bytes();
+        let server = Arc::new(
+            Server::new()
+                .with(
+                    meta_url("scope", "pkg"),
+                    Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+                )
+                .with(
+                    version_url("scope", "pkg", "1.0.0"),
+                    Reply::ok(version_metadata(
+                        &[("/root.js", root_bytes)],
+                        &[(".", "./root.js")],
+                    )),
+                )
+                .with(
+                    file_url("scope", "pkg", "1.0.0", "/root.js"),
+                    Reply::ok(root_bytes),
+                )
+                .with(
+                    file_url("scope", "pkg", "1.0.0", "/evil.js"),
+                    Reply::ok(b"throw new Error(\"EVIL_EXECUTED\");\n".as_slice()),
+                ),
+        );
+
+        let message = error_message(run(&server, "import \"jsr:@scope/pkg@1\";\n"));
+        assert!(
+            message.contains(expected),
+            "`{target}` produced `{message}`, expected `{expected}`"
+        );
+        assert!(!message.contains("EVIL_EXECUTED"), "{message}");
+        assert!(
+            server.seen().iter().all(|url| !url.contains("evil.js")),
+            "the unverified target must not be fetched: {:?}",
+            server.seen()
+        );
+    }
+}
+
+// Integration test: after a canonical jsr.io URL has been loaded as an ordinary
+// HTTPS module, a `jsr:` import of the same identity is refused. Reusing the
+// unverified module would silently bypass manifest verification.
+#[test]
+fn a_jsr_import_cannot_reuse_an_unverified_ordinary_registry_module() {
+    let url = file_url("neotales", "chars", "0.0.0", "/mod.ts");
+    let body = b"import \"jsr:@neotales/chars@0.0.0\";\n";
+    let server = Arc::new(
+        Server::new()
+            .with(url.clone(), Reply::ok(body.as_slice()))
+            .with(meta_url("neotales", "chars"), Reply::ok(REAL_CHARS_META))
+            .with(
+                version_url("neotales", "chars", "0.0.0"),
+                Reply::ok(REAL_CHARS_VERSION_META),
+            ),
+    );
+    let source = format!("import \"{url}\";\n");
+
+    let message = error_message(run(&server, &source));
+    assert!(
+        message.contains("already loaded as an ordinary HTTPS module"),
+        "{message}"
+    );
+}
+
+// Integration test: the cache is local mutable state. Rewriting both the
+// version metadata and the file keeps the checksum consistent, so the loader
+// accepts the substituted body. This documents a limitation: the checksum
+// proves consistency with the retrieved metadata, not publisher identity or
+// authentication.
+#[test]
+fn a_consistent_cache_rewrite_is_not_authenticated() {
+    let original = b"export const value = 1;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(
+                    &[("/mod.js", original)],
+                    &[(".", "./mod.js")],
+                )),
+            )
+            .with(
+                file_url("scope", "pkg", "1.0.0", "/mod.js"),
+                Reply::ok(original.as_slice()),
+            ),
+    );
+    let cache = tempfile::tempdir().expect("cache dir");
+    let options = || RemoteOptions::new().with_cache_dir(cache.path());
+    run_with(
+        &server,
+        options(),
+        "import { value } from \"jsr:@scope/pkg@1\";\nif (value !== 1) throw new Error(\"first\");\n",
+    )
+    .expect("the first run must load over the transport");
+
+    let substituted = b"export const value = 2;\n";
+    let substituted_metadata = version_metadata(&[("/mod.js", substituted)], &[(".", "./mod.js")]);
+    write_cache_entry(
+        cache.path(),
+        &version_url("scope", "pkg", "1.0.0"),
+        substituted_metadata.as_bytes(),
+    );
+    write_cache_entry(
+        cache.path(),
+        &file_url("scope", "pkg", "1.0.0", "/mod.js"),
+        substituted,
+    );
+
+    let offline = Arc::new(Server::no_network());
+    run_with(
+        &offline,
+        options(),
+        "import { value } from \"jsr:@scope/pkg@1\";\nif (value !== 2) throw new Error(`substituted value ${value}`);\n",
+    )
+    .expect("a consistent cache rewrite is accepted; this is the documented limitation");
+    assert!(
+        offline.seen().is_empty(),
+        "the cache rewrite must be served without a request: {:?}",
+        offline.seen()
+    );
 }
 
 // Integration test: a redirect from a JSR registry request is subject to the
