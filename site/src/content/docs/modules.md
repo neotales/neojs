@@ -1,6 +1,6 @@
 ---
 title: Built-in modules
-description: The thirteen modules implemented by the V8 runtime, their aliases, and the registry and namespace identity rules.
+description: The fourteen modules implemented by the V8 runtime, their aliases, and the registry and namespace identity rules.
 sidebar:
   order: 3
 ---
@@ -16,6 +16,7 @@ modules; it runs local ECMAScript files with no built-in module surface.
 | [`assert`](/modules/assert/) | `assert`, `neo:assert` | Assertions, structural equality, Promise checks | One native-Promise observation op |
 | [`chars`](/modules/chars/) | `chars`, `neo:chars` | Unicode code-point classification and simple case mapping | No |
 | [`console`](/modules/console/) | `console`, `neo:console` | The realm's installed console object and five methods | Writes to process stdout/stderr |
+| [`cron`](/modules/cron/) | `cron`, `neo:cron` | UTC five-field parsing and in-process scheduling | Host-clock scheduling; keeps the event loop alive until disposed |
 | [`crypto`](/modules/crypto/) | `crypto`, `neo:crypto` | CSPRNG, AES-256-GCM envelope, CBC/GCM ciphers, SHA-2, HMAC, PBKDF2, bcrypt, Shamir sharing | Entropy and bounded native crypto work |
 | [`os`](/modules/os/) | `os`, `neo:os` | Build-target `platform` and `arch` strings | No |
 | [`path`](/modules/path/) | `path`, `neo:path` | Lexical POSIX and Windows path operations | Reads the process working directory when needed |

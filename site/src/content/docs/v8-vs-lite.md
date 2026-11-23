@@ -20,7 +20,7 @@ policy; they do not share a feature set, and Lite does not chase parity with V8.
 | Top-level `await` | Yes | Only when QuickJS's own job queue can settle it |
 | `.ts` / `.mts` | Yes, type stripping only | **No** |
 | Type checking | **No** | **No** |
-| Built-in `neo:` modules | Thirteen modules | **No** |
+| Built-in `neo:` modules | Fourteen modules | **No** |
 | `Neo.getBuiltInModule` | Yes | **No** |
 | Host asynchrony | The runtime drives async ops and top-level `await`; there is no user-facing timer API | **No** timers or host Promise integration |
 | Remote `https:` loading | Opt-in in the V8 CLI/runtime | **Not implemented** |

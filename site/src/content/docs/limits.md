@@ -14,8 +14,9 @@ disagree, the source wins.
 - Opt-in HTTPS module loading with explicit resource limits.
 - Console output.
 - `neojs test` over multiple files and globs.
-- The built-in modules `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`, `slices`, `ssh`,
-  `stdio`, `strings`, `test`, and `uuid`.
+- The built-in modules `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`,
+  `ssh`, `stdio`, `strings`, `test`, and `uuid`.
+- UTC five-field cron parsing and in-process scheduling, with explicit disposal and overlap rules.
 - The `Neo` built-in registry.
 - The Rust embedding API.
 

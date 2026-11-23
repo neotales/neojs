@@ -54,6 +54,7 @@ export default defineConfig({
             { label: "assert", slug: "modules/assert" },
             { label: "chars", slug: "modules/chars" },
             { label: "console", slug: "modules/console" },
+            { label: "cron", slug: "modules/cron" },
             { label: "crypto", slug: "modules/crypto" },
             { label: "os", slug: "modules/os" },
             { label: "path", slug: "modules/path" },

@@ -20,6 +20,7 @@ const expectedPages = [
   "modules/assert/",
   "modules/chars/",
   "modules/console/",
+  "modules/cron/",
   "modules/crypto/",
   "modules/os/",
   "modules/path/",
@@ -113,6 +114,10 @@ test("Pagefind search output is generated", async () => {
   const entry = JSON.parse(await readFile(path.join(pagefind, "pagefind-entry.json"), "utf8"));
   const pageCount = entry.languages?.en?.page_count ?? 0;
   assert.ok(pageCount > 0, "the Pagefind index contains no pages");
+  assert.ok(
+    pageCount >= expectedPages.length,
+    `the Pagefind index has ${pageCount} pages, expected at least ${expectedPages.length}`,
+  );
 
   const home = await readFile(path.join(dist, "index.html"), "utf8");
   assert.match(home, /pagefind|Search/i, "the built home page has no search control");
@@ -124,21 +129,15 @@ test("every expected page is built", async () => {
   }
 });
 
-test("every expected page is reachable from the built HTML", async () => {
-  const htmlFiles = (await walk(dist)).filter((file) => file.endsWith(".html"));
-  assert.ok(htmlFiles.length >= expectedPages.length, "fewer HTML files than expected pages");
-
-  const links = new Set();
-  for (const file of htmlFiles) {
-    const html = await readFile(file, "utf8");
-    for (const match of html.matchAll(/\shref="([^"]+)"/g)) {
-      links.add(match[1].split("#")[0]);
-    }
-  }
+test("the sidebar links every expected page", async () => {
+  // A regular documentation page carries Starlight's full sidebar. The splash
+  // home page deliberately does not, so check a content page.
+  const html = await readFile(path.join(dist, "getting-started", "index.html"), "utf8");
+  const links = new Set([...html.matchAll(/\shref="([^"]+)"/g)].map((match) => match[1]));
 
   for (const route of expectedPages) {
     const href = `/${route}`;
-    assert.ok(links.has(href), `no built page links to ${href}`);
+    assert.ok(links.has(href), `the sidebar does not link to ${href}`);
   }
 });
 

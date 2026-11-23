@@ -22,7 +22,7 @@ hero:
   <a href="/modules/" class="group rounded-xl border border-slate-200 p-5 no-underline transition hover:border-sky-400 hover:shadow-sm dark:border-slate-700 dark:hover:border-sky-500">
     <span class="text-xs font-semibold uppercase tracking-wide text-sky-600 dark:text-sky-400">Reference</span>
     <span class="mt-2 block text-lg font-semibold text-slate-900 dark:text-slate-100">Built-in modules</span>
-    <span class="mt-1 block text-sm text-slate-600 dark:text-slate-400">Thirteen modules, their exports, limits, and error codes.</span>
+    <span class="mt-1 block text-sm text-slate-600 dark:text-slate-400">Fourteen modules, their exports, limits, and error codes.</span>
   </a>
   <a href="/remote-security/" class="group rounded-xl border border-slate-200 p-5 no-underline transition hover:border-sky-400 hover:shadow-sm dark:border-slate-700 dark:hover:border-sky-500">
     <span class="text-xs font-semibold uppercase tracking-wide text-sky-600 dark:text-sky-400">Security</span>
@@ -45,13 +45,13 @@ NeoJS is two crates with different jobs. They share executable-extension policy,
 | Engine | V8 through `deno_core` | QuickJS through `rquickjs` |
 | ECMAScript modules | Yes | Yes |
 | Erasable TypeScript | Yes, `.ts` and `.mts`, no type checking | **No** |
-| Built-in `neo:` modules | Thirteen modules documented here | **No** |
-| Host asynchrony and timers | Through the runtime and `deno_core` | **No** timers or host Promise integration |
+| Built-in `neo:` modules | Fourteen modules documented here | **No** |
+| Host asynchrony | The runtime drives async ops and top-level `await`; there is no user-facing timer API | **No** timers or host Promise integration |
 | Remote HTTPS loading | Opt-in through the V8 CLI/runtime | **Not implemented** |
 | Permissions or sandbox | **None** | **None** |
 
 :::note[Status of this documentation]
-These pages describe the `dev` tree at commit `26fb38f` and were built on 2026-11-22. Only Linux
+These pages describe the `dev` tree at commit `420402e` and were built on 2026-11-22. Only Linux
 x86-64 is verified in the repository; other targets are unverified. When this documentation and the
 source disagree, the source and the repository [README](https://github.com/neotales/neojs) win.
 :::
@@ -59,8 +59,8 @@ source disagree, the source and the repository [README](https://github.com/neota
 ## What this site covers
 
 - **The V8 command line**: `neojs <file>`, `neojs test`, remote flags, and exit codes.
-- **Every built-in module** currently implemented: `age`, `assert`, `chars`, `console`, `crypto`,
-  `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid`.
+- **Every built-in module** currently implemented: `age`, `assert`, `chars`, `console`, `cron`,
+  `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid`.
 - **The embedding APIs**: `neojs_core::Runtime` and `neojs_lite_core::Runtime`.
 - **The SQL foundation**: `neojs-dbapi`, including the fact that only SQLite is wired end to end.
 - **The unsupported list**: the things that are deliberately absent, so a missing feature is not

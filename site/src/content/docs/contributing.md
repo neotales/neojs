@@ -61,7 +61,7 @@ build is the authoritative check for search output, not the development server.
 
 The site deliberately summarises rather than duplicating the whole README. When behaviour changes,
 update the page that states it and keep the "not implemented" claims honest. The pages were checked
-against `dev` at commit `26fb38f` on 2026-11-22.
+against `dev` at commit `420402e` on 2026-11-22.
 
 ## Content rules
 
