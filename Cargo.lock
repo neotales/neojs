@@ -2108,6 +2108,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "neojs-manifest"
+version = "0.1.0"
+dependencies = [
+ "neojs-module-policy",
+ "semver",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "url",
+]
+
+[[package]]
 name = "neojs-module-policy"
 version = "0.1.0"
 
