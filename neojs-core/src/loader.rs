@@ -10,10 +10,11 @@
 //! `neo:slices`, `neo:ssh`, `neo:stdio`, `neo:strings`, `neo:test`, `neo:uuid`,
 //! `neo:uuid/v4`, and `neo:uuid/v7` ([`crate::builtins`]), and — only when the
 //! runtime was created with [`crate::Runtime::with_remote`] — absolute `https:`
-//! URLs. Every other scheme is rejected with a reason that names the missing
-//! feature instead of failing later inside V8. A bare specifier is never a
-//! built-in module, even when it matches a registry name; `age` is rejected
-//! where `neo:age` resolves.
+//! URLs. That opt-in also enables `jsr:` imports through
+//! [`crate::jsr_loader`]. Every other scheme is rejected with a reason that
+//! names the missing feature instead of failing later inside V8. A bare
+//! specifier is never a built-in module, even when it matches a registry name;
+//! `age` is rejected where `neo:age` resolves.
 //!
 //! A relative specifier in a remote module resolves against that module's URL,
 //! so it stays remote. A remote module cannot import `file:`; remote code gets
@@ -21,7 +22,9 @@
 //! the module map registers the module under the final URL and aliases the
 //! requested URL to it. That gives the module one identity, makes its relative
 //! imports resolve against the final URL, and makes `import.meta.url` the final
-//! URL, as a browser does.
+//! URL, as a browser does. An installed final-URL observer runs before that
+//! registration; the JSR loader uses it to keep an ordinary HTTPS redirect out
+//! of a verified registry identity.
 //!
 //! Each built-in module has exactly one canonical `neo:` specifier. The URL
 //! scheme is matched case-insensitively, as URL schemes are, so `NEO:age` is
@@ -62,6 +65,7 @@ use deno_error::JsErrorBox;
 use neojs_module_policy::is_path_specifier;
 use std::cell::RefCell;
 use std::path::Path;
+use std::rc::Rc;
 
 use crate::builtins;
 use crate::remote::RemoteClient;
@@ -117,6 +121,13 @@ fn node_disabled(specifier: &str) -> String {
     )
 }
 
+/// A callback that sees a remote module's requested and final URLs before
+/// registration.
+///
+/// An error refuses the module. The JSR loader installs one to track ordinary
+/// HTTPS identities and to protect verified registry identities.
+pub(crate) type FinalUrlObserver = Rc<dyn Fn(&Url, &Url) -> Result<(), String>>;
+
 /// A loader for local and, when enabled, remote ECMAScript and TypeScript
 /// modules.
 ///
@@ -143,6 +154,14 @@ pub(crate) struct FileModuleLoader {
     /// source to the module map, which registers the module under its final
     /// URL and aliases the requested URL to it.
     entry: RefCell<Option<PreparedEntry>>,
+    /// Observes the requested and final URLs of a remote module before it is
+    /// registered.
+    ///
+    /// The JSR loader installs this to record an ordinary HTTPS module's
+    /// requested and final redirect URLs, and to refuse a redirect onto an
+    /// already verified JSR identity before V8 can register a second module
+    /// there.
+    final_url_observer: RefCell<Option<FinalUrlObserver>>,
 }
 
 /// A remote entry module fetched and stripped before V8 sees it.
@@ -164,6 +183,25 @@ impl FileModuleLoader {
             remote,
             node,
             entry: RefCell::new(None),
+            final_url_observer: RefCell::new(None),
+        }
+    }
+
+    /// Installs a URL observer.
+    ///
+    /// The observer runs after a remote module is fetched and prepared, and
+    /// before the `ModuleSource` that registers it is returned. It receives the
+    /// requested URL and the final redirect URL. An error prevents registration.
+    pub(crate) fn set_final_url_observer(&self, observer: FinalUrlObserver) {
+        *self.final_url_observer.borrow_mut() = Some(observer);
+    }
+
+    /// Runs the final-URL observer, when one is installed.
+    fn observe_final_url(&self, requested: &Url, final_url: &Url) -> Result<(), String> {
+        let observer = self.final_url_observer.borrow();
+        match observer.as_ref() {
+            Some(observer) => observer(requested, final_url),
+            None => Ok(()),
         }
     }
 
@@ -358,6 +396,11 @@ impl ModuleLoader for FileModuleLoader {
         }
         if module_specifier.scheme() == "https" {
             if let Some(entry) = self.take_entry(module_specifier) {
+                if let Err(reason) = self.observe_final_url(module_specifier, &entry.found) {
+                    return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                        "cannot load {display}: {reason}"
+                    ))));
+                }
                 return ModuleLoadResponse::Sync(Ok(ModuleSource::new_with_redirect(
                     ModuleType::JavaScript,
                     ModuleSourceCode::String(entry.code.into()),
@@ -471,6 +514,11 @@ impl FileModuleLoader {
                 }
             }
         };
+        if let Err(reason) = self.observe_final_url(module_specifier, &fetched.final_url) {
+            return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                "cannot load {display}: {reason}"
+            ))));
+        }
         ModuleLoadResponse::Sync(Ok(ModuleSource::new_with_redirect(
             ModuleType::JavaScript,
             source,
@@ -578,7 +626,10 @@ fn unsupported_scheme(url: &Url) -> String {
         }
         "node" => node_unsupported(&format!("node:{}", url.path())),
         "npm" => "npm: modules are not implemented".to_string(),
-        "jsr" => "jsr: modules are not implemented".to_string(),
+        "jsr" => {
+            "jsr: modules require remote module loading; create the Runtime with Runtime::with_remote (neojs --allow-remote) to enable them"
+                .to_string()
+        }
         "http" => "only https: module URLs are supported, not http:".to_string(),
         "https" => {
             "remote module loading is disabled; create the Runtime with Runtime::with_remote"

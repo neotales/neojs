@@ -1614,7 +1614,7 @@ fn refuses_a_jsr_import_and_exits_1() {
     let message = stderr(&output);
     assert!(message.contains("jsr:@scope/pkg@1"), "{message}");
     assert!(
-        message.contains("jsr: modules are not implemented"),
+        message.contains("jsr: modules require remote module loading"),
         "{message}"
     );
 }
@@ -1659,7 +1659,8 @@ Usage:
   neojs --allow-remote test <file-or-glob>...
 
 Options:
-  --allow-remote   allow https: entry and imports; off by default
+  --allow-remote   allow https: entry and imports and jsr: imports; off by
+                   default
   --no-allow-remote
                    force remote loading off, overriding NEOJS_ALLOW_REMOTE
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -1684,10 +1685,12 @@ module. `Neo.getBuiltInModule` takes the same canonical specifier, such as
 `Neo.getBuiltInModule(\"neo:test\")`; the README lists every specifier.
 
 Remote loading is disabled by default. `--allow-remote` enables an https:
-entry and absolute https: imports; `--no-allow-remote` forces it off. Either flag
+entry, absolute https: imports, and jsr:@scope/name[@version][/subpath] imports
+from the public JSR registry; `--no-allow-remote` forces it off. Either flag
 may appear before the module, or before or after `test`. It is not SSRF
 protection and not a sandbox, and downloads are cached under `neojs/packages` in
-the user cache.
+the user cache. JSR metadata and files use the same HTTPS limits and cache. npm:,
+node:, gh:, and import maps are not implemented.
 
 `neojs test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh

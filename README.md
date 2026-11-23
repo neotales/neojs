@@ -39,7 +39,8 @@ Usage:
   neojs --allow-remote test <file-or-glob>...
 
 Options:
-  --allow-remote   allow https: entry and imports; off by default
+  --allow-remote   allow https: entry and imports and jsr: imports; off by
+                   default
   --no-allow-remote
                    force remote loading off, overriding NEOJS_ALLOW_REMOTE
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -905,7 +906,7 @@ of a clock change rather than making scheduling monotonic.
 
 **Run tests.** `neojs test` takes one or more files or shell-style globs, expands them
 deterministically, sorts the selected files by canonical path, removes duplicates, and runs each
-file in a fresh runtime. `test` and `neo:test` import the same built-in module.
+file in a fresh runtime. Only `neo:test` is a module specifier; the bare name `test` is rejected.
 `test(name, fn)` accepts a synchronous or async callback; `test(name)` registers a
 pending test, which fails the run.
 
@@ -1622,8 +1623,9 @@ database providers and a JavaScript/Node adapter are not yet wired in. See the
 The [`neojs-manifest` crate](docs/neo-jsonc.md) is the bounded foundation for `neo.jsonc`: strict
 JSONC parsing, schema validation, and canonical import-specifier normalization for `gh:`, `npm:`,
 `jsr:`, and `node:`. It does not install an import map, expand workspaces, apply
-`include`/`exclude`, or load npm, JSR, GitHub, or Node modules. Those transports remain rejected at
-runtime.
+`include`/`exclude`, or load npm, JSR, GitHub, or Node modules. The runtime loads `jsr:` imports
+only when remote loading is enabled; the manifest crate does not change that, and `npm:`, `gh:`,
+and `node:` remain rejected at runtime.
 
 ### QuickJS runtime: neojs-lite-core
 
@@ -1677,9 +1679,11 @@ controls-incomplete rather than strict. The directory is self-contained: see
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
-local module loading, opt-in HTTPS module loading with explicit limits, imports of the `age`,
-`assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`,
-`test`, and `uuid` built-ins by their canonical `neo:` specifiers, console output, `neojs test` over
+local module loading, opt-in HTTPS module loading with explicit limits, opt-in `jsr:` resolution
+through the public JSR registry with manifest length and SHA-256 verification, imports of the
+`age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
+`strings`, `test`, and `uuid` built-ins by their canonical `neo:` specifiers, console output,
+`neojs test` over
 multiple files and globs, bounded in-memory byte streams, live mutable and read-only array and
 typed-array views, mutable and read-only Unicode code point buffers, UTC five-field cron parsing and
 in-process scheduling, writes to the process's stdout and stderr, lexical POSIX and Windows path
@@ -1698,10 +1702,27 @@ surface, not the built-in modules: `Neo.engine` is `"neo-lite"`, its built-in mo
   rejected by extension. CommonJS is rejected by the `.cjs` and `.cts` extensions; a `.js` file
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
-- `node:`, `npm:`, `jsr:`, `http:`, `data:`, and `blob:` imports are rejected by default. `https:`
-  imports are rejected unless the runtime is created with remote loading enabled
-  (`neojs --allow-remote`, or `NEOJS_ALLOW_REMOTE=1`), and `http:` is always rejected. With the
-  off-by-default `node-compat` feature, a runtime created with
+- `node:`, `npm:`, `gh:`, `http:`, `data:`, and `blob:` imports are rejected. `jsr:` imports are
+  rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`, or
+  `NEOJS_ALLOW_REMOTE=1`); when enabled they resolve through the public JSR registry, and each file
+  is checked against the version manifest's length and SHA-256 before it runs. The checksum proves
+  consistency with the retrieved metadata, not publisher identity; the cache is mutable local state,
+  so an attacker who rewrites both the cached manifest and the cached body can keep them consistent.
+  A direct `https://jsr.io/...` import from a local or ordinary remote module is an ordinary HTTPS
+  module, not a `jsr:` import, and does not use registry metadata or checksums; an explicit jsr.io
+  URL imported inside a JSR graph is verified against the manifest. One exception: if the same
+  canonical URL is already pending from a `jsr:` resolution (including a bare `import.meta.resolve`
+  or a failed verified load), a later direct load of that URL takes the verified path because the
+  original specifier is not recoverable at load time. That is conservative verification, not a
+  bypass. JSR support covers
+  exported entrypoints and the relative modules they import; `npm:`, `node:`, `gh:`, dist-tags,
+  private registries, authentication, import maps and `neo.jsonc`, lockfiles, offline policy, and
+  publisher signatures are not implemented. A JSR package that imports one of those fails at
+  resolution. The first metadata request for a package or version is synchronous and blocks the
+  isolate thread. `https:` imports are
+  rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`, or
+  `NEOJS_ALLOW_REMOTE=1`), and `http:` is always rejected.
+- With the off-by-default `node-compat` feature, a runtime created with
   `Runtime::with_node_compat` accepts only `node:child_process`, and only its synchronous
   `spawnSync` and `execFileSync` with `encoding: "utf8"`; other `node:` modules and every other
   form are rejected with a reason. Node modules are not added to the `Neo` registry, no bare

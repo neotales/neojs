@@ -15,8 +15,9 @@ never searches for the file. A caller passes an explicit path to `Manifest::from
 the text to `Manifest::parse`. `from_path` reads at most `MAX_MANIFEST_BYTES + 1` bytes, so an
 oversized file is rejected without being loaded whole.
 
-No command-line flag reads `neo.jsonc` yet. `neojs` still rejects `npm:`, `jsr:`, `gh:`, and
-`node:` imports at module resolution.
+No command-line flag reads `neo.jsonc` yet. `neojs` loads a `jsr:` import when remote loading is
+enabled (`--allow-remote` or `NEOJS_ALLOW_REMOTE=1`), but this crate still does not install an
+import map. `npm:`, `gh:`, and `node:` imports remain rejected at module resolution.
 
 ## JSONC dialect
 
