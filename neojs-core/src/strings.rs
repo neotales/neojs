@@ -16,6 +16,30 @@ use deno_core::v8;
 
 use neojs_builtins::strings as logic;
 
+/// Counts engine text reads for the streaming-search tests.
+#[cfg(feature = "test-support")]
+static TEXT_UNITS_READ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts engine windows read for the streaming-search tests.
+#[cfg(feature = "test-support")]
+static TEXT_WINDOWS_READ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Returns `(units, windows)` copied from V8 strings by the streaming search.
+#[cfg(feature = "test-support")]
+pub(crate) fn test_reads() -> (usize, usize) {
+    (
+        TEXT_UNITS_READ.load(std::sync::atomic::Ordering::Relaxed),
+        TEXT_WINDOWS_READ.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// Resets the streaming-search read counters.
+#[cfg(feature = "test-support")]
+pub(crate) fn reset_test_reads() {
+    TEXT_UNITS_READ.store(0, std::sync::atomic::Ordering::Relaxed);
+    TEXT_WINDOWS_READ.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The global that carries the native built-in entry to the realm shim.
 ///
 /// The shim reads it once, builds the registry, and the runtime removes it
@@ -168,6 +192,87 @@ fn string_argument<'s>(
     Some(units)
 }
 
+/// Returns a required string argument as a V8 string without copying it.
+///
+/// The caller builds a [`Utf16Text`] over this value so the streaming search
+/// reads only the windows it needs.
+fn string_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &v8::FunctionCallbackArguments<'s>,
+    index: i32,
+    message: &str,
+) -> Option<v8::Local<'s, v8::String>> {
+    let value = args.get(index);
+    if !value.is_string() {
+        throw_type(scope, message);
+        return None;
+    }
+    Some(value.cast())
+}
+
+/// A forward-readable V8 string that copies bounded windows on demand.
+///
+/// The buffer is allocated once with [`logic::WINDOW_UNITS`] capacity. A search
+/// with a small limit therefore reads a small prefix instead of the whole
+/// string, and a full search keeps only one window alive.
+struct Utf16Text<'a, 's, 'i> {
+    scope: &'a mut v8::PinScope<'s, 'i>,
+    text: v8::Local<'s, v8::String>,
+    length: usize,
+    read_limit: usize,
+    window_start: usize,
+    window: Vec<u16>,
+}
+
+impl<'a, 's, 'i> Utf16Text<'a, 's, 'i> {
+    fn new(scope: &'a mut v8::PinScope<'s, 'i>, text: v8::Local<'s, v8::String>) -> Self {
+        Self {
+            scope,
+            text,
+            length: text.length(),
+            read_limit: usize::MAX,
+            window_start: 0,
+            window: Vec::new(),
+        }
+    }
+
+    fn load(&mut self, start: usize) {
+        let end = (start + logic::WINDOW_UNITS)
+            .min(self.length)
+            .min(self.read_limit.max(start + 1));
+        self.window.resize(end - start, 0);
+        self.text.write_v2(
+            &*self.scope,
+            start as u32,
+            &mut self.window,
+            v8::WriteFlags::default(),
+        );
+        self.window_start = start;
+        #[cfg(feature = "test-support")]
+        {
+            TEXT_UNITS_READ.fetch_add(self.window.len(), std::sync::atomic::Ordering::Relaxed);
+            TEXT_WINDOWS_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+impl logic::Utf16Source for Utf16Text<'_, '_, '_> {
+    fn len(&self) -> usize {
+        self.length
+    }
+
+    fn set_read_limit(&mut self, end: usize) {
+        self.read_limit = end;
+    }
+
+    fn unit(&mut self, index: usize) -> u16 {
+        if index < self.window_start || index >= self.window_start + self.window.len() {
+            self.load(index);
+        }
+        self.window[index - self.window_start]
+    }
+}
+
 /// Returns an optional string argument, distinguishing `undefined` from a
 /// non-string value.
 fn optional_string<'s>(
@@ -273,7 +378,7 @@ fn index_of_fold<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'s, v8::Value>,
 ) {
-    let Some(text) = string_argument(scope, &args, 0, logic::TEXT_MESSAGE) else {
+    let Some(text) = string_value(scope, &args, 0, logic::TEXT_MESSAGE) else {
         return;
     };
     let Some(search) = string_argument(scope, &args, 1, logic::SEARCH_MESSAGE) else {
@@ -283,7 +388,11 @@ fn index_of_fold<'s>(
         Ok(from) => from,
         Err(()) => return,
     };
-    match logic::index_of_fold(&text, &search, from) {
+    let result = {
+        let mut source = Utf16Text::new(scope, text);
+        logic::index_of_fold_source(&mut source, &search, from)
+    };
+    match result {
         Ok(index) => set_index(&mut rv, index),
         Err(error) => throw_range(scope, error.message()),
     }
@@ -294,7 +403,7 @@ fn last_index_of_fold<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'s, v8::Value>,
 ) {
-    let Some(text) = string_argument(scope, &args, 0, logic::TEXT_MESSAGE) else {
+    let Some(text) = string_value(scope, &args, 0, logic::TEXT_MESSAGE) else {
         return;
     };
     let Some(search) = string_argument(scope, &args, 1, logic::SEARCH_MESSAGE) else {
@@ -304,7 +413,11 @@ fn last_index_of_fold<'s>(
         Ok(from) => from,
         Err(()) => return,
     };
-    match logic::last_index_of_fold(&text, &search, from) {
+    let result = {
+        let mut source = Utf16Text::new(scope, text);
+        logic::last_index_of_fold_source(&mut source, &search, from)
+    };
+    match result {
         Ok(index) => set_index(&mut rv, index),
         Err(error) => throw_range(scope, error.message()),
     }

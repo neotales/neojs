@@ -249,8 +249,10 @@
 //! U+0131 DOTLESS I, and `"ss"` does not equal `"ß"`. Indices are UTF-16 code
 //! unit offsets like `String.prototype.indexOf`, and overlapping occurrences
 //! are found. Searching is linear in the text plus the search string (KMP over
-//! simple-fold equivalence) and uses O(search) extra memory, so a repeated
-//! prefix cannot make it quadratic. `lastIndexOfFold` stops as soon as no match
+//! simple-fold equivalence) and uses O(search) extra memory plus one fixed
+//! 1024-code-unit window, so a repeated prefix cannot make it quadratic and a
+//! small `fromIndex` does not copy the whole text. `lastIndexOfFold` stops as
+//! soon as no match
 //! can begin at or before its limit, so a small limit does not scan a long tail.
 //! A lone surrogate is compared as itself and never matches half of a pair.
 //! With no `chars`, trimming is exactly `String.prototype.trim`, so it uses
@@ -447,6 +449,23 @@ pub mod test_support {
     /// production hook.
     pub fn fail_next_shamir_random() {
         crate::crypto_shamir::fail_next_shamir_random();
+    }
+
+    /// Return `(units, windows)` copied from V8 strings by the last
+    /// `indexOfFold`/`lastIndexOfFold` calls.
+    ///
+    /// Used to prove that a small `fromIndex` reads a bounded prefix instead of
+    /// copying the whole text. Compiled only with `test-support` and
+    /// `neo-strings`.
+    #[cfg(feature = "neo-strings")]
+    pub fn strings_text_reads() -> (usize, usize) {
+        crate::strings::test_reads()
+    }
+
+    /// Reset the streaming-search read counters on the current thread.
+    #[cfg(feature = "neo-strings")]
+    pub fn reset_strings_text_reads() {
+        crate::strings::reset_test_reads();
     }
 
     /// Make the next UUID entropy draw fail with `NEO_UUID_RANDOM`.
