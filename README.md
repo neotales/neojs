@@ -38,8 +38,8 @@ Usage:
 
 Options:
   --allow-remote   allow https: entry and imports; off by default
-  -h, --help       show this help; alone, or after `test`
-  -V, --version    show the version; must be the only argument
+  -h, --help       show this help; alone, after `test`, or after `--allow-remote`
+  -V, --version    show the version; alone, or after `--allow-remote`
   --               end option parsing, for a file or pattern beginning with `-`
 ```
 
