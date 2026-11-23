@@ -216,7 +216,18 @@ GIT_COMMIT=$(git -C "$ROOT" rev-parse HEAD)
 GIT_BRANCH=$(git -C "$ROOT" symbolic-ref -q --short HEAD 2>/dev/null || echo detached)
 GIT_DESCRIBE=$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo unknown)
 GIT_TAGS_JSON=$(git -C "$ROOT" tag --points-at HEAD | jq -R -s 'split("\n") | map(select(length > 0))')
-if [ "$(git -C "$ROOT" status --porcelain | wc -l)" -gt 0 ]; then
+
+# The ledger is this tool's output, not an input to the artifact. If it is
+# inside the repository, appending to it would otherwise make the next run
+# report a dirty tree and derive a different key, so exclude it from the
+# cleanliness check.
+GIT_STATUS_PATHS=(.)
+LEDGER_REL=$(realpath -m --relative-to="$ROOT" "$LEDGER" 2>/dev/null || true)
+case "$LEDGER_REL" in
+    "" | /* | ../*) ;;
+    *) GIT_STATUS_PATHS+=(":(exclude)$LEDGER_REL") ;;
+esac
+if [ "$(git -C "$ROOT" status --porcelain -- "${GIT_STATUS_PATHS[@]}" | wc -l)" -gt 0 ]; then
     GIT_DIRTY=true
 else
     GIT_DIRTY=false
