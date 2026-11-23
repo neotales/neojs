@@ -12,6 +12,13 @@
 //! The primitive is the RustCrypto `aes-gcm` crate. This crate defines the
 //! envelope, not a sandbox, a key store, or a key-lifecycle manager.
 //!
+//! The envelope layout, associated-data construction, size policy, and core
+//! seal/open logic are adapted from the `neo:crypto` module in the NeoLiteJS
+//! project. That source is MIT licensed, Copyright (c) 2026 NeoTales
+//! contributors; the full upstream notice is in `THIRD_PARTY_NOTICES.md`. The
+//! project licence remains `LICENSE.md` (Copyright (c) 2026 NeoTales and
+//! x0craft). No PLAB code or format is used here.
+//!
 //! # Envelope
 //!
 //! Every value returned by [`encrypt`] has this layout:
