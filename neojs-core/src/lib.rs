@@ -21,6 +21,18 @@
 //! [`RemoteOptions`] sets the per-module deadline, body, aggregate byte,
 //! module-count, and redirect limits, and the cache directory.
 //!
+//! With remote loading enabled, `gh:owner/repo@ref/path` and
+//! `github:owner/repo@ref/path` are accepted as an entry or an import. Each is
+//! validated and normalized to one credential-free
+//! `https://raw.githubusercontent.com/owner/repo/ref/path` URL, then loaded as
+//! that HTTPS module, so the same limits, redirect policy, cache, identity, and
+//! relative-import base apply. The legacy `gh:owner/repo/path/@ref` spelling is
+//! also accepted. The reference is one path segment: a tag, a branch, or a
+//! commit SHA, but not a branch name containing `/`. Percent signs, `..`
+//! segments, backslashes, queries, and fragments are rejected. GitHub is not an
+//! allowlist: any `https:` URL is still allowed, and remote code is not
+//! sandboxed.
+//!
 //! It provides the `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`,
 //! `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid` built-in
 //! modules through `Neo.getBuiltInModule("neo:name")` and through the canonical
@@ -324,6 +336,7 @@ mod crypto_cipher;
 mod crypto_hash;
 mod crypto_shamir;
 mod error;
+mod github;
 // Private groundwork for native `jsr:` imports. `Runtime::new` does not install
 // a JSR-capable loader, so every public `jsr:` import is still rejected; see
 // `src/jsr.rs` for the implemented core and the work that remains.

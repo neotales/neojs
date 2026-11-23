@@ -2059,6 +2059,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "httpdate",
+ "neojs-manifest",
  "neojs-module-policy",
  "neotales-age",
  "neotales-ssh",
