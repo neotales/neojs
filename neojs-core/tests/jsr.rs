@@ -920,6 +920,155 @@ if (first.value !== 1) throw new Error(`bad value ${{first.value}}`);
     .expect("a direct import of an already verified JSR URL must reuse the module");
 }
 
+// Integration test: an ordinary HTTPS module that redirects to a canonical
+// jsr.io URL is registered under the final URL. A later `jsr:` import of that
+// identity is refused, so it cannot reuse the unverified redirect body.
+#[test]
+fn an_ordinary_redirect_to_a_registry_url_cannot_be_reused_by_jsr() {
+    let target = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let body = b"export const value = 1;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                "https://elsewhere.test/entry.js".to_string(),
+                Reply::redirect("https://jsr.io/@scope/pkg/1.0.0/mod.js"),
+            )
+            .with(target.clone(), Reply::ok(body.as_slice()))
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", body)], &[(".", "./mod.js")])),
+            ),
+    );
+
+    let message = error_message(run(
+        &server,
+        r#"
+const direct = await import("https://elsewhere.test/entry.js");
+if (direct.value !== 1) throw new Error("the ordinary redirect did not load");
+await import("jsr:@scope/pkg@1");
+"#,
+    ));
+    assert!(
+        message.contains("already loaded as an ordinary HTTPS module"),
+        "{message}"
+    );
+    assert_eq!(
+        server.request_count(&target),
+        1,
+        "the jsr: import must not fetch the unverified redirect target again"
+    );
+}
+
+// Integration test: a prepared `run_url` entry that redirects to a canonical
+// jsr.io URL registers under the final URL. Its `jsr:` import of that identity
+// is refused. An exact request budget proves the prepared entry is not fetched
+// again.
+#[test]
+fn a_prepared_entry_redirect_cannot_be_reused_by_jsr() {
+    let requested = "https://elsewhere.test/entry.js";
+    let target = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let body = b"import \"jsr:@scope/pkg@1\";\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                requested.to_string(),
+                Reply::redirect("https://jsr.io/@scope/pkg/1.0.0/mod.js"),
+            )
+            .with(target.clone(), Reply::ok(body.as_slice()))
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", body)], &[(".", "./mod.js")])),
+            ),
+    );
+    let mut runtime = Runtime::with_remote_transport(
+        RemoteOptions::new().without_cache().with_max_requests(4),
+        server.transport(),
+    )
+    .expect("runtime");
+
+    let error = runtime
+        .run_url(requested)
+        .expect_err("the jsr: import must not reuse the prepared redirect body");
+    let message = error.to_string();
+    assert!(
+        message.contains("already loaded as an ordinary HTTPS module"),
+        "{message}"
+    );
+    assert_eq!(
+        server.seen(),
+        vec![
+            requested.to_string(),
+            target.clone(),
+            meta_url("scope", "pkg"),
+            version_url("scope", "pkg", "1.0.0"),
+        ],
+        "the prepared entry must be fetched once and the request budget preserved"
+    );
+}
+
+// Integration test: the opposite order is also safe. After a canonical jsr.io
+// URL is verified, an ordinary redirect to that identity is refused before V8
+// can register a second module there, and the verified module remains intact.
+#[test]
+fn an_ordinary_redirect_to_an_already_verified_jsr_url_is_refused() {
+    let requested = "https://elsewhere.test/entry.js";
+    let target = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let body = b"export const value = 1;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", body)], &[(".", "./mod.js")])),
+            )
+            .with(target.clone(), Reply::ok(body.as_slice()))
+            .with(
+                requested.to_string(),
+                Reply::redirect("https://jsr.io/@scope/pkg/1.0.0/mod.js"),
+            ),
+    );
+
+    run(
+        &server,
+        r#"
+const verified = await import("jsr:@scope/pkg@1");
+let caught = null;
+try {
+    await import("https://elsewhere.test/entry.js");
+} catch (error) {
+    caught = error;
+}
+if (verified.value !== 1) throw new Error("the verified module was replaced");
+if (caught === null) throw new Error("the ordinary redirect was not refused");
+if (!String(caught).includes("already a verified JSR module")) {
+    throw new Error(`unexpected refusal: ${caught}`);
+}
+"#,
+    )
+    .expect("an ordinary redirect must not replace a verified JSR module");
+    assert_eq!(
+        server.request_count(&target),
+        2,
+        "the verified load and the refused ordinary redirect each fetch the target once"
+    );
+    assert_eq!(
+        server.request_count(requested),
+        1,
+        "the ordinary redirect must be fetched once"
+    );
+}
+
 // Integration test: the cache is local mutable state. Rewriting both the
 // version metadata and the file keeps the checksum consistent, so the loader
 // accepts the substituted body. This documents a limitation: the checksum
