@@ -15,8 +15,9 @@ never searches for the file. A caller passes an explicit path to `Manifest::from
 the text to `Manifest::parse`. `from_path` reads at most `MAX_MANIFEST_BYTES + 1` bytes, so an
 oversized file is rejected without being loaded whole.
 
-No command-line flag reads `neo.jsonc` yet. `neojs` still rejects `npm:`, `jsr:`, `gh:`, and
-`node:` imports at module resolution.
+No command-line flag reads `neo.jsonc` yet. A `gh:`/`github:` target is normalized here, but the
+V8 runtime only loads such a specifier directly when remote loading is enabled; a manifest import
+map is not installed. `npm:`, `jsr:`, and `node:` imports are still rejected at module resolution.
 
 ## JSONC dialect
 
@@ -159,7 +160,9 @@ Targets are normalized by the same public function, `normalize_specifier`. Bare 
 | `npm:lodash@4.17.21` | `npm:lodash@4.17.21` | Unsupported |
 | `npm:@scope/pkg@^1.2.3/sub` | `npm:@scope/pkg@^1.2.3/sub` | Unsupported |
 | `jsr:@scope/pkg@1.2.3/sub` | `jsr:@scope/pkg@1.2.3/sub` | Unsupported |
-| `gh:owner/repo/src/mod.ts/@v1.2.3` | `https://raw.githubusercontent.com/owner/repo/v1.2.3/src/mod.ts` | Unsupported |
+| `gh:owner/repo@v1.2.3/src/mod.ts` | `https://raw.githubusercontent.com/owner/repo/v1.2.3/src/mod.ts` | Normalized only |
+| `github:owner/repo@v1.2.3/src/mod.ts` | the same raw URL | Normalized only |
+| `gh:owner/repo/src/mod.ts/@v1.2.3` (legacy) | the same raw URL | Normalized only |
 | `node:fs/promises` | `node:fs/promises` | Unsupported |
 
 `ImportMap::first_not_loadable` identifies the first entry, in key order, that
@@ -191,21 +194,33 @@ Grammar: `jsr:@scope/name@version[/subpath]`.
 - A subpath may not contain empty, `.`, or `..` segments.
 - No JSR metadata, module graph, file, checksum, or cache entry is read.
 
-#### `gh:`
+#### `gh:` and `github:`
 
-Grammar: `gh:owner/repo/path/@tagOrSha`.
+Grammar: `gh:owner/repo@reference/path`, or the alias `github:owner/repo@reference/path`. The
+legacy `gh:owner/repo/path/@reference` spelling remains accepted.
 
 - `owner` is 1 to 39 ASCII letters, digits, or `-`, and may not start or end with `-`.
 - `repo` is 1 to 100 ASCII letters, digits, `.`, `_`, or `-`, and may not be `.`, `..`, or `.git`.
-- `path` is a repository-relative module path with no empty, `.`, or `..` segment.
-- The separator is the **last** `/@` in the specifier. Everything after it is the reference.
+- `path` is a repository-relative module path with no empty, `.`, or `..` segment. `\`, `%`, `?`,
+  and `#` are rejected, so `%2e%2e` and `%2f` cannot hide traversal.
+- In the new form, the reference is the single segment between `@` and the next `/`. A tag such as
+  `v1.2.3` and a full 40-character commit SHA are both accepted. A branch name containing `/`
+  cannot be expressed, because the first `/` ends the reference; use a tag or a full SHA. The
+  path may contain `@`, including a segment that starts with it.
+- In the legacy form, the separator is the **last** `/@`, the reference may not contain `/`, and
+  an earlier path segment may contain `@`: `gh:o/r/dir@name/mod.ts/@v1` names the path
+  `dir@name/mod.ts` at reference `v1`.
 - A reference is 1 to 256 bytes of ASCII letters, digits, `.`, `_`, `+`, `-`, or `@`, starts with
-  a letter or digit, and may not contain `..`. It may not contain `/`.
-- A path segment may contain `@`; the last `/@` still wins. `gh:o/r/dir@name/mod.ts/@v1` names the
-  path `dir@name/mod.ts` at reference `v1`.
+  a letter or digit, and may not contain `..`.
+- `@` immediately after the repository selects the new form and `/` selects the legacy form, so a
+  specifier is never guessed from an ambiguous separator. A specifier with neither is rejected.
+- The scheme is matched case-sensitively here: `GH:` is an unknown scheme. (The V8 runtime accepts
+  either case because URL schemes are case-insensitive.)
 
-The canonical form is a `raw.githubusercontent.com` HTTPS URL. That URL is not fetched, and GitHub
-loading is not tested. The status is unsupported, not a claim that the URL will be reachable.
+The canonical form is a `raw.githubusercontent.com` HTTPS URL. This crate does not fetch it; a
+manifest import map is not installed. The V8 runtime loads a direct `gh:`/`github:` specifier, or
+the same raw URL, only when remote loading is enabled. The URL is not a promise that the repository,
+reference, or file exists.
 
 #### `node:`
 

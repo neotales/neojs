@@ -1,8 +1,8 @@
 //! Integration tests for import-specifier normalization.
 //!
 //! Normalization is the public contract: these tests assert canonical strings,
-//! parsed fields, and the explicit unsupported status for npm, JSR, GitHub, and
-//! Node.
+//! parsed fields, the normalized-only status for GitHub, and the explicit
+//! unsupported status for npm, JSR, and Node.
 
 use neojs_manifest::Error;
 use neojs_manifest::NormalizedSpecifier;
@@ -25,7 +25,7 @@ fn normalizes_gh_to_a_raw_url() {
         specifier.canonical(),
         "https://raw.githubusercontent.com/owner/repo/v1.2.3/src/mod.ts"
     );
-    assert!(matches!(specifier.support(), Support::Unsupported(_)));
+    assert_eq!(specifier.support(), Support::NormalizedOnly);
 
     let NormalizedSpecifier::Gh(gh) = specifier else {
         panic!("expected a gh specifier");
@@ -38,6 +38,82 @@ fn normalizes_gh_to_a_raw_url() {
         gh.url(),
         "https://raw.githubusercontent.com/owner/repo/v1.2.3/src/mod.ts"
     );
+}
+
+#[test]
+fn normalizes_the_new_gh_and_github_forms_to_one_url() {
+    let expected = "https://raw.githubusercontent.com/owner/repo/v1.2.3/src/mod.ts";
+    for input in [
+        "gh:owner/repo@v1.2.3/src/mod.ts",
+        "github:owner/repo@v1.2.3/src/mod.ts",
+    ] {
+        let specifier = normalize_specifier(input).expect(input);
+        assert_eq!(specifier.kind(), SpecifierKind::Gh);
+        assert_eq!(specifier.canonical(), expected);
+        let NormalizedSpecifier::Gh(gh) = specifier else {
+            panic!("expected a gh specifier");
+        };
+        assert_eq!(gh.owner(), "owner");
+        assert_eq!(gh.repo(), "repo");
+        assert_eq!(gh.reference(), "v1.2.3");
+        assert_eq!(gh.path(), "src/mod.ts");
+        assert_eq!(gh.url(), expected);
+    }
+
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    assert_eq!(
+        canonical(&format!("github:owner/repo@{sha}/a/b.ts")),
+        format!("https://raw.githubusercontent.com/owner/repo/{sha}/a/b.ts")
+    );
+}
+
+#[test]
+fn a_new_form_reference_is_one_segment_and_the_path_may_contain_at() {
+    assert_eq!(
+        canonical("gh:owner/repo@feature/x/mod.ts"),
+        "https://raw.githubusercontent.com/owner/repo/feature/x/mod.ts"
+    );
+    assert_eq!(
+        canonical("github:owner/repo@v1/dir/@name/mod.ts"),
+        "https://raw.githubusercontent.com/owner/repo/v1/dir/@name/mod.ts"
+    );
+    // The alias accepts the legacy spelling too, with the last `/@` winning.
+    assert_eq!(
+        canonical("github:owner/repo/dir@name/mod.ts/@v1"),
+        "https://raw.githubusercontent.com/owner/repo/v1/dir@name/mod.ts"
+    );
+}
+
+#[test]
+fn rejects_malformed_new_gh_and_github_forms() {
+    for input in [
+        "gh:owner/repo",
+        "gh:owner/repo@v1",
+        "gh:owner/repo@v1/",
+        "gh:owner/repo@/mod.ts",
+        "gh:owner/repo@@v1/mod.ts",
+        "gh:owner/repo@v1//mod.ts",
+        "gh:owner/repo@v1/./mod.ts",
+        "gh:owner/repo@v1/../mod.ts",
+        "gh:owner/repo@v1/%2e%2e/mod.ts",
+        "gh:owner/repo@v1/%2fmod.ts",
+        "gh:owner/repo@v1/mod%2ets",
+        "gh:owner/repo@v1/mod.ts?x=1",
+        "gh:owner/repo@v1/mod.ts#frag",
+        "gh:owner/repo@v1/a\\b.ts",
+        "gh:owner/repo@..hidden/mod.ts",
+        "gh:owner/repo@v1/.mod.ts/../x.ts",
+        "github:owner/repo@v1",
+        "github:owner/repo@v1/../x.ts",
+        "github:-owner/repo@v1/mod.ts",
+        "github:owner/.git@v1/mod.ts",
+    ] {
+        let error = normalize_specifier(input).expect_err(input);
+        assert!(
+            matches!(error, Error::InvalidSpecifier { .. }),
+            "{input}: {error}"
+        );
+    }
 }
 
 #[test]

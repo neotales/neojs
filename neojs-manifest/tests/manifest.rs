@@ -83,16 +83,16 @@ fn parses_every_documented_field() {
         manifest.imports.get("local").expect("local").support(),
         Support::NormalizedOnly
     );
-    assert!(matches!(
+    assert_eq!(
         manifest.imports.get("gh").expect("gh").support(),
-        Support::Unsupported(_)
-    ));
+        Support::NormalizedOnly
+    );
     assert_eq!(
         manifest
             .imports
             .first_not_loadable()
             .map(|(key, support)| (key, matches!(support, Support::Unsupported(_)))),
-        Some(("gh", true))
+        Some(("gh", false))
     );
 }
 
