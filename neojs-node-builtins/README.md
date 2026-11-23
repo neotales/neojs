@@ -24,10 +24,14 @@ size are bounded. The serialized bridge request is capped before parsing.
 On Unix, pipes are non-blocking and driven by `poll` on the calling thread; no
 reader or writer threads are created. A timeout, output overflow, or an
 inherited pipe left after the direct child exits triggers a bounded drain and a
-process-group SIGKILL, so a descendant cannot keep a join blocked. A descendant
-that creates a new process group and escapes is not tracked or killed. Other
-platforms return `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` rather than using an
-unbounded join.
+process-group SIGKILL, so a descendant cannot keep a join blocked. That case is
+reported as an explicit incomplete error, never a successful status with
+possibly truncated output. A descendant that creates a new process group and
+escapes is not tracked or killed. Other platforms return
+`ERR_NODE_CHILD_PROCESS_UNSUPPORTED` before spawning. The guest serializes
+null-prototype records and arrays with intrinsics captured at bridge
+installation, so inherited `toJSON` hooks or a replaced `JSON.stringify` are not
+used.
 
 This is not a sandbox. An allowed executable runs with the authority of the
 NeoJS process. The allowlist matches canonical paths, not inodes or contents:

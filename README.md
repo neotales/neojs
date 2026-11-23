@@ -1706,9 +1706,10 @@ surface, not the built-in modules: `Neo.engine` is `"neo-lite"`, its built-in mo
   `spawnSync` and `execFileSync` with `encoding: "utf8"`; other `node:` modules and every other
   form are rejected with a reason. Node modules are not added to the `Neo` registry, no bare
   `child_process` alias exists, and `node:test` is never an alias for the `test` built-in.
-  Serialized bridge requests are capped before parsing, and a timeout or inherited pipe is
-  followed by a bounded drain and process-group kill. See
-  [`docs/node-compat.md`](docs/node-compat.md). The built-in modules are
+  Serialized bridge requests are capped before parsing, guest serialization uses
+  install-time intrinsics and null-prototype records, and a timeout or inherited pipe is followed
+  by a bounded drain and process-group kill; an inherited pipe is an explicit incomplete error,
+  not a success. See [`docs/node-compat.md`](docs/node-compat.md). The built-in modules are
   `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
   `strings`, `test`, and `uuid`,
   reached through `Neo.getBuiltInModule("neo:age")`,

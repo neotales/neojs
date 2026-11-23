@@ -18,8 +18,9 @@ every execution. There is no shell, `PATH` lookup, inherited environment, or
 `stdio: inherit`, and all resources are bounded. The allowlist matches canonical
 paths, not inodes: protect the executable and every ancestor directory from
 untrusted writes. A timeout, overflow, or inherited pipe left after the direct
-child exits triggers a bounded drain and a process-group kill; no reader thread
-is left waiting. An allowed executable still runs with the full authority of the
+child exits triggers a bounded drain and a process-group kill; an inherited pipe
+is reported as an explicit incomplete error, and no reader thread is left
+waiting. An allowed executable still runs with the full authority of the
 process; this is not a sandbox.
 
 See `neojs-node-builtins` for the shared support matrix and limits.
