@@ -23,10 +23,10 @@
 //! Unicode release.
 //!
 //! Searching is linear in the text plus the search string (KMP over the
-//! fold-equivalence relation) and uses O(search) extra memory, so a repeated
-//! prefix cannot make it quadratic. `last_index_of_fold` stops as soon as no
-//! pending or future match can begin at or before its limit, so a small limit
-//! does not scan a long tail.
+//! fold-equivalence relation) and uses O(search) extra memory plus the engine
+//! adapter's fixed window, so a repeated prefix cannot make it quadratic.
+//! `last_index_of_fold` stops as soon as no pending or future match can begin
+//! at or before its limit, so a small limit does not scan or copy a long tail.
 //!
 //! With no `chars`, trimming is exactly JavaScript's `String.prototype.trim`,
 //! `trimStart`, and `trimEnd`: that whitespace set contains U+FEFF and excludes
@@ -42,6 +42,8 @@ use std::cell::Cell;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 mod case_fold;
+#[cfg(test)]
+mod case_fold_test;
 
 /// The canonical import specifier and registry key.
 pub const SPECIFIER: &str = "neo:strings";
@@ -144,6 +146,60 @@ thread_local! {
     static CODE_POINT_READS: Cell<usize> = const { Cell::new(0) };
 }
 
+/// The maximum number of UTF-16 code units an engine adapter copies per read.
+///
+/// The streaming search uses this as an upper bound on its working buffer, not
+/// as a bound on the text it may examine. A search with a small `fromIndex`
+/// reads only the windows it needs and stops at the algorithm's early bound.
+pub const WINDOW_UNITS: usize = 1024;
+
+/// A forward-readable UTF-16 text used by the streaming search functions.
+///
+/// An engine adapter implements this trait without copying the whole string.
+/// `unit` is called with an index below [`Utf16Source::len`]. The search moves
+/// forward, but boundary adjustment may read one code unit before the first
+/// requested index, so an adapter must handle any in-range index and may cache
+/// a bounded window internally.
+pub trait Utf16Source {
+    /// Returns the number of UTF-16 code units in the text.
+    fn len(&self) -> usize;
+
+    /// Returns whether the text has no code units.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Narrows the prefix a search expects to examine.
+    ///
+    /// This is a performance hint, not a change to the text: `unit` must still
+    /// answer any in-range index. The default keeps the whole text available.
+    fn set_read_limit(&mut self, _end: usize) {}
+
+    /// Returns the code unit at `index`, which is below [`Self::len`].
+    fn unit(&mut self, index: usize) -> u16;
+}
+
+/// A source over an existing UTF-16 slice.
+struct SliceSource<'a> {
+    units: &'a [u16],
+}
+
+impl<'a> SliceSource<'a> {
+    fn new(units: &'a [u16]) -> Self {
+        Self { units }
+    }
+}
+
+impl Utf16Source for SliceSource<'_> {
+    fn len(&self) -> usize {
+        self.units.len()
+    }
+
+    fn unit(&mut self, index: usize) -> u16 {
+        self.units[index]
+    }
+}
+
 /// Decodes the code point at a UTF-16 index.
 ///
 /// A well-formed surrogate pair is one code point of width two. A lone
@@ -181,17 +237,32 @@ fn code_point_before(units: &[u16], end: usize) -> (u32, usize) {
     (u32::from(unit), end - 1)
 }
 
-/// Moves `index` forward off the trailing half of a surrogate pair.
-///
-/// No well-formed match can start in the middle of a pair, so this changes no
-/// result; it only keeps the scan at code point boundaries.
-fn code_point_start(units: &[u16], index: usize) -> usize {
-    if index == 0 || index >= units.len() {
+/// Decodes the code point at a UTF-16 index in a streaming source.
+fn code_point_at_source<S: Utf16Source>(
+    source: &mut S,
+    length: usize,
+    index: usize,
+) -> (u32, usize) {
+    let unit = source.unit(index);
+    if (0xD800..=0xDBFF).contains(&unit) && index + 1 < length {
+        let next = source.unit(index + 1);
+        if (0xDC00..=0xDFFF).contains(&next) {
+            let high = u32::from(unit) - 0xD800;
+            let low = u32::from(next) - 0xDC00;
+            return (0x1_0000 + (high << 10) + low, 2);
+        }
+    }
+    (u32::from(unit), 1)
+}
+
+/// Moves a streaming index forward off the trailing half of a surrogate pair.
+fn code_point_start_source<S: Utf16Source>(source: &mut S, length: usize, index: usize) -> usize {
+    if index == 0 || index >= length {
         return index;
     }
-    let unit = units[index];
+    let unit = source.unit(index);
     if (0xDC00..=0xDFFF).contains(&unit) {
-        let previous = units[index - 1];
+        let previous = source.unit(index - 1);
         if (0xD800..=0xDBFF).contains(&previous) {
             return index + 1;
         }
@@ -331,25 +402,44 @@ pub fn index_of_fold(
     search: &[u16],
     from_index: Option<f64>,
 ) -> Result<Option<usize>, IndexError> {
-    let from = to_index(from_index, text.len(), 0)?;
+    let mut source = SliceSource::new(text);
+    index_of_fold_source(&mut source, search, from_index)
+}
+
+/// Finds the first occurrence of `search` in a forward-readable text.
+///
+/// This is the streaming form of [`index_of_fold`]. The adapter is asked only
+/// for the code units the KMP scan reaches, so a large text is not copied
+/// whole.
+///
+/// # Errors
+///
+/// Returns [`IndexError`] under the same conditions as [`index_of_fold`].
+pub fn index_of_fold_source<S: Utf16Source>(
+    text: &mut S,
+    search: &[u16],
+    from_index: Option<f64>,
+) -> Result<Option<usize>, IndexError> {
+    let length = text.len();
+    let from = to_index(from_index, length, 0)?;
     if search.is_empty() {
         return Ok(Some(from));
     }
-    let mut offset = code_point_start(text, from);
-    if offset >= text.len() {
+    let mut offset = code_point_start_source(text, length, from);
+    if offset >= length {
         return Ok(None);
     }
     let pattern = code_points_of(search);
-    let length = pattern.len();
+    let pattern_length = pattern.len();
     let prefix = fold_prefix(&pattern);
-    let mut starts = vec![0usize; length];
+    let mut starts = vec![0usize; pattern_length];
     let mut matched = 0;
     let mut slot = 0;
-    while offset < text.len() {
-        let (point, width) = code_point_at(text, offset);
+    while offset < length {
+        let (point, width) = code_point_at_source(text, length, offset);
         starts[slot] = offset;
         slot += 1;
-        if slot == length {
+        if slot == pattern_length {
             slot = 0;
         }
         while matched > 0 && !fold_equal(pattern[matched], point) {
@@ -358,10 +448,10 @@ pub fn index_of_fold(
         if fold_equal(pattern[matched], point) {
             matched += 1;
         }
-        // The ring holds the last `length` start offsets. After the increment
-        // above, `starts[slot]` is the oldest of them, which is the start of
-        // the match that has just completed.
-        if matched == length {
+        // The ring holds the last `pattern_length` start offsets. After the
+        // increment above, `starts[slot]` is the oldest of them, which is the
+        // start of the match that has just completed.
+        if matched == pattern_length {
             return Ok(Some(starts[slot]));
         }
         offset += width;
@@ -388,23 +478,53 @@ pub fn last_index_of_fold(
     search: &[u16],
     from_index: Option<f64>,
 ) -> Result<Option<usize>, IndexError> {
-    let limit = to_index(from_index, text.len(), text.len())?;
+    let mut source = SliceSource::new(text);
+    last_index_of_fold_source(&mut source, search, from_index)
+}
+
+/// Finds the last occurrence of `search` in a forward-readable text.
+///
+/// This is the streaming form of [`last_index_of_fold`]. The adapter is asked
+/// only for the code units the scan examines before the early-stop condition
+/// fires, so a small `from_index` does not force a whole-text copy. Memory is
+/// O(search) plus the adapter's bounded window.
+///
+/// # Errors
+///
+/// Returns [`IndexError`] under the same conditions as
+/// [`last_index_of_fold`].
+pub fn last_index_of_fold_source<S: Utf16Source>(
+    text: &mut S,
+    search: &[u16],
+    from_index: Option<f64>,
+) -> Result<Option<usize>, IndexError> {
+    let length = text.len();
+    let limit = to_index(from_index, length, length)?;
     if search.is_empty() {
         return Ok(Some(limit));
     }
     let pattern = code_points_of(search);
-    let length = pattern.len();
+    let pattern_length = pattern.len();
     let prefix = fold_prefix(&pattern);
-    let mut starts = vec![0usize; length];
+    let mut starts = vec![0usize; pattern_length];
+    // A match that starts at or before `limit` can consume at most two code
+    // units per code point of the search, plus one more code point to discover
+    // that a pending match fails. This prefix, not the whole text, is the most
+    // an engine adapter can need to copy.
+    let read_limit = limit
+        .saturating_add(search.len().saturating_mul(2))
+        .saturating_add(8)
+        .min(length);
+    text.set_read_limit(read_limit);
     let mut last = None;
     let mut matched = 0;
     let mut offset = 0;
     let mut slot = 0;
-    while offset < text.len() {
-        let (point, width) = code_point_at(text, offset);
+    while offset < length {
+        let (point, width) = code_point_at_source(text, length, offset);
         starts[slot] = offset;
         slot += 1;
-        if slot == length {
+        if slot == pattern_length {
             slot = 0;
         }
         while matched > 0 && !fold_equal(pattern[matched], point) {
@@ -413,7 +533,7 @@ pub fn last_index_of_fold(
         if fold_equal(pattern[matched], point) {
             matched += 1;
         }
-        if matched == length {
+        if matched == pattern_length {
             let start = starts[slot];
             if start > limit {
                 break;
@@ -427,7 +547,7 @@ pub fn last_index_of_fold(
         // so once that candidate is past the limit no match can be recorded
         // and the rest of the text need not be read.
         if matched > 0 {
-            let candidate = (slot + length - matched) % length;
+            let candidate = (slot + pattern_length - matched) % pattern_length;
             if starts[candidate] > limit {
                 break;
             }
@@ -826,6 +946,140 @@ mod tests {
 
     fn read_count() -> usize {
         CODE_POINT_READS.with(Cell::get)
+    }
+
+    /// A source that records how much of the text the search asks for.
+    struct TrackingSource<'a> {
+        units: &'a [u16],
+        reads: usize,
+        max_index: Option<usize>,
+    }
+
+    impl<'a> TrackingSource<'a> {
+        fn new(units: &'a [u16]) -> Self {
+            Self {
+                units,
+                reads: 0,
+                max_index: None,
+            }
+        }
+    }
+
+    impl Utf16Source for TrackingSource<'_> {
+        fn len(&self) -> usize {
+            self.units.len()
+        }
+
+        fn unit(&mut self, index: usize) -> u16 {
+            self.reads += 1;
+            self.max_index = Some(self.max_index.map_or(index, |max| max.max(index)));
+            self.units[index]
+        }
+    }
+
+    #[test]
+    fn streaming_search_reads_only_the_relevant_prefix() {
+        let mut text = units(&"a".repeat(1_000_000));
+        text.push(b'z' as u16);
+
+        let mut source = TrackingSource::new(&text);
+        assert_eq!(
+            last_index_of_fold_source(&mut source, &units("q"), Some(0.0)),
+            Ok(None)
+        );
+        assert_eq!(source.reads, 1, "a zero limit read {} units", source.reads);
+        assert_eq!(source.max_index, Some(0));
+
+        let mut source = TrackingSource::new(&text);
+        assert_eq!(
+            last_index_of_fold_source(&mut source, &units("q"), Some(10_000.0)),
+            Ok(None)
+        );
+        assert!(
+            source.reads <= 10_002,
+            "a limit of 10000 read {} units",
+            source.reads
+        );
+        assert!(source.max_index.is_some_and(|index| index <= 10_001));
+
+        let astral = units(&"\u{1F600}a".repeat(100_000));
+        let mut source = TrackingSource::new(&astral);
+        assert_eq!(
+            last_index_of_fold_source(&mut source, &units("q"), Some(0.0)),
+            Ok(None)
+        );
+        assert_eq!(
+            source.reads, 2,
+            "a pair boundary read {} units",
+            source.reads
+        );
+        assert_eq!(source.max_index, Some(1));
+
+        let mut source = TrackingSource::new(&astral);
+        assert_eq!(
+            last_index_of_fold_source(&mut source, &units("q"), Some(1.0)),
+            Ok(None)
+        );
+        assert_eq!(
+            source.reads, 2,
+            "a mid-pair limit read {} units",
+            source.reads
+        );
+    }
+
+    #[test]
+    fn streaming_search_matches_the_slice_search() {
+        let texts = [
+            units(""),
+            units("a"),
+            units("abc"),
+            units("aaaa"),
+            units("abababab"),
+            units("\u{1F600}a\u{1F600}a"),
+            vec![0xD800, 0x0061, 0xDC00, 0x0061],
+            vec![0xD800],
+            units("\u{03C3}\u{03A3}x\u{03C3}"),
+        ];
+        let searches = [
+            units(""),
+            units("a"),
+            units("abab"),
+            units("A"),
+            units("\u{1F600}"),
+            vec![0xDE00],
+            units("q"),
+        ];
+        let limits = [
+            None,
+            Some(-1.0),
+            Some(0.0),
+            Some(1.0),
+            Some(2.0),
+            Some(3.0),
+            Some(4.0),
+            Some(5.0),
+            Some(f64::INFINITY),
+        ];
+        for text in &texts {
+            for search in &searches {
+                for limit in limits {
+                    let expected = last_index_of_fold(text, search, limit);
+                    let mut source = TrackingSource::new(text);
+                    assert_eq!(
+                        last_index_of_fold_source(&mut source, search, limit),
+                        expected,
+                        "lastIndexOfFold {text:?} {search:?} {limit:?}"
+                    );
+                    let expected = index_of_fold(text, search, limit);
+                    let mut source = TrackingSource::new(text);
+                    assert_eq!(
+                        index_of_fold_source(&mut source, search, limit),
+                        expected,
+                        "indexOfFold {text:?} {search:?} {limit:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
