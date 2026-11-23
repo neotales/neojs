@@ -36,27 +36,47 @@ globalThis.console = Object.freeze({
 });
 "#;
 
-/// Installs the minimal `Neo` introspection global for this QuickJS runtime.
+/// The placeholder for the shared `chars` implementation expression.
 ///
-/// The engine is `neo-lite`. This runtime has no built-in modules, so the list
-/// is one frozen empty array and `getBuiltInModule` returns `undefined` for
-/// every string name; a non-string name throws the intrinsic `TypeError`
-/// captured when the shim was installed. The object and global property are
-/// frozen and non-writable, and the same array is returned for every list
-/// lookup. This is not the V8 runtime's surface: no `neo:` module is implemented
-/// here, and the list does not claim any.
-const NEO_SHIM: &str = r#"
+/// The expression comes from the engine-neutral `neojs-builtins` crate. The V8
+/// shim splices in the same expression, so the two engines share one
+/// implementation and one set of captured intrinsics.
+const CHARS_IMPL_TOKEN: &str = "__NEO_CHARS_IMPL__";
+
+/// Installs the minimal `Neo` introspection global and shared built-ins.
+///
+/// The engine is `neo-lite`. The registry currently contains one canonical
+/// module, `neo:chars`, implemented by `neojs-builtins`. The list is one frozen
+/// array of canonical specifiers and is the same array for every lookup.
+/// `getBuiltInModule` accepts the canonical specifier only and returns
+/// `undefined` for every other string; a non-string name throws the intrinsic
+/// `TypeError` captured when the shim was installed. The object and global
+/// property are frozen and non-writable. This is not a sandbox: a missing module
+/// is a surface decision, not a capability restriction.
+///
+/// [`neo_shim`] replaces [`CHARS_IMPL_TOKEN`] with the shared expression. A
+/// marker left in the evaluated shim would be a JavaScript syntax error rather
+/// than a silently missing module.
+const NEO_SHIM_TEMPLATE: &str = r#"
 (() => {
     "use strict";
 
     const freeze = Object.freeze;
     const defineProperty = Object.defineProperty;
     const makeTypeError = TypeError;
-    const builtInModuleList = freeze([]);
+    // Look up modules through a bound intrinsic, not `modules.get`. A dynamic
+    // property lookup would consult the mutable `Map.prototype.get`.
+    const mapGet = Function.prototype.call.bind(Map.prototype.get);
+    const chars = __NEO_CHARS_IMPL__;
+    const modules = new Map([
+        ["neo:chars", chars],
+    ]);
+    const builtInModuleList = freeze(["neo:chars"]);
 
     /**
-     * Return `undefined` for every string name because this runtime has no
-     * built-in modules. The shape matches the V8 registry lookup.
+     * Return a built-in module by its canonical `neo:` specifier, or
+     * `undefined` when the specifier is not implemented. The same module object
+     * is returned for every lookup.
      *
      * @throws {TypeError} when the name is not a string.
      */
@@ -64,11 +84,14 @@ const NEO_SHIM: &str = r#"
         if (typeof name !== "string") {
             throw new makeTypeError("module name must be a string");
         }
-        return undefined;
+        return mapGet(modules, name);
     }
 
     /**
-     * Return the one frozen empty list of built-in module specifiers.
+     * Return every implemented built-in module specifier as one frozen array.
+     *
+     * Entries are canonical `neo:` specifiers in registration order. The array
+     * is frozen and the same array is returned for every call.
      */
     function getBuiltInModulesList() {
         return builtInModuleList;
@@ -86,6 +109,11 @@ const NEO_SHIM: &str = r#"
     });
 })();
 "#;
+
+/// Returns the realm shim with the shared built-in implementation spliced in.
+fn neo_shim() -> String {
+    NEO_SHIM_TEMPLATE.replace(CHARS_IMPL_TOKEN, neojs_builtins::chars::IMPLEMENTATION)
+}
 
 /// Unhandled promise rejections recorded by QuickJS's host rejection tracker.
 #[derive(Default)]
@@ -397,11 +425,14 @@ impl Runtime {
     /// Creates a QuickJS runtime, installs the file loader, and installs
     /// `console` and the `Neo` introspection global.
     ///
-    /// `Neo.engine` is `"neo-lite"`. This runtime has no built-in modules, so
-    /// `Neo.getBuiltInModulesList()` returns one frozen empty array and
-    /// `Neo.getBuiltInModule(name)` returns `undefined` for a string name; a
-    /// non-string name throws `TypeError`. It does not claim the V8 runtime's
-    /// built-ins. This performs no filesystem access. An error means QuickJS
+    /// `Neo.engine` is `"neo-lite"`. The registry currently contains the
+    /// canonical shared module `neo:chars`. `Neo.getBuiltInModulesList()`
+    /// returns one frozen array of canonical specifiers, and
+    /// `Neo.getBuiltInModule("neo:chars")` returns the same frozen module object
+    /// that `import ... from "neo:chars"` exposes. A bare name, another scheme,
+    /// or a non-string argument does not return a module; a non-string name
+    /// throws `TypeError`. It does not claim the V8 runtime's full built-in
+    /// surface. This performs no filesystem access. An error means QuickJS
     /// could not allocate its runtime or context, or a shim could not be
     /// installed.
     pub fn new() -> Result<Self, Error> {
@@ -432,7 +463,7 @@ impl Runtime {
                     })?;
                 ctx.globals().set("__neojsLiteWrite", write)?;
                 ctx.eval::<(), _>(CONSOLE_SHIM)?;
-                ctx.eval::<(), _>(NEO_SHIM)?;
+                ctx.eval::<(), _>(neo_shim())?;
                 #[cfg(test)]
                 install_test_gc(&ctx)?;
                 Ok(())

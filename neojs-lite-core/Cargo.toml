@@ -10,6 +10,10 @@ authors.workspace = true
 readme = "README.md"
 
 [dependencies]
+# The shared `neo:chars` implementation and its canonical wrapper. This is an
+# explicit selection: the QuickJS build opts in to the module, and the V8 build
+# opts in to the same module separately. Selection is not a sandbox.
+neojs-builtins = { workspace = true, features = ["chars"] }
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
 # Pinned: the C API and Rust API change between minor releases. 0.14.0 is the
 # version reviewed for this crate; `loader` supplies the module resolver and

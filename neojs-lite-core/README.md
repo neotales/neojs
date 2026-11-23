@@ -49,21 +49,28 @@ imported files still go through the loader and shared extension policy.
 ## Runtime introspection
 
 The runtime installs a minimal `Neo` global. Its `engine` property is
-`"neo-lite"`. This runtime has no built-in modules, so
-`Neo.getBuiltInModulesList()` returns one frozen empty array and
-`Neo.getBuiltInModule(name)` returns `undefined` for every string name. A
+`"neo-lite"`. The registry contains the canonical shared module `neo:chars`.
+`Neo.getBuiltInModulesList()` returns one frozen array of canonical specifiers,
+and `Neo.getBuiltInModule("neo:chars")` returns the same frozen module object
+that `import ... from "neo:chars"` exposes. A bare `chars` name, another scheme,
+a query or fragment, or any unimplemented specifier returns `undefined`; a
 non-string name throws `TypeError`. The `Neo` object and the global property are
-frozen and non-writable, and the empty list is the same array for every lookup.
+frozen and non-writable, and the list is the same array for every lookup.
 
 ```js
 console.log(Neo.engine); // "neo-lite"
-console.log(Neo.getBuiltInModulesList().length); // 0
-console.log(Neo.getBuiltInModule("age")); // undefined
+console.log(Neo.getBuiltInModulesList()); // [ "neo:chars" ]
+console.log(Neo.getBuiltInModule("neo:chars").isLetter(0x41)); // true
+console.log(Neo.getBuiltInModule("chars")); // undefined
 ```
 
-This is not the V8 runtime's built-in surface. It does not make any `neo:`
-specifier importable, and the empty list does not claim that a module exists or
-will exist.
+This is not the V8 runtime's full built-in surface. Only `neo:chars` is
+implemented, and the list does not claim another module exists or will exist.
+The implementation and wrapper come from the engine-neutral `neojs-builtins`
+crate, which the V8 runtime also uses, so the module contract is shared. The
+Unicode tables still belong to each engine; see
+[`neojs-builtins/README.md`](../neojs-builtins/README.md) for the precise
+limits.
 
 ## Lifecycle
 
@@ -87,10 +94,9 @@ This crate does **not** claim parity with the V8-based `neojs`:
 * **No TypeScript.** `.ts` and `.mts` are rejected with a clear reason.
 * **No host asynchrony.** There are no timers or host Promise integration. A
   top-level `await` works only when QuickJS's own job queue can settle it.
-* **No built-in `neo:` modules.** Local ECMAScript files only. The `Neo`
-  global is introspection only: its list is empty,
-  `getBuiltInModule` returns `undefined` for every string name, and a
-  non-string name throws `TypeError`.
+* **Most built-in `neo:` modules are absent.** Only the shared `neo:chars`
+  module is implemented. Other V8 modules are not importable, and the `Neo`
+  list does not claim them.
 * **No permissions or sandbox.** None are implemented.
 
 Both runtimes share `neojs-module-policy` for executable-extension decisions, so

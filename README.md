@@ -320,11 +320,15 @@ takes the bare names in the list. The `neo:` entries are the canonical import sp
 entries are registry names and import aliases, so `Neo.getBuiltInModule("neo:age")` returns
 `undefined`.
 
-The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"`.
-`Neo.getBuiltInModulesList()` is one frozen empty array because that runtime implements no built-in
-modules, and `Neo.getBuiltInModule(name)` returns `undefined` for every string name. A non-string name
-throws `TypeError`. That empty list is not a claim that a module is planned or available; `neo:`
-imports remain rejected there.
+The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"` and
+currently implements one shared built-in, `neo:chars`. `Neo.getBuiltInModulesList()` is one frozen
+array of canonical specifiers (`["neo:chars"]`), and
+`Neo.getBuiltInModule("neo:chars")` returns the same frozen object that
+`import ... from "neo:chars"` exposes. A bare `chars` name, another scheme, or any other specifier
+returns `undefined`; a non-string name throws `TypeError`. That list is not a claim that another V8
+module is planned or available. The `chars` implementation and wrapper come from the engine-neutral
+`neojs-builtins` crate, which both runtimes use; see `neojs-builtins/README.md` for the shared contract
+and its Unicode-version limit.
 
 **Use the stdio built-in.** `Neo.getBuiltInModule("stdio")` returns a frozen module object cached
 for the realm. `stdio` is the canonical bare specifier and `neo:stdio` is an alias for the same
@@ -1656,12 +1660,16 @@ queue. It then drains queued jobs, bounded at 100,000, so trailing `.then` callb
 dynamic imports still run; a nonconverging job chain or a throwing queued job fails closed, and a
 promise still rejected without a handler when the queue empties is an error; rejection diagnostics use
 primitive values and an Error's own data without invoking getters, proxies, `toString`, or `String`.
-It does **not** implement TypeScript, host asynchrony or timers, `neo:` built-in modules, permissions,
-or a sandbox, and it does not claim parity with the V8 runtime. It installs a minimal `Neo` global
-whose engine is `"neo-lite"` and whose built-in module list is empty; `Neo.getBuiltInModule` returns
-`undefined` for every string name and throws `TypeError` for a non-string name. Both runtimes share
-`neojs-module-policy` for executable-extension decisions and rejection reasons, so `.cjs`, JSX/TSX,
-declaration files, JSON, WebAssembly, and native addons fail with the same explanation in either.
+It does **not** implement TypeScript, host asynchrony or timers, most `neo:` built-in modules,
+permissions, or a sandbox, and it does not claim parity with the V8 runtime. It installs a minimal
+`Neo` global whose engine is `"neo-lite"` and whose built-in module list is the canonical
+`["neo:chars"]`; `Neo.getBuiltInModule("neo:chars")` returns the same frozen object that
+`import ... from "neo:chars"` exposes, while a bare name, another scheme, or any other specifier
+returns `undefined`, and a non-string name throws `TypeError`. The `chars` implementation and
+canonical wrapper come from the engine-neutral `neojs-builtins` crate, which both runtimes use; it
+has no V8 or QuickJS dependency. Both runtimes share `neojs-module-policy` for executable-extension
+decisions and rejection reasons, so `.cjs`, JSX/TSX, declaration files, JSON, WebAssembly, and native
+addons fail with the same explanation in either.
 
 ### Binary size tracking
 

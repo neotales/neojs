@@ -8,7 +8,9 @@
 //! default `cargo build` in this workspace does not compile it and does not put
 //! QuickJS or `rquickjs` in the V8 graph. Both runtimes share the engine-neutral
 //! module policy in `neojs-module-policy`, so extension handling and failure
-//! reasons agree.
+//! reasons agree, and the shared `neo:chars` implementation and wrapper in
+//! `neojs-builtins`, so module behavior and imports agree where the module is
+//! implemented.
 //!
 //! # What works
 //!
@@ -27,10 +29,14 @@
 //!   Entry and rejection diagnostics never invoke getters, proxy traps,
 //!   `toString`, or `String`.
 //! * `console.log` and `console.error` write to the process streams.
-//! * A minimal `Neo` global reports `engine` `"neo-lite"`.
-//!   `Neo.getBuiltInModulesList()` returns one frozen empty array because this
-//!   runtime has no built-in modules, and `Neo.getBuiltInModule(name)` returns
-//!   `undefined` for every string name. A non-string name throws `TypeError`.
+//! * A minimal `Neo` global reports `engine` `"neo-lite"`. The registry
+//!   contains the canonical shared module `neo:chars`.
+//!   `Neo.getBuiltInModulesList()` returns one frozen array of canonical
+//!   specifiers, and `Neo.getBuiltInModule("neo:chars")` returns the same frozen
+//!   module object that `import ... from "neo:chars"` exposes. A bare name or
+//!   another scheme returns `undefined`; a non-string name throws `TypeError`.
+//!   The implementation comes from the engine-neutral `neojs-builtins` crate,
+//!   which the V8 runtime also uses.
 //!
 //! # What is not implemented yet
 //!
@@ -42,9 +48,9 @@
 //! * **No host asynchrony.** There are no timers, no host promise integration,
 //!   and no event loop beyond QuickJS's own job queue. A top-level `await` that
 //!   depends on an external event fails with an error instead of hanging.
-//! * **No built-in `neo:` modules.** The QuickJS crate currently loads local
-//!   ECMAScript files only. The `Neo` global is introspection only: it does not
-//!   make any `neo:` specifier importable.
+//! * **Most built-in `neo:` modules are absent.** This crate currently
+//!   implements the shared `neo:chars` module only. Other V8 modules are not
+//!   importable here, and the `Neo` list does not claim them.
 //! * **No sandbox.** Permissions, host capabilities, and isolation are not
 //!   implemented.
 //!
