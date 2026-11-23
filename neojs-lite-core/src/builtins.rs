@@ -14,8 +14,10 @@
 
 /// The canonical specifier of the `crypto` built-in.
 ///
-/// `crypto` and `neo:crypto` (with a case-insensitive `neo:` scheme) resolve to
-/// this one identity, so QuickJS caches a single module instance.
+/// Neo built-ins always require the `neo:` prefix. This crate does not publish
+/// a bare `crypto` alias; a bare specifier is left to the normal bare-package
+/// path. The `neo:` scheme is matched case-insensitively, so `NEO:crypto`
+/// resolves to this same identity and QuickJS caches one module instance.
 #[cfg(feature = "crypto")]
 pub(crate) const CRYPTO_SPECIFIER: &str = "neo:crypto";
 
@@ -36,14 +38,15 @@ pub fn enabled_builtin_modules() -> &'static [&'static str] {
     }
 }
 
-/// Returns whether `specifier` is any spelling of the `crypto` built-in,
-/// whether or not the feature is enabled.
+/// Returns whether `specifier` names the `crypto` built-in with its required
+/// `neo:` prefix, whether or not the feature is enabled.
 ///
 /// The check is deliberately independent of the feature so a disabled build
-/// can explain that the module exists but is not compiled in, instead of
-/// reporting a generic bare-specifier failure.
+/// can explain that the module exists but is not compiled in. A bare `crypto`
+/// specifier is not this module: it stays a normal bare specifier, reserved for
+/// Node compatibility and packages.
 pub(crate) fn is_crypto_specifier(specifier: &str) -> bool {
-    specifier == "crypto" || strip_neo_prefix(specifier) == Some("crypto")
+    strip_neo_prefix(specifier) == Some("crypto")
 }
 
 /// Resolve an enabled built-in specifier to its canonical identity.
@@ -76,11 +79,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn crypto_spellings_are_recognised() {
-        for specifier in ["crypto", "neo:crypto", "NEO:crypto", "NeO:crypto"] {
+    fn crypto_spellings_require_the_neo_prefix() {
+        for specifier in ["neo:crypto", "NEO:crypto", "NeO:crypto"] {
             assert!(is_crypto_specifier(specifier), "{specifier}");
         }
         for specifier in [
+            "crypto",
             "Crypto",
             "neo:Crypto",
             "node:crypto",
@@ -100,10 +104,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_only_returns_an_enabled_module() {
+    fn resolve_only_returns_an_enabled_prefixed_module() {
         #[cfg(feature = "crypto")]
-        assert_eq!(resolve("crypto"), Some("neo:crypto"));
+        assert_eq!(resolve("neo:crypto"), Some("neo:crypto"));
         #[cfg(not(feature = "crypto"))]
+        assert_eq!(resolve("neo:crypto"), None);
         assert_eq!(resolve("crypto"), None);
         assert_eq!(resolve("./crypto.js"), None);
     }

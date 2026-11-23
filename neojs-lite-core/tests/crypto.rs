@@ -39,28 +39,26 @@ fn enabled_list_names_only_the_crypto_module() {
 fn crypto_is_a_native_module_with_exactly_four_exports() {
     run_js(
         r#"
-import * as fromBare from "crypto";
 import * as fromScheme from "neo:crypto";
 import * as fromUpper from "NEO:crypto";
 
-if (fromBare !== fromScheme) throw new Error("crypto and neo:crypto differ");
 if (fromScheme !== fromUpper) throw new Error("scheme matching is not case-insensitive");
 
-const names = Object.keys(fromBare).sort();
+const names = Object.keys(fromScheme).sort();
 const expected = ["decrypt", "encrypt", "generateEnvelopeKey", "randomBytes"];
 if (names.length !== expected.length) throw new Error(`exports: ${names}`);
 for (let i = 0; i < expected.length; i++) {
     if (names[i] !== expected[i]) throw new Error(`export ${i}: ${names[i]}`);
-    if (typeof fromBare[names[i]] !== "function") throw new Error(`${names[i]} is not a function`);
+    if (typeof fromScheme[names[i]] !== "function") throw new Error(`${names[i]} is not a function`);
 }
-if ("default" in fromBare) throw new Error("crypto must not have a default export");
-if (fromBare.generateEnvelopeKey.length !== 0) throw new Error("generateEnvelopeKey arity");
-if (fromBare.randomBytes.length !== 1) throw new Error("randomBytes arity");
-if (fromBare.encrypt.length !== 2) throw new Error("encrypt arity");
-if (fromBare.decrypt.length !== 2) throw new Error("decrypt arity");
-if (fromBare.encrypt.name !== "encrypt") throw new Error("encrypt name");
-if ("generateKey" in fromBare) throw new Error("generateKey must not be exported");
-if ("hashAsync" in fromBare || "createHash" in fromBare || "subtle" in fromBare) {
+if ("default" in fromScheme) throw new Error("crypto must not have a default export");
+if (fromScheme.generateEnvelopeKey.length !== 0) throw new Error("generateEnvelopeKey arity");
+if (fromScheme.randomBytes.length !== 1) throw new Error("randomBytes arity");
+if (fromScheme.encrypt.length !== 2) throw new Error("encrypt arity");
+if (fromScheme.decrypt.length !== 2) throw new Error("decrypt arity");
+if (fromScheme.encrypt.name !== "encrypt") throw new Error("encrypt name");
+if ("generateKey" in fromScheme) throw new Error("generateKey must not be exported");
+if ("hashAsync" in fromScheme || "createHash" in fromScheme || "subtle" in fromScheme) {
     throw new Error("an unimplemented crypto export is present");
 }
 if ("__neojsLiteCrypto" in globalThis) throw new Error("internal host global leaked");
@@ -493,8 +491,8 @@ if (decrypt(key, small).length !== 3) throw new Error("small roundtrip");
 fn unknown_crypto_exports_are_link_errors() {
     for source in [
         "import { hashAsync } from \"neo:crypto\";\n",
-        "import { generateKey } from \"crypto\";\n",
-        "import { createHash } from \"crypto\";\n",
+        "import { generateKey } from \"neo:crypto\";\n",
+        "import { createHash } from \"neo:crypto\";\n",
         "import def from \"neo:crypto\";\n",
     ] {
         let message = run_js_error(source);
@@ -518,6 +516,14 @@ fn an_unknown_builtin_specifier_is_rejected() {
 }
 
 #[test]
+fn a_bare_crypto_specifier_is_not_an_alias() {
+    let message = run_js_error("import \"crypto\";\n");
+    assert!(message.contains("bare module specifiers"), "{message}");
+    let message = run_js_error("import { encrypt } from \"crypto\";\n");
+    assert!(message.contains("bare module specifiers"), "{message}");
+}
+
+#[test]
 fn a_local_module_named_crypto_is_not_shadowed() {
     let dir = tempfile::tempdir().expect("temp dir");
     fs::write(dir.path().join("crypto.js"), "export const value = 7;\n")
@@ -527,7 +533,7 @@ fn a_local_module_named_crypto_is_not_shadowed() {
         &main,
         r#"
 import { value } from "./crypto.js";
-import { generateEnvelopeKey } from "crypto";
+import { generateEnvelopeKey } from "neo:crypto";
 if (value !== 7) throw new Error("local module");
 if (generateEnvelopeKey().length !== 32) throw new Error("built-in");
 "#,

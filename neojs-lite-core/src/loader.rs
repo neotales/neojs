@@ -1,11 +1,13 @@
 //! Module resolution and loading for local ECMAScript files.
 //!
 //! The resolver turns a file specifier into one canonical absolute path, which
-//! is also the module identity. When the `crypto` feature is enabled, it also
-//! maps `crypto` and `neo:crypto` (case-insensitive `neo:` scheme) to the
-//! native module's canonical specifier, `neo:crypto`. With the feature off, it
-//! rejects those two spellings with a reason that names the disabled feature
-//! instead of reporting a generic bare-specifier failure.
+//! is also the module identity. Neo built-ins always require the `neo:` prefix.
+//! When the `crypto` feature is enabled, the resolver maps `neo:crypto` (with a
+//! case-insensitive `neo:` scheme) to the native module's canonical specifier,
+//! `neo:crypto`. With the feature off, it rejects `neo:crypto` with a reason
+//! that names the disabled feature instead of reporting a generic failure. A
+//! bare `crypto` specifier is never an alias; it stays a normal bare specifier,
+//! reserved for Node compatibility and packages.
 //!
 //! The loader accepts only formats that QuickJS can execute: `.js`, `.mjs`, and
 //! names without an extension. The format decision comes from

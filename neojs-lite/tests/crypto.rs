@@ -18,8 +18,8 @@ fn run_module(source: &str) -> std::process::Output {
 fn the_command_can_import_and_use_neo_crypto() {
     let output = run_module(
         r#"
-import { decrypt, encrypt, generateEnvelopeKey, randomBytes } from "crypto";
-import * as scheme from "neo:crypto";
+import { decrypt, encrypt, generateEnvelopeKey, randomBytes } from "neo:crypto";
+import * as scheme from "NEO:crypto";
 
 if (scheme.encrypt !== encrypt) throw new Error("module identities differ");
 const key = generateEnvelopeKey();

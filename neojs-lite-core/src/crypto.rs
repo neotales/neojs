@@ -9,6 +9,10 @@
 //! * `encrypt(key, plaintext[, associatedData])` emits a NEO1 envelope.
 //! * `decrypt(key, envelope[, associatedData])` opens a NEO1 envelope.
 //!
+//! The module is reachable only as `neo:crypto` (the `neo:` scheme is matched
+//! case-insensitively). Neo built-ins always require the prefix; a bare
+//! `crypto` specifier is not an alias and stays a normal bare specifier.
+//!
 //! There is no `Neo` object and no introspection global in Lite yet. The module
 //! is a native QuickJS module, so no host function is installed on `globalThis`
 //! and no JavaScript shim can be replaced before the module is imported.
@@ -62,8 +66,8 @@ use crate::builtins::CRYPTO_SPECIFIER;
 /// Register the `neo:crypto` native module in this context.
 ///
 /// QuickJS stores the module in the context's loaded-module list, so a later
-/// `import "crypto"` or `import "neo:crypto"` shares one module instance. The
-/// module is not evaluated until it is imported.
+/// `import "neo:crypto"` reaches that one instance. The module is not evaluated
+/// until it is imported.
 pub(crate) fn register(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     Module::declare_def::<CryptoModule, _>(ctx.clone(), CRYPTO_SPECIFIER)?;
     Ok(())

@@ -27,11 +27,7 @@ fn disabled_build_lists_no_builtin_modules() {
 
 #[test]
 fn disabled_crypto_explains_the_feature_instead_of_resolving() {
-    for source in [
-        "import \"neo:crypto\";\n",
-        "import \"crypto\";\n",
-        "import \"NEO:crypto\";\n",
-    ] {
+    for source in ["import \"neo:crypto\";\n", "import \"NEO:crypto\";\n"] {
         let message = run_js_error(source);
         assert!(
             message.contains("not enabled") && message.contains("crypto"),
@@ -41,7 +37,9 @@ fn disabled_crypto_explains_the_feature_instead_of_resolving() {
 }
 
 #[test]
-fn an_unknown_specifier_is_still_a_normal_load_failure() {
-    let message = run_js_error("import \"lodash\";\n");
-    assert!(message.contains("bare module specifiers"), "{message}");
+fn bare_specifiers_are_still_normal_load_failures() {
+    for source in ["import \"lodash\";\n", "import \"crypto\";\n"] {
+        let message = run_js_error(source);
+        assert!(message.contains("bare module specifiers"), "{message}");
+    }
 }

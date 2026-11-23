@@ -32,15 +32,17 @@
 //!
 //! The `crypto` Cargo feature is a positive opt-in and is **off by default**.
 //! With it enabled, the runtime registers a native QuickJS module under the
-//! canonical specifier `neo:crypto`; both `import ... from "neo:crypto"` and
-//! `import ... from "crypto"` resolve to that one instance. The module exports
-//! exactly `generateEnvelopeKey`, `randomBytes`, `encrypt`, and `decrypt`, and
-//! shares its NEO1 envelope and CSPRNG backend with the V8 runtime through
-//! `neojs-crypto-core`. It is synchronous because Lite has no host asynchronous
-//! work; no async or other `crypto` export is advertised.
+//! canonical specifier `neo:crypto`; `import ... from "neo:crypto"` (with a
+//! case-insensitive `neo:` scheme) reaches that one instance. Neo built-ins
+//! always require the prefix: a bare `crypto` specifier is **not** an alias and
+//! stays a normal bare specifier, reserved for Node compatibility and packages.
+//! The module exports exactly `generateEnvelopeKey`, `randomBytes`, `encrypt`,
+//! and `decrypt`, and shares its NEO1 envelope and CSPRNG backend with the V8
+//! runtime through `neojs-crypto-core`. It is synchronous because Lite has no
+//! host asynchronous work; no async or other `crypto` export is advertised.
 //!
 //! The `neojs-lite` command enables the feature explicitly. A library embedder
-//! that leaves it off gets no built-in module, and importing either spelling
+//! that leaves it off gets no built-in module, and importing `neo:crypto`
 //! fails with a reason that names the disabled feature. Cargo unifies features
 //! across a build graph: if any dependency enables the feature, every user of
 //! this crate in that build gets it too.
