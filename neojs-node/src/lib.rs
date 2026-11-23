@@ -49,13 +49,17 @@ pub fn install(js: &mut JsRuntime, options: NodeOptions) -> Result<(), String> {
     let context = js.main_context();
     let exports = {
         v8::scope!(let scope, js.v8_isolate());
-        let context_local = v8::Local::new(scope, context);
-        context_local.set_slot(Rc::new(options));
+        let context_local = v8::Local::new(scope, context.clone());
         let scope = &mut v8::ContextScope::new(scope, context_local);
         build_exports(scope)?
     };
     js.register_native_module(CHILD_PROCESS_SPECIFIER, exports)
         .map_err(|error| error.to_string())?;
+    // Install the policy only after the module registration is accepted. A
+    // rejected duplicate must not replace the authority of the existing module.
+    v8::scope!(let scope, js.v8_isolate());
+    let context_local = v8::Local::new(scope, context);
+    context_local.set_slot(Rc::new(options));
     Ok(())
 }
 
@@ -82,7 +86,9 @@ fn build_exports<'s>(
         ("fork", &fork),
         ("ChildProcess", &child_process),
     ] {
-        set_value(scope, &api, name, (*function).into());
+        if !define_value(scope, &api, name, (*function).into()) {
+            return Err("cannot define a native child_process export".to_string());
+        }
     }
     if api.set_integrity_level(scope, v8::IntegrityLevel::Frozen) != Some(true) {
         return Err("cannot freeze the native child_process object".to_string());
@@ -161,41 +167,58 @@ fn push_export<'s>(
     name: FastStaticString,
     value: v8::Local<'s, v8::Value>,
 ) {
-    let _ = scope;
     exports.push((name, v8::Global::new(scope, value)));
 }
 
-fn set_value<'s>(
+/// Defines an own data property without consulting the prototype chain.
+///
+/// `Object::set` would invoke an inherited setter. Native results and errors
+/// are built from fresh objects, so `CreateDataProperty` is both the correct
+/// JavaScript semantics and immune to a hostile `Object.prototype` or
+/// `Array.prototype`.
+fn define_value<'s>(
     scope: &v8::PinScope<'s, '_>,
     object: &v8::Local<'s, v8::Object>,
     name: &str,
     value: v8::Local<'s, v8::Value>,
-) {
-    let key = v8::String::new(scope, name).expect("a native property name is a valid V8 string");
-    assert!(
-        object.set(scope, key.into(), value) == Some(true),
-        "setting a native property failed"
-    );
+) -> bool {
+    let Some(key) = v8::String::new(scope, name) else {
+        return false;
+    };
+    match object.create_data_property(scope, key.into(), value) {
+        Some(true) => true,
+        Some(false) => {
+            if let Some(message) = v8::String::new(scope, "cannot define a native property") {
+                scope.throw_exception(v8::Exception::error(scope, message));
+            }
+            false
+        }
+        // An empty result carries a pending V8 exception. Leave it in place.
+        None => false,
+    }
 }
 
 fn get<'s>(
     scope: &v8::PinScope<'s, '_>,
     object: &v8::Local<'s, v8::Object>,
     name: &str,
-) -> Option<v8::Local<'s, v8::Value>> {
-    let key = v8::String::new(scope, name)?;
-    object.get(scope, key.into())
+) -> Result<v8::Local<'s, v8::Value>, Failure> {
+    let key = v8::String::new(scope, name).ok_or(Failure::Pending)?;
+    object.get(scope, key.into()).ok_or(Failure::Pending)
 }
 
-/// A coded failure raised by guest validation or the shared runner.
-struct Failure {
-    code: String,
-    message: String,
+/// A failure raised by guest validation or the shared runner.
+enum Failure {
+    /// A coded error this adapter should construct and throw.
+    Coded { code: String, message: String },
+    /// V8 already has a pending exception (a guest getter threw, or allocation
+    /// failed). Return without replacing it.
+    Pending,
 }
 
 impl Failure {
     fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
+        Self::Coded {
             code: code.into(),
             message: message.into(),
         }
@@ -228,27 +251,32 @@ impl Failure {
     }
 }
 
-fn throw_failure(scope: &mut v8::PinScope<'_, '_>, failure: Failure) {
-    throw_coded(scope, &failure.code, &failure.message);
+fn throw_failure(scope: &v8::PinScope<'_, '_>, failure: Failure) {
+    match failure {
+        Failure::Coded { code, message } => throw_coded(scope, &code, &message),
+        Failure::Pending => {}
+    }
 }
 
 fn coded_error<'s>(
     scope: &v8::PinScope<'s, '_>,
     code: &str,
     message: &str,
-) -> v8::Local<'s, v8::Object> {
-    let message = v8::String::new(scope, message).expect("an error message is a valid V8 string");
+) -> Option<v8::Local<'s, v8::Object>> {
+    let message = v8::String::new(scope, message)?;
     let exception = v8::Exception::error(scope, message);
-    let object =
-        v8::Local::<v8::Object>::try_from(exception).expect("Exception::error is an object");
+    let object = v8::Local::<v8::Object>::try_from(exception).ok()?;
     let code = string_value(scope, code);
-    set_value(scope, &object, "code", code);
-    object
+    if !define_value(scope, &object, "code", code) {
+        return None;
+    }
+    Some(object)
 }
 
-fn throw_coded(scope: &mut v8::PinScope<'_, '_>, code: &str, message: &str) {
-    let error = coded_error(scope, code, message);
-    scope.throw_exception(error.into());
+fn throw_coded(scope: &v8::PinScope<'_, '_>, code: &str, message: &str) {
+    if let Some(error) = coded_error(scope, code, message) {
+        scope.throw_exception(error.into());
+    }
 }
 
 fn string_value<'s>(scope: &v8::PinScope<'s, '_>, text: &str) -> v8::Local<'s, v8::Value> {
@@ -281,92 +309,81 @@ fn output_array<'s>(
     scope: &v8::PinScope<'s, '_>,
     stdout: &str,
     stderr: &str,
-) -> v8::Local<'s, v8::Array> {
+) -> Option<v8::Local<'s, v8::Array>> {
     let output = v8::Array::new(scope, 3);
-    assert!(
-        output.set_index(scope, 0, v8::null(scope).into()) == Some(true),
-        "setting output[0] failed"
-    );
-    assert!(
-        output.set_index(scope, 1, string_value(scope, stdout)) == Some(true),
-        "setting output[1] failed"
-    );
-    assert!(
-        output.set_index(scope, 2, string_value(scope, stderr)) == Some(true),
-        "setting output[2] failed"
-    );
-    output
+    let object: v8::Local<'s, v8::Object> = output.into();
+    let null: v8::Local<'s, v8::Value> = v8::null(scope).into();
+    if !define_value(scope, &object, "0", null)
+        || !define_value(scope, &object, "1", string_value(scope, stdout))
+        || !define_value(scope, &object, "2", string_value(scope, stderr))
+    {
+        return None;
+    }
+    Some(output)
 }
 
 fn attach_result_fields<'s>(
     scope: &v8::PinScope<'s, '_>,
     object: &v8::Local<'s, v8::Object>,
     result: &SyncResult,
-) {
+) -> bool {
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
-    set_value(
-        scope,
-        object,
-        "pid",
-        v8::Number::new(scope, f64::from(result.pid)).into(),
-    );
-    set_value(
-        scope,
-        object,
-        "output",
-        output_array(scope, &stdout, &stderr).into(),
-    );
-    set_value(scope, object, "stdout", string_value(scope, &stdout));
-    set_value(scope, object, "stderr", string_value(scope, &stderr));
-    set_value(
-        scope,
-        object,
-        "status",
-        null_or_number(scope, result.status),
-    );
-    set_value(
-        scope,
-        object,
-        "signal",
-        null_or_string(scope, result.signal_name),
-    );
+    let Some(output) = output_array(scope, &stdout, &stderr) else {
+        return false;
+    };
+    let pid = v8::Number::new(scope, f64::from(result.pid));
+    let stdout_value = string_value(scope, &stdout);
+    let stderr_value = string_value(scope, &stderr);
+    let status = null_or_number(scope, result.status);
+    let signal = null_or_string(scope, result.signal_name);
+    define_value(scope, object, "pid", pid.into())
+        && define_value(scope, object, "output", output.into())
+        && define_value(scope, object, "stdout", stdout_value)
+        && define_value(scope, object, "stderr", stderr_value)
+        && define_value(scope, object, "status", status)
+        && define_value(scope, object, "signal", signal)
 }
 
 fn spawn_result<'s>(
     scope: &v8::PinScope<'s, '_>,
     result: &SyncResult,
-) -> v8::Local<'s, v8::Object> {
+) -> Option<v8::Local<'s, v8::Object>> {
     let object = v8::Object::new(scope);
-    attach_result_fields(scope, &object, result);
-    object
+    if !attach_result_fields(scope, &object, result) {
+        return None;
+    }
+    Some(object)
 }
 
 fn empty_spawn_result<'s>(
     scope: &v8::PinScope<'s, '_>,
     code: &str,
     message: &str,
-) -> v8::Local<'s, v8::Object> {
+) -> Option<v8::Local<'s, v8::Object>> {
     let object = v8::Object::new(scope);
-    set_value(scope, &object, "pid", v8::Number::new(scope, 0.0).into());
-    set_value(scope, &object, "output", output_array(scope, "", "").into());
-    set_value(scope, &object, "stdout", string_value(scope, ""));
-    set_value(scope, &object, "stderr", string_value(scope, ""));
-    set_value(scope, &object, "status", v8::null(scope).into());
-    set_value(scope, &object, "signal", v8::null(scope).into());
-    let error = coded_error(scope, code, message);
-    set_value(scope, &object, "error", error.into());
-    object
+    let output = output_array(scope, "", "")?;
+    let error = coded_error(scope, code, message)?;
+    if !define_value(scope, &object, "pid", v8::Number::new(scope, 0.0).into())
+        || !define_value(scope, &object, "output", output.into())
+        || !define_value(scope, &object, "stdout", string_value(scope, ""))
+        || !define_value(scope, &object, "stderr", string_value(scope, ""))
+        || !define_value(scope, &object, "status", v8::null(scope).into())
+        || !define_value(scope, &object, "signal", v8::null(scope).into())
+        || !define_value(scope, &object, "error", error.into())
+    {
+        return None;
+    }
+    Some(object)
 }
 
-fn throw_with_fields(
-    scope: &mut v8::PinScope<'_, '_>,
-    code: &str,
-    message: &str,
-    result: &SyncResult,
-) {
-    let error = coded_error(scope, code, message);
-    attach_result_fields(scope, &error, result);
+fn throw_with_fields(scope: &v8::PinScope<'_, '_>, code: &str, message: &str, result: &SyncResult) {
+    let Some(error) = coded_error(scope, code, message) else {
+        return;
+    };
+    if !attach_result_fields(scope, &error, result) {
+        return;
+    }
     scope.throw_exception(error.into());
 }
 
@@ -416,18 +433,12 @@ fn read_utf8_options<'s>(
     reject_unknown_options(scope, &object)?;
 
     // Snapshot every option exactly once; a getter must not be read again.
-    let encoding = get(scope, &object, "encoding")
-        .ok_or_else(|| Failure::invalid_type("options could not be read"))?;
-    let cwd = get(scope, &object, "cwd")
-        .ok_or_else(|| Failure::invalid_type("options could not be read"))?;
-    let env = get(scope, &object, "env")
-        .ok_or_else(|| Failure::invalid_type("options could not be read"))?;
-    let input = get(scope, &object, "input")
-        .ok_or_else(|| Failure::invalid_type("options could not be read"))?;
-    let timeout = get(scope, &object, "timeout")
-        .ok_or_else(|| Failure::invalid_type("options could not be read"))?;
-    let max_buffer = get(scope, &object, "maxBuffer")
-        .ok_or_else(|| Failure::invalid_type("options could not be read"))?;
+    let encoding = get(scope, &object, "encoding")?;
+    let cwd = get(scope, &object, "cwd")?;
+    let env = get(scope, &object, "env")?;
+    let input = get(scope, &object, "input")?;
+    let timeout = get(scope, &object, "timeout")?;
+    let max_buffer = get(scope, &object, "maxBuffer")?;
 
     if !encoding.is_string() {
         return Err(Failure::unsupported_encoding());
@@ -534,7 +545,7 @@ fn reject_unknown_options<'s>(
                 key_conversion: v8::KeyConversionMode::ConvertToString,
             },
         )
-        .ok_or_else(|| Failure::invalid_type("options must be an object"))?;
+        .ok_or(Failure::Pending)?;
     let count = names.length() as usize;
     if count > MAX_OPTION_KEYS {
         return Err(Failure::unsupported("an option is not implemented"));
@@ -542,7 +553,7 @@ fn reject_unknown_options<'s>(
     for index in 0..count {
         let key = names
             .get_index(scope, index as u32)
-            .ok_or_else(|| Failure::invalid_type("an option could not be read"))?;
+            .ok_or(Failure::Pending)?;
         let key = v8::Local::<v8::String>::try_from(key)
             .map_err(|_| Failure::invalid_type("an option could not be read"))?;
         if key.length() > MAX_PATH_UNITS {
@@ -584,7 +595,7 @@ fn read_env<'s>(
                 key_conversion: v8::KeyConversionMode::ConvertToString,
             },
         )
-        .ok_or_else(|| Failure::invalid_type("options.env must be an object"))?;
+        .ok_or(Failure::Pending)?;
     let count = names.length() as usize;
     if count > MAX_ENV_ENTRIES {
         return Err(Failure::too_large());
@@ -595,7 +606,7 @@ fn read_env<'s>(
     for index in 0..count {
         let key = names
             .get_index(scope, index as u32)
-            .ok_or_else(|| Failure::invalid_type("an environment name is not valid"))?;
+            .ok_or(Failure::Pending)?;
         let name = v8::Local::<v8::String>::try_from(key)
             .map_err(|_| Failure::invalid_type("an environment name is not valid"))?;
         if name.length() > MAX_PATH_UNITS {
@@ -605,9 +616,7 @@ fn read_env<'s>(
         if name.is_empty() || name.contains('=') || name.contains('\0') {
             return Err(Failure::invalid_value("an environment name is not valid"));
         }
-        let value = object
-            .get(scope, key)
-            .ok_or_else(|| Failure::invalid_type("an environment value is not valid"))?;
+        let value = object.get(scope, key).ok_or(Failure::Pending)?;
         let value = read_string(scope, value, "environment value", MAX_ENV_BYTES)?;
         if value.contains('\0') {
             return Err(Failure::invalid_value(
@@ -649,8 +658,7 @@ fn read_args<'s>(
         .map_err(|_| Failure::invalid_type("arguments must be an array"))?;
     let length = match pre_length {
         Some(length) => length,
-        None => get(scope, &object, "length")
-            .ok_or_else(|| Failure::invalid_type("arguments must have a valid length"))?,
+        None => get(scope, &object, "length")?,
     };
     if !length.is_number() {
         return Err(Failure::invalid_type("arguments must have a valid length"));
@@ -669,9 +677,7 @@ fn read_args<'s>(
     let mut arguments = Vec::with_capacity(length as usize);
     let mut total = 0usize;
     for index in 0..length {
-        let value = object
-            .get_index(scope, index)
-            .ok_or_else(|| Failure::invalid_type("an argument could not be read"))?;
+        let value = object.get_index(scope, index).ok_or(Failure::Pending)?;
         if value.is_string() {
             let string = v8::Local::<v8::String>::try_from(value)
                 .map_err(|_| Failure::invalid_type("an argument is not a valid string"))?;
@@ -690,9 +696,7 @@ fn read_args<'s>(
             }
             arguments.push(text);
         } else if value.is_number() || value.is_boolean() {
-            let string = value
-                .to_string(scope)
-                .ok_or_else(|| Failure::invalid_type("an argument is not a valid string"))?;
+            let string = value.to_string(scope).ok_or(Failure::Pending)?;
             if string.length() > MAX_ARG_UNITS {
                 return Err(Failure::too_large());
             }
@@ -735,7 +739,7 @@ fn build_request<'s>(
         // the argument list, as `Array.isArray` would report for a Proxy over
         // an array. The same value is reused instead of reading it again.
         let object = v8::Local::<v8::Object>::try_from(args_value).ok();
-        let length = object.and_then(|object| get(scope, &object, "length"));
+        let length = object.and_then(|object| get(scope, &object, "length").ok());
         if length.is_some_and(|value| value.is_number()) {
             pre_length = length;
             (Some(args_value), third)
@@ -776,7 +780,7 @@ fn execute<'s>(
     run_sync(&request, &options).map_err(|error| Failure::new(error.code(), error.message()))
 }
 
-fn unsupported_operation(scope: &mut v8::PinScope<'_, '_>, name: &str) {
+fn unsupported_operation(scope: &v8::PinScope<'_, '_>, name: &str) {
     throw_coded(
         scope,
         "ERR_NODE_UNSUPPORTED",
@@ -841,41 +845,50 @@ fn spawn_sync<'s>(
 ) {
     let result = match execute(scope, &args) {
         Ok(result) => result,
-        Err(failure) => {
-            if failure.code == "ENOENT" || failure.code == "EACCES" {
-                rv.set(empty_spawn_result(scope, &failure.code, &failure.message).into());
+        Err(Failure::Pending) => return,
+        Err(Failure::Coded { code, message }) if code == "ENOENT" || code == "EACCES" => {
+            let Some(object) = empty_spawn_result(scope, &code, &message) else {
                 return;
-            }
-            throw_failure(scope, failure);
+            };
+            rv.set(object.into());
+            return;
+        }
+        Err(Failure::Coded { code, message }) => {
+            throw_coded(scope, &code, &message);
             return;
         }
     };
 
-    let object = spawn_result(scope, &result);
-    if result.timed_out {
-        let error = coded_error(scope, "ETIMEDOUT", "child process timed out");
-        set_value(scope, &object, "error", error.into());
+    let Some(object) = spawn_result(scope, &result) else {
+        return;
+    };
+    let error = if result.timed_out {
+        Some(("ETIMEDOUT", "child process timed out"))
     } else if result.limit_exceeded {
-        let error = coded_error(
-            scope,
+        Some((
             "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
             "child process output exceeded maxBuffer",
-        );
-        set_value(scope, &object, "error", error.into());
+        ))
     } else if result.incomplete {
-        let error = coded_error(
-            scope,
+        Some((
             "ERR_NODE_CHILD_PROCESS_INCOMPLETE",
             "the direct child exited while a descendant still held a piped stream; output may be incomplete",
-        );
-        set_value(scope, &object, "error", error.into());
+        ))
     } else if result.io_error {
-        let error = coded_error(
-            scope,
+        Some((
             "ERR_NODE_CHILD_PROCESS_IO",
             "a child process pipe read failed; output may be incomplete",
-        );
-        set_value(scope, &object, "error", error.into());
+        ))
+    } else {
+        None
+    };
+    if let Some((code, message)) = error {
+        let Some(error) = coded_error(scope, code, message) else {
+            return;
+        };
+        if !define_value(scope, &object, "error", error.into()) {
+            return;
+        }
     }
     rv.set(object.into());
 }
