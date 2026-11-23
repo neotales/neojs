@@ -37,8 +37,10 @@ There are two identifiers on every record:
   measured bytes. Two records with the same `series_id` share controls, but a
   delta is labelled **strict** only when every control is actually captured.
   Effective features, effective linker, Cargo config, target-specific
-  environment, source state and a V8 input with unknown provenance/use are
-  checked; if any is unknown the delta is **controls-incomplete**.
+  environment, source state, a recorded cooperative target lock and a V8 input
+  with unknown provenance/use are checked; if any is unknown the delta is
+  **controls-incomplete**. A cooperative lock still does not prove an external
+  writer was absent; that is a separate, explicitly unclaimed guarantee.
 - **`family_id`** — the intended longitudinal artifact: binary, target,
   profile, requested features. The trend report compares records in one family
   even when a control changed, and labels the delta.
@@ -176,7 +178,8 @@ run. Every record states this contract:
 `build.target_dir.lock = "cooperating-measure-script-only"`,
 `ownership = "exclusive-required"`,
 `external_writer_safety = "not-claimed"`. A record does not imply that an
-external writer was absent, and the tool makes no such claim.
+external writer was absent, and the tool makes no such claim. A record without a
+recorded cooperative lock is never labelled a strict comparison.
 
 ### Missing artifacts
 

@@ -35,6 +35,7 @@ def controls_complete($r):
   ($r.build.effective_linker.status == "captured") and
   ($r.build.cargo_config.status == "captured") and
   ($r.build.target_specific_env.status != "not-captured") and
+  ($r.build.target_dir.lock == "cooperating-measure-script-only") and
   ($r.source.state_status == "captured") and
   ($r.build.v8_archive_status != "supplied-provenance-unknown") and
   ($r.build.v8_archive_status != "not-supplied-not-captured");

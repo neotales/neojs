@@ -368,6 +368,21 @@ assert_contains "$TMP/stdout" "strict" "trend calls a complete same-series compa
 assert_contains "$TMP/stdout" "complete" "trend shows the complete controls label"
 assert_contains "$TMP/stdout" "+1" "trend shows the strict delta"
 
+UNTRACKED_COMPLETE=$(rewrite_with_ids '
+  .build.target_dir = {
+    lock: "not-recorded",
+    ownership: "not-claimed",
+    external_writer_safety: "not-claimed"
+  }
+  | .source.git_commit = ("5" * 40)
+  | .measured_at = "2026-11-23T03:30:00Z"
+' "$COMPLETE")
+printf '%s\n%s\n' "$COMPLETE" "$UNTRACKED_COMPLETE" >"$TMP/untracked-strict.jsonl"
+expect_status 0 "unrecorded target lock prevents strict" \
+    bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/untracked-strict.jsonl" --trend
+assert_contains "$TMP/stdout" "controls-incomplete" "trend refuses strict without a recorded target lock"
+assert_contains "$TMP/stdout" "not-recorded" "trend shows the unrecorded target lock"
+
 V8A=$(rewrite_with_ids '
   .build.v8_archive_status = "supplied-provenance-unknown"
   | .build.v8_archive = {
