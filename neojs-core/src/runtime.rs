@@ -1161,4 +1161,45 @@ if (dynamic.isLetter !== chars.isLetter) {
             "a second registration of the same specifier must be rejected"
         );
     }
+
+    #[test]
+    fn native_module_registration_rejects_a_lazy_esm_collision() {
+        let mut runtime = Runtime::new().expect("runtime");
+        let js = runtime.js.as_mut().expect("the isolate is present");
+        let specifier = "ext:test/native-lazy-collision.js";
+        let source = "export const value = 7;";
+        js.add_lazy_loaded_esm_source_for_test(specifier, source);
+
+        let export = js
+            .execute_script("<native-export>", "(function value() { return 7; })")
+            .expect("export value");
+        let result =
+            js.register_native_module(specifier, vec![(deno_core::ascii_str!("value"), export)]);
+        assert!(
+            result.is_err(),
+            "a native registration must reject a known lazy ESM collision"
+        );
+
+        // The rejected registration must not have removed or replaced the lazy
+        // source. The original bytes remain, and the module still compiles and
+        // evaluates under its original identity.
+        let code = js
+            .take_lazy_loaded_esm_source_for_test(specifier)
+            .expect("the lazy ESM source remains");
+        assert_eq!(code, source);
+
+        let namespace = js
+            .lazy_load_es_module_with_code(specifier, source.to_string())
+            .expect("the remaining lazy source evaluates");
+        let context = js.main_context();
+        deno_core::v8::scope!(let scope, js.v8_isolate());
+        let context = deno_core::v8::Local::new(scope, context);
+        let scope = &mut deno_core::v8::ContextScope::new(scope, context);
+        let namespace = deno_core::v8::Local::new(scope, namespace);
+        let namespace = deno_core::v8::Local::<deno_core::v8::Object>::try_from(namespace)
+            .expect("module namespace is an object");
+        let key = deno_core::v8::String::new(scope, "value").expect("export key");
+        let value = namespace.get(scope, key.into()).expect("export value");
+        assert_eq!(value.uint32_value(scope), Some(7));
+    }
 }

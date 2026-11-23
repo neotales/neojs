@@ -1461,14 +1461,33 @@ impl JsRuntime {
 
     // Refuse before touching the module map. `create_module_info` inserts into
     // the name table without checking, so a second registration would silently
-    // replace the existing mapping.
+    // replace the existing mapping. Module names live in three places:
+    //   * `by_name`, keyed by requested type (loaded modules and aliases);
+    //   * `synthetic_esm_modules` (module specifier to backing script);
+    //   * `known_lazy_esm` plus the residual lazy ESM table (unloaded modules).
+    // Lazy scripts are a separate script namespace, not module names.
     if module_map
       .get_id(name.as_str(), RequestedModuleType::None)
       .is_some()
+      || module_map.has_name_any_type(name.as_str())
     {
       return Err(
         CoreErrorKind::JsBox(JsErrorBox::type_error(format!(
           "module `{}` is already registered",
+          name.as_str()
+        )))
+        .into_box(),
+      );
+    }
+    // `known_lazy_esm` and the residual table name modules that are not yet
+    // loaded. `create_module_info` removes a matching lazy source, so a native
+    // registration would replace that module's identity. `lazy_esm_sources`
+    // keys are mirrored into `known_lazy_esm`; residual sources are checked by
+    // the same method.
+    if module_map.has_lazy_esm_source(name.as_str()) {
+      return Err(
+        CoreErrorKind::JsBox(JsErrorBox::type_error(format!(
+          "module `{}` already has a lazy ESM source",
           name.as_str()
         )))
         .into_box(),
@@ -1529,6 +1548,47 @@ impl JsRuntime {
   #[cfg(test)]
   pub(crate) fn main_realm(&self) -> JsRealm {
     JsRealm::clone(&self.inner.main_realm)
+  }
+
+  /// Test-only: register a known unloaded lazy ESM source.
+  ///
+  /// This exists for collision tests in a dependent crate. It is not part of
+  /// the normal embedder API.
+  #[cfg(feature = "native_module_testing")]
+  #[doc(hidden)]
+  pub fn add_lazy_loaded_esm_source_for_test(
+    &mut self,
+    specifier: &str,
+    code: &str,
+  ) {
+    self
+      .inner
+      .main_realm
+      .0
+      .module_map()
+      .add_lazy_loaded_esm_source(
+        ModuleName::from(specifier.to_string()),
+        code.to_string().into(),
+      );
+  }
+
+  /// Test-only: remove and return a known lazy ESM source.
+  ///
+  /// This exists for collision tests in a dependent crate. It is not part of
+  /// the normal embedder API.
+  #[cfg(feature = "native_module_testing")]
+  #[doc(hidden)]
+  pub fn take_lazy_loaded_esm_source_for_test(
+    &mut self,
+    specifier: &str,
+  ) -> Option<String> {
+    self
+      .inner
+      .main_realm
+      .0
+      .module_map()
+      .take_lazy_esm_source(specifier)
+      .map(|code| code.as_str().to_string())
   }
 
   #[inline]

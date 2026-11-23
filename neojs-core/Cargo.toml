@@ -55,6 +55,9 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Enables the vendored deno_core test-only seam for the lazy-ESM collision
+# test. Normal builds do not enable this feature.
+deno_core = { workspace = true, features = ["native_module_testing"] }
 ed25519-dalek = { version = "3.0.0", features = ["pkcs8"] }
 rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

@@ -71,6 +71,16 @@ impl<T> ModuleNameTypeMap<T> {
     map.get(name)
   }
 
+  /// Whether any requested module type has an entry for `name`.
+  ///
+  /// The module map keys entries by requested type as well as name. A native
+  /// module registration must not collide with a JSON, text, bytes, or other
+  /// typed entry under the same name, so it checks every submap rather than
+  /// only [`RequestedModuleType::None`].
+  pub fn contains_key_any_type(&self, name: &str) -> bool {
+    self.submaps.iter().any(|map| map.contains_key(name))
+  }
+
   pub fn insert(
     &mut self,
     module_type: &RequestedModuleType,
@@ -391,6 +401,11 @@ impl ModuleMapData {
 
   /// Get module id, following all aliases in case of module specifier
   /// that had been redirected.
+  /// Whether a name exists under any requested module type.
+  pub(crate) fn has_name_any_type(&self, name: &str) -> bool {
+    self.by_name.contains_key_any_type(name)
+  }
+
   pub fn get_id(
     &self,
     name: &str,

@@ -18,12 +18,21 @@ It is vendored only to add the narrow public seam
 the crate's existing `ModuleMap::new_synthetic_module` to register an eagerly
 evaluated synthetic ECMAScript module with explicit named exports derived from
 native V8 values. It returns an error before touching the module map when the
-specifier is already registered or has an existing `synthetic_esm` mapping, or
-when the export list contains a duplicate name. It changes no loader, resolver,
-cache, or module-graph behaviour. The replacement is applied in the workspace
+specifier is already registered under any requested module type, has an existing
+`synthetic_esm` mapping, has a known or residual lazy ESM source, or the export
+list contains a duplicate name. It changes no loader, resolver, cache, or
+module-graph behaviour. The replacement is applied in the workspace
 `Cargo.toml` with `[patch.crates-io]`.
 
 Remove this directory and the `[patch.crates-io]` entry as soon as an upstream
-`deno_core` release exposes an equivalent public API. The only local diff in Rust is the
-`HashSet` and `ModuleType` imports and the `register_native_module` method in
-`runtime/jsruntime.rs`. The added `LICENSE` documents the upstream MIT terms.
+`deno_core` release exposes an equivalent public API. The local Rust diff is:
+
+* `runtime/jsruntime.rs`: `register_native_module` and two test-only lazy-ESM
+  helpers gated by the `native_module_testing` feature;
+* `modules/module_map_data.rs` and `modules/map.rs`: `has_name_any_type`, which
+  checks the by-name table under every requested module type;
+* `Cargo.toml`: the `native_module_testing` feature.
+
+The added `LICENSE` documents the upstream MIT terms. `neojs-core` enables
+`native_module_testing` only as a dev-dependency; normal builds do not expose
+the helpers.

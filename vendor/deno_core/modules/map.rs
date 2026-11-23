@@ -281,6 +281,11 @@ impl ModuleMap {
     self.data.borrow().get_id(name, requested_module_type)
   }
 
+  /// Whether `name` exists under any requested module type.
+  pub(crate) fn has_name_any_type(&self, name: &str) -> bool {
+    self.data.borrow().has_name_any_type(name)
+  }
+
   /// Register an additional `(name, requested_module_type) -> module_id`
   /// mapping for an already-registered module. See
   /// `ModuleMapData::register_under_type`.

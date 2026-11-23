@@ -27,6 +27,9 @@ repository = "https://github.com/denoland/deno"
 resolver = "2"
 
 [features]
+# Test-only seam for exercising ModuleMap lazy-ESM collisions without
+# exposing lazy source registration in the normal embedder API.
+native_module_testing = []
 default = [
     "v8",
     "v8_use_custom_libcxx",
