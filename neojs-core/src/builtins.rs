@@ -90,7 +90,7 @@
 //! [`UUID_SPECIFIER`], [`UUID_V4_SPECIFIER`], and [`UUID_V7_SPECIFIER`].
 //! Only those exact `neo:` specifiers are accepted: a bare name is not a
 //! built-in module specifier and the loader rejects it. `neo:chars` is a
-//! native V8 module registered by [`crate::chars::install`]; the loader source
+//! native V8 module registered by `crate::chars::install`; the loader source
 //! table returns only an empty deduplication sentinel for it. `SLICES_MODULE`
 //! exists only with `neo-slices`; with the feature off its name, source,
 //! registry entry, and loader entry are absent. All except the native `chars`
@@ -168,7 +168,7 @@ const SLICES_REGISTRY_TOKEN: &str = "// __NEO_SLICES_REGISTRY_ENTRY__";
 /// `std::env::consts::OS` and `std::env::consts::ARCH`, so the module reports the
 /// target the runtime was compiled for and reads no host state at runtime.
 ///
-/// `neo-chars` spreads the native entries installed by [`crate::chars::install`]
+/// `neo-chars` spreads the native entries installed by `crate::chars::install`
 /// into the registry and the introspection list. The object and every function
 /// are native V8 values; no ECMAScript implementation or facade is spliced in.
 /// `neo-slices` splices the separate `slices.impl.js` source and registry entry;
@@ -263,7 +263,7 @@ const ASSERT_MODULE: &str = include_str!("builtins/assert.esm.js");
 /// Only `neo:chars` resolves to this URL. It is the canonical and only module
 /// specifier for this built-in, so the engine caches one native module instance
 /// for every importer. It is not a `file:` URL and is never read from disk. The
-/// module is registered natively by [`crate::chars::install`]; the loader's
+/// module is registered natively by `crate::chars::install`; the loader's
 /// source table returns only an empty deduplication sentinel. With `neo-chars`
 /// off, the specifier is absent from the name table and the loader rejects it.
 #[cfg(feature = "neo-chars")]
