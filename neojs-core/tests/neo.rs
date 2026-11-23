@@ -179,3 +179,15 @@ fn a_bare_built_in_name_is_rejected_with_the_canonical_suggestion() {
     );
     assert!(message.contains("Bare module specifiers"), "{message}");
 }
+
+#[cfg(not(feature = "node-compat"))]
+#[test]
+fn a_feature_off_runtime_rejects_node_child_process() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = dir.path().join("main.js");
+    fs::write(&file, "import \"node:child_process\";\n").expect("write source");
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime.run_file(&file).expect_err("node must be disabled");
+    let text = format!("{error}");
+    assert!(text.contains("Node compatibility is disabled"), "{text}");
+}

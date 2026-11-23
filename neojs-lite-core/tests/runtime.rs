@@ -404,3 +404,14 @@ fn run_source_accepts_in_memory_modules() {
         .run_source("memory.js", "export default 1;\n")
         .expect("in-memory module");
 }
+
+#[cfg(not(feature = "node-compat"))]
+#[test]
+fn a_feature_off_runtime_rejects_node_child_process() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write(&dir, "main.js", "import \"node:child_process\";\n");
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime.run_file(&file).expect_err("node must be disabled");
+    let text = format!("{error}");
+    assert!(text.contains("Node compatibility is disabled"), "{text}");
+}
