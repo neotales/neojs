@@ -1,9 +1,9 @@
 // The `chars` built-in module as seen by `import ... from "chars"` or
 // `import ... from "neo:chars"`.
 //
-// The implementations live in `neo.js`, which the runtime evaluates once per
-// realm. This file only re-exports them, so every named export is the same
-// function object as the matching property of
+// The implementation lives in the engine-neutral `neojs-builtins` crate. The
+// V8 realm shim splices that expression in before the entry module, so every
+// named export here is the same function object as the matching property of
 // `Neo.getBuiltInModule("chars")`. Nothing here reaches the private module
 // registry: it reads the public module object and binds its properties.
 //

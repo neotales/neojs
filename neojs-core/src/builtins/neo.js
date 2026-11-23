@@ -50,11 +50,15 @@
 // module calls no host op, reads no environment or operating-system file, and
 // installs no global.
 //
-// The `chars` module is an independent implementation for neojs. It is
-// informed by `@neotales/chars` and the QuickJS `neo:chars` module, but it does
-// not port their lookup tables and does not claim compatibility with them.
-// Character classification uses the Unicode property tables compiled into V8,
-// so the exact Unicode version follows the V8 build.
+// The `chars` module is an independent implementation shared with NeoJS Lite
+// through the engine-neutral `neojs-builtins` crate. That crate holds the
+// implementation expression and the canonical wrapper; this shim splices the
+// expression in so the V8 object, its `slices` dependency, the registry, and
+// the module namespace all see one set of function objects. Character
+// classification uses the Unicode property tables compiled into V8, so the exact
+// Unicode version follows the V8 build. It is informed by `@neotales/chars` and
+// the QuickJS `neo:chars` module, but it does not port their lookup tables and
+// does not claim compatibility with them.
 (() => {
     "use strict";
 
@@ -81,7 +85,6 @@
     // consult that mutable property.
     const regexpExec = Function.prototype.call.bind(RegExp.prototype.exec);
     const lowerCase = Function.prototype.call.bind(String.prototype.toLowerCase);
-    const upperCase = Function.prototype.call.bind(String.prototype.toUpperCase);
     // Look up modules through a bound intrinsic, not `modules.get`. A dynamic
     // property lookup would consult the mutable `Map.prototype.get`, letting
     // later code replace lookups or receive the private registry map itself.
@@ -107,159 +110,12 @@
     // go through the native slice op instead.
     const typedArraySet = Function.prototype.call.bind(Uint8Array.prototype.set);
 
-    // A Unicode scalar value: an integer code point that is not a surrogate.
-    // Surrogates cannot be encoded by `String.fromCodePoint`, and treating
-    // them as characters would make the predicates disagree with strings.
-    function isScalar(value) {
-        return (
-            typeof value === "number" &&
-            isInteger(value) &&
-            value >= 0 &&
-            value <= MAX_CODE_POINT &&
-            (value < SURROGATE_MIN || value > SURROGATE_MAX)
-        );
-    }
-
-    const LETTER = /\p{L}/u;
-    const DECIMAL_DIGIT = /\p{Nd}/u;
-    const UPPERCASE_LETTER = /\p{Lu}/u;
-    const LOWERCASE_LETTER = /\p{Ll}/u;
-    const CONTROL = /\p{Cc}/u;
-    const PUNCTUATION = /\p{P}/u;
-    const SYMBOL = /\p{S}/u;
-    // Go's unicode.IsSpace: ASCII \t through \r and space, U+0085, and the
-    // Unicode separator categories. U+FEFF (BOM) and U+200B (zero width space)
-    // are deliberately not whitespace here even though JavaScript's `\s`
-    // includes the former.
-    const WHITESPACE = /[\t\n\v\f\r \u0085\p{Zs}\p{Zl}\p{Zp}]/u;
-
-    function matches(pattern, value) {
-        return isScalar(value) && regexpExec(pattern, fromCodePoint(value)) !== null;
-    }
-
-    function requireScalar(value, name) {
-        if (typeof value !== "number") {
-            throw new makeTypeError(`${name} must be a number`);
-        }
-        if (!isScalar(value)) {
-            throw new makeRangeError(`${name} must be a Unicode scalar value`);
-        }
-        return value;
-    }
-
-    // Apply a full case mapping to one code point and return a number only when
-    // the result is still one code point. Expanding mappings (`ß` to `SS`,
-    // `İ` to `i` plus a combining dot) are left unchanged because the API
-    // returns a code point, not a string.
-    function mapCase(value, map) {
-        const codePoint = requireScalar(value, "value");
-        const mapped = map(fromCodePoint(codePoint));
-        const first = codePointAt(mapped, 0);
-        const width = first > 0xffff ? 2 : 1;
-        return mapped.length === width ? first : codePoint;
-    }
-
-    /** True for a Unicode scalar value. */
-    function isChar(value) {
-        return isScalar(value);
-    }
-
-    /** True for an ASCII scalar value, 0 through 0x7F. */
-    function isAscii(value) {
-        return isScalar(value) && value <= ASCII_MAX;
-    }
-
-    /** True for a Latin-1 scalar value, 0 through 0xFF. */
-    function isLatin1(value) {
-        return isScalar(value) && value <= LATIN1_MAX;
-    }
-
-    /** True for a C0 or C1 control character (Unicode category Cc). */
-    function isControl(value) {
-        return matches(CONTROL, value);
-    }
-
-    /** True for a decimal digit (Unicode category Nd), not other numerals. */
-    function isDigit(value) {
-        return matches(DECIMAL_DIGIT, value);
-    }
-
-    /** True for a letter (Unicode category L). */
-    function isLetter(value) {
-        return matches(LETTER, value);
-    }
-
-    /** True for a letter or a decimal digit. */
-    function isLetterOrDigit(value) {
-        return matches(LETTER, value) || matches(DECIMAL_DIGIT, value);
-    }
-
-    /** True for a lowercase letter (Unicode category Ll). */
-    function isLower(value) {
-        return matches(LOWERCASE_LETTER, value);
-    }
-
-    /** True for an uppercase letter (Unicode category Lu). */
-    function isUpper(value) {
-        return matches(UPPERCASE_LETTER, value);
-    }
-
-    /** True for punctuation (Unicode category P). */
-    function isPunc(value) {
-        return matches(PUNCTUATION, value);
-    }
-
-    /**
-     * True for whitespace: ASCII tab, line feed, vertical tab, form feed,
-     * carriage return, and space, plus U+0085 and categories Zs, Zl, and Zp.
-     */
-    function isSpace(value) {
-        return matches(WHITESPACE, value);
-    }
-
-    /** True for a symbol (Unicode category S), including emoji. */
-    function isSymbol(value) {
-        return matches(SYMBOL, value);
-    }
-
-    /**
-     * Return the lowercase code point for a scalar value, or the value itself
-     * when the full mapping expands to more than one code point.
-     *
-     * @throws {TypeError} when the value is not a number.
-     * @throws {RangeError} when the value is not a Unicode scalar value.
-     */
-    function toLower(value) {
-        return mapCase(value, lowerCase);
-    }
-
-    /**
-     * Return the uppercase code point for a scalar value, or the value itself
-     * when the full mapping expands to more than one code point.
-     *
-     * @throws {TypeError} when the value is not a number.
-     * @throws {RangeError} when the value is not a Unicode scalar value.
-     */
-    function toUpper(value) {
-        return mapCase(value, upperCase);
-    }
-
-    const chars = Object.freeze({
-        isChar,
-        isAscii,
-        isLatin1,
-        isControl,
-        isDigit,
-        isLetter,
-        isLetterOrDigit,
-        isLower,
-        isUpper,
-        isPunc,
-        isSpace,
-        isSymbol,
-        toLower,
-        toUpper,
-    });
+    // The `chars` implementation is engine-neutral and lives in
+    // `neojs-builtins`. The token below is replaced with that expression when
+    // the shim is assembled, so V8 and QuickJS evaluate the same source and
+    // capture the same intrinsics. The object is defined before `slices`
+    // evaluates: `CharSlice` captures `chars.toUpper` and `chars.toLower`.
+    const chars = __NEO_CHARS_IMPL__;
 
     // `strings` is plain ECMAScript: folded matching and set-based trimming.
     // It calls no host op and adds no capability beyond the strings it is

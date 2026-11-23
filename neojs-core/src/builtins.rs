@@ -16,6 +16,15 @@
 //! reported through an optional observer. It adds no filesystem, environment,
 //! network, or process capability and has no local-time, DST, time-zone, or
 //! fake-timer surface.
+//!
+//! `chars` is not written in this crate. Its implementation is the
+//! engine-neutral expression in [`neojs_builtins::chars`], the same expression
+//! the QuickJS runtime evaluates, and [`neo_shim`] splices it in. The V8 adapter
+//! below still serves this branch base's bare registry key and bare import
+//! spelling; the canonical-registry change in flight will switch both to
+//! `neo:chars`. The function objects, the `slices` dependency, the registry, and
+//! the module namespace all share one object because the expression is
+//! evaluated once, before `slices`.
 //! `crypto` calls private host ops registered by [`crate::crypto`],
 //! [`crate::crypto_cipher`], [`crate::crypto_hash`], and
 //! [`crate::crypto_shamir`]; it
@@ -126,22 +135,36 @@ use deno_core::url::Url;
 /// `undefined`.
 const NEO_SHIM_SOURCE: &str = include_str!("builtins/neo.js");
 
+/// The placeholder replaced with the shared `chars` implementation expression.
+///
+/// The implementation itself lives in the engine-neutral `neojs-builtins`
+/// crate. The token is an expression, not a statement, so this shim can declare
+/// the same `const chars` that the QuickJS shim declares.
+const CHARS_IMPL_TOKEN: &str = "__NEO_CHARS_IMPL__";
+
 /// The placeholder replaced with the build target's `std::env::consts::OS`.
 const OS_PLATFORM_TOKEN: &str = "__NEO_OS_PLATFORM__";
 
 /// The placeholder replaced with the build target's `std::env::consts::ARCH`.
 const OS_ARCH_TOKEN: &str = "__NEO_OS_ARCH__";
 
-/// Returns the shim with the build target's `os` constants substituted.
+/// Returns the shim with the build target's `os` constants substituted and the
+/// shared built-in implementation spliced in.
 ///
 /// [`NEO_SHIM_SOURCE`] holds two placeholders, one per `neo:os` value. They are
 /// replaced with ECMAScript string literals for this build's
 /// `std::env::consts::OS` and `std::env::consts::ARCH`, so the module reports the
 /// target the runtime was compiled for and reads no host state at runtime.
+///
+/// The `chars` token is replaced with the expression from
+/// [`neojs_builtins::chars::IMPLEMENTATION`], the same source the QuickJS shim
+/// evaluates. The V8 build enables the shared crate's `chars` feature, so this
+/// substitution is unconditional here and the default V8 surface is unchanged.
 pub(crate) fn neo_shim() -> String {
     NEO_SHIM_SOURCE
         .replace(OS_PLATFORM_TOKEN, &js_string(std::env::consts::OS))
         .replace(OS_ARCH_TOKEN, &js_string(std::env::consts::ARCH))
+        .replace(CHARS_IMPL_TOKEN, neojs_builtins::chars::IMPLEMENTATION)
 }
 
 /// Encodes `value` as a double-quoted ECMAScript string literal.
@@ -486,6 +509,7 @@ pub(crate) fn implemented_specifiers() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::CHARS_IMPL_TOKEN;
     use super::OS_ARCH_TOKEN;
     use super::OS_PLATFORM_TOKEN;
     use super::neo_shim;
@@ -498,6 +522,19 @@ mod tests {
         let shim = neo_shim();
         assert!(!shim.contains(OS_PLATFORM_TOKEN));
         assert!(!shim.contains(OS_ARCH_TOKEN));
+        assert!(!shim.contains(CHARS_IMPL_TOKEN));
+        assert!(
+            shim.contains("const chars = "),
+            "the shared chars implementation was not spliced in"
+        );
+        assert!(
+            shim.contains("(() => {") && shim.contains("return freeze({"),
+            "the shared chars implementation is not an install expression"
+        );
+        assert!(
+            shim.contains("const isInteger = Number.isInteger;"),
+            "the shared chars implementation did not capture its intrinsics"
+        );
         assert!(
             shim.contains(&format!("platform: \"{}\"", std::env::consts::OS)),
             "platform literal is missing from the shim"
