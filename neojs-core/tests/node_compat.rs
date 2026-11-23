@@ -828,6 +828,28 @@ if (code !== "ERR_NODE_UNSUPPORTED") throw new Error(`seven keys: ${code}`);
 }
 
 #[test]
+fn bounded_engine_stops_before_scanning_large_element_capacity() {
+    run(
+        policy(&[]),
+        r#"
+import { spawnSync } from "node:child_process";
+const elements = { encoding: "utf8" };
+for (let index = 0; index < 20000; index += 1) elements[index] = 1;
+const started = Date.now();
+let code = null;
+try {
+    spawnSync("/bin/echo", [], elements);
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_UNSUPPORTED") throw new Error(`large elements: ${code}`);
+if (Date.now() - started > 2000) throw new Error("element capacity scan was not bounded");
+"#,
+    )
+    .expect("large element capacity");
+}
+
+#[test]
 fn bounded_engine_supports_fast_index_elements() {
     require("/usr/bin/env");
     run(

@@ -58,35 +58,33 @@ enum BoundedKeysError {
 #[allow(unsafe_code)]
 unsafe extern "C" {
     /// Narrow bounded own-enumerable-string-key collector added by the
-    /// vendored V8 source patch. `out_array` is a V8 `Array*` handle.
+    /// vendored V8 source patch. Keys are delivered to `sink` while the V8
+    /// handle scope is alive; no V8 handle crosses this ABI.
     fn neojs_v8_get_own_enumerable_string_keys_bounded(
         object: *const v8::Object,
         context: *const v8::Context,
         max_keys: u32,
         max_scan: u32,
-        out_array: *mut *const v8::Array,
+        max_key_units: u32,
+        sink: extern "C" fn(*mut std::ffi::c_void, *const u8, usize),
+        sink_data: *mut std::ffi::c_void,
         out_len: *mut u32,
         out_scanned: *mut u32,
     ) -> i32;
 }
 
-const _: () = assert!(
-    std::mem::size_of::<v8::Local<'static, v8::Array>>() == std::mem::size_of::<*const v8::Array>()
-);
-const _: () = assert!(
-    std::mem::align_of::<v8::Local<'static, v8::Array>>()
-        == std::mem::align_of::<*const v8::Array>()
-);
-
-/// Reconstructs the V8 local handle returned by the C ABI.
 #[allow(unsafe_code)]
-fn local_array_from_raw<'s>(ptr: *const v8::Array) -> Option<v8::Local<'s, v8::Array>> {
-    if ptr.is_null() {
-        return None;
+extern "C" fn bounded_key_sink(data: *mut std::ffi::c_void, bytes: *const u8, length: usize) {
+    if data.is_null() {
+        return;
     }
-    // The v8 crate uses the same pointer-sized representation for Local in its
-    // own C++ bridge (`support.h`). The const assertions above pin the layout.
-    Some(unsafe { std::mem::transmute_copy(&ptr) })
+    let keys = unsafe { &mut *(data as *mut Vec<String>) };
+    if length == 0 {
+        keys.push(String::new());
+        return;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(bytes, length) };
+    keys.push(String::from_utf8_lossy(bytes).into_owned());
 }
 
 /// Collects own enumerable string keys through the bounded V8 engine API.
@@ -99,7 +97,7 @@ fn bounded_keys<'js>(
     max_key_units: usize,
 ) -> Result<Vec<String>, BoundedKeysError> {
     let context = scope.get_current_context();
-    let mut array: *const v8::Array = std::ptr::null();
+    let mut keys = Vec::new();
     let mut len = 0u32;
     let mut scanned = 0u32;
     let status = unsafe {
@@ -108,36 +106,25 @@ fn bounded_keys<'js>(
             &*context as *const v8::Context,
             max_keys,
             max_scan,
-            &mut array,
+            max_key_units as u32,
+            bounded_key_sink,
+            &mut keys as *mut Vec<String> as *mut std::ffi::c_void,
             &mut len,
             &mut scanned,
         )
     };
+    let _ = scanned;
     match status {
         0 => {}
         1 => return Err(BoundedKeysError::TooManyKeys),
         2 => return Err(BoundedKeysError::ScanLimit),
         3 => return Err(BoundedKeysError::Unsupported),
         4 => return Err(BoundedKeysError::Memory),
+        5 => return Err(BoundedKeysError::KeyTooLong),
         _ => return Err(BoundedKeysError::Exception),
     }
-    let Some(array) = local_array_from_raw(array) else {
+    if keys.len() != len as usize {
         return Err(BoundedKeysError::Exception);
-    };
-    if array.length() != len || len as usize > max_keys as usize {
-        return Err(BoundedKeysError::Exception);
-    }
-    let mut keys = Vec::with_capacity(len as usize);
-    for index in 0..len {
-        let value = array
-            .get_index(scope, index)
-            .ok_or(BoundedKeysError::Exception)?;
-        let key =
-            v8::Local::<v8::String>::try_from(value).map_err(|_| BoundedKeysError::Exception)?;
-        if key.length() > max_key_units {
-            return Err(BoundedKeysError::KeyTooLong);
-        }
-        keys.push(key.to_rust_string_lossy(scope));
     }
     Ok(keys)
 }
@@ -1033,4 +1020,39 @@ fn exec_file_sync<'s>(
         scope,
         &String::from_utf8_lossy(&result.stdout),
     ));
+}
+
+#[cfg(test)]
+mod bounded_keys_gc_tests {
+    use super::bounded_keys;
+    use deno_core::JsRuntime;
+    use deno_core::v8;
+
+    #[test]
+    fn keys_survive_gc_and_handle_churn_around_the_abi() {
+        v8::V8::set_flags_from_string("--expose-gc");
+        let mut js = JsRuntime::new(Default::default());
+        js.execute_script(
+            "<bounded-keys-gc>",
+            "globalThis.boundedObject = { alpha: 1, beta: 2, gamma: 3 };",
+        )
+        .expect("script");
+
+        let context = js.main_context();
+        v8::scope!(let scope, js.v8_isolate());
+        let context = v8::Local::new(scope, context);
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let global = scope.get_current_context().global(scope);
+        let key = v8::String::new(scope, "boundedObject").expect("key");
+        let value = global.get(scope, key.into()).expect("object");
+        let object = v8::Local::<v8::Object>::try_from(value).expect("object");
+
+        scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
+        let keys = bounded_keys(scope, &object, 16, 64, 64).expect("bounded keys");
+        scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
+        for index in 0..2000 {
+            let _ = v8::String::new(scope, &format!("handle-churn-{index}"));
+        }
+        assert_eq!(keys, ["alpha", "beta", "gamma"]);
+    }
 }

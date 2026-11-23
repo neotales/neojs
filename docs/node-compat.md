@@ -133,9 +133,13 @@ adapter therefore requires a V8 archive built from the pinned
 `eng/v8-source/patches/0001-bounded-own-enumerable-string-keys.patch` applied.
 The patch adds a narrow C ABI used only by `neojs-node`; it is separate from the
 `deno_core` and `rquickjs-sys` patches. `eng/v8-source/build-bounded.sh` verifies
-the prepared inputs, applies the patch to an isolated copy, builds with
-`V8_FROM_SOURCE`, and prints the archive path and hash. Neither the V8 tree nor
-the archive is committed.
+the prepared inputs, recreates a fresh isolated source tree, checks the exact
+patch and post-patch file hashes, rejects overlapping build roots, locks the
+output root, uses the committed `builder.lock` with `--locked` (pinning
+`bindgen 0.72.1`), builds with `V8_FROM_SOURCE`, and prints the archive path and
+hash. The caller supplies and must trust the prepared cache/procedure roots;
+`--verify-only` is drift detection, not attacker authentication. Neither the V8
+tree nor the archive is committed.
 
 The engine API supports `JS_OBJECT_TYPE` ordinary objects with fast or
 dictionary properties and fast non-double elements. It rejects Proxy, functions,
@@ -144,7 +148,10 @@ any callback. Dictionary elements, double elements, dictionary capacity beyond
 the scan cap, and property/dictionary slots beyond the scan cap fail closed.
 It counts all descriptor and element capacity slots against the scan bound
 before output allocation, allocates only after the key and scan bounds pass,
-and preserves index-first/insertion order.
+and preserves index-first/insertion order. Keys are copied to a Rust sink while
+the V8 handle scope is alive; no V8 local handle crosses the C ABI, so there is
+no escaped-handle lifetime to manage. A GC/handle-churn unit test exercises the
+sink path.
 
 The adapter applies the same caps as the QuickJS adapter: options 6 keys / 64
 scanned slots, environment 128 keys / 4096 scanned slots, and 4096 UTF-16 units
