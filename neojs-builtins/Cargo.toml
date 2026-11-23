@@ -1,0 +1,20 @@
+[package]
+name = "neojs-builtins"
+description = "Engine-independent Neo built-in module implementations shared by the V8 and QuickJS runtimes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+# The shared `neo:chars` implementation, canonical wrapper, and descriptor.
+# The V8 runtime enables it so a default V8 build keeps `chars`; the QuickJS
+# runtime enables it explicitly. Cargo features are additive across the
+# dependency graph, so a module is present whenever any dependent enables it.
+chars = []
+
+[dependencies]
