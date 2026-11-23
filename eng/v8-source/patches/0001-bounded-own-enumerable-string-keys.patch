@@ -1,6 +1,6 @@
 --- a/v8/src/objects/keys.h
 +++ b/v8/src/objects/keys.h
-@@ -32,6 +32,30 @@
+@@ -32,6 +32,31 @@
        static_cast<int>(v8::KeyCollectionMode::kIncludePrototypes)
  };
  
@@ -12,6 +12,7 @@
 +  kScanLimit = 2,
 +  kUnsupported = 3,
 +  kMemory = 4,
++  kKeyTooLong = 5,
 +  kException = -1,
 +};
 +
@@ -43,24 +44,16 @@
  #include <optional>
  
  #include "src/api/api-arguments-inl.h"
-@@ -1459,6 +1462,213 @@
+@@ -1459,6 +1462,205 @@
    return result;
  }
  
 +
 +namespace {
 +
-+uint32_t OwnFastElementKeys(Tagged<FixedArrayBase> elements,
-+                            ElementsKind kind, uint32_t* scanned) {
-+  const uint32_t capacity = elements->length().value();
-+  *scanned = capacity;
-+  if (capacity == 0) return 0;
-+  if (!IsFastElementsKind(kind) || !IsFixedArray(elements)) {
-+    // Capacity is still reported, but the path is unsupported. Double
-+    // elements, dictionary elements and custom element kinds fail closed.
-+    return UINT32_MAX;
-+  }
++uint32_t OwnFastElementKeys(Tagged<FixedArrayBase> elements) {
 +  Tagged<FixedArray> array = Cast<FixedArray>(elements);
++  const uint32_t capacity = elements->length().value();
 +  uint32_t count = 0;
 +  for (uint32_t i = 0; i < capacity; i++) {
 +    if (!IsTheHole(array->get(i))) count++;
@@ -140,17 +133,17 @@
 +
 +  ElementsKind elements_kind = object->GetElementsKind();
 +  Tagged<FixedArrayBase> raw_elements = object->elements();
-+  uint32_t element_scan = 0;
-+  uint32_t element_keys =
-+      OwnFastElementKeys(raw_elements, elements_kind, &element_scan);
++  const uint32_t element_scan = raw_elements->length().value();
 +  scanned += element_scan;
-+  if (scanned > max_scan) {
-+    *out_scanned = static_cast<uint32_t>(std::min<uint64_t>(scanned, UINT32_MAX));
-+    return BoundedOwnKeysStatus::kScanLimit;
-+  }
-+  if (element_keys == UINT32_MAX) {
++  *out_scanned =
++      static_cast<uint32_t>(std::min<uint64_t>(scanned, UINT32_MAX));
++  if (scanned > max_scan) return BoundedOwnKeysStatus::kScanLimit;
++  if (element_scan != 0 &&
++      (!IsFastElementsKind(elements_kind) || !IsFixedArray(raw_elements))) {
 +    return BoundedOwnKeysStatus::kUnsupported;
 +  }
++  const uint32_t element_keys =
++      element_scan == 0 ? 0 : OwnFastElementKeys(raw_elements);
 +  key_count += element_keys;
 +
 +  if (fast_properties) {
@@ -267,7 +260,7 @@
  #include "src/objects/js-promise-inl.h"
  #include "src/objects/js-regexp-inl.h"
  #include "src/objects/js-weak-refs-inl.h"
-@@ -4991,6 +4992,55 @@
+@@ -4991,6 +4992,62 @@
                            v8::IndexFilter::kIncludeIndices, key_conversion);
  }
  
@@ -279,18 +272,19 @@
 +}
 +}  // namespace
 +
-+// Narrow C ABI for the opt-in neojs Node adapter. Returns the status values of
-+// i::BoundedOwnKeysStatus, the total scan count, and on success a JS array of
-+// own enumerable string keys. The bounds are applied before output allocation.
++// Narrow C ABI for the opt-in neojs Node adapter. Keys are copied to the
++// caller's sink while the V8 handle scope is alive; no V8 handle crosses the
++// ABI. Returns the status values of i::BoundedOwnKeysStatus and the scan count.
++typedef void (*NeojsKeySink)(void* data, const uint8_t* bytes, size_t length);
++
 +extern "C" V8_EXPORT int
 +neojs_v8_get_own_enumerable_string_keys_bounded(
 +    const Object* self, const Context* context, uint32_t max_keys,
-+    uint32_t max_scan, const Array** out_array, uint32_t* out_len,
-+    uint32_t* out_scanned) {
-+  if (out_array) *out_array = nullptr;
++    uint32_t max_scan, uint32_t max_key_units, NeojsKeySink sink,
++    void* sink_data, uint32_t* out_len, uint32_t* out_scanned) {
 +  if (out_len) *out_len = 0;
 +  if (out_scanned) *out_scanned = 0;
-+  if (self == nullptr || context == nullptr || out_array == nullptr ||
++  if (self == nullptr || context == nullptr || sink == nullptr ||
 +      out_len == nullptr || out_scanned == nullptr) {
 +    return static_cast<int>(i::BoundedOwnKeysStatus::kUnsupported);
 +  }
@@ -308,14 +302,20 @@
 +  if (status != i::BoundedOwnKeysStatus::kOk) {
 +    return static_cast<int>(status);
 +  }
++
 +  const uint32_t length = keys->ulength().value();
-+  i::Handle<i::JSArray> array = i_isolate->factory()->NewJSArrayWithElements(
-+      keys, i::PACKED_ELEMENTS, length);
-+  if (array.is_null()) {
-+    return static_cast<int>(i::BoundedOwnKeysStatus::kException);
++  for (uint32_t index = 0; index < length; index++) {
++    i::DirectHandle<i::String> key = i::direct_handle(
++        i::Cast<i::String>(keys->get(index)), i_isolate);
++    if (key->length() > max_key_units) {
++      return static_cast<int>(i::BoundedOwnKeysStatus::kKeyTooLong);
++    }
++    Local<String> local_key = Utils::ToLocal(key);
++    Isolate* v8_isolate = reinterpret_cast<Isolate*>(i_isolate);
++    String::Utf8Value utf8(v8_isolate, local_key);
++    sink(sink_data, reinterpret_cast<const uint8_t*>(*utf8),
++         static_cast<size_t>(utf8.length()));
 +  }
-+  Local<Array> local = Utils::ToLocal(array);
-+  *out_array = *local;
 +  *out_len = length;
 +  return static_cast<int>(i::BoundedOwnKeysStatus::kOk);
 +}

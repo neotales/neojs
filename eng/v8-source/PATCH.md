@@ -17,7 +17,8 @@ The patch changes only:
 
 It adds an internal `GetOwnEnumerableStringKeysBounded` function and a narrow
 `extern "C"` entry point. It does not alter any existing V8 API or key collector
-path.
+path. Keys are copied to a Rust sink while the V8 handle scope is alive; no V8
+handle crosses the C ABI, so there is no escaped-local lifetime.
 
 ## Supported and rejected objects
 
@@ -49,11 +50,17 @@ worktree. From the verified `prepare.sh` inputs:
 | ICU data | `icudtl.dat` sha256 `1cf67874b5a87a8363a86fb3f81e3cbbed54d389062dab8fb52308d5cf8c8612`; `icudtb.dat` sha256 `c58e1567b34e12a672b24ff4a5f21efa4c4481ab64a213dde059309b01aacde2` |
 | Rust toolchain | sha256 `832de79f8d90940f4aaef023f83a00c1e7210c023f4d57f606b7bf9831c889aa`, 274393124 bytes |
 | Chromium clang | sha256 `de584381536aa5ba2403033c4f8b70f3c39c2e5d7fa87c953b7fd8bfbba0ee2a`, 69635068 bytes |
-| Patch file | sha256 `9dbf09cead9c8fe12e97dcc0c7cf98812183c408e0b105cf9ba4c1cd06407c3f`, 325 lines |
+| Patch file | sha256 `b0bd951eda45659f32912293c9f6b7e0168e1d4280dfdadfff53856afef3e757`, 325 lines |
+| Patched `keys.h` | sha256 `20c9fe7be177ccd6175e5738293c4dcdbd545e09bfb2a6ac07ddb0cafcaea3d5` |
+| Patched `keys.cc` | sha256 `c84de6aa2a4a8a27a8f7fd30890bf01693a0f4a30c7f27d7c6c4771f1716dc8b` |
+| Patched `api.cc` | sha256 `5025ce1012d183d215edce11a0d90c276747b506b3f5efbf578c61b74fe36e01` |
 
 The prepared cache is verified with
 `eng/v8-source/prepare.sh --verify-only`. Local stamps are drift detection, not
-attacker authentication.
+attacker authentication. `NEOTALES_V8_CACHE` and `NEOTALES_V8_PROCEDURE` are
+caller-supplied roots: the caller must trust them. This script does not claim to
+authenticate them beyond the verified procedure's checks and the patch/source
+hashes below.
 
 ## Build
 
@@ -71,14 +78,39 @@ tree and archive are not committed.
 
 Observed local build (Linux x86_64, 12 jobs):
 
-- `librusty_v8.a`: 186,810,584 bytes
-- sha256: `67552f675667459e7ce167cabe62f9da6207225b3b7a552620cf1eb65d95656e`
-- An earlier build from the same source via the workspace path produced
-  186,791,634 bytes / `f3a24493e280335f2d9801772e59d1a6c63a2d2d289b58ab940dbc06d0a997ad`;
-  the difference is the no-bit-reproducibility caveat, not a pin.
+- `librusty_v8.a`: 186,810,152 bytes
+- sha256: `643ddb9ef4413922f14ee8e77cc5972882011f62c52d1494efa87f56b3a77ff8`
+- Earlier builds from the same pinned source produced different bytes
+  (`67552f…`, `f3a244…`); the difference is the no-bit-reproducibility caveat,
+  not a pin. Rebuilding the archive requires `cargo clean -p v8` in the
+  consumer target because Cargo does not track the archive file content.
 - exported symbol: `neojs_v8_get_own_enumerable_string_keys_bounded`
 - ICU and Temporal enabled in the build (`V8_INTL_SUPPORT`,
   `V8_TEMPORAL_SUPPORT`, `icudtl_dat.o` present)
+
+Consumer compatibility: the archive is a release V8 build with
+`use_custom_libcxx`, `simdutf`, no pointer compression and no sandbox, matching
+`deno_core` 0.413.0's v8 selection. Both consumer debug and release Rust
+profiles link the same release archive:
+
+```sh
+export RUSTY_V8_ARCHIVE=/path/to/librusty_v8.a
+cargo +1.100.0 test -p neojs-core --features node-compat --test node_compat --locked --offline
+cargo +1.100.0 test -p neojs-core --features node-compat --test node_compat --release --locked --offline
+```
+
+After a consumer build, verify the final executable (not only a library)
+contains the symbol:
+
+```sh
+nm target/debug/deps/node_compat-* | grep neojs_v8_get_own_enumerable_string_keys_bounded
+# The V8 archive is built with hidden visibility, so the symbol is present as
+# a local hidden function in the final executable; `readelf -sW` shows it too.
+```
+
+The builder uses a committed `builder.lock` with `--locked`; it pins
+`bindgen 0.72.1` and the v8 dependency resolution. The script asserts both
+resolved versions.
 
 **No bit-for-bit reproducibility claim.** The build is repeatable on the same
 host/toolchain inputs, but V8 and the Rust toolchain do not promise identical
@@ -86,9 +118,11 @@ bytes across builds. The archive hash above is an observation, not a pin.
 
 ## License
 
-V8 source is BSD-style; see `v8/LICENSE` in the pinned crate tree. The Rusty V8
-crate is MIT. The patch retains V8's copyright/license headers and adds no
-third-party code.
+V8 source is BSD-style. The crates.io `v8` 150.4.0 archive does not ship a
+standalone V8 `LICENSE` file; the BSD-style notice is in every V8 source header,
+for example `v8/src/api/api.cc` lines 1-3. The Rusty V8 crate is MIT according
+to its Cargo metadata. The patch retains those headers and adds no third-party
+code.
 
 ## Why not a stock archive
 
