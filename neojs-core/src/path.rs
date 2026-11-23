@@ -1,7 +1,7 @@
 //! Private host facts for the lexical `neo:path` module.
 //!
 //! The JavaScript module object is installed by [`crate::builtins`] and is
-//! exposed as `Neo.getBuiltInModule("path")`, `import ... from "path"`, and
+//! exposed as `Neo.getBuiltInModule("neo:path")` and
 //! `import ... from "neo:path"`. This file registers the two host ops it calls:
 //! one reports the build target's path dialect, and one returns the current
 //! process working directory as text.

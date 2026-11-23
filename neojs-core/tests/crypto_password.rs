@@ -69,7 +69,7 @@ expectBytes("raw bytes", pbkdf2("sha256",
     "60d38d8523b876fa767fb807eec4c919d8c75512bb89ad7954bc0328812eb4cc");
 
 // The same input via the registry and the named export.
-if (pbkdf2 !== Neo.getBuiltInModule("crypto").pbkdf2) throw new Error("identity");
+if (pbkdf2 !== Neo.getBuiltInModule("neo:crypto").pbkdf2) throw new Error("identity");
 "#,
         sha256 = PBKDF2_SHA256,
         sha384 = PBKDF2_SHA384,

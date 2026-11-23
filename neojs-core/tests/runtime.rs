@@ -368,12 +368,12 @@ fn rejects_import_attributes_for_files_and_builtins() {
         ),
         (
             "static builtin",
-            "import * as chars from \"chars\" with { type: \"text\" };\n",
+            "import * as chars from \"neo:chars\" with { type: \"text\" };\n",
             "text",
         ),
         (
             "dynamic builtin",
-            "await import(\"chars\", { with: { type: \"bytes\" } });\n",
+            "await import(\"neo:chars\", { with: { type: \"bytes\" } });\n",
             "bytes",
         ),
         (
@@ -411,7 +411,7 @@ fn dynamic_imports_of_files_and_builtins_still_work() {
         "main.js",
         r#"
 const data = await import("./data.js");
-const chars = await import("chars");
+const chars = await import("neo:chars");
 const alias = await import("neo:chars");
 if (data.value !== 1) throw new Error("file import failed");
 if (alias !== chars) throw new Error("builtin specifiers differ");
@@ -522,7 +522,7 @@ fn run_file_async_works_without_an_ambient_tokio_runtime() {
         &dir,
         "main.ts",
         r#"
-const chars = await import("chars");
+const chars = await import("neo:chars");
 const value: number = await Promise.resolve(41);
 if (value + 1 !== 42) throw new Error("top-level await failed");
 if (!chars.isLetter("A".codePointAt(0))) throw new Error("dynamic builtin failed");
@@ -666,8 +666,8 @@ fn run_js(source: &str) {
 fn built_in_module_lookup_is_cached_and_frozen() {
     run_js(
         r#"
-const first = Neo.getBuiltInModule("chars");
-const second = Neo.getBuiltInModule("chars");
+const first = Neo.getBuiltInModule("neo:chars");
+const second = Neo.getBuiltInModule("neo:chars");
 if (first !== second) throw new Error("chars lookup is not cached");
 if (typeof first !== "object" || first === null) throw new Error("chars is not an object");
 if (!Object.isFrozen(first)) throw new Error("chars module is not frozen");
@@ -682,7 +682,7 @@ for (const name of ["isChar", "isAscii", "isLatin1", "toLower", "toUpper"]) {
 fn built_in_lookup_ignores_a_replaced_map_get() {
     run_js(
         r#"
-const chars = Neo.getBuiltInModule("chars");
+const chars = Neo.getBuiltInModule("neo:chars");
 const originalGet = Map.prototype.get;
 let replacedCalls = 0;
 Map.prototype.get = function (key) {
@@ -690,7 +690,7 @@ Map.prototype.get = function (key) {
     return this;
 };
 try {
-    if (Neo.getBuiltInModule("chars") !== chars) {
+    if (Neo.getBuiltInModule("neo:chars") !== chars) {
         throw new Error("known lookup did not return the cached module");
     }
     if (Neo.getBuiltInModule("missing") !== undefined) {
@@ -713,7 +713,7 @@ try {
 fn unknown_built_in_modules_return_undefined() {
     run_js(
         r#"
-const names = ["", "fs", "neo:chars", "constructor", "__proto__", "toString"];
+const names = ["", "fs", "chars", "constructor", "__proto__", "toString"];
 for (const name of names) {
     const module = Neo.getBuiltInModule(name);
     if (module !== undefined) throw new Error(`unknown module ${name} was returned`);
@@ -753,8 +753,8 @@ fn run_js_error(source: &str) -> String {
 fn built_in_module_named_exports_are_the_registry_functions() {
     run_js(
         r#"
-import * as chars from "chars";
-const registry = Neo.getBuiltInModule("chars");
+import * as chars from "neo:chars";
+const registry = Neo.getBuiltInModule("neo:chars");
 const exported = Object.keys(chars).sort();
 const registered = Object.keys(registry).sort();
 if (JSON.stringify(exported) !== JSON.stringify(registered)) {
@@ -776,25 +776,35 @@ fn built_in_module_specifiers_share_one_module_instance() {
         &dir,
         "main.js",
         r#"
-import * as staticChars from "chars";
+import * as staticChars from "neo:chars";
 import { isLetter as throughModule } from "./consumer.js";
 
-const first = await import("chars");
-const alias = await import("neo:chars");
+const first = await import("neo:chars");
 const uppercase = await import("NEO:chars");
-const again = await import("chars");
+const again = await import("neo:chars");
 
 if (staticChars !== first) throw new Error("static and dynamic import differ");
-if (first !== alias) throw new Error("chars and neo:chars differ");
-if (alias !== uppercase) throw new Error("scheme matching is not case-insensitive");
-if (alias !== again) throw new Error("repeated dynamic import was not cached");
+if (first !== uppercase) throw new Error("scheme matching is not case-insensitive");
+if (first !== again) throw new Error("repeated dynamic import was not cached");
 if (first.isLetter !== staticChars.isLetter) throw new Error("namespace export differs");
 if (throughModule !== staticChars.isLetter) {
     throw new Error("an importer of neo:chars saw a different function");
 }
 
-if (import.meta.resolve("chars") !== "neo:chars") throw new Error("chars did not resolve canonically");
-if (import.meta.resolve("neo:chars") !== "neo:chars") throw new Error("neo:chars did not resolve canonically");
+if (import.meta.resolve("neo:chars") !== "neo:chars") {
+    throw new Error("neo:chars did not resolve canonically");
+}
+if (import.meta.resolve("NEO:chars") !== "neo:chars") {
+    throw new Error("NEO:chars did not resolve canonically");
+}
+
+let bareRejected = false;
+try {
+    await import("chars");
+} catch (error) {
+    bareRejected = error instanceof TypeError;
+}
+if (!bareRejected) throw new Error("bare chars import was accepted");
 "#,
     );
     write_module(
@@ -813,8 +823,8 @@ if (import.meta.resolve("neo:chars") !== "neo:chars") throw new Error("neo:chars
 fn built_in_module_namespace_and_registry_are_immutable() {
     run_js(
         r#"
-import * as chars from "chars";
-const registry = Neo.getBuiltInModule("chars");
+import * as chars from "neo:chars";
+const registry = Neo.getBuiltInModule("neo:chars");
 
 let rejections = 0;
 try {
@@ -847,8 +857,8 @@ delete chars.isLetter.marker;
 fn chars_predicates_ignore_a_replaced_regexp_exec() {
     run_js(
         r#"
-import * as chars from "chars";
-const registry = Neo.getBuiltInModule("chars");
+import * as chars from "neo:chars";
+const registry = Neo.getBuiltInModule("neo:chars");
 
 const predicates = [
     "isControl", "isDigit", "isLetter", "isLetterOrDigit", "isLower",
@@ -903,7 +913,7 @@ if (chars.isLetter("A".codePointAt(0)) !== true) throw new Error("classification
 
 #[test]
 fn unknown_built_in_exports_fail_to_link() {
-    let bare = run_js_error("import { nope } from \"chars\";\n");
+    let bare = run_js_error("import { nope } from \"neo:chars\";\n");
     assert!(
         bare.contains("does not provide an export named 'nope'"),
         "{bare}"
@@ -944,7 +954,7 @@ if (extensionless !== 8) throw new Error("extensionless ./chars was not loaded")
 fn chars_predicates_use_scalar_code_points() {
     run_js(
         r#"
-const chars = Neo.getBuiltInModule("chars");
+const chars = Neo.getBuiltInModule("neo:chars");
 const predicates = [
     "isChar", "isAscii", "isLatin1", "isControl", "isDigit", "isLetter",
     "isLetterOrDigit", "isLower", "isUpper", "isPunc", "isSpace", "isSymbol",
@@ -1017,7 +1027,7 @@ for (const [predicate, value, expected] of cases) {
 fn chars_case_mapping_returns_one_code_point_or_the_input() {
     run_js(
         r#"
-const chars = Neo.getBuiltInModule("chars");
+const chars = Neo.getBuiltInModule("neo:chars");
 const cases = [
     ["toLower", 0x00, 0x00],
     ["toUpper", 0x00, 0x00],
@@ -1061,10 +1071,10 @@ for (const method of ["toLower", "toUpper"]) {
 fn console_module_exports_the_global_console_and_its_methods() {
     run_js(
         r#"
-import * as consoleModule from "console";
-import defaultConsole from "console";
+import * as consoleModule from "neo:console";
+import defaultConsole from "neo:console";
 
-const registry = Neo.getBuiltInModule("console");
+const registry = Neo.getBuiltInModule("neo:console");
 
 if (registry !== globalThis.console) throw new Error("registry is not the global console");
 if (defaultConsole !== globalThis.console) throw new Error("default export is not the global console");
@@ -1072,8 +1082,8 @@ if (consoleModule.default !== globalThis.console) {
     throw new Error("namespace default is not the global console");
 }
 if (Object.isFrozen(registry)) throw new Error("the live console must not be frozen");
-if (Neo.getBuiltInModule("neo:console") !== undefined) {
-    throw new Error("the registry takes bare names only");
+if (Neo.getBuiltInModule("console") !== undefined) {
+    throw new Error("the registry accepted a bare name");
 }
 
 const exports = Object.keys(consoleModule).sort();
@@ -1101,13 +1111,13 @@ fn console_module_specifiers_share_one_module_instance() {
         &dir,
         "main.js",
         r#"
-import * as staticConsole from "console";
+import * as staticConsole from "neo:console";
 import { log as throughModule } from "./consumer.js";
 
-const first = await import("console");
+const first = await import("neo:console");
 const alias = await import("neo:console");
 const uppercase = await import("NEO:console");
-const again = await import("console");
+const again = await import("neo:console");
 
 if (staticConsole !== first) throw new Error("static and dynamic import differ");
 if (first !== alias) throw new Error("console and neo:console differ");
@@ -1117,7 +1127,7 @@ if (first.default !== staticConsole.default) throw new Error("namespace default 
 if (throughModule !== staticConsole.log) {
     throw new Error("an importer of neo:console saw a different function");
 }
-if (import.meta.resolve("console") !== "neo:console") {
+if (import.meta.resolve("neo:console") !== "neo:console") {
     throw new Error("console did not resolve canonically");
 }
 if (import.meta.resolve("neo:console") !== "neo:console") {
@@ -1141,10 +1151,10 @@ if (import.meta.resolve("neo:console") !== "neo:console") {
 fn console_module_default_export_is_live_and_named_exports_are_captured() {
     run_js(
         r#"
-import defaultConsole, { log } from "console";
-import * as namespace from "console";
+import defaultConsole, { log } from "neo:console";
+import * as namespace from "neo:console";
 
-const registry = Neo.getBuiltInModule("console");
+const registry = Neo.getBuiltInModule("neo:console");
 const original = defaultConsole.log;
 let replacedCalls = 0;
 const replacement = () => {
@@ -1198,10 +1208,10 @@ if ("marker" in original) throw new Error("the marker was not removed");
 fn console_registry_keeps_the_installed_console() {
     run_js(
         r#"
-import defaultConsole from "console";
+import defaultConsole from "neo:console";
 
 const installed = globalThis.console;
-const registry = Neo.getBuiltInModule("console");
+const registry = Neo.getBuiltInModule("neo:console");
 const replacement = { log() {} };
 
 globalThis.console = replacement;
@@ -1209,13 +1219,13 @@ try {
     if (globalThis.console !== replacement) throw new Error("the global was not replaced");
     if (registry !== installed) throw new Error("the registry changed with the global property");
     if (defaultConsole !== installed) throw new Error("the default export changed with the global property");
-    if (Neo.getBuiltInModule("console") !== installed) {
+    if (Neo.getBuiltInModule("neo:console") !== installed) {
         throw new Error("a later lookup changed with the global property");
     }
 } finally {
     globalThis.console = installed;
 }
-if (Neo.getBuiltInModule("console") !== globalThis.console) {
+if (Neo.getBuiltInModule("neo:console") !== globalThis.console) {
     throw new Error("the restore did not rejoin the registry and the global");
 }
 "#,
@@ -1226,7 +1236,7 @@ if (Neo.getBuiltInModule("console") !== globalThis.console) {
 fn console_named_exports_capture_a_pre_evaluation_replacement() {
     run_js(
         r#"
-const installed = Neo.getBuiltInModule("console");
+const installed = Neo.getBuiltInModule("neo:console");
 const original = installed.log;
 let calls = 0;
 const replacement = () => {
@@ -1240,7 +1250,7 @@ try {
     if (globalThis.console.log !== replacement) {
         throw new Error("the installed console was not changed");
     }
-    const first = await import("console");
+    const first = await import("neo:console");
     const alias = await import("neo:console");
 
     if (first.default !== installed) throw new Error("the default export is not the installed object");
@@ -1255,7 +1265,7 @@ try {
 }
 
 // Restoring the property does not rewrite the already-evaluated module binding.
-const later = await import("console");
+const later = await import("neo:console");
 if (later.log !== replacement) throw new Error("the captured binding changed after restore");
 if (later.default.log !== original) {
     throw new Error("the default export did not follow the restored property");
@@ -1268,7 +1278,7 @@ if (later.default.log !== original) {
 fn console_module_does_not_follow_a_global_replacement_before_import() {
     run_js(
         r#"
-const installed = Neo.getBuiltInModule("console");
+const installed = Neo.getBuiltInModule("neo:console");
 const installedLog = installed.log;
 const replacementConsole = {
     log() {
@@ -1284,10 +1294,10 @@ const replacementConsole = {
 // console object, not this replacement.
 globalThis.console = replacementConsole;
 try {
-    const first = await import("console");
+    const first = await import("neo:console");
     const alias = await import("neo:console");
 
-    if (Neo.getBuiltInModule("console") !== installed) {
+    if (Neo.getBuiltInModule("neo:console") !== installed) {
         throw new Error("the registry followed the global property");
     }
     if (first.default !== installed) throw new Error("the default export followed the global property");
@@ -1305,7 +1315,7 @@ try {
     globalThis.console = installed;
 }
 
-if (Neo.getBuiltInModule("console") !== globalThis.console) {
+if (Neo.getBuiltInModule("neo:console") !== globalThis.console) {
     throw new Error("the restore did not rejoin the registry and the global");
 }
 "#,
@@ -1314,7 +1324,7 @@ if (Neo.getBuiltInModule("console") !== globalThis.console) {
 
 #[test]
 fn unknown_console_exports_fail_to_link() {
-    let bare = run_js_error("import { nope } from \"console\";\n");
+    let bare = run_js_error("import { nope } from \"neo:console\";\n");
     assert!(
         bare.contains("does not provide an export named 'nope'"),
         "{bare}"
@@ -1366,7 +1376,7 @@ fn a_local_module_named_console_is_not_shadowed() {
         "main.js",
         r#"
 import { value } from "./console.js";
-import * as builtin from "console";
+import * as builtin from "neo:console";
 if (value !== 7) throw new Error("relative console.js was not loaded");
 if (builtin.default !== globalThis.console) throw new Error("the built-in was not loaded");
 "#,
@@ -1542,7 +1552,7 @@ fn an_async_preflight_failure_leaves_the_runtime_unused() {
 fn strings_folded_matching_uses_es_simple_folding() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const cases = [
     // [text, other, expected, description]
@@ -1600,7 +1610,7 @@ if (strings.endsWithFold("a\r\n", "a")) throw new Error("endsWithFold matched be
 fn strings_indices_are_utf16_and_last_index_finds_overlaps() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const cases = [
     // [text, search, fromIndex, expected, description]
@@ -1662,7 +1672,7 @@ for (let limit = -1; limit <= overlapText.length + 1; limit += 1) {
 fn strings_trim_removes_a_code_point_set_and_defaults_to_js_whitespace() {
     run_js(
         r###"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const trimCases = [
     ["...hi...", ".", "hi", "one character"],
@@ -1707,7 +1717,7 @@ if (strings.trimEnd("  a  ") !== "  a") throw new Error("trimEnd default failed"
 fn strings_reject_non_string_and_bad_index_arguments() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const typeErrors = [
     () => strings.equalFold(1, "a"),
@@ -1762,7 +1772,7 @@ if (!coerced) throw new Error("indexOfFold coerced a number to a string");
 fn strings_survive_replaced_intrinsics() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const baseline = [
     strings.equalFold("K", "\u212A"),
@@ -1842,7 +1852,7 @@ if (globalThis.RegExp !== originals.regexp) throw new Error("RegExp was not rest
 fn strings_handle_long_input() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const long = "a".repeat(1000000);
 const tail = long + "needle";
@@ -1876,9 +1886,9 @@ if (!strings.equalFold(accented, "\u00C9".repeat(200000))) {
 fn strings_module_named_exports_are_the_registry_functions() {
     run_js(
         r#"
-import * as strings from "strings";
-const registry = Neo.getBuiltInModule("strings");
-if (registry !== Neo.getBuiltInModule("strings")) {
+import * as strings from "neo:strings";
+const registry = Neo.getBuiltInModule("neo:strings");
+if (registry !== Neo.getBuiltInModule("neo:strings")) {
     throw new Error("strings lookup is not cached");
 }
 if (!Object.isFrozen(registry)) throw new Error("strings is not frozen");
@@ -1904,7 +1914,7 @@ const alias = await import("neo:strings");
 const upper = await import("NEO:strings");
 if (alias !== strings) throw new Error("neo:strings is not the same module instance");
 if (upper !== strings) throw new Error("the scheme is not matched case-insensitively");
-if (import.meta.resolve("strings") !== "neo:strings") {
+if (import.meta.resolve("neo:strings") !== "neo:strings") {
     throw new Error("strings did not resolve canonically");
 }
 
@@ -1924,7 +1934,7 @@ if (strings.trim("...x...", ".") !== "x") throw new Error("trim was replaced");
 fn strings_folded_search_stays_linear_on_repeated_prefixes() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 // A per-position retry of the whole needle performs about 10^10 comparisons
 // for the ASCII case and about 2.5 * 10^9 for the astral case at these sizes,
@@ -1970,7 +1980,7 @@ if (strings.lastIndexOfFold(foldedHit, foldedNeedle) !== 50000) {
 fn strings_folded_search_keeps_unicode_and_overlap_semantics() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 const indexCases = [
     ["aaaa", "aa", 0, "overlapping first match"],
@@ -2023,7 +2033,7 @@ for (let limit = -1; limit <= overlapText.length + 1; limit += 1) {
 fn strings_last_index_stops_at_a_small_limit() {
     run_js(
         r#"
-import * as strings from "strings";
+import * as strings from "neo:strings";
 
 // One million code points with no match. With fromIndex 0 the scan must stop
 // as soon as no pending or future match can start at or before 0; a scan that
@@ -2184,10 +2194,10 @@ if (reads > 32) {
 fn assert_module_exports_the_callable_without_assert_equals() {
     run_js(
         r#"
-import assertDefault, * as assertModule from "assert";
-import { AssertionError, equals, ok, strictEquals } from "assert";
+import assertDefault, * as assertModule from "neo:assert";
+import { AssertionError, equals, ok, strictEquals } from "neo:assert";
 
-const registry = Neo.getBuiltInModule("assert");
+const registry = Neo.getBuiltInModule("neo:assert");
 if (registry !== assertDefault) throw new Error("the default export is not the registry");
 if (registry !== assertModule.assert) throw new Error("the named assert is not the registry");
 if (registry !== ok) throw new Error("ok is not the registry callable");
@@ -2235,19 +2245,12 @@ if ("default" in registry) throw new Error("the registry must not have a default
 "#,
     );
 
-    for specifier in ["assert", "neo:assert"] {
-        let error = run_js_error(&format!(
-            "import {{ assertEquals }} from \"{specifier}\";\n"
-        ));
-        assert!(
-            error.contains("does not provide an export named 'assertEquals'"),
-            "{specifier}: {error}"
-        );
-        assert!(
-            error.contains(specifier.trim_start_matches("neo:")),
-            "{error}"
-        );
-    }
+    let error = run_js_error("import { assertEquals } from \"neo:assert\";\n");
+    assert!(
+        error.contains("does not provide an export named 'assertEquals'"),
+        "{error}"
+    );
+    assert!(error.contains("assert"), "{error}");
 }
 
 /// `strictEquals` is `Object.is`; `equals` is structural equality. The test
@@ -2256,7 +2259,7 @@ if ("default" in registry) throw new Error("the registry must not have a default
 fn assert_equality_distinguishes_identity_from_structure() {
     run_js(
         r#"
-import { AssertionError, equals, notEquals, notStrictEquals, strictEquals } from "assert";
+import { AssertionError, equals, notEquals, notStrictEquals, strictEquals } from "neo:assert";
 
 function passes(label, fn) {
     try {
@@ -2375,7 +2378,7 @@ fails("kind detection after self-revocation", () =>
 fn assert_equality_handles_maps_sets_and_binary_views() {
     run_js(
         r#"
-import { AssertionError, equals } from "assert";
+import { AssertionError, equals } from "neo:assert";
 
 function passes(label, fn) {
     try {
@@ -2489,7 +2492,7 @@ fails("Error message", () => equals(new TypeError("x"), new TypeError("y")));
 fn assert_assertion_error_is_informative() {
     run_js(
         r#"
-import { AssertionError, assert, equals, fail, strictEquals } from "assert";
+import { AssertionError, assert, equals, fail, strictEquals } from "neo:assert";
 
 let error = null;
 try {
@@ -2583,7 +2586,7 @@ import {
     doesNotThrow,
     rejects,
     throws,
-} from "assert";
+} from "neo:assert";
 
 function fails(label, fn) {
     let error;
@@ -3020,8 +3023,8 @@ fn test_built_in_reports_sync_async_failure_and_pending() {
         &dir,
         "main.js",
         r#"
-import test from "test";
-import assert from "assert";
+import test from "neo:test";
+import assert from "neo:assert";
 
 test("sync pass", () => assert.equals(1 + 1, 2));
 test("async pass", async () => {
@@ -3054,7 +3057,7 @@ fn test_built_in_timeout_is_a_failure() {
         &dir,
         "main.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("never", () => new Promise(() => {}), { timeout: 10 });
 "#,
     );
@@ -3077,7 +3080,7 @@ fn test_built_in_records_unhandled_rejections() {
         &dir,
         "main.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("schedules a rejection", () => {
     Promise.reject(new Error("unhandled from a test"));
 });
@@ -3125,7 +3128,7 @@ fn test_runner_async_form_works_inside_tokio() {
         &dir,
         "main.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("async pass", async () => { await Promise.resolve(); });
 "#,
     );
@@ -3152,7 +3155,7 @@ fn test_built_in_repeated_run_throws_on_retained_failure() {
         &dir,
         "main.js",
         r#"
-import test, { run, TestFailureError } from "test";
+import test, { run, TestFailureError } from "neo:test";
 test("fails once", () => { throw new Error("retained"); });
 let first = false;
 let second = false;
@@ -3182,7 +3185,7 @@ fn test_built_in_reports_unsettled_detached_timer() {
         &dir,
         "main.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("leaves a long timer", () => {
     Deno.core.createTimer(() => {}, 60_000, undefined, false, true, false);
 });
@@ -3217,7 +3220,7 @@ fn test_built_in_drains_short_detached_rejection() {
         &dir,
         "main.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("late rejection", () => {
     Deno.core.createTimer(
         () => { Promise.reject(new Error("late rejection")); },

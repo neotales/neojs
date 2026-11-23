@@ -225,9 +225,9 @@ fn stdio_built_in_writes_binary_streams_to_the_process() {
     let file = project.write(
         "main.js",
         r#"
-import { stdout, stderr } from "stdio";
+import { stdout, stderr } from "neo:stdio";
 
-if (Neo.getBuiltInModule("stdio").stdout !== stdout) {
+if (Neo.getBuiltInModule("neo:stdio").stdout !== stdout) {
     throw new Error("the registry and the import disagree");
 }
 const payload = Uint8Array.from([0x00, 0xff, 0x80, 0x0a]);
@@ -260,11 +260,11 @@ fn path_built_in_is_available_from_the_cli() {
     let file = project.write(
         "main.js",
         r#"
-import * as path from "path";
+import * as path from "neo:path";
 import * as alias from "neo:path";
 
 if (path !== alias) throw new Error("path and neo:path namespaces differ");
-if (Neo.getBuiltInModule("path").join !== path.join) {
+if (Neo.getBuiltInModule("neo:path").join !== path.join) {
     throw new Error("registry and import disagree");
 }
 console.log(path.posix.join("/a", "b"));
@@ -411,10 +411,10 @@ fn console_module_shares_identity_with_the_global_console() {
     let file = project.write(
         "console-identity.js",
         r#"
-import defaultConsole from "console";
+import defaultConsole from "neo:console";
 import * as namespace from "neo:console";
-const registry = Neo.getBuiltInModule("console");
-const dynamic = await import("console");
+const registry = Neo.getBuiltInModule("neo:console");
+const dynamic = await import("neo:console");
 const uppercase = await import("NEO:console");
 console.log(registry === globalThis.console);
 console.log(defaultConsole === registry);
@@ -422,7 +422,7 @@ console.log(namespace.default === registry);
 console.log(dynamic === namespace);
 console.log(uppercase === namespace);
 console.log(namespace.log === globalThis.console.log);
-console.log(Neo.getBuiltInModule("neo:console") === undefined);
+console.log(Neo.getBuiltInModule("console") === undefined);
 "#,
     );
 
@@ -442,7 +442,7 @@ fn console_module_keeps_the_live_console_and_captures_named_exports() {
     let file = project.write(
         "console-mutation.js",
         r#"
-import defaultConsole, { log } from "console";
+import defaultConsole, { log } from "neo:console";
 const original = globalThis.console.log;
 const replacement = () => {};
 defaultConsole.log = replacement;
@@ -471,13 +471,13 @@ fn console_module_ignores_a_global_replacement_before_dynamic_import() {
     let file = project.write(
         "console-wholesale.js",
         r#"
-const installed = Neo.getBuiltInModule("console");
+const installed = Neo.getBuiltInModule("neo:console");
 const print = installed.log;
 const installedLog = installed.log;
 globalThis.console = { log() {}, error() {} };
 
-const dynamic = await import("console");
-print(Neo.getBuiltInModule("console") === installed);
+const dynamic = await import("neo:console");
+print(Neo.getBuiltInModule("neo:console") === installed);
 print(dynamic.default === installed);
 print(dynamic.log === installedLog);
 print(dynamic.default === globalThis.console);
@@ -501,7 +501,7 @@ fn console_module_captures_a_method_replacement_before_dynamic_import() {
     let file = project.write(
         "console-pre-evaluation.js",
         r#"
-const installed = Neo.getBuiltInModule("console");
+const installed = Neo.getBuiltInModule("neo:console");
 const print = installed.log;
 const original = installed.log;
 const replacement = () => {};
@@ -530,7 +530,7 @@ fn console_module_runs_from_typescript() {
     let file = project.write(
         "console-module.ts",
         r#"
-import defaultConsole, { log, warn } from "console";
+import defaultConsole, { log, warn } from "neo:console";
 
 const name: string = "typescript";
 log(`console ${name}`);
@@ -551,14 +551,14 @@ fn crypto_builtin_roundtrips_and_rejects_a_wrong_key() {
     let file = project.write(
         "crypto.js",
         r#"
-import { decrypt, encrypt, generateEnvelopeKey, randomBytes } from "crypto";
+import { decrypt, encrypt, generateEnvelopeKey, randomBytes } from "neo:crypto";
 const key = generateEnvelopeKey();
 const plaintext = Uint8Array.from([0, 1, 2, 255, 128]);
 const envelope = encrypt(key, plaintext);
 const out = decrypt(key, envelope);
 let hex = "";
 for (const byte of out) hex += byte.toString(16).padStart(2, "0");
-console.log(hex, randomBytes(4).length, typeof Neo.getBuiltInModule("crypto").generateKey);
+console.log(hex, randomBytes(4).length, typeof Neo.getBuiltInModule("neo:crypto").generateKey);
 try {
     randomBytes(1.5);
 } catch (error) {
@@ -599,7 +599,7 @@ import {
     shamirCombineAsync,
     shamirSplit,
     shamirSplitAsync,
-} from "crypto";
+} from "neo:crypto";
 
 function hex(bytes) {
     let text = "";
@@ -644,7 +644,7 @@ fn crypto_stateful_cbc_and_gcm_work_from_the_cli() {
     let file = project.write(
         "cipher.js",
         r#"
-import { createDecryptor, createEncryptor } from "crypto";
+import { createDecryptor, createEncryptor } from "neo:crypto";
 
 function fromHex(text) {
     const bytes = new Uint8Array(text.length / 2);
@@ -718,7 +718,7 @@ fn crypto_hash_hmac_and_async_hash_work_from_the_cli() {
     let file = project.write(
         "hash.js",
         r#"
-import { createHash, createHmac, hashAsync, hmacAsync } from "crypto";
+import { createHash, createHmac, hashAsync, hmacAsync } from "neo:crypto";
 
 console.log(createHash("sha256").update("abc").digest("hex"));
 console.log(createHash("sha384").update("abc").digest("hex"));
@@ -762,7 +762,7 @@ import {
     bcryptVerifyAsync,
     pbkdf2,
     pbkdf2Async,
-} from "crypto";
+} from "neo:crypto";
 
 function hex(bytes) {
     let text = "";
@@ -806,7 +806,7 @@ fn age_builtin_roundtrips_and_rejects_a_wrong_file() {
     let file = project.write(
         "age.js",
         r#"
-import { decrypt, encrypt, generateIdentity, identityToRecipient } from "age";
+import { decrypt, encrypt, generateIdentity, identityToRecipient } from "neo:age";
 const pair = generateIdentity();
 const plaintext = Uint8Array.from([0, 1, 2, 255, 128]);
 const ciphertext = encrypt(pair.recipient, plaintext);
@@ -819,7 +819,7 @@ console.log(
     identityToRecipient(pair.identity) === pair.recipient,
     hex,
     ciphertext[0] === 0x61,
-    typeof Neo.getBuiltInModule("age").generateKey,
+    typeof Neo.getBuiltInModule("neo:age").generateKey,
 );
 let callbackCalled = false;
 try {
@@ -851,7 +851,7 @@ fn a_local_module_named_age_is_not_shadowed() {
     project.write("age.js", "export const value = 7;\n");
     let file = project.write(
         "main.js",
-        "import { value } from \"./age.js\";\nimport { generateIdentity } from \"age\";\nconsole.log(value, generateIdentity().identity.startsWith(\"AGE-SECRET-KEY-1\"));\n",
+        "import { value } from \"./age.js\";\nimport { generateIdentity } from \"neo:age\";\nconsole.log(value, generateIdentity().identity.startsWith(\"AGE-SECRET-KEY-1\"));\n",
     );
 
     let output = run_file(&file);
@@ -867,7 +867,7 @@ fn a_local_module_named_crypto_is_not_shadowed() {
     project.write("crypto.js", "export const value = 7;\n");
     let file = project.write(
         "main.js",
-        "import { value } from \"./crypto.js\";\nimport { generateEnvelopeKey } from \"crypto\";\nconsole.log(value, generateEnvelopeKey().length);\n",
+        "import { value } from \"./crypto.js\";\nimport { generateEnvelopeKey } from \"neo:crypto\";\nconsole.log(value, generateEnvelopeKey().length);\n",
     );
 
     let output = run_file(&file);
@@ -883,7 +883,7 @@ fn a_local_module_named_console_is_not_shadowed() {
     project.write("console.js", "export const value = 7;\n");
     let file = project.write(
         "main.js",
-        "import { value } from \"./console.js\";\nimport * as builtin from \"console\";\nconsole.log(value, builtin.default === globalThis.console);\n",
+        "import { value } from \"./console.js\";\nimport * as builtin from \"neo:console\";\nconsole.log(value, builtin.default === globalThis.console);\n",
     );
 
     let output = run_file(&file);
@@ -918,8 +918,8 @@ fn exposes_the_cached_chars_builtin_to_a_module() {
     let file = project.write(
         "chars.js",
         r#"
-const first = Neo.getBuiltInModule("chars");
-const second = Neo.getBuiltInModule("chars");
+const first = Neo.getBuiltInModule("neo:chars");
+const second = Neo.getBuiltInModule("neo:chars");
 console.log(first === second);
 console.log(Neo.getBuiltInModule("missing") === undefined);
 console.log(first.isLetter("λ".codePointAt(0)));
@@ -942,8 +942,8 @@ fn exposes_the_cached_strings_builtin_to_a_module() {
     let file = project.write(
         "strings.js",
         r#"
-const strings = Neo.getBuiltInModule("strings");
-console.log(strings === Neo.getBuiltInModule("strings"));
+const strings = Neo.getBuiltInModule("neo:strings");
+console.log(strings === Neo.getBuiltInModule("neo:strings"));
 console.log(strings.equalFold("K", "\u212A"));
 console.log(strings.indexOfFold("\u{1F600}a", "A"));
 console.log(strings.lastIndexOfFold("aaa", "aa"));
@@ -966,10 +966,10 @@ fn exposes_the_cached_os_builtin_to_a_module() {
     let file = project.write(
         "os.js",
         r#"
-import * as os from "os";
+import * as os from "neo:os";
 import { arch, platform } from "neo:os";
-const registry = Neo.getBuiltInModule("os");
-console.log(registry === Neo.getBuiltInModule("os"));
+const registry = Neo.getBuiltInModule("neo:os");
+console.log(registry === Neo.getBuiltInModule("neo:os"));
 console.log(os.platform === registry.platform && os.arch === registry.arch);
 console.log(platform === os.platform && arch === os.arch);
 console.log(`${os.platform}/${os.arch}`);
@@ -996,11 +996,11 @@ fn slices_built_in_is_available_from_the_cli() {
     let file = project.write(
         "slices.js",
         r#"
-import * as slices from "slices";
+import * as slices from "neo:slices";
 import * as alias from "neo:slices";
 
 if (slices !== alias) throw new Error("slices and neo:slices namespaces differ");
-if (Neo.getBuiltInModule("slices").slice !== slices.slice) throw new Error("registry differs");
+if (Neo.getBuiltInModule("neo:slices").slice !== slices.slice) throw new Error("registry differs");
 
 const base = [1, 2, 3];
 const view = slices.slice(base, 1, 3);
@@ -1036,10 +1036,10 @@ fn assert_builtin_passes_from_the_cli() {
     let file = project.write(
         "assert-pass.js",
         r#"
-import assert, { equals, strictEquals } from "assert";
+import assert, { equals, strictEquals } from "neo:assert";
 import { equals as aliased } from "neo:assert";
 
-if (Neo.getBuiltInModule("assert") !== assert) throw new Error("registry identity");
+if (Neo.getBuiltInModule("neo:assert") !== assert) throw new Error("registry identity");
 if (aliased !== equals) throw new Error("specifier alias identity");
 if (assert.ok !== assert) throw new Error("ok identity");
 
@@ -1105,7 +1105,7 @@ fn assert_failure_exits_1_with_an_informative_assertion_error() {
     let file = project.write(
         "assert-fail.js",
         r#"
-import { equals } from "assert";
+import { equals } from "neo:assert";
 
 equals({ a: { b: [0, 1] } }, { a: { b: [0, 2] } });
 "#,
@@ -1127,7 +1127,7 @@ fn assert_has_no_assert_equals_export_from_the_cli() {
     let project = Project::new();
     let file = project.write(
         "assert-no-alias.js",
-        "import { assertEquals } from \"assert\";\n",
+        "import { assertEquals } from \"neo:assert\";\n",
     );
 
     let output = run_file(&file);
@@ -1158,50 +1158,51 @@ fn reports_bad_built_in_module_names_and_exits_1() {
 }
 
 #[test]
-fn imports_a_built_in_module_by_bare_name() {
+fn refuses_a_bare_built_in_name_and_exits_1() {
     let project = Project::new();
     let file = project.write(
-        "chars-import.js",
+        "chars-bare-import.js",
         r#"
-import { isLetter, isDigit, toUpper } from "chars";
-console.log(isLetter("λ".codePointAt(0)));
-console.log(isDigit("٣".codePointAt(0)));
-console.log(toUpper("a".codePointAt(0)));
+import { isLetter } from "chars";
+console.log(isLetter("A".codePointAt(0)));
 "#,
     );
 
     let output = run_file(&file);
 
-    assert_eq!(output.status.code(), Some(0));
-    assert_eq!(stdout(&output), "true\ntrue\n65\n");
-    assert_eq!(stderr(&output), "");
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains("chars"), "{message}");
+    assert!(message.contains("canonical `neo:` specifier"), "{message}");
+    assert!(message.contains("neo:chars"), "{message}");
 }
 
 #[test]
-fn imports_a_built_in_module_by_neo_specifier() {
+fn imports_a_built_in_module_by_canonical_specifier() {
     let project = Project::new();
     let file = project.write(
         "chars-neo-import.js",
         r#"
 import { isLetter } from "neo:chars";
-const registry = Neo.getBuiltInModule("chars");
-const dynamic = await import("chars");
+const registry = Neo.getBuiltInModule("neo:chars");
+const dynamic = await import("neo:chars");
 console.log(isLetter === registry.isLetter);
 console.log(dynamic.isLetter === isLetter);
+console.log(Neo.getBuiltInModule("chars") === undefined);
 "#,
     );
 
     let output = run_file(&file);
 
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(stdout(&output), "true\ntrue\n");
+    assert_eq!(stdout(&output), "true\ntrue\ntrue\n");
     assert_eq!(stderr(&output), "");
 }
 
 #[test]
 fn reports_an_unknown_built_in_export_and_exits_1() {
     let project = Project::new();
-    let file = project.write("bad-export.js", "import { nope } from \"chars\";\n");
+    let file = project.write("bad-export.js", "import { nope } from \"neo:chars\";\n");
 
     let output = run_file(&file);
 
@@ -1227,7 +1228,7 @@ fn reports_an_unknown_neo_module_and_lists_the_implemented_ones() {
     assert!(message.contains("not implemented"), "{message}");
     assert!(
         message.contains(
-            "neojs implements age, neo:age, assert, neo:assert, chars, neo:chars, console, neo:console, cron, neo:cron, crypto, neo:crypto, os, neo:os, path, neo:path, slices, neo:slices, ssh, neo:ssh, stdio, neo:stdio, strings, neo:strings"
+            "neojs implements neo:age, neo:assert, neo:chars, neo:console, neo:cron, neo:crypto, neo:os, neo:path, neo:slices, neo:ssh, neo:stdio, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7"
         ),
         "{message}"
     );
@@ -1254,7 +1255,7 @@ fn a_local_module_named_path_is_not_shadowed() {
     project.write("path.js", "export const value = 7;\n");
     let file = project.write(
         "main.js",
-        "import { value } from \"./path.js\";\nimport { posix } from \"path\";\nconsole.log(value, posix.join(\"/a\", \"b\"));\n",
+        "import { value } from \"./path.js\";\nimport { posix } from \"neo:path\";\nconsole.log(value, posix.join(\"/a\", \"b\"));\n",
     );
 
     let output = run_file(&file);
@@ -1677,9 +1678,10 @@ only erasable syntax is accepted (no enum, namespace, or other transforms), and
 
 The age, assert, chars, console, cron, crypto, os, path,
 slices, ssh, stdio, strings, test, and uuid built-in modules are implemented,
-including the uuid/v4 and uuid/v7 subpaths. Import one by bare name or with the
-`neo:` prefix, or use `Neo.getBuiltInModule(\"test\")` and
-`Neo.getBuiltInModule(\"uuid\")`; the README lists every specifier.
+including the uuid/v4 and uuid/v7 subpaths. Import one by its canonical `neo:`
+specifier, such as `neo:age` and `neo:test`; a bare name is not a built-in
+module. `Neo.getBuiltInModule` takes the same canonical specifier, such as
+`Neo.getBuiltInModule(\"neo:test\")`; the README lists every specifier.
 
 Remote loading is disabled by default. `--allow-remote` enables an https:
 entry and absolute https: imports; `--no-allow-remote` forces it off. Either flag
@@ -1746,7 +1748,7 @@ fn help_lists_uuid_and_points_at_the_readme_for_every_specifier() {
     for expected in [
         "uuid built-in modules are implemented",
         "uuid/v4 and uuid/v7 subpaths",
-        "Neo.getBuiltInModule(\"uuid\")",
+        "Neo.getBuiltInModule(\"neo:test\")",
         "README lists every specifier",
     ] {
         assert!(text.contains(expected), "missing {expected:?}: {text}");
@@ -1974,7 +1976,7 @@ fn rejects_import_attributes_and_exits_1() {
         ),
         (
             "builtin.js",
-            "const chars = await import(\"chars\", { with: { type: \"text\" } });\nconsole.log(chars.isLetter(65));\n",
+            "const chars = await import(\"neo:chars\", { with: { type: \"text\" } });\nconsole.log(chars.isLetter(65));\n",
             "type: \"text\"",
         ),
     ];
@@ -2061,7 +2063,7 @@ fn age_cli_interop_with_external_age() {
         "encrypt.js",
         &format!(
             r#"
-import {{ encrypt }} from "age";
+import {{ encrypt }} from "neo:age";
 const plaintext = new Uint8Array({});
 for (let i = 0; i < plaintext.length; i++) plaintext[i] = (i * 37 + 11) & 255;
 const ciphertext = encrypt("{RECIPIENT}", plaintext);
@@ -2111,7 +2113,7 @@ console.log(hex);
         "decrypt.js",
         &format!(
             r#"
-import {{ decrypt }} from "age";
+import {{ decrypt }} from "neo:age";
 const hex = "{}";
 const ciphertext = new Uint8Array(hex.length / 2);
 for (let i = 0; i < ciphertext.length; i++) {{
@@ -2154,7 +2156,7 @@ console.log(plaintext.length, sum);
         "empty-decrypt.js",
         &format!(
             r#"
-import {{ decrypt }} from "age";
+import {{ decrypt }} from "neo:age";
 const hex = "{}";
 const ciphertext = new Uint8Array(hex.length / 2);
 for (let i = 0; i < ciphertext.length; i++) {{
@@ -2508,7 +2510,7 @@ fn ssh_builtin_connects_to_a_loopback_fixture_through_the_cli() {
     let script = r#"
 import { connect } from "neo:ssh";
 
-const registry = Neo.getBuiltInModule("ssh");
+const registry = Neo.getBuiltInModule("neo:ssh");
 if (typeof registry !== "object" || registry === null) throw Error("missing ssh registry module");
 if (registry.connect !== connect) throw Error("registry and import identity");
 
@@ -2857,7 +2859,7 @@ fn test_command_expands_files_and_globs_without_duplicates() {
     let project = Project::new();
     project.write(
         "a.test.js",
-        "import test from \"test\";\ntest(\"a\", () => {});\n",
+        "import test from \"neo:test\";\ntest(\"a\", () => {});\n",
     );
     project.write(
         "b.test.js",
@@ -2865,7 +2867,7 @@ fn test_command_expands_files_and_globs_without_duplicates() {
     );
     project.write(
         "sub/c.test.js",
-        "import test from \"test\";\ntest(\"c\", () => {});\n",
+        "import test from \"neo:test\";\ntest(\"c\", () => {});\n",
     );
     let dir = project.dir.path().to_str().expect("utf-8 path");
     let literal = format!("{dir}/a.test.js");
@@ -2927,7 +2929,7 @@ fn write_remote_importing_test(project: &Project, name: &str, url: &str) -> Path
     project.write(
         name,
         &format!(
-            "import test from \"test\";\n\
+            "import test from \"neo:test\";\n\
              import {{ value }} from \"{url}\";\n\
              test(\"remote import\", () => {{ if (value !== 1) throw new Error(\"bad value\"); }});\n"
         ),
@@ -3306,7 +3308,7 @@ fn test_command_allow_remote_keeps_globbed_files_isolated() {
     project.write(
         "a-isolation.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 globalThis.leaked = "a-isolation";
 test("a", () => {});
 "#,
@@ -3314,7 +3316,7 @@ test("a", () => {});
     project.write(
         "b-isolation.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("b", () => {
     if (globalThis.leaked !== undefined) throw new Error("state leaked from a-isolation");
 });
@@ -3341,7 +3343,7 @@ fn test_command_continues_after_a_failure_and_isolates_files() {
     project.write(
         "a-fail.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 globalThis.leaked = "a-fail";
 test("fails", () => { throw new Error("first file failed"); });
 "#,
@@ -3349,7 +3351,7 @@ test("fails", () => { throw new Error("first file failed"); });
     project.write(
         "b-pass.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("isolated", () => {
     if (globalThis.leaked !== undefined) throw new Error("state leaked from a-fail");
 });
@@ -3379,7 +3381,7 @@ fn test_command_fails_for_pending_and_unhandled_cases() {
     let file = project.write(
         "problems.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("pending case");
 test("unhandled case", () => { Promise.reject(new Error("boom")); });
 "#,
@@ -3409,7 +3411,7 @@ fn test_command_fails_a_pending_promise_at_its_timeout() {
     let file = project.write(
         "timeout.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("never settles", () => new Promise(() => {}), { timeout: 10 });
 "#,
     );
@@ -3432,7 +3434,7 @@ fn test_command_runs_tests_registered_after_top_level_await() {
     let file = project.write(
         "await.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 const value = await Promise.resolve(41);
 test("after await", () => {
     if (value + 1 !== 42) throw new Error("wrong value");
@@ -3515,7 +3517,7 @@ fn test_command_reports_an_async_rejection_and_continues_in_the_file() {
     let file = project.write(
         "async.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("rejects", async () => {
     await Promise.resolve();
     throw new Error("async failure");
@@ -3542,7 +3544,7 @@ fn test_command_does_not_let_a_caught_run_failure_pass() {
     let file = project.write(
         "caught.test.js",
         r#"
-import test, { run, TestFailureError } from "test";
+import test, { run, TestFailureError } from "neo:test";
 test("fails once", () => { throw new Error("caught failure"); });
 try {
     await run();
@@ -3592,7 +3594,7 @@ fn test_command_timeout_survives_replaced_promise_intrinsics() {
     let file = project.write(
         "promise-ops.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 Promise.resolve = () => ({ then: (fulfilled) => fulfilled() });
 Promise.prototype.then = function (fulfilled) { fulfilled(); return this; };
 test("never settles", () => new Promise(() => {}), { timeout: 20 });
@@ -3617,7 +3619,7 @@ fn test_command_fails_unsettled_detached_timer_without_hanging() {
     let file = project.write(
         "detached.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("leaves a long timer", () => {
     Deno.core.createTimer(() => {}, 60_000, undefined, false, true, false);
 });
@@ -3642,7 +3644,7 @@ fn test_command_nested_pending_thenable_uses_internal_promise_state() {
     let file = project.write(
         "nested-pending.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 Promise.prototype.then = function (fulfilled) { fulfilled("fake"); return this; };
 test("nested pending", () => ({
     then(resolve) {
@@ -3672,7 +3674,7 @@ fn test_command_native_promise_subclass_ignores_throwing_prototype_getters() {
     let file = project.write(
         "subclass.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 class EvilPromise extends Promise {}
 Object.defineProperty(EvilPromise, Symbol.species, {
     get() { throw new Error("species touched"); },
@@ -3717,7 +3719,7 @@ fn test_command_thenable_settlement_cycles_and_errors() {
     let file = project.write(
         "thenables.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("first resolution wins", () => ({
     then(resolve, reject) {
         resolve("first");
@@ -3762,7 +3764,7 @@ fn test_command_bounds_a_long_thenable_chain_without_hanging() {
     let file = project.write(
         "chain.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 test("deep chain", () => {
     let value = 1;
     for (let index = 0; index < 1001; index += 1) {
@@ -3794,7 +3796,7 @@ fn test_command_stateful_then_getter_cycle_is_not_reread() {
     let file = project.write(
         "stateful.test.js",
         r#"
-import test from "test";
+import test from "neo:test";
 let undefinedReads = 0;
 const undefinedCycle = {
     get then() {

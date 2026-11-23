@@ -1,7 +1,7 @@
 //! Synchronous byte streams and process standard output for `neo:stdio`.
 //!
 //! The JavaScript module object is installed by [`crate::builtins`] and is
-//! exposed as `Neo.getBuiltInModule("stdio")`, `import ... from "stdio"`, and
+//! exposed as `Neo.getBuiltInModule("neo:stdio")` and
 //! `import ... from "neo:stdio"`. This file registers the private host ops it
 //! calls: one validates and copies bytes or UTF-8 text, one validates a read
 //! target, one copies a byte range out of a private snapshot, and one writes to
@@ -639,7 +639,7 @@ deno_core::extension!(
         op_neo_stdio_slice,
         op_neo_stdio_write
     ],
-    docs = "Synchronous byte-copy, range-copy, and process-standard-stream ops behind `Neo.getBuiltInModule(\"stdio\")`."
+    docs = "Synchronous byte-copy, range-copy, and process-standard-stream ops behind `Neo.getBuiltInModule(\"neo:stdio\")`."
 );
 
 #[cfg(test)]

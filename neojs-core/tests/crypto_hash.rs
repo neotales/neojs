@@ -788,10 +788,10 @@ for (const name of names) {
 fn hash_exports_are_the_registry_functions_and_resolve_canonically() {
     run_js(
         r#"
-import * as crypto from "crypto";
+import * as crypto from "neo:crypto";
 import { createHash, createHmac, hashAsync, hmacAsync } from "neo:crypto";
 
-const registry = Neo.getBuiltInModule("crypto");
+const registry = Neo.getBuiltInModule("neo:crypto");
 for (const name of ["createHash", "createHmac", "hashAsync", "hmacAsync"]) {
     if (typeof registry[name] !== "function") throw new Error(name + " missing");
     if (crypto[name] !== registry[name]) throw new Error(name + " identity");
@@ -801,7 +801,7 @@ if (createHmac !== registry.createHmac) throw new Error("named createHmac identi
 if (hashAsync !== registry.hashAsync) throw new Error("named hashAsync identity");
 if (hmacAsync !== registry.hmacAsync) throw new Error("named hmacAsync identity");
 if ("default" in crypto) throw new Error("crypto must not have a default export");
-if (import.meta.resolve("crypto") !== "neo:crypto") throw new Error("resolve");
+if (import.meta.resolve("neo:crypto") !== "neo:crypto") throw new Error("resolve");
 if (import.meta.resolve("neo:crypto") !== "neo:crypto") throw new Error("alias resolve");
 if (Object.keys(registry).length !== 20) throw new Error("unexpected export count");
 "#,

@@ -102,8 +102,8 @@
 //! # JavaScript contract
 //!
 //! The module object is installed in the realm before user code runs and is
-//! exposed as `Neo.getBuiltInModule("age")`, `import ... from "age"`, and
-//! `import ... from "neo:age"`. All three paths share one frozen module object
+//! exposed as `Neo.getBuiltInModule("neo:age")` and
+//! `import ... from "neo:age"`. Both paths share one frozen module object
 //! and one set of function objects. The module is available in every runtime;
 //! there is no secure-context or TLS gate.
 //!
@@ -788,7 +788,7 @@ deno_core::extension!(
         op_neo_age_encrypt,
         op_neo_age_decrypt
     ],
-    docs = "Synchronous binary age v1 X25519 ops behind `Neo.getBuiltInModule(\"age\")`."
+    docs = "Synchronous binary age v1 X25519 ops behind `Neo.getBuiltInModule(\"neo:age\")`."
 );
 
 #[cfg(test)]

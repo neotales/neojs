@@ -23,17 +23,16 @@
 //!
 //! It provides the `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`,
 //! `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid` built-in
-//! modules through `Neo.getBuiltInModule(name)` and through the module
-//! specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`,
-//! `console`, `neo:console`, `cron`, `neo:cron`, `crypto`, `neo:crypto`, `os`,
-//! `neo:os`, `path`, `neo:path`, `slices`, `neo:slices`, `ssh`, `neo:ssh`,
-//! `stdio`, `neo:stdio`, `strings`, `neo:strings`, `test`, `neo:test`, `uuid`,
-//! `neo:uuid`, `uuid/v4`, `neo:uuid/v4`, `uuid/v7`, and `neo:uuid/v7`. The
-//! `uuid/v4` and `uuid/v7` subpaths are thin modules whose named and default
-//! exports are the same functions as `uuid.v4` and `uuid.v7`. The global `Neo`
-//! reports `engine` `"neo"`; `Neo.getBuiltInModulesList` returns one frozen
-//! array containing each built-in's bare registry name followed by its canonical
-//! `neo:` specifier, including `cron` and both UUID subpaths.
+//! modules through `Neo.getBuiltInModule("neo:name")` and through the canonical
+//! module specifiers `neo:age`, `neo:assert`, `neo:chars`, `neo:console`,
+//! `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`,
+//! `neo:stdio`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and
+//! `neo:uuid/v7`. A bare name is not a built-in module specifier and does not
+//! resolve. The `uuid/v4` and `uuid/v7` subpaths are thin modules whose named
+//! and default exports are the same functions as `uuid.v4` and `uuid.v7`. The
+//! global `Neo` reports `engine` `"neo"`; `Neo.getBuiltInModulesList` returns
+//! one frozen array of those canonical specifiers, including both UUID
+//! subpaths.
 //!
 //! `cron` parses standard five-field UTC cron expressions and runs a callback
 //! on the schedule. `cron(expression, callback, options?)` returns a frozen

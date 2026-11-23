@@ -239,6 +239,38 @@ export { answer };
 }
 
 #[test]
+fn a_remote_module_imports_only_canonical_builtin_specifiers() {
+    let server = Server::new(&[
+        (
+            "https://mods.test/builtin.js",
+            Reply::ok(
+                r#"
+import { isLetter } from "neo:chars";
+export const letter = isLetter(65);
+"#,
+            ),
+        ),
+        (
+            "https://mods.test/bare-builtin.js",
+            Reply::ok("import { isLetter } from \"chars\";\nexport const letter = isLetter(65);\n"),
+        ),
+    ]);
+
+    let mut runtime = remote_runtime(&server);
+    runtime
+        .run_url("https://mods.test/builtin.js")
+        .expect("a remote module may import a canonical builtin");
+
+    let mut runtime = remote_runtime(&server);
+    let error = runtime
+        .run_url("https://mods.test/bare-builtin.js")
+        .expect_err("a remote module must not import a bare builtin name");
+    let message = error.to_string();
+    assert!(message.contains("canonical `neo:` specifier"), "{message}");
+    assert!(message.contains("neo:chars"), "{message}");
+}
+
+#[test]
 fn a_redirect_makes_the_final_url_the_identity_and_base() {
     let server = Server::new(&[
         (
@@ -313,7 +345,7 @@ fn a_test_file_in_a_remote_runtime_can_import_a_remote_module() {
     fs::write(
         &file,
         r#"
-import test from "test";
+import test from "neo:test";
 import { greet } from "https://mods.test/greet.js";
 test("remote import", () => {
     if (greet("world") !== "hello, world") throw new Error("remote import failed");

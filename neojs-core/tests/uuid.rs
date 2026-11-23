@@ -25,15 +25,14 @@ fn run_js(source: &str) {
 fn imports_are_cached_frozen_and_identity_shared() {
     run_js(
         r#"
-import * as uuid from "uuid";
-import * as alias from "neo:uuid";
+import * as uuid from "neo:uuid";
+import * as alias from "NEO:uuid";
 
-const registry = Neo.getBuiltInModule("uuid");
+const registry = Neo.getBuiltInModule("neo:uuid");
 
-if (uuid !== alias) throw new Error("uuid and neo:uuid namespaces differ");
-if (alias !== (await import("uuid"))) throw new Error("dynamic uuid namespace differs");
-if (alias !== (await import("neo:uuid"))) throw new Error("dynamic neo:uuid namespace differs");
-if (registry !== Neo.getBuiltInModule("uuid")) throw new Error("registry lookup is not cached");
+if (uuid !== alias) throw new Error("uuid and NEO:uuid namespaces differ");
+if (alias !== (await import("neo:uuid"))) throw new Error("dynamic uuid namespace differs");
+if (registry !== Neo.getBuiltInModule("neo:uuid")) throw new Error("registry lookup is not cached");
 if (Object.isFrozen(registry) !== true) throw new Error("registry is not frozen");
 if (Object.isExtensible(uuid) !== false) throw new Error("namespace is extensible");
 if ("default" in uuid) throw new Error("unexpected default export");
@@ -51,12 +50,22 @@ for (const name of exported) {
     if (typeof uuid[name] !== "function") throw new Error(`${name} is not a function`);
 }
 
-if (import.meta.resolve("uuid") !== "neo:uuid") throw new Error("canonical uuid specifier");
-if (import.meta.resolve("neo:uuid") !== "neo:uuid") throw new Error("canonical neo:uuid specifier");
+if (import.meta.resolve("neo:uuid") !== "neo:uuid") throw new Error("canonical uuid specifier");
+if (import.meta.resolve("NEO:uuid") !== "neo:uuid") throw new Error("scheme is not case-insensitive");
 
-// The registry takes bare names, and the module installs no global.
-if (Neo.getBuiltInModule("neo:uuid") !== undefined) {
-    throw new Error("registry accepted a neo: prefix");
+// The registry and loader accept only the canonical specifier, and the module
+// installs no global.
+for (const name of ["uuid", "uuid/v4", "uuid/v7"]) {
+    if (Neo.getBuiltInModule(name) !== undefined) {
+        throw new Error(`registry accepted bare ${name}`);
+    }
+    let bareRejected = false;
+    try {
+        await import(name);
+    } catch (error) {
+        bareRejected = error instanceof TypeError;
+    }
+    if (!bareRejected) throw new Error(`bare ${name} import was accepted`);
 }
 for (const name of ["uuid", "__neoUuidV4", "__neoUuidV7", "__neoUUID"]) {
     if (name in globalThis) throw new Error(`${name} leaked onto globalThis`);
@@ -64,10 +73,10 @@ for (const name of ["uuid", "__neoUuidV4", "__neoUuidV7", "__neoUUID"]) {
 
 // The version subpaths are thin modules over the same functions. Both the
 // named and default exports are the aggregate module's function object.
-const v4Module = await import("uuid/v4");
-const v4Alias = await import("neo:uuid/v4");
-const v7Module = await import("uuid/v7");
-const v7Alias = await import("neo:uuid/v7");
+const v4Module = await import("neo:uuid/v4");
+const v4Alias = await import("NEO:uuid/v4");
+const v7Module = await import("neo:uuid/v7");
+const v7Alias = await import("NEO:uuid/v7");
 if (v4Module !== v4Alias) throw new Error("uuid/v4 namespaces differ");
 if (v7Module !== v7Alias) throw new Error("uuid/v7 namespaces differ");
 if (v4Module.v4 !== uuid.v4) throw new Error("uuid/v4 named export differs");
@@ -75,10 +84,10 @@ if (v4Module.default !== uuid.v4) throw new Error("uuid/v4 default export differ
 if (v7Module.v7 !== uuid.v7) throw new Error("uuid/v7 named export differs");
 if (v7Module.default !== uuid.v7) throw new Error("uuid/v7 default export differs");
 
-const registryV4 = Neo.getBuiltInModule("uuid/v4");
-const registryV7 = Neo.getBuiltInModule("uuid/v7");
-if (registryV4 !== Neo.getBuiltInModule("uuid/v4")) throw new Error("uuid/v4 lookup is not cached");
-if (registryV7 !== Neo.getBuiltInModule("uuid/v7")) throw new Error("uuid/v7 lookup is not cached");
+const registryV4 = Neo.getBuiltInModule("neo:uuid/v4");
+const registryV7 = Neo.getBuiltInModule("neo:uuid/v7");
+if (registryV4 !== Neo.getBuiltInModule("neo:uuid/v4")) throw new Error("uuid/v4 lookup is not cached");
+if (registryV7 !== Neo.getBuiltInModule("neo:uuid/v7")) throw new Error("uuid/v7 lookup is not cached");
 if (!Object.isFrozen(registryV4) || !Object.isFrozen(registryV7)) {
     throw new Error("a uuid subpath registry object is not frozen");
 }
@@ -100,11 +109,11 @@ if (registryV4.v4 !== uuid.v4 || registryV4.default !== uuid.v4) {
 if (registryV7.v7 !== uuid.v7 || registryV7.default !== uuid.v7) {
     throw new Error("uuid/v7 registry identity differs");
 }
-if (import.meta.resolve("uuid/v4") !== "neo:uuid/v4") throw new Error("canonical uuid/v4 specifier");
+if (import.meta.resolve("neo:uuid/v4") !== "neo:uuid/v4") throw new Error("canonical uuid/v4 specifier");
 if (import.meta.resolve("neo:uuid/v4") !== "neo:uuid/v4") {
     throw new Error("canonical neo:uuid/v4 specifier");
 }
-if (import.meta.resolve("uuid/v7") !== "neo:uuid/v7") throw new Error("canonical uuid/v7 specifier");
+if (import.meta.resolve("neo:uuid/v7") !== "neo:uuid/v7") throw new Error("canonical uuid/v7 specifier");
 if (import.meta.resolve("neo:uuid/v7") !== "neo:uuid/v7") {
     throw new Error("canonical neo:uuid/v7 specifier");
 }
@@ -183,7 +192,7 @@ for (const value of [undefined, null, 0, "", "v4", {}, [], () => { called = true
 }
 if (called) throw new Error("a callback argument was invoked");
 
-const registry = Neo.getBuiltInModule("uuid");
+const registry = Neo.getBuiltInModule("neo:uuid");
 expectTypeError(() => registry.v4(undefined), "registry v4 argument");
 expectTypeError(() => registry.v7(undefined, undefined), "registry v7 arguments");
 

@@ -1384,8 +1384,7 @@ deno_core::extension!(
     state = |state| {
         state.put(CipherBudgetHandle::default());
     },
-    docs =
-        "Bounded AES-256-CBC and AES-256-GCM cipher ops behind `Neo.getBuiltInModule(\"crypto\")`."
+    docs = "Bounded AES-256-CBC and AES-256-GCM cipher ops behind `Neo.getBuiltInModule(\"neo:crypto\")`."
 );
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! UTC five-field cron parsing and the host side of `neo:cron`.
 //!
 //! The JavaScript module object is installed by [`crate::builtins`] and is
-//! exposed as `Neo.getBuiltInModule("cron")`, `import ... from "cron"`, and
+//! exposed as `Neo.getBuiltInModule("neo:cron")` and
 //! `import ... from "neo:cron"`. This file registers the private host ops the
 //! module calls: it parses an expression, searches for the next occurrence,
 //! sleeps until an occurrence, and cancels a job.
@@ -934,7 +934,8 @@ deno_core::extension!(
     state = |state| {
         state.put(CronState { jobs: 0 });
     },
-    docs = "UTC five-field cron parsing and scheduling behind `Neo.getBuiltInModule(\"cron\")`."
+    docs =
+        "UTC five-field cron parsing and scheduling behind `Neo.getBuiltInModule(\"neo:cron\")`."
 );
 
 /// Advance the installed test clock. Compiled only with `test-support`.

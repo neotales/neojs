@@ -273,14 +273,14 @@ fn send_bytes_after_status<T: ChannelTransport>(
 fn module_identity_constants_and_no_network_capability_leak() {
     run_js(
         r#"
-import { connect } from "ssh";
+import { connect } from "neo:ssh";
 import * as aliased from "neo:ssh";
 
-const registry = Neo.getBuiltInModule("ssh");
+const registry = Neo.getBuiltInModule("neo:ssh");
 if (typeof registry !== "object" || registry === null) throw Error("missing registry module");
-if (Neo.getBuiltInModule("ssh") !== registry) throw Error("registry lookup is not cached");
+if (Neo.getBuiltInModule("neo:ssh") !== registry) throw Error("registry lookup is not cached");
 if (!Object.isFrozen(registry)) throw Error("registry module is not frozen");
-if (registry.connect !== connect) throw Error("bare import is not the registry function");
+if (registry.connect !== connect) throw Error("import is not the registry function");
 if (aliased.connect !== connect) throw Error("neo: import is not the registry function");
 const registryNames = Object.keys(registry).sort().join(",");
 const moduleNames = Object.keys(aliased).sort().join(",");

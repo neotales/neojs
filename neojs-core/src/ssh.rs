@@ -1,8 +1,8 @@
 //! Synchronous SSH command execution for `neo:ssh`.
 //!
 //! The JavaScript module object is installed by [`crate::builtins`] and is
-//! exposed as `Neo.getBuiltInModule("ssh")`, `import { connect } from "ssh"`,
-//! and `import { connect } from "neo:ssh"`. This file registers the private
+//! exposed as `Neo.getBuiltInModule("neo:ssh")` and
+//! `import { connect } from "neo:ssh"`. This file registers the private
 //! host ops it calls and implements the small synchronous connection API behind
 //! them.
 //!
@@ -1448,7 +1448,7 @@ deno_core::extension!(
     neojs_ssh,
     ops = [op_neo_ssh_connect, op_neo_ssh_exec, op_neo_ssh_close],
     state = |state| state.put(SshState::default()),
-    docs = "Synchronous SSH command execution behind `Neo.getBuiltInModule(\"ssh\")`."
+    docs = "Synchronous SSH command execution behind `Neo.getBuiltInModule(\"neo:ssh\")`."
 );
 
 #[cfg(test)]

@@ -37,9 +37,9 @@ fn crypto_is_available_and_roundtrips_bytes() {
         r#"
 import { decrypt, encrypt, generateEnvelopeKey } from "neo:crypto";
 
-const registry = Neo.getBuiltInModule("crypto");
+const registry = Neo.getBuiltInModule("neo:crypto");
 if (typeof registry !== "object" || registry === null) throw Error("missing registry module");
-if (Neo.getBuiltInModule("crypto") !== registry) throw Error("registry lookup is not cached");
+if (Neo.getBuiltInModule("neo:crypto") !== registry) throw Error("registry lookup is not cached");
 if (!Object.isFrozen(registry)) throw Error("registry module is not frozen");
 for (const name of ["decrypt", "encrypt", "generateEnvelopeKey", "randomBytes"]) {
     if (typeof registry[name] !== "function") throw Error(`${name} is not a function`);
@@ -83,7 +83,7 @@ fn crypto_rejects_unsupported_argument_counts_and_reserves_generate_key() {
     run_js(
         r#"
 import * as crypto from "neo:crypto";
-const registry = Neo.getBuiltInModule("crypto");
+const registry = Neo.getBuiltInModule("neo:crypto");
 
 // The envelope generator is not Node's generateKey; the name is reserved for
 // a future Node-compatible surface and must not appear here.
@@ -161,22 +161,20 @@ fn crypto_generate_key_is_not_exported() {
 fn crypto_module_specifiers_share_one_module_instance() {
     run_js(
         r#"
-import * as staticCrypto from "crypto";
+import * as staticCrypto from "neo:crypto";
 
-const registry = Neo.getBuiltInModule("crypto");
-const first = await import("crypto");
-const alias = await import("neo:crypto");
+const registry = Neo.getBuiltInModule("neo:crypto");
+const first = await import("neo:crypto");
 const uppercase = await import("NEO:crypto");
-const again = await import("crypto");
+const again = await import("neo:crypto");
 
 if (staticCrypto !== first) throw Error("static and dynamic import differ");
-if (first !== alias) throw Error("crypto and neo:crypto differ");
-if (alias !== uppercase) throw Error("scheme matching is not case-insensitive");
-if (alias !== again) throw Error("repeated dynamic import was not cached");
+if (first !== uppercase) throw Error("scheme matching is not case-insensitive");
+if (first !== again) throw Error("repeated dynamic import was not cached");
 if (staticCrypto.encrypt !== registry.encrypt) throw Error("registry function differs");
 if ("default" in staticCrypto) throw Error("crypto must not have a default export");
-if (import.meta.resolve("crypto") !== "neo:crypto") throw Error("crypto did not resolve canonically");
-if (import.meta.resolve("neo:crypto") !== "neo:crypto") throw Error("alias did not resolve canonically");
+if (import.meta.resolve("neo:crypto") !== "neo:crypto") throw Error("crypto did not resolve canonically");
+if (import.meta.resolve("NEO:crypto") !== "neo:crypto") throw Error("scheme is not case-insensitive");
 "#,
     );
     // A second importer in a different module must see the same function
@@ -190,7 +188,7 @@ if (import.meta.resolve("neo:crypto") !== "neo:crypto") throw Error("alias did n
     let file = dir.path().join("main.js");
     fs::write(
         &file,
-        "import { encrypt as a } from \"crypto\";\nimport { encrypt as b } from \"./consumer.js\";\nif (a !== b) throw new Error(\"cross-module identity failed\");\n",
+        "import { encrypt as a } from \"neo:crypto\";\nimport { encrypt as b } from \"./consumer.js\";\nif (a !== b) throw new Error(\"cross-module identity failed\");\n",
     )
     .expect("write main");
     let mut runtime = Runtime::new().expect("runtime");
@@ -846,8 +844,8 @@ expectBytes(
 fn crypto_named_exports_are_the_registry_functions() {
     run_js(
         r#"
-import * as crypto from "crypto";
-const registry = Neo.getBuiltInModule("crypto");
+import * as crypto from "neo:crypto";
+const registry = Neo.getBuiltInModule("neo:crypto");
 const exported = Object.keys(crypto).sort();
 const registered = Object.keys(registry).sort();
 if (JSON.stringify(exported) !== JSON.stringify(registered)) {
@@ -863,15 +861,22 @@ if ("default" in crypto) throw new Error("crypto must not have a default export"
 }
 
 #[test]
-fn crypto_is_not_available_under_an_unknown_registry_name() {
+fn crypto_is_not_available_under_a_bare_or_misspelled_name() {
     run_js(
         r#"
-if (Neo.getBuiltInModule("neo:crypto") !== undefined) {
-    throw new Error("prefixed registry name must be unknown");
+if (Neo.getBuiltInModule("crypto") !== undefined) {
+    throw new Error("bare registry name must be unknown");
 }
 if (Neo.getBuiltInModule("Crypto") !== undefined) {
-    throw new Error("bare registry name must match exactly");
+    throw new Error("registry names are case-sensitive");
 }
+let bareRejected = false;
+try {
+    await import("crypto");
+} catch (error) {
+    bareRejected = error instanceof TypeError;
+}
+if (!bareRejected) throw new Error("bare crypto import was accepted");
 "#,
     );
 }

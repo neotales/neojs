@@ -1,10 +1,10 @@
-// The `ssh` built-in module as seen by `import { connect } from "ssh"` or
+// The `ssh` built-in module as seen by
 // `import { connect } from "neo:ssh"`.
 //
 // The implementation lives in `neo.js`, which the runtime evaluates once per
 // realm, and calls private host ops registered by `neojs-core/src/ssh.rs`.
 // This file only re-exports the public values, so every named export is the
-// same value as the matching property of `Neo.getBuiltInModule("ssh")`. Nothing
+// same value as the matching property of `Neo.getBuiltInModule("neo:ssh")`. Nothing
 // here reaches the private module registry: it reads the public module object
 // and binds its properties.
 //
@@ -26,7 +26,7 @@
 // object behind it is frozen, so neither path can replace `connect` or a
 // constant. Adding a property to the exported function is visible through both
 // paths because they share the same function.
-const ssh = Neo.getBuiltInModule("ssh");
+const ssh = Neo.getBuiltInModule("neo:ssh");
 
 export const connect = ssh.connect;
 export const MAX_COMMAND_BYTES = ssh.MAX_COMMAND_BYTES;

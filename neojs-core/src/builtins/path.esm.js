@@ -1,10 +1,10 @@
-// The `path` built-in module as seen by `import ... from "path"` or
+// The `path` built-in module as seen by
 // `import ... from "neo:path"`.
 //
 // The implementations live in `neo.js`, which the runtime evaluates once per
 // realm. This file only re-exports them, so every named export is the same
 // function, frozen namespace, or constant as the matching property of
-// `Neo.getBuiltInModule("path")`. Nothing here reaches the private module
+// `Neo.getBuiltInModule("neo:path")`. Nothing here reaches the private module
 // registry: it reads the public module object and binds its properties.
 //
 // The exported list must match the properties of the `path` object in
@@ -21,7 +21,7 @@
 // object behind it is frozen, so neither path can replace a function or a
 // namespace. Adding a property to an exported function object is visible
 // through both paths because they share the same function.
-const path = Neo.getBuiltInModule("path");
+const path = Neo.getBuiltInModule("neo:path");
 
 export const posix = path.posix;
 export const win32 = path.win32;
