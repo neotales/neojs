@@ -1812,11 +1812,12 @@ surface, not the built-in modules: `Neo.engine` is `"neo-lite"`, its built-in mo
 - JSON and WebAssembly module files are rejected, both as the entry file and as imports. V8's
   `WebAssembly` global is present but untested.
 - There is no permission system. The loader reads any file the process can read. neojs is not a
-  sandbox. `chars`, `console`, `os`, `slices`, and `strings` are plain ECMAScript and add no
-  capability beyond the globals they expose; `os` holds two build-target constants and reads no
-  host state, the `console` module writes to the process streams already used by the global
-  console, and `slices` aliases Arrays and typed arrays the caller already has; it creates no
-  buffer, opens no file, and is not a snapshot or an isolation boundary. `assert` calls
+  sandbox. `console`, `os`, `slices`, and `strings` are plain ECMAScript and add no capability
+  beyond the globals they expose; `chars` is a native Rust module, not ECMAScript, and likewise
+  adds no capability. `os` holds two build-target constants and reads no host state, the
+  `console` module writes to the process streams already used by the global console, and `slices`
+  aliases Arrays and typed arrays the caller already has; it creates no buffer, opens no file,
+  and is not a snapshot or an isolation boundary. `assert` calls
   one host op that observes a genuine native Promise's settlement by
   attaching settlement handlers without reading a user `then` or consulting `Symbol.species`; it
   adds no other capability. `cron` calls six host ops: it parses and validates an expression, stores

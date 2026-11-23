@@ -193,8 +193,9 @@ impl Runtime {
     /// array of the canonical `neo:` specifiers in registration order. The
     /// `age`, `cron`, `crypto`, `path`, `ssh`, `stdio`, and `uuid` modules
     /// register their private host ops in that realm before user code runs;
-    /// `chars`, `os`, `slices`, `strings`, and `test` are plain ECMAScript, and
-    /// `assert` calls one private Promise-observation host op. The `cron` ops
+    /// `chars` is a native Rust module with no ECMAScript source, `os`,
+    /// `slices`, `strings`, and `test` are plain ECMAScript, and `assert` calls
+    /// one private Promise-observation host op. The `cron` ops
     /// take the runtime's own Tokio timer and resource table, so an undisposed
     /// job keeps the event loop alive. The `console`
     /// module's object is the console object the runtime installed: its default
