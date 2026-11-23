@@ -738,3 +738,34 @@ if (caught !== boom) throw new Error(`argument getter: ${caught && caught.messag
     )
     .expect("getter propagation");
 }
+
+#[test]
+fn proxy_argument_length_exceptions_propagate_through_both_sync_exports() {
+    require("/bin/echo");
+    run(
+        policy(&["/bin/echo"]),
+        r#"
+import { execFileSync, spawnSync } from "node:child_process";
+const boom = new Error("proxy length boom");
+const args = new Proxy([], {
+    get(target, key, receiver) {
+        if (key === "length") throw boom;
+        return Reflect.get(target, key, receiver);
+    },
+});
+for (const [name, call] of [
+    ["spawnSync", () => spawnSync("/bin/echo", args, { encoding: "utf8" })],
+    ["execFileSync", () => execFileSync("/bin/echo", args, { encoding: "utf8" })],
+]) {
+    let caught = null;
+    try {
+        call();
+    } catch (error) {
+        caught = error;
+    }
+    if (caught !== boom) throw new Error(`${name} replaced the length error`);
+}
+"#,
+    )
+    .expect("proxy length exception propagation");
+}

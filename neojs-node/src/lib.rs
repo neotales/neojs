@@ -738,10 +738,11 @@ fn build_request<'s>(
         // this adapter is allowed to read; a numeric length means the Proxy is
         // the argument list, as `Array.isArray` would report for a Proxy over
         // an array. The same value is reused instead of reading it again.
-        let object = v8::Local::<v8::Object>::try_from(args_value).ok();
-        let length = object.and_then(|object| get(scope, &object, "length").ok());
-        if length.is_some_and(|value| value.is_number()) {
-            pre_length = length;
+        let object = v8::Local::<v8::Object>::try_from(args_value)
+            .map_err(|_| Failure::invalid_type("arguments must be an array"))?;
+        let length = get(scope, &object, "length")?;
+        if length.is_number() {
+            pre_length = Some(length);
             (Some(args_value), third)
         } else {
             (None, args_value)
