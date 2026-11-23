@@ -1,20 +1,16 @@
-//! Artifact-level checks for the shared `chars` implementation in QuickJS
-//! builds.
+//! Artifact-level checks for the native `chars` binding in QuickJS builds.
 //!
-//! The needles are distinctive sequences from the actual implementation, not
-//! markers. A disabled build must not contain them. They are decoded from hex at
-//! runtime, so the test source does not satisfy its own scan.
+//! The needle is the Rust error text used by the native binding, not a marker.
+//! A disabled build does not link the binding, so the text is absent. It is
+//! decoded from hex at runtime, so the test source does not satisfy its own scan.
 
 use std::fs;
 
 use neojs_lite_core::Runtime;
 
-/// `const DECIMAL_DIGIT = /\p{Nd}/u;` from the shared `chars` implementation.
+/// `NON_SCALAR_MESSAGE` from the Rust `chars` implementation and binding.
 const CHARS_SEQUENCE_ONE_HEX: &str =
-    "636f6e737420444543494d414c5f4449474954203d202f5c707b4e647d2f753b";
-/// `throw new makeRangeError(\`${name} must be a Unicode scalar value\`);` from
-/// the shared `chars` implementation.
-const CHARS_SEQUENCE_TWO_HEX: &str = "7468726f77206e6577206d616b6552616e67654572726f722860247b6e616d657d206d757374206265206120556e69636f6465207363616c61722076616c756560293b";
+    "76616c7565206d757374206265206120556e69636f6465207363616c61722076616c7565";
 
 /// A string that is always in the shim, proving the scan reads real source bytes.
 const CONTROL_HEX: &str = "6765744275696c74496e4d6f64756c65734c697374";
@@ -55,7 +51,7 @@ fn shared_chars_source_bytes_follow_the_feature() {
         "artifact scan control is missing; the scan is not reading shim source bytes"
     );
 
-    let chars = [CHARS_SEQUENCE_ONE_HEX, CHARS_SEQUENCE_TWO_HEX];
+    let chars = [CHARS_SEQUENCE_ONE_HEX];
     #[cfg(feature = "neo-chars")]
     assert_sequences(&artifact, &chars, true, "neo-chars is enabled");
     #[cfg(not(feature = "neo-chars"))]

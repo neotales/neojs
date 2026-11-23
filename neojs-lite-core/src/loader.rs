@@ -3,11 +3,11 @@
 //!
 //! The resolver turns a specifier into one canonical absolute path, which is
 //! also the module identity. A canonical specifier listed by the engine-neutral
-//! `neojs-builtins` crate resolves to itself instead; the loader serves that
-//! module's canonical wrapper from the same crate. The loader accepts only
-//! formats that QuickJS can execute: `.js`, `.mjs`, and names without an
-//! extension. The format decision comes from `neojs-module-policy`, the same
-//! policy the V8 runtime uses.
+//! `neojs-builtins` crate resolves to itself instead; the loader declares the
+//! matching native QuickJS module from that crate's Rust logic. The loader
+//! accepts only formats that QuickJS can execute: `.js`, `.mjs`, and names
+//! without an extension. The format decision comes from `neojs-module-policy`,
+//! the same policy the V8 runtime uses.
 
 use std::path::{Path, PathBuf};
 
@@ -164,13 +164,12 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
-        // Serve the shared canonical wrapper before the filesystem path is
-        // interpreted. The wrapper reads the registry object installed by the
-        // realm shim, so imports and `Neo.getBuiltInModule` share function
-        // identity while the namespace remains a distinct object.
+        // A shared canonical module is a native QuickJS module. The module
+        // declaration is the only interface; its evaluation exports the function
+        // objects created by `crate::chars`. No ECMAScript source is read.
         #[cfg(feature = "neo-chars")]
-        if let Some(builtin) = neojs_builtins::module(name) {
-            return Module::declare(ctx.clone(), name, builtin.source.as_bytes().to_vec());
+        if neojs_builtins::module(name).is_some() {
+            return Module::declare_def::<crate::chars::CharsModule, _>(ctx.clone(), name);
         }
         let path = Path::new(name);
         match module_format(path) {

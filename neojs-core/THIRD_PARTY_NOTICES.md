@@ -562,3 +562,19 @@ source URLs and SHA-256 values are recorded in
 
 The captured source is MIT-licensed, copyright 2022-2026 Neotales. The full
 license text is `neojs-core/tests/fixtures/jsr/neotales/LICENSE.md`.
+
+## Vendored `deno_core` patch
+
+`vendor/deno_core/` is a copy of the `deno_core` 0.413.0 crate
+(checksum `7ad7d5294f640fd99db08c455e2453c9860b1fa728b76fbdacf0eed3e308d48a`,
+upstream revision `fe7ed012d92c642fd8e5607ac5a45d517538b5c5`). It is
+MIT-licensed by the Deno authors. The only local change is the added
+`JsRuntime::register_native_module` method described in
+`vendor/deno_core/PATCH.md`; it uses the crate's existing synthetic-module
+registration and does not alter loader, resolver, or cache behavior.
+
+## Unicode category tables
+
+`neojs-builtins` depends on `unicode-general-category` 1.1.0,
+<https://github.com/yeslogic/unicode-general-category>, Apache-2.0, for the
+Unicode 16.0 General_Category tables used by the native `neo:chars` classifier.

@@ -1,8 +1,9 @@
 //! Cross-engine `neo:chars` contract and QuickJS-specific adapter rules.
 //!
 //! The contract fixture is shared verbatim with `neojs-core/tests/chars_shared.rs`.
-//! Only the two adapter tokens differ, so a behavior change in the shared
-//! implementation has to satisfy both engines.
+//! Only the two adapter tokens differ, so a behavior change in the shared Rust
+//! implementation has to satisfy both engines. An additional test proves the
+//! exports are native QuickJS functions rather than JavaScript wrappers.
 #![cfg(feature = "neo-chars")]
 
 use std::fs;
@@ -25,6 +26,27 @@ fn contract_source() -> String {
     CONTRACT
         .replace("__CHARS_SPECIFIER__", "neo:chars")
         .replace("__CHARS_REGISTRY_KEY__", "neo:chars")
+}
+
+#[test]
+fn native_chars_exports_are_native_quickjs_functions() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write(
+        &dir,
+        "main.js",
+        r#"
+import * as chars from "neo:chars";
+for (const name of Object.keys(chars)) {
+    const text = Function.prototype.toString.call(chars[name]);
+    if (!text.includes("[native code]")) {
+        throw new Error(`${name} is not a native function: ${text}`);
+    }
+}
+"#,
+    );
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime.run_file(&file).expect("native chars exports");
 }
 
 #[test]

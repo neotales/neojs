@@ -487,10 +487,14 @@ impl Runtime {
             .js
             .as_mut()
             .expect("the isolate is present until Drop");
+        #[cfg(feature = "neo-chars")]
+        crate::chars::install(js).map_err(Error::NativeBuiltins)?;
         js.execute_script("<neojs:console>", console)
             .map_err(|error| Error::Core(error.into()))?;
         js.execute_script("<neojs:builtins>", builtins)
             .map_err(|error| Error::Core(error.into()))?;
+        #[cfg(feature = "neo-chars")]
+        crate::chars::remove_entries_global(js).map_err(Error::NativeBuiltins)?;
         Ok(runtime)
     }
 

@@ -1,50 +1,51 @@
-//! Engine-independent Neo built-in module implementations.
+//! Engine-neutral Neo built-in module implementations.
 //!
-//! This crate holds the ECMAScript source and metadata for built-in modules
-//! that both the V8 runtime (`neojs-core`) and the QuickJS runtime
-//! (`neojs-lite-core`) implement. It deliberately depends on neither
-//! `deno_core` nor `rquickjs`, so it can sit in both dependency graphs without
-//! moving an engine across the separation boundary. It also performs no I/O and
-//! has no dependencies of its own.
+//! This crate holds Rust implementations and metadata for built-in modules that
+//! both the V8 runtime (`neojs-core`) and the QuickJS runtime
+//! (`neojs-lite-core`) expose. It deliberately depends on neither `deno_core`
+//! nor `rquickjs`, so it can sit in both dependency graphs without moving an
+//! engine across the separation boundary. It performs no I/O.
 //!
 //! # What is shared
 //!
-//! A module contributes three pieces:
+//! A module contributes:
 //!
-//! * an **implementation** expression that evaluates to the frozen public
-//!   module object and captures the intrinsics it uses;
-//! * a **canonical module wrapper** that re-exports that object from
-//!   `Neo.getBuiltInModule("<canonical specifier>")`;
-//! * a [`BuiltinModule`] descriptor with the canonical specifier, the exact
-//!   export names, and both sources.
+//! * a Rust implementation with total predicates and explicit error results;
+//! * a [`BuiltinModule`] descriptor with the canonical specifier and the exact
+//!   export names.
 //!
-//! Each engine keeps its own realm shim and loader/registry adapter. The engine
-//! decides where to splice the implementation and how to accept a specifier;
-//! the implementation and wrapper text are the same in both.
+//! Each engine keeps its own binding. The V8 runtime creates native V8 function
+//! objects and the QuickJS runtime exports native QuickJS functions. There is no
+//! ECMAScript implementation source and no ECMAScript module wrapper in this
+//! crate.
 //!
 //! # Module selection
 //!
 //! Every shared module has its own Cargo feature. `chars` is the first. The
 //! feature is off by default; a dependent that wants the module enables it.
-//! `neojs-core` enables `chars` so a default V8 build keeps the existing
-//! surface, and `neojs-lite-core` enables it explicitly. Cargo features are
-//! additive and unify across the dependency graph, so a build that another
-//! dependent enables a module for contains that module. Selecting modules is
-//! compile-time surface selection, not a sandbox.
+//! `neojs-core` and `neojs-lite-core` enable it in their default feature sets.
+//! Cargo features are additive and unify across the dependency graph, so a build
+//! that another dependent enables a module for contains that module. Selecting
+//! modules is compile-time surface selection, not a sandbox.
 //!
 //! # Precise limits
 //!
-//! * The shared source is ECMAScript, not Rust. It uses Unicode property
-//!   escapes (`\p{...}` with the `u` flag), full case mapping through
-//!   `String.prototype.toLowerCase`/`toUpperCase`, and bound intrinsics. Both
-//!   engines implement these, but their Unicode tables can be from different
-//!   releases. A code point assigned in a newer release can classify
-//!   differently between V8 and QuickJS; the contract tests use long-assigned
-//!   code points and do not claim a fixed Unicode version.
-//! * The implementation captures intrinsics when the realm shim is evaluated.
-//!   Replacing those intrinsics afterwards does not affect the module. Code
-//!   that replaced them before the shim ran is not defended against.
-//! * The shared text is not a permission, capability, or isolation boundary.
+//! * Character classification uses the Unicode General_Category tables in the
+//!   [`unicode_general_category`] crate (Unicode 16.0). Case mapping uses Rust's
+//!   `char::to_lowercase` and `char::to_uppercase`. This fixes the Unicode data
+//!   version for both engines instead of following each engine's tables.
+//! * The module has no host op, no capability, and no I/O. It is not a sandbox.
+//! * The Rust functions are not a stable ABI. The public contract is the
+//!   JavaScript module behavior; this crate's exact Rust signatures are
+//!   internal to the two engines.
+
+/// The backend that implements a shared module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// Implemented by Rust functions in this crate and bound natively by each
+    /// engine. There is no ECMAScript source.
+    Rust,
+}
 
 /// One shared built-in module, described without reference to an engine.
 #[derive(Debug, Clone, Copy)]
@@ -53,10 +54,8 @@ pub struct BuiltinModule {
     pub specifier: &'static str,
     /// The named exports, in the implementation's property order.
     pub exports: &'static [&'static str],
-    /// An ECMAScript expression that evaluates to the frozen module object.
-    pub implementation: &'static str,
-    /// The canonical ECMAScript module wrapper served by a loader.
-    pub source: &'static str,
+    /// How the module is implemented.
+    pub backend: Backend,
 }
 
 #[cfg(feature = "chars")]
@@ -100,6 +99,7 @@ mod tests {
             assert!(module("neo:chars#x").is_none());
             assert!(module("neo:strings").is_none());
             assert_eq!(chars::MODULE.specifier, "neo:chars");
+            assert_eq!(chars::MODULE.backend, Backend::Rust);
         }
         #[cfg(not(feature = "chars"))]
         {
@@ -109,12 +109,11 @@ mod tests {
     }
 
     #[test]
-    fn every_descriptor_has_source_and_exports() {
+    fn every_descriptor_has_exports_and_a_rust_backend() {
         for builtin in MODULES {
             assert!(builtin.specifier.starts_with("neo:"));
             assert!(!builtin.exports.is_empty());
-            assert!(!builtin.implementation.trim().is_empty());
-            assert!(!builtin.source.trim().is_empty());
+            assert_eq!(builtin.backend, Backend::Rust);
         }
     }
 }
