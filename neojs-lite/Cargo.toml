@@ -19,6 +19,7 @@ path = "src/main.rs"
 # silently change what the command advertises. This is not a sandbox.
 neojs-lite-core = { version = "0.1.0", path = "../neojs-lite-core", default-features = false, features = [
     "neo-chars",
+    "neo-strings",
 ] }
 
 [dev-dependencies]

@@ -8,8 +8,9 @@
 //! default `cargo build` in this workspace does not compile it and does not put
 //! QuickJS or `rquickjs` in the V8 graph. Both runtimes share the engine-neutral
 //! module policy in `neojs-module-policy`, so extension handling and failure
-//! reasons agree, and the shared `neo:chars` Rust logic in `neojs-builtins`, so
-//! module behavior and imports agree where the module is implemented.
+//! reasons agree, and the shared `neo:chars` and `neo:strings` Rust logic in
+//! `neojs-builtins`, so module behavior and imports agree where the modules are
+//! implemented.
 //!
 //! # What works
 //!
@@ -29,16 +30,17 @@
 //!   `toString`, or `String`.
 //! * `console.log` and `console.error` write to the process streams.
 //! * A minimal `Neo` global reports `engine` `"neo-lite"`. With the default
-//!   `neo-chars` feature the registry contains the canonical shared module
-//!   `neo:chars`. `Neo.getBuiltInModulesList()` returns one frozen array of
-//!   canonical specifiers, and `Neo.getBuiltInModule("neo:chars")` returns the
-//!   frozen registry object whose named functions are the same function objects
-//!   the `neo:chars` namespace exports; the namespace itself is a distinct
-//!   object. A bare name or another scheme returns `undefined`; a non-string
-//!   name throws `TypeError`. With `default-features = false` the registry and
-//!   list are empty and no module source is compiled in. The implementation
-//!   comes from the engine-neutral `neojs-builtins` crate, bound as a native
-//!   QuickJS module; the V8 runtime uses the same Rust logic.
+//!   `neo-chars` and `neo-strings` features the registry contains the canonical
+//!   shared modules `neo:chars` and `neo:strings`.
+//!   `Neo.getBuiltInModulesList()` returns one frozen array of canonical
+//!   specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
+//!   registry object whose named functions are the same function objects the
+//!   module namespace exports; the namespace itself is a distinct object. A
+//!   bare name or another scheme returns `undefined`; a non-string name throws
+//!   `TypeError`. With `default-features = false` the registry and list are
+//!   empty and no module source is compiled in. The implementations come from
+//!   the engine-neutral `neojs-builtins` crate, bound as native QuickJS
+//!   modules; the V8 runtime uses the same Rust logic.
 //!
 //! # What is not implemented yet
 //!
@@ -50,9 +52,10 @@
 //! * **No host asynchrony.** There are no timers, no host promise integration,
 //!   and no event loop beyond QuickJS's own job queue. A top-level `await` that
 //!   depends on an external event fails with an error instead of hanging.
-//! * **Most built-in `neo:` modules are absent.** With `neo-chars` enabled this
-//!   crate implements the shared `neo:chars` module only. Other V8 modules are
-//!   not importable here, and the `Neo` list does not claim them.
+//! * **Most built-in `neo:` modules are absent.** With their features enabled
+//!   this crate implements the shared `neo:chars` and `neo:strings` modules
+//!   only. Other V8 modules are not importable here, and the `Neo` list does
+//!   not claim them.
 //! * **No sandbox.** Permissions, host capabilities, and isolation are not
 //!   implemented.
 //!
@@ -65,5 +68,7 @@ mod runtime;
 #[cfg(feature = "neo-chars")]
 mod chars;
 mod neo;
+#[cfg(feature = "neo-strings")]
+mod strings;
 
 pub use runtime::{Error, Runtime};

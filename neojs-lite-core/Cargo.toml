@@ -10,17 +10,22 @@ authors.workspace = true
 readme = "README.md"
 
 [features]
-# A default Lite build keeps the `neo:chars` module. A consumer that wants the
-# smallest QuickJS runtime can disable default features; the CLI below selects
-# `neo-chars` explicitly so a change to these defaults cannot silently change
-# what the command advertises. Cargo features are additive and unify across the
-# dependency graph: a module is present whenever any dependent enables it.
-# Selection is compile-time surface selection, not a sandbox.
-default = ["neo-chars"]
+# A default Lite build keeps the `neo:chars` and `neo:strings` modules. A
+# consumer that wants the smallest QuickJS runtime can disable default features;
+# the CLI below selects the modules explicitly so a change to these defaults
+# cannot silently change what the command advertises. Cargo features are
+# additive and unify across the dependency graph: a module is present whenever
+# any dependent enables it. Selection is compile-time surface selection, not a
+# sandbox.
+default = ["neo-chars", "neo-strings"]
 # The shared `chars` Rust logic, native registry object, native module
 # declaration, and introspection list entry. This enables the optional
 # `neojs-builtins` dependency and its `chars` module.
 neo-chars = ["dep:neojs-builtins", "neojs-builtins/chars"]
+# The shared `strings` Rust logic, native registry object, native module
+# declaration, and introspection list entry. This enables the optional
+# `neojs-builtins` dependency and its `strings` module.
+neo-strings = ["dep:neojs-builtins", "neojs-builtins/strings"]
 
 [dependencies]
 # The shared `neo:chars` Rust logic is enabled by the `neo-chars` feature.

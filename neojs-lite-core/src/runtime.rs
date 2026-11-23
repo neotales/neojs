@@ -346,14 +346,15 @@ impl Runtime {
     /// Creates a QuickJS runtime, installs the file loader, and installs
     /// `console` and the native `Neo` introspection global.
     ///
-    /// `Neo.engine` is `"neo-lite"`. With the default `neo-chars` feature the
-    /// registry contains the canonical native module `neo:chars`.
-    /// `Neo.getBuiltInModulesList()` returns one frozen array of canonical
-    /// specifiers, and `Neo.getBuiltInModule("neo:chars")` returns the frozen
-    /// registry object whose named functions are the same function objects the
-    /// `neo:chars` namespace exports. The namespace itself is a distinct object.
-    /// A bare name, another scheme, or a non-string argument does not return a
-    /// module; a non-string name throws `TypeError`. With default features off
+    /// `Neo.engine` is `"neo-lite"`. With the default `neo-chars` and
+    /// `neo-strings` features the registry contains the canonical native
+    /// modules `neo:chars` and `neo:strings`. `Neo.getBuiltInModulesList()`
+    /// returns one frozen array of canonical specifiers, and
+    /// `Neo.getBuiltInModule(specifier)` returns the frozen registry object
+    /// whose named functions are the same function objects the namespace
+    /// exports. The namespace itself is a distinct object. A bare name, another
+    /// scheme, or a non-string argument does not return a module; a non-string
+    /// name throws `TypeError`. With default features off
     /// the registry and list are empty. It does not claim the V8 runtime's full
     /// built-in surface. This performs no filesystem access. An error means
     /// QuickJS could not allocate its runtime or context, or the native surface

@@ -1,7 +1,8 @@
 //! Native `Neo` introspection object for the QuickJS runtime.
 //!
-//! The registry, the module list, and the `neo:chars` object are Rust values.
-//! No part of the surface is installed by JavaScript.
+//! The registry, the module list, and the native `neo:chars` and
+//! `neo:strings` objects are Rust values. No part of the surface is installed
+//! by JavaScript.
 
 use rquickjs::{
     Array, Ctx, Exception, Function, JsLifetime, Object, Persistent, Result, String as JsString,
@@ -17,6 +18,9 @@ pub(super) struct NeoState {
     /// The frozen public `neo:chars` object, when the feature is selected.
     #[cfg(feature = "neo-chars")]
     pub(super) chars: Option<Persistent<Object<'static>>>,
+    /// The frozen public `neo:strings` object, when the feature is selected.
+    #[cfg(feature = "neo-strings")]
+    pub(super) strings: Option<Persistent<Object<'static>>>,
     /// The frozen canonical module list returned for every call.
     pub(super) list: Persistent<Array<'static>>,
 }
@@ -36,17 +40,29 @@ unsafe impl<'js> JsLifetime<'js> for NeoState {
 pub(super) fn install<'js>(ctx: &Ctx<'js>) -> Result<()> {
     #[cfg(feature = "neo-chars")]
     let chars: Option<Object<'js>> = Some(super::chars::object(ctx)?);
+    #[cfg(feature = "neo-strings")]
+    let strings: Option<Object<'js>> = Some(super::strings::object(ctx)?);
 
     let list = Array::new(ctx.clone())?;
+    let mut index = 0;
     #[cfg(feature = "neo-chars")]
     if chars.is_some() {
-        list.set(0, neojs_builtins::chars::SPECIFIER)?;
+        list.set(index, neojs_builtins::chars::SPECIFIER)?;
+        index += 1;
     }
+    #[cfg(feature = "neo-strings")]
+    if strings.is_some() {
+        list.set(index, neojs_builtins::strings::SPECIFIER)?;
+        index += 1;
+    }
+    let _ = index;
     freeze(ctx, list.as_object())?;
 
     ctx.store_userdata(NeoState {
         #[cfg(feature = "neo-chars")]
         chars: chars.map(|chars| Persistent::save(ctx, chars)),
+        #[cfg(feature = "neo-strings")]
+        strings: strings.map(|strings| Persistent::save(ctx, strings)),
         list: Persistent::save(ctx, list),
     })
     .map_err(|_| rquickjs::Error::Unknown)?;
@@ -80,9 +96,15 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
         };
         return Ok(chars.clone().restore(&ctx)?.into_value());
     }
-    #[cfg(not(feature = "neo-chars"))]
-    let _ = state;
-    let _ = name;
+    #[cfg(feature = "neo-strings")]
+    if name == neojs_builtins::strings::SPECIFIER {
+        let Some(strings) = state.strings.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(strings.clone().restore(&ctx)?.into_value());
+    }
+    #[cfg(not(any(feature = "neo-chars", feature = "neo-strings")))]
+    let _ = (&state, &name);
     Ok(Value::new_undefined(ctx.clone()))
 }
 
