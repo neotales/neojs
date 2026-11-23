@@ -40,6 +40,8 @@ disagree, the source wins.
 - **`fetch`, `URL`, or `TextEncoder` as documented NeoJS APIs.** V8 supplies the ECMAScript
   built-ins; NeoJS does not add these host APIs.
 - **Import maps, module type attributes, and bare specifiers that are not built-ins.**
+- **npm package loading.** `docs/esm-npm-proposal.md` is a design proposal, not implemented behavior.
+  There is no npm registry resolution, project `package.json` handling, or `node_modules` layout.
 - **JSON and WebAssembly module files**, both as the entry and as imports. V8's `WebAssembly` global
   is present but untested.
 - **Windows verification.** Only Linux x86-64 is verified in the repository.
