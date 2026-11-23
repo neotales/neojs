@@ -334,13 +334,16 @@ pub(crate) struct JsrModuleLoader {
     jsr_pending: Rc<RefCell<BTreeSet<String>>>,
     /// Canonical URLs whose verified module source was handed to V8.
     ///
-    /// This is the collision authority for ordinary HTTPS redirects.
+    /// This is the collision authority for ordinary HTTPS redirects. A source
+    /// handed to V8 is treated as registered for identity purposes; a later
+    /// compilation or evaluation failure does not clear it.
     jsr_loaded: Rc<RefCell<BTreeSet<String>>>,
     /// `jsr.io` URLs whose ordinary HTTPS module source was handed to V8.
     ///
     /// Both the requested and final identities are recorded, because V8
     /// registers under the final redirect URL and aliases the requested URL.
-    /// A later `jsr:` import of either identity is refused.
+    /// A later `jsr:` import of either identity is refused. A later compilation
+    /// or evaluation failure does not clear the record.
     ordinary_loaded: Rc<RefCell<BTreeSet<String>>>,
 }
 
