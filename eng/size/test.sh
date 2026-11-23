@@ -10,7 +10,10 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 size_require jq sha256sum bash git
 
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/neojs-size-test.XXXXXX")
+ROOT=$(size_repo_root)
+mkdir -p "$ROOT/target/size/tmp"
+TMP=$(mktemp -d "$ROOT/target/size/tmp/test.XXXXXX")
+export TMPDIR="$ROOT/target/size/tmp"
 trap 'rm -rf -- "$TMP"' EXIT
 FAILED=0
 
@@ -289,6 +292,31 @@ assert_contains "$TMP/stderr" "package-not-in-workspace" "missing package names 
 
 expect_status 0 "allow-missing accepts a missing package" \
     bash "$SCRIPT_DIR/measure.sh" --dry-run --allow-missing --package not-a-package --ledger "$TMP/missing-dry.jsonl"
+
+# A real workspace with no neojs-lite member exercises the branch that a branch
+# without Lite would take, without touching this checkout.
+FAKE="$TMP/fakeroot"
+mkdir -p "$FAKE/eng" "$FAKE/neojs/src"
+cp -a "$SCRIPT_DIR" "$FAKE/eng/size"
+cat >"$FAKE/Cargo.toml" <<'TOML'
+[workspace]
+resolver = "3"
+members = ["neojs"]
+TOML
+cat >"$FAKE/neojs/Cargo.toml" <<'TOML'
+[package]
+name = "neojs"
+version = "0.1.0"
+edition = "2024"
+TOML
+printf 'fn main() {}\n' >"$FAKE/neojs/src/main.rs"
+cargo generate-lockfile --manifest-path "$FAKE/Cargo.toml" --offline >/dev/null 2>&1
+expect_status 3 "fixture workspace without Lite exits 3" \
+    bash "$FAKE/eng/size/measure.sh" --dry-run --package neojs --package neojs-lite \
+    --ledger "$TMP/fake-missing.jsonl"
+assert_contains "$TMP/stderr" "neojs-lite" "fixture missing report names neojs-lite"
+assert_contains "$TMP/stderr" "package-not-in-workspace" "fixture missing report names the reason"
+assert_contains "$TMP/stdout" "dry run: neojs" "fixture still measures the present package"
 
 expect_status 0 "report renders a valid ledger" \
     bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/valid.jsonl"

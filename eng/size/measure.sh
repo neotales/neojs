@@ -259,8 +259,8 @@ METADATA=""
 load_metadata() {
     [ -n "$METADATA" ] && return 0
     local error_file="$TARGET_DIR/metadata.err"
-    if ! METADATA=$(cargo "+$TOOLCHAIN" metadata --no-deps --format-version 1 \
-        --locked "${METADATA_NETWORK[@]}" 2>"$error_file"); then
+    if ! METADATA=$(cargo "+$TOOLCHAIN" metadata --manifest-path "$ROOT/Cargo.toml" \
+        --no-deps --format-version 1 --locked "${METADATA_NETWORK[@]}" 2>"$error_file"); then
         cat "$error_file" >&2
         size_die "cargo metadata failed; fix Cargo.toml/Cargo.lock before measuring"
     fi
@@ -381,8 +381,8 @@ make_record() {
 # the artifact never used and would split an otherwise identical series.
 package_uses_v8() {
     local package=$1 tree
-    if ! tree=$(cargo "+$TOOLCHAIN" tree -p "$package" --prefix none \
-        --locked "${METADATA_NETWORK[@]}" 2>/dev/null); then
+    if ! tree=$(cargo "+$TOOLCHAIN" tree --manifest-path "$ROOT/Cargo.toml" \
+        -p "$package" --prefix none --locked "${METADATA_NETWORK[@]}" 2>/dev/null); then
         size_die "cargo tree failed for $package; cannot attribute the V8 archive"
     fi
     grep -Eq '^(v8|deno_v8) v' <<<"$tree"
@@ -413,7 +413,8 @@ measure_package() {
     local log
     local bytes sha256 file_type measured_at notes_json record v8_json="null"
 
-    build_cmd=(cargo "+$TOOLCHAIN" build --release --locked --target "$TARGET" -p "$package")
+    build_cmd=(cargo "+$TOOLCHAIN" build --manifest-path "$ROOT/Cargo.toml" \
+        --release --locked --target "$TARGET" -p "$package")
     if [ "${#BUILD_NETWORK[@]}" -gt 0 ]; then
         build_cmd+=("${BUILD_NETWORK[@]}")
     fi
