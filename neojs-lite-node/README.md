@@ -15,8 +15,9 @@ The native `ChildProcess` export is a throwing function, not a constructible
 class; `new ChildProcess()` is a `TypeError` rather than the coded unsupported
 error. String fields are preflighted through QuickJS's string length property
 before conversion; the actual UTF-8 length is checked after conversion, so the
-host allocation is bounded by four times the configured cap. Option/environment
-enumeration uses QuickJS `JS_GetOwnPropertyNames`, which materializes the full
+host allocation is bounded by four times the configured cap. Proxy `options` and
+`options.env` are rejected before enumeration. Option/environment enumeration
+still uses QuickJS `JS_GetOwnPropertyNames`, which materializes the full plain
 property list before the count cap; this is a documented limitation, not a
 strict pre-materialization key-count bound.
 
