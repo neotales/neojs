@@ -49,21 +49,32 @@ imported files still go through the loader and shared extension policy.
 ## Runtime introspection
 
 The runtime installs a minimal `Neo` global. Its `engine` property is
-`"neo-lite"`. This runtime has no built-in modules, so
-`Neo.getBuiltInModulesList()` returns one frozen empty array and
-`Neo.getBuiltInModule(name)` returns `undefined` for every string name. A
-non-string name throws `TypeError`. The `Neo` object and the global property are
-frozen and non-writable, and the empty list is the same array for every lookup.
+`"neo-lite"`. With the default `neo-chars` feature the registry contains the
+canonical shared module `neo:chars`. `Neo.getBuiltInModulesList()` returns one
+frozen array of canonical specifiers, and
+`Neo.getBuiltInModule("neo:chars")` returns the frozen registry object whose
+named functions are the same function objects the `neo:chars` namespace exports.
+The namespace itself is a distinct object. With `default-features = false` the
+registry and list are empty and no module source is compiled in. A bare `chars`
+name, another scheme, a query or fragment, or any unimplemented specifier returns
+`undefined`; a non-string name throws `TypeError`. The `Neo` object and the
+global property are frozen and non-writable, and the list is the same array for
+every lookup.
 
 ```js
 console.log(Neo.engine); // "neo-lite"
-console.log(Neo.getBuiltInModulesList().length); // 0
-console.log(Neo.getBuiltInModule("neo:age")); // undefined
+console.log(Neo.getBuiltInModulesList()); // [ "neo:chars" ]
+console.log(Neo.getBuiltInModule("neo:chars").isLetter(0x41)); // true
+console.log(Neo.getBuiltInModule("chars")); // undefined
 ```
 
-This is not the V8 runtime's built-in surface. It does not make any `neo:`
-specifier importable, and the empty list does not claim that a module exists or
-will exist.
+This is not the V8 runtime's full built-in surface. Only `neo:chars` is
+implemented, and the list does not claim another module exists or will exist.
+The implementation and wrapper come from the engine-neutral `neojs-builtins`
+crate, which the V8 runtime also uses, so the module contract is shared. The
+Unicode tables still belong to each engine; see
+[`neojs-builtins/README.md`](../neojs-builtins/README.md) for the precise
+limits.
 
 ## Lifecycle
 
@@ -87,15 +98,42 @@ This crate does **not** claim parity with the V8-based `neojs`:
 * **No TypeScript.** `.ts` and `.mts` are rejected with a clear reason.
 * **No host asynchrony.** There are no timers or host Promise integration. A
   top-level `await` works only when QuickJS's own job queue can settle it.
-* **No built-in `neo:` modules.** Local ECMAScript files only. The `Neo`
-  global is introspection only: its list is empty,
-  `getBuiltInModule` returns `undefined` for every string name, and a
-  non-string name throws `TypeError`.
+* **Most built-in `neo:` modules are absent.** With the default `neo-chars`
+  feature, only the shared `neo:chars` module is implemented. Other V8 modules
+  are not importable, and the `Neo` list does not claim them. With default
+  features off, no built-in module is implemented.
 * **No permissions or sandbox.** None are implemented.
 
 Both runtimes share `neojs-module-policy` for executable-extension decisions, so
 `.js`/`.mjs`/extensionless names and the rejection reasons for `.cjs`, JSX/TSX,
 declaration files, JSON, WebAssembly, and native addons are the same.
+
+## Build features
+
+A default build enables `neo-chars`, the shared `neo:chars` module and its
+canonical registry, loader, and introspection-list entries. The feature controls
+the optional `neojs-builtins` dependency; with `default-features = false` the
+dependency, the implementation source, the registry object, the loader entry,
+and the list entry are all absent. The list is then the frozen empty array.
+
+```sh
+# Default: neo:chars present
+cargo test -p neojs-lite-core
+
+# No built-in module: dependency and source absent
+cargo test -p neojs-lite-core --no-default-features --test feature_flags
+
+# Feature-on surface test with the dependency enabled
+cargo test -p neojs-lite-core --features neo-chars --test feature_flags
+```
+
+Cargo features are additive and unify across the dependency graph. A build that
+another dependent enables `neo-chars` for contains the module even if this crate
+was requested without it. Feature selection is compile-time surface selection,
+not a security boundary or sandbox; code that runs keeps the process's
+authority. `neojs-lite` explicitly selects `neo-chars` with
+`default-features = false`, so a change to this crate's defaults cannot silently
+change what the command advertises.
 
 ## Build isolation
 

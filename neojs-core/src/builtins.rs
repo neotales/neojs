@@ -89,9 +89,11 @@
 //! [`STDIO_SPECIFIER`], [`STRINGS_SPECIFIER`], [`TEST_SPECIFIER`],
 //! [`UUID_SPECIFIER`], [`UUID_V4_SPECIFIER`], and [`UUID_V7_SPECIFIER`].
 //! Only those exact `neo:` specifiers are accepted: a bare name is not a
-//! built-in module specifier and the loader rejects it. All read the public
-//! module objects installed by [`neo_shim`], so the registry and the module
-//! bindings share identity. `assert` is the frozen callable
+//! built-in module specifier and the loader rejects it. `CHARS_MODULE` and
+//! `SLICES_MODULE` exist only with `neo-chars` and `neo-slices`; with the
+//! features off their names, sources, registry entries, and loader entries are
+//! absent. All read the public module objects installed by [`neo_shim`], so the
+//! registry and the module bindings share identity. `assert` is the frozen callable
 //! `assert` function itself, with its named assertions as properties; it also
 //! has a default export in its module namespace. `age`, `chars`, `cron`,
 //! `slices`, `strings`, `test`, and `uuid` are frozen module objects whose named
@@ -135,16 +137,77 @@ const OS_PLATFORM_TOKEN: &str = "__NEO_OS_PLATFORM__";
 /// The placeholder replaced with the build target's `std::env::consts::ARCH`.
 const OS_ARCH_TOKEN: &str = "__NEO_OS_ARCH__";
 
-/// Returns the shim with the build target's `os` constants substituted.
+/// The marker replaced with the shared `chars` declaration.
+///
+/// The implementation itself lives in the engine-neutral `neojs-builtins`
+/// crate. The marker is the comment token on its own line, so removing it leaves
+/// no half-statement behind.
+const CHARS_DECLARATION_TOKEN: &str = "// __NEO_CHARS_DECLARATION__";
+
+/// The marker replaced with the `chars` registry entry.
+const CHARS_REGISTRY_TOKEN: &str = "// __NEO_CHARS_REGISTRY_ENTRY__";
+
+/// The marker replaced with the separate `slices` implementation source.
+///
+/// The implementation is not part of [`NEO_SHIM_SOURCE`]. It is compiled in
+/// only when `neo-slices` is enabled, so a disabled build does not carry its
+/// bytes.
+const SLICES_IMPL_TOKEN: &str = "// __NEO_SLICES_IMPL__";
+
+/// The `slices` implementation, compiled only when `neo-slices` is enabled.
+#[cfg(feature = "neo-slices")]
+const SLICES_IMPL_SOURCE: &str = include_str!("builtins/slices.impl.js");
+
+/// The marker replaced with the `slices` registry entry.
+const SLICES_REGISTRY_TOKEN: &str = "// __NEO_SLICES_REGISTRY_ENTRY__";
+
+/// Returns the shim with the build target's `os` constants substituted and the
+/// selected built-in source and registration spliced in.
 ///
 /// [`NEO_SHIM_SOURCE`] holds two placeholders, one per `neo:os` value. They are
 /// replaced with ECMAScript string literals for this build's
 /// `std::env::consts::OS` and `std::env::consts::ARCH`, so the module reports the
 /// target the runtime was compiled for and reads no host state at runtime.
+///
+/// `neo-chars` replaces the declaration marker with
+/// [`neojs_builtins::chars::IMPLEMENTATION`], the same source the QuickJS shim
+/// evaluates, and adds the canonical registry entry. `neo-slices` splices the
+/// separate `slices.impl.js` source and registry entry; it implies `neo-chars`
+/// because `CharSlice` captures `chars.toUpper` and `chars.toLower`. A disabled
+/// module's source, registry entry, loader entry, and name are all absent. The
+/// `slices` source is not compiled into a disabled build at all. The default V8
+/// features keep both present, so the default surface is unchanged.
 pub(crate) fn neo_shim() -> String {
-    NEO_SHIM_SOURCE
+    let shim = NEO_SHIM_SOURCE
         .replace(OS_PLATFORM_TOKEN, &js_string(std::env::consts::OS))
-        .replace(OS_ARCH_TOKEN, &js_string(std::env::consts::ARCH))
+        .replace(OS_ARCH_TOKEN, &js_string(std::env::consts::ARCH));
+
+    #[cfg(feature = "neo-chars")]
+    let shim = shim
+        .replace(
+            CHARS_DECLARATION_TOKEN,
+            &format!("const chars = {};", neojs_builtins::chars::IMPLEMENTATION),
+        )
+        .replace(CHARS_REGISTRY_TOKEN, "[\"neo:chars\", chars],");
+    #[cfg(not(feature = "neo-chars"))]
+    let shim = shim
+        .replace(CHARS_DECLARATION_TOKEN, "")
+        .replace(CHARS_REGISTRY_TOKEN, "");
+
+    #[cfg(feature = "neo-slices")]
+    let shim = shim
+        .replace(SLICES_IMPL_TOKEN, SLICES_IMPL_SOURCE)
+        .replace(SLICES_REGISTRY_TOKEN, "[\"neo:slices\", slices],");
+    #[cfg(not(feature = "neo-slices"))]
+    let shim = shim
+        .replace(SLICES_IMPL_TOKEN, "")
+        .replace(SLICES_REGISTRY_TOKEN, "");
+
+    debug_assert!(!shim.contains(CHARS_DECLARATION_TOKEN));
+    debug_assert!(!shim.contains(CHARS_REGISTRY_TOKEN));
+    debug_assert!(!shim.contains(SLICES_IMPL_TOKEN));
+    debug_assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
+    shim
 }
 
 /// Encodes `value` as a double-quoted ECMAScript string literal.
@@ -206,13 +269,20 @@ const ASSERT_MODULE: &str = include_str!("builtins/assert.esm.js");
 ///
 /// Only `neo:chars` resolves to this URL. It is the canonical and only module
 /// specifier for this built-in, so the engine caches one module instance for
-/// every importer. It is not a `file:` URL and is never read from disk.
+/// every importer. It is not a `file:` URL and is never read from disk. With
+/// `neo-chars` off, the specifier is absent from the name and source tables and
+/// the loader rejects it.
+#[cfg(feature = "neo-chars")]
 pub(crate) const CHARS_SPECIFIER: &str = "neo:chars";
 
 /// The ECMAScript module source served for [`CHARS_SPECIFIER`].
 ///
 /// It re-exports the function objects from the public `chars` module object, so
-/// the module and `Neo.getBuiltInModule("neo:chars")` share identity.
+/// each named export is the same function object as the matching registry
+/// property and `Neo.getBuiltInModule("neo:chars")` shares identity. The ES
+/// module namespace is a separate object from the registry object. The
+/// implementation is the shared `neojs-builtins` expression.
+#[cfg(feature = "neo-chars")]
 const CHARS_MODULE: &str = include_str!("builtins/chars.esm.js");
 
 /// The canonical module specifier for the `console` built-in.
@@ -328,16 +398,23 @@ const PATH_MODULE: &str = include_str!("builtins/path.esm.js");
 ///
 /// Only `neo:slices` resolves to this URL. It is the canonical and only module
 /// specifier for this built-in, so the engine caches one module instance for
-/// every importer. It is not a `file:` URL and is never read from disk.
+/// every importer. It requires `neo-chars` because `CharSlice` captures
+/// `chars.toUpper` and `chars.toLower`. It is not a `file:` URL and is never
+/// read from disk. With `neo-slices` off, the specifier is absent from the name
+/// and source tables and the loader rejects it.
+#[cfg(feature = "neo-slices")]
 pub(crate) const SLICES_SPECIFIER: &str = "neo:slices";
 
 /// The ECMAScript module source served for [`SLICES_SPECIFIER`].
 ///
 /// It re-exports the view classes and factories from the public `slices` module
-/// object, so the module and `Neo.getBuiltInModule("neo:slices")` share
-/// identity. The implementations are plain ECMAScript in [`neo_shim`]; no host
-/// op is called. Views alias the caller's Array or typed array; they are not copies,
-/// a sandbox, or a cross-realm/cross-thread zero-copy mechanism.
+/// object, so each named export is the same function or class object as the
+/// matching registry property. The ES module namespace is a separate object from
+/// the registry object. The implementations are plain ECMAScript in
+/// [`neo_shim`]; no host op is called. Views alias the caller's Array or typed
+/// array; they are not copies, a sandbox, or a cross-realm/cross-thread
+/// zero-copy mechanism.
+#[cfg(feature = "neo-slices")]
 const SLICES_MODULE: &str = include_str!("builtins/slices.esm.js");
 
 /// The canonical module specifier for the `strings` built-in.
@@ -422,12 +499,14 @@ const UUID_V7_MODULE: &str = include_str!("builtins/uuid-v7.esm.js");
 const BUILTINS: &[(&str, &str)] = &[
     ("age", AGE_SPECIFIER),
     ("assert", ASSERT_SPECIFIER),
+    #[cfg(feature = "neo-chars")]
     ("chars", CHARS_SPECIFIER),
     ("console", CONSOLE_SPECIFIER),
     ("cron", CRON_SPECIFIER),
     ("crypto", CRYPTO_SPECIFIER),
     ("os", OS_SPECIFIER),
     ("path", PATH_SPECIFIER),
+    #[cfg(feature = "neo-slices")]
     ("slices", SLICES_SPECIFIER),
     ("ssh", SSH_SPECIFIER),
     ("stdio", STDIO_SPECIFIER),
@@ -476,12 +555,14 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
     match specifier.as_str() {
         AGE_SPECIFIER => Some(AGE_MODULE),
         ASSERT_SPECIFIER => Some(ASSERT_MODULE),
+        #[cfg(feature = "neo-chars")]
         CHARS_SPECIFIER => Some(CHARS_MODULE),
         CONSOLE_SPECIFIER => Some(CONSOLE_MODULE),
         CRON_SPECIFIER => Some(CRON_MODULE),
         CRYPTO_SPECIFIER => Some(CRYPTO_MODULE),
         OS_SPECIFIER => Some(OS_MODULE),
         PATH_SPECIFIER => Some(PATH_MODULE),
+        #[cfg(feature = "neo-slices")]
         SLICES_SPECIFIER => Some(SLICES_MODULE),
         SSH_SPECIFIER => Some(SSH_MODULE),
         STDIO_SPECIFIER => Some(STDIO_MODULE),
@@ -512,6 +593,9 @@ mod tests {
     use super::neo_shim;
     use super::resolve;
     use super::resolve_name;
+    use super::{CHARS_DECLARATION_TOKEN, CHARS_REGISTRY_TOKEN};
+    use super::{SLICES_IMPL_TOKEN, SLICES_REGISTRY_TOKEN};
+    use deno_core::url::Url;
 
     /// The shim is not valid JavaScript until the two `os` placeholders are
     /// replaced, so a missing substitution must fail here rather than at the
@@ -558,6 +642,10 @@ mod tests {
         let shim = neo_shim();
         assert!(!shim.contains(OS_PLATFORM_TOKEN));
         assert!(!shim.contains(OS_ARCH_TOKEN));
+        assert!(!shim.contains(CHARS_DECLARATION_TOKEN));
+        assert!(!shim.contains(CHARS_REGISTRY_TOKEN));
+        assert!(!shim.contains(SLICES_IMPL_TOKEN));
+        assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
         assert!(
             shim.contains(&format!("platform: \"{}\"", std::env::consts::OS)),
             "platform literal is missing from the shim"
@@ -566,5 +654,101 @@ mod tests {
             shim.contains(&format!("arch: \"{}\"", std::env::consts::ARCH)),
             "arch literal is missing from the shim"
         );
+
+        #[cfg(feature = "neo-chars")]
+        {
+            assert!(
+                shim.contains("const chars = "),
+                "the shared chars implementation was not spliced in"
+            );
+            assert!(
+                shim.contains("(() => {") && shim.contains("return freeze({"),
+                "the shared chars implementation is not an install expression"
+            );
+            assert!(
+                shim.contains("const isInteger = Number.isInteger;"),
+                "the shared chars implementation did not capture its intrinsics"
+            );
+            assert!(
+                shim.contains("[\"neo:chars\", chars],"),
+                "the chars registry entry is missing"
+            );
+        }
+        #[cfg(not(feature = "neo-chars"))]
+        {
+            assert!(
+                !shim.contains("const chars = "),
+                "the disabled chars declaration is present"
+            );
+            assert!(
+                !shim.contains("function isChar("),
+                "the disabled chars implementation is present"
+            );
+            assert!(
+                !shim.contains("[\"neo:chars\", chars],"),
+                "the disabled chars registry entry is present"
+            );
+        }
+
+        #[cfg(feature = "neo-slices")]
+        {
+            assert!(
+                shim.contains("const slices = (() => {"),
+                "the slices implementation is missing"
+            );
+            assert!(
+                shim.contains("[\"neo:slices\", slices],"),
+                "the slices registry entry is missing"
+            );
+        }
+        #[cfg(not(feature = "neo-slices"))]
+        {
+            assert!(
+                !shim.contains("const slices = (() => {"),
+                "the disabled slices implementation is present"
+            );
+            assert!(
+                !shim.contains("class CharSlice"),
+                "the disabled slices source is present"
+            );
+            assert!(
+                !shim.contains("[\"neo:slices\", slices],"),
+                "the disabled slices registry entry is present"
+            );
+        }
+    }
+
+    /// A disabled module must be absent from both the name table the loader
+    /// consults and the source table it serves. The enabled module is present.
+    #[test]
+    fn module_tables_follow_the_chars_and_slices_features() {
+        let chars = Url::parse("neo:chars").expect("valid chars specifier");
+        let slices = Url::parse("neo:slices").expect("valid slices specifier");
+
+        #[cfg(feature = "neo-chars")]
+        {
+            assert_eq!(super::resolve("neo:chars"), Some(super::CHARS_SPECIFIER));
+            assert!(super::source(&chars).is_some());
+            assert!(super::implemented_specifiers().contains("neo:chars"));
+        }
+        #[cfg(not(feature = "neo-chars"))]
+        {
+            assert_eq!(super::resolve("neo:chars"), None);
+            assert!(super::source(&chars).is_none());
+            assert!(!super::implemented_specifiers().contains("neo:chars"));
+        }
+
+        #[cfg(feature = "neo-slices")]
+        {
+            assert_eq!(super::resolve("neo:slices"), Some(super::SLICES_SPECIFIER));
+            assert!(super::source(&slices).is_some());
+            assert!(super::implemented_specifiers().contains("neo:slices"));
+        }
+        #[cfg(not(feature = "neo-slices"))]
+        {
+            assert_eq!(super::resolve("neo:slices"), None);
+            assert!(super::source(&slices).is_none());
+            assert!(!super::implemented_specifiers().contains("neo:slices"));
+        }
     }
 }

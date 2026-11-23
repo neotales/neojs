@@ -353,6 +353,7 @@ if (value !== 7) throw new Error("value was not imported");
         .expect("type-only imports must not be loaded");
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn rejects_import_attributes_for_files_and_builtins() {
     let cases = [
@@ -403,6 +404,7 @@ fn rejects_import_attributes_for_files_and_builtins() {
     }
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn dynamic_imports_of_files_and_builtins_still_work() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -511,6 +513,7 @@ fn sync_entry_refuses_to_block_inside_tokio() {
     });
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn run_file_async_works_without_an_ambient_tokio_runtime() {
     assert!(
@@ -662,6 +665,7 @@ fn run_js(source: &str) {
     runtime.run_file(&file).expect("module assertions");
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn built_in_module_lookup_is_cached_and_frozen() {
     run_js(
@@ -678,6 +682,7 @@ for (const name of ["isChar", "isAscii", "isLatin1", "toLower", "toUpper"]) {
     );
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn built_in_lookup_ignores_a_replaced_map_get() {
     run_js(
@@ -749,6 +754,7 @@ fn run_js_error(source: &str) -> String {
     error.to_string()
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn built_in_module_named_exports_are_the_registry_functions() {
     run_js(
@@ -769,6 +775,7 @@ if ("default" in chars) throw new Error("chars must not have a default export");
     );
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn built_in_module_specifiers_share_one_module_instance() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -819,6 +826,7 @@ if (!bareRejected) throw new Error("bare chars import was accepted");
         .expect("module assertions");
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn malformed_builtin_specifiers_do_not_resolve_or_import() {
     run_js(
@@ -880,12 +888,17 @@ if (upper !== lower) throw new Error("NEO:chars and neo:chars are not one module
     );
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn built_in_module_namespace_and_registry_are_immutable() {
     run_js(
         r#"
 import * as chars from "neo:chars";
 const registry = Neo.getBuiltInModule("neo:chars");
+
+if (chars === registry) {
+    throw new Error("the module namespace must be distinct from the registry object");
+}
 
 let rejections = 0;
 try {
@@ -914,6 +927,7 @@ delete chars.isLetter.marker;
     );
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn chars_predicates_ignore_a_replaced_regexp_exec() {
     run_js(
@@ -972,6 +986,7 @@ if (chars.isLetter("A".codePointAt(0)) !== true) throw new Error("classification
     );
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn unknown_built_in_exports_fail_to_link() {
     let bare = run_js_error("import { nope } from \"neo:chars\";\n");
@@ -1011,6 +1026,7 @@ if (extensionless !== 8) throw new Error("extensionless ./chars was not loaded")
         .expect("local modules");
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn chars_predicates_use_scalar_code_points() {
     run_js(
@@ -1084,6 +1100,7 @@ for (const [predicate, value, expected] of cases) {
     );
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn chars_case_mapping_returns_one_code_point_or_the_input() {
     run_js(

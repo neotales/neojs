@@ -2045,6 +2045,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "neojs-builtins"
+version = "0.1.0"
+
+[[package]]
 name = "neojs-core"
 version = "0.1.0"
 dependencies = [
@@ -2059,6 +2063,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "httpdate",
+ "neojs-builtins",
  "neojs-module-policy",
  "neojs-node",
  "neotales-age",
@@ -2101,6 +2106,7 @@ dependencies = [
 name = "neojs-lite-core"
 version = "0.1.0"
 dependencies = [
+ "neojs-builtins",
  "neojs-lite-node",
  "neojs-module-policy",
  "rquickjs",

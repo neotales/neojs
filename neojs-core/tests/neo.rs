@@ -3,10 +3,49 @@
 //! These run real ECMAScript modules through [`Runtime`], so they cover the
 //! installed global, the registry, and the loader together. The JavaScript
 //! modules assert on their own and throw on failure.
+//!
+//! The exact list is built from the enabled features, so this file runs in the
+//! default build and in each reduced feature-matrix build. `feature_flags.rs`
+//! additionally checks that a disabled module's source is absent.
 
 use std::fs;
 
 use neojs_core::Runtime;
+
+/// Builds the JS array literal for the modules this build selected.
+fn expected_specifiers() -> String {
+    let mut entries = vec!["neo:age", "neo:assert"];
+    if cfg!(feature = "neo-chars") {
+        entries.push("neo:chars");
+    }
+    entries.extend([
+        "neo:console",
+        "neo:cron",
+        "neo:crypto",
+        "neo:os",
+        "neo:path",
+    ]);
+    if cfg!(feature = "neo-slices") {
+        entries.push("neo:slices");
+    }
+    entries.extend([
+        "neo:ssh",
+        "neo:stdio",
+        "neo:strings",
+        "neo:test",
+        "neo:uuid",
+        "neo:uuid/v4",
+        "neo:uuid/v7",
+    ]);
+    format!(
+        "[{}]",
+        entries
+            .iter()
+            .map(|entry| format!("\"{entry}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
 
 /// Runs a JavaScript module whose own assertions throw on failure.
 fn run_js(source: &str) {
@@ -19,27 +58,9 @@ fn run_js(source: &str) {
 
 #[test]
 fn engine_and_module_list_are_frozen_exact_and_stable() {
-    run_js(
-        r#"
+    let source = r#"
 const list = Neo.getBuiltInModulesList();
-const expected = [
-    "neo:age",
-    "neo:assert",
-    "neo:chars",
-    "neo:console",
-    "neo:cron",
-    "neo:crypto",
-    "neo:os",
-    "neo:path",
-    "neo:slices",
-    "neo:ssh",
-    "neo:stdio",
-    "neo:strings",
-    "neo:test",
-    "neo:uuid",
-    "neo:uuid/v4",
-    "neo:uuid/v7",
-];
+const expected = __EXPECTED_LIST__;
 
 if (Neo.engine !== "neo") throw new Error(`engine: ${Neo.engine}`);
 if (JSON.stringify(list) !== JSON.stringify(expected)) {
@@ -79,8 +100,8 @@ for (const attempt of attempts) {
     if (!threw) throw new Error("a mutation attempt did not throw TypeError");
 }
 if (JSON.stringify(list) !== JSON.stringify(expected)) throw new Error("list changed");
-"#,
-    );
+"#;
+    run_js(&source.replace("__EXPECTED_LIST__", &expected_specifiers()));
 }
 
 #[test]
@@ -141,6 +162,7 @@ for (const name of names) {
     );
 }
 
+#[cfg(feature = "neo-chars")]
 #[test]
 fn a_bare_built_in_name_is_rejected_with_the_canonical_suggestion() {
     let dir = tempfile::tempdir().expect("temp dir");

@@ -39,7 +39,7 @@ fn runs_a_module_and_prints_console_output() {
 }
 
 #[test]
-fn exposes_the_lite_engine_and_empty_builtin_list() {
+fn exposes_the_lite_engine_and_the_shared_builtin() {
     let dir = tempfile::tempdir().expect("temp dir");
     write(
         &dir,
@@ -49,13 +49,18 @@ console.log(Neo.engine);
 console.log(Neo.getBuiltInModulesList().length);
 console.log(Object.isFrozen(Neo.getBuiltInModulesList()));
 console.log(typeof Neo.getBuiltInModule("neo:age"));
+console.log(typeof Neo.getBuiltInModule("age"));
+console.log(typeof Neo.getBuiltInModule("neo:chars"));
 "#,
     );
     let file = dir.path().join("main.js");
 
     let output = run(&[file.as_os_str()]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(stdout(&output), "neo-lite\n0\ntrue\nundefined\n");
+    assert_eq!(
+        stdout(&output),
+        "neo-lite\n1\ntrue\nundefined\nundefined\nobject\n"
+    );
     assert_eq!(stderr(&output), "");
 }
 
