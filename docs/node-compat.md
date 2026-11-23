@@ -111,7 +111,14 @@ checks the V8 string length before copying it to Rust, and the guest wrapper
 caps input at 1,048,576 code units, arguments at 256 and 64 KiB total,
 environment at 128 entries and 64 KiB total, and each path at 4,096 code units.
 The QuickJS module is native: it validates values directly and enforces the same
-input, argument, environment, and path bounds without serialization.
+input, argument, environment, and path bounds without serialization. It reads a
+string's UTF-16 length through QuickJS's public string property API before
+converting it, so an oversized file, argument, environment value, or input is
+rejected before a large Rust String is allocated. UTF-8 conversion allocation is
+therefore bounded by four times the configured cap, and the actual UTF-8 length
+is checked after conversion. Public rquickjs does not expose an exact UTF-8
+length before conversion; the QuickJS length preflight is a single audited
+C-API function used only for this bound.
 
 Other `node:` modules are rejected with `the Node module ... is not
 implemented`. Resolution never falls through to a `neo:` module.
@@ -170,6 +177,11 @@ resource bound, not a sandbox.
   not used, and the serialized request is capped before JSON parsing. The
   QuickJS module has no JSON bridge: its native functions validate each field
   and cap input, argument, environment, and path copies directly.
+* A signal-terminated `execFileSync` child has `status: None`; it is not treated
+  as status 0. `spawnSync` keeps `status: null` and reports the signal without an
+  `.error` unless a timeout, overflow, incomplete read, or I/O failure occurred.
+* `spawnSync(file, undefined, options)` and the same form of `execFileSync`
+  retain the third argument as options.
 * Bounded pipe completion is implemented on Unix with non-blocking pipes and
   `poll`; no reader or writer threads are created. Another platform returns
   `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` before spawning a child.
@@ -197,4 +209,6 @@ a descendant left holding the pipes is killed after the direct child exits, that
 an unsupported-platform seam rejects before spawning, that an injected
 post-spawn setup failure kills and reaps the child group, and that an injected
 pipe read error is not treated as success. Adapter tests cover changing option
-getters and a changing Proxy array length.
+getters, a changing Proxy array length, primitive numeric options with replaced
+intrinsics, oversized native fields, third-argument options after `undefined`
+args, and signal-terminated `execFileSync`.

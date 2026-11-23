@@ -13,7 +13,9 @@ no JSON bridge, and its named/default exports are Rust functions. `spawn`,
 `ERR_NODE_UNSUPPORTED`; none is faked as a blocking call or a resolved Promise.
 The native `ChildProcess` export is a throwing function, not a constructible
 class; `new ChildProcess()` is a `TypeError` rather than the coded unsupported
-error.
+error. String fields are preflighted through QuickJS's string length property
+before conversion; the actual UTF-8 length is checked after conversion, so the
+host allocation is bounded by four times the configured cap.
 
 A default `Runtime::new` rejects every `node:` import. In an opted-in runtime, a
 bare specifier that is a familiar Node module name is rejected rather than
