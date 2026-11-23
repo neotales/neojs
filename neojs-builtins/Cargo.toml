@@ -26,3 +26,7 @@ strings = ["dep:unicode-general-category"]
 # Unicode General_Category lookup for the `chars` classifier. Version 1.1.0
 # ships the Unicode 16.0 tables and has no dependencies of its own.
 unicode-general-category = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Checks the pinned CaseFolding.txt artifact hash in the exhaustive table test.
+sha2.workspace = true

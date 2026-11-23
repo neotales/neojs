@@ -102,8 +102,10 @@ offsets, not code point offsets. Folding is Unicode 16.0 simple case folding
 from a generated table, so `"K"` equals U+212A KELVIN SIGN, `"s"` equals
 U+017F LONG S, `"I"` does not equal U+0131 DOTLESS I, and `"ss"` does not equal
 `"ß"`. Non-string arguments throw `TypeError`; a non-integer index throws
-`RangeError`, while `Infinity` and `-Infinity` clamp. The module calls no host
-op and adds no capability.
+`RangeError`, while `Infinity` and `-Infinity` clamp. `indexOfFold` and
+`lastIndexOfFold` stream through a fixed 1024-code-unit engine window instead
+of copying the whole text; a small `fromIndex` reads only the prefix the scan
+needs. The module calls no host op and adds no capability.
 
 ## Precise limits
 
@@ -131,6 +133,24 @@ op and adds no capability.
   function objects as the registry properties.
 * **Rust signatures are internal.** The public contract is the JavaScript
   module behavior. The crate's exact Rust signatures are not a stable ABI.
+
+## Case-folding data
+
+`neo:strings` folds with a generated table from the exact official Unicode 16.0
+`CaseFolding.txt` artifact. The source URL, version header, SHA-256, selection
+rules, and Unicode License V3 notice are in
+[`data/unicode/README.md`](data/unicode/README.md) and
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+```sh
+python3 scripts/generate_case_fold.py
+python3 scripts/generate_case_fold.py --check
+```
+
+The generator refuses a mismatched hash or version header. A unit test
+independently hashes the pinned artifact and compares every Unicode code point
+and every lone surrogate unit against `simple_fold`, without using the
+generator.
 
 ## Cross-engine tests
 
