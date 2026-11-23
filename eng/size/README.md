@@ -270,8 +270,11 @@ Rules:
   shared by `conflict_check.jq` and `report.jq`; a classifier failure is fatal,
   not an empty conflict list. The report's `conflict`
   column is `confirmed`, `possible` or `no`; the trend's delta-kind is
-  `conflict` or `possible-conflict`. `measure.sh` records a differing digest
-  with a warning instead of hiding or overwriting it.
+  `conflict` or `possible-conflict` and comes from the **shared group rule**,
+  not from comparing only the adjacent pair. Thus a group with two complete
+  records that differ plus one incomplete record is `possible` for every delta
+  in that group, not `conflict` for the complete pair. `measure.sh` records a
+  differing digest with a warning instead of hiding or overwriting it.
 - **The ledger is not a source change.** When the ledger is inside the
   repository, it is excluded from the `git_dirty`/state fingerprint; otherwise
   appending the first measurement would make every later run look dirty. Other
@@ -299,7 +302,8 @@ That runs:
   build, Cargo config capture, environment override refusal, missing package
   handling, dry-run behaviour, controls-complete versus controls-incomplete,
   possible versus confirmed conflicts (including a mixed-completeness group
-  and a forced classifier failure), offline/locked trend reasons,
+  and a forced classifier failure, plus an all-three-record mixed group),
+  offline/locked trend reasons,
   package/target columns, target-dir contract, trend/report rendering and
   idempotent append, all in a temporary directory;
 - `validate.sh` — strict schema, integrity, unique keys and conflict detection

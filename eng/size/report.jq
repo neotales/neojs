@@ -88,10 +88,6 @@ def source_diff($p; $r):
        "state-capture"
      else "state" end)
   ] | join(",");
-def same_source_state($p; $r):
-  ($p.source.git_commit == $r.source.git_commit) and
-  (($p.source.state_sha256 // $p.source.state_status) ==
-   ($r.source.state_sha256 // $r.source.state_status));
 def conflict_groups($all):
   [$all[] | select(.status == "ok")]
   | group_by(conflict_key)
@@ -124,10 +120,9 @@ def conflict_status($groups; $r):
      | (if $p == null then "baseline"
         elif $r.status == "missing" then "missing"
         elif $p.status == "missing" then "resumed"
-        elif ($r.series_id == $p.series_id and
-              same_source_state($p; $r) and
-              $r.measurement.sha256 != $p.measurement.sha256) then
-          (if (controls_complete($p) and controls_complete($r))
+        elif (conflict_key($r) == conflict_key($p) and
+              (conflict_status($conflicts; $r) != "no")) then
+          (if conflict_status($conflicts; $r) == "confirmed"
            then "conflict" else "possible-conflict" end)
         elif ($r.series_id == $p.series_id and
               ((controls_complete($p) and controls_complete($r)) | not)) then

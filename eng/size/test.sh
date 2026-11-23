@@ -410,6 +410,22 @@ else
     ok "mixed-completeness group is not marked confirmed"
 fi
 
+printf '%s\n%s\n%s\n' "$COMPLETE" "$CONFIRMED" "$MIXED_INCOMPLETE" >"$TMP/all-three.jsonl"
+expect_status 0 "all-three mixed group validates as possible" \
+    bash "$SCRIPT_DIR/validate.sh" --ledger "$TMP/all-three.jsonl"
+assert_contains "$TMP/stderr" "possible conflict with incomplete controls" \
+    "all-three group is not a confirmed conflict"
+expect_status 0 "all-three mixed group renders" \
+    bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/all-three.jsonl" --trend
+assert_contains "$TMP/stdout" "possible-conflict" \
+    "all-three trend emits possible-conflict"
+if awk 'NR == 3 || NR == 4 { if ($11 != "possible-conflict") exit 1 }
+        NR > 1 && $11 == "conflict" { exit 1 }' "$TMP/stdout"; then
+    ok "every delta in the mixed group uses the shared possible-conflict classification"
+else
+    fail "an adjacent complete pair was still called conflict"
+fi
+
 BROKEN="$TMP/broken-classifier"
 mkdir -p "$BROKEN"
 cp "$SCRIPT_DIR/lib.sh" "$SCRIPT_DIR/record_validate.jq" "$SCRIPT_DIR/controls.jq" "$BROKEN/"
