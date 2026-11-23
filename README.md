@@ -1513,8 +1513,15 @@ queue. It then drains queued jobs, bounded at 100,000, so trailing `.then` callb
 dynamic imports still run; a nonconverging job chain or a throwing queued job fails closed, and a
 promise still rejected without a handler when the queue empties is an error; rejection diagnostics use
 primitive values and an Error's own data without invoking getters, proxies, `toString`, or `String`.
-It does **not** implement TypeScript, host asynchrony or timers, `neo:` built-in modules, permissions,
-or a sandbox, and it does not claim parity with the V8 runtime. Both runtimes share
+It does **not** implement TypeScript, host asynchrony or timers, permissions, or a sandbox, and it
+does not claim parity with the V8 runtime. The only built-in is the optional `neo:crypto` module:
+the library feature is off by default, the `neojs-lite` command enables it, and only the
+`neo:crypto` spelling is accepted (a bare `crypto` is not an alias). It exports exactly
+`generateEnvelopeKey`, `randomBytes`, `encrypt`, and `decrypt`. It is synchronous, uses the same
+NEO1 AES-256-GCM envelope and operating-system CSPRNG as `neojs`, keeps the same 32-byte key and
+8 MiB bounds, advertises no other crypto or async export, and fails closed on detached or
+unprovable container ranges. See `neojs-lite-core/README.md` for the feature flag, the full limits
+and security notes, and a complete example. Both runtimes share
 `neojs-module-policy` for executable-extension decisions and rejection reasons, so `.cjs`, JSX/TSX,
 declaration files, JSON, WebAssembly, and native addons fail with the same explanation in either.
 
