@@ -1,0 +1,7 @@
+# Rust toolchain for comparable size measurements.
+#
+# Cargo.toml records 1.100.0 as the verified MSRV floor and the toolchain the
+# workspace was built with. Change this file deliberately, in its own commit,
+# because a toolchain change moves the byte count for reasons unrelated to the
+# source.
+1.100.0

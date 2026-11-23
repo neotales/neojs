@@ -1663,6 +1663,19 @@ whose engine is `"neo-lite"` and whose built-in module list is empty; `Neo.getBu
 `neojs-module-policy` for executable-extension decisions and rejection reasons, so `.cjs`, JSX/TSX,
 declaration files, JSON, WebAssembly, and native addons fail with the same explanation in either.
 
+### Binary size tracking
+
+`eng/size/` measures the release-profile `neojs` and `neojs-lite` executables and
+appends each result to an append-only JSONL ledger. A record carries the exact
+bytes and SHA-256, the source state, artifact, target, toolchain, requested
+features, Cargo and lockfile inputs, and explicitly labels effective features,
+linker and V8-archive provenance as captured or unknown. Strict comparison
+series and a labelled trend report keep a toolchain or config change from being
+read as a source-code delta; a comparison with any uncaptured control is marked
+controls-incomplete rather than strict. The directory is self-contained: see
+[`eng/size/README.md`](eng/size/README.md) for the methodology and
+`eng/size/check.sh` for the deterministic checks.
+
 ## Limits
 
 Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, top-level await,
