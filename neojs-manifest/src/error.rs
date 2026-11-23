@@ -72,12 +72,16 @@ pub enum Error {
     },
     /// A field is not part of the accepted manifest.
     ///
-    /// The key is not included. The manifest boundary rejects a typo without
-    /// turning an arbitrary key into a log entry.
-    #[error(
-        "unknown manifest field; accepted fields are name, version, description, authors, exports, include, exclude, imports, and workspaces"
-    )]
-    UnknownField,
+    /// The key and its value are not included. The line and byte column point
+    /// at the opening quote of the top-level key. The manifest boundary rejects
+    /// a typo without turning arbitrary text into a log entry.
+    #[error("unknown manifest field at line {line}, byte column {column}")]
+    UnknownField {
+        /// One-based line number of the key.
+        line: usize,
+        /// One-based byte column of the key's opening quote.
+        column: usize,
+    },
     /// A specifier is syntactically invalid.
     #[error("specifier is invalid: {reason}")]
     InvalidSpecifier {

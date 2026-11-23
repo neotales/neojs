@@ -176,7 +176,7 @@ fn rejects_a_version_range() {
 fn rejects_unknown_and_reserved_fields() {
     let unknown = Manifest::parse(r#"{"name":"@scope/pkg","secret-key-123":true}"#)
         .expect_err("unknown field");
-    assert!(matches!(unknown, Error::UnknownField));
+    assert!(matches!(unknown, Error::UnknownField { .. }));
     assert!(!unknown.to_string().contains("secret-key-123"), "{unknown}");
 
     for (expected_field, text) in [
@@ -194,6 +194,39 @@ fn rejects_unknown_and_reserved_fields() {
             "{expected_field}: {error}"
         );
     }
+}
+
+#[test]
+fn unknown_field_reports_a_multiline_key_position_without_key_or_value() {
+    let text =
+        "{\n  \"name\": \"@a/b\",\n  // a comment\n  \"secret-key-123\": \"secret-value-456\"\n}\n";
+    let error = Manifest::parse(text).expect_err("unknown field");
+    let message = error.to_string();
+    match error {
+        Error::UnknownField { line, column } => {
+            assert_eq!(line, 4);
+            assert_eq!(column, 3);
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+    assert!(!message.contains("secret-key-123"), "{message}");
+    assert!(!message.contains("secret-value-456"), "{message}");
+}
+
+#[test]
+fn unknown_field_reports_a_byte_column_after_unicode() {
+    let text = r#"{"name":"@a/b","description":"説明","秘密":"秘密の値"}"#;
+    let error = Manifest::parse(text).expect_err("unknown field");
+    let message = error.to_string();
+    match error {
+        Error::UnknownField { line, column } => {
+            assert_eq!(line, 1);
+            assert_eq!(column, 39);
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+    assert!(!message.contains("秘密"), "{message}");
+    assert!(!message.contains("秘密の値"), "{message}");
 }
 
 #[test]

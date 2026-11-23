@@ -19,6 +19,8 @@
 //! is exhausted. These are parse limits, not a file-size or security boundary
 //! for a caller that reads untrusted files.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Map, Value};
 
 use crate::Error;
@@ -43,6 +45,39 @@ pub const MAX_JSONC_DEPTH: usize = 128;
 /// Returns [`Error::Jsonc`] for malformed JSONC, an oversized document, or
 /// excessive nesting, and [`Error::DuplicateKey`] for a repeated key.
 pub fn parse(text: &str) -> Result<Value, Error> {
+    parse_document(text, false).map(|document| document.value)
+}
+
+/// A one-based line and byte column in the parsed document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SourcePosition {
+    pub(crate) line: usize,
+    pub(crate) column: usize,
+}
+
+impl SourcePosition {
+    /// The first byte of the document, used only as a defensive fallback.
+    pub(crate) const START: Self = Self { line: 1, column: 1 };
+}
+
+/// Parses a document and returns top-level object key positions.
+///
+/// The map contains the opening quote of each top-level key and no nested
+/// keys. This is crate-private because it exists for manifest diagnostics, not
+/// for the public JSONC contract.
+pub(crate) fn parse_with_top_level_positions(
+    text: &str,
+) -> Result<(Value, BTreeMap<String, SourcePosition>), Error> {
+    let document = parse_document(text, true)?;
+    Ok((document.value, document.top_level_positions))
+}
+
+struct ParsedDocument {
+    value: Value,
+    top_level_positions: BTreeMap<String, SourcePosition>,
+}
+
+fn parse_document(text: &str, record_top_level_positions: bool) -> Result<ParsedDocument, Error> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     if text.len() > MAX_JSONC_BYTES {
         return Err(Error::Jsonc {
@@ -59,6 +94,8 @@ pub fn parse(text: &str) -> Result<Value, Error> {
         text,
         bytes: text.as_bytes(),
         position: 0,
+        record_top_level_positions,
+        top_level_positions: BTreeMap::new(),
     };
     parser.skip_trivia()?;
     if parser.position == parser.bytes.len() {
@@ -72,13 +109,18 @@ pub fn parse(text: &str) -> Result<Value, Error> {
             "unexpected content after the top-level value",
         ));
     }
-    Ok(value)
+    Ok(ParsedDocument {
+        value,
+        top_level_positions: parser.top_level_positions,
+    })
 }
 
 struct Parser<'a> {
     text: &'a str,
     bytes: &'a [u8],
     position: usize,
+    record_top_level_positions: bool,
+    top_level_positions: BTreeMap<String, SourcePosition>,
 }
 
 impl Parser<'_> {
@@ -127,6 +169,11 @@ impl Parser<'_> {
             }
             let key_position = self.position;
             let key = self.parse_string()?;
+            if self.record_top_level_positions && depth == 0 {
+                let (line, column) = line_and_column(self.text, key_position);
+                self.top_level_positions
+                    .insert(key.clone(), SourcePosition { line, column });
+            }
             self.skip_trivia()?;
             if self.peek() != Some(b':') {
                 return Err(self.syntax(self.position, "expected `:` after an object key"));
@@ -432,6 +479,16 @@ mod tests {
     }
 
     #[test]
+    fn accepts_the_maximum_nesting_depth() {
+        let text = format!(
+            "{}0{}",
+            "[".repeat(MAX_JSONC_DEPTH),
+            "]".repeat(MAX_JSONC_DEPTH)
+        );
+        parse(&text).expect("maximum nesting");
+    }
+
+    #[test]
     fn rejects_excessive_nesting() {
         let text = format!(
             "{}0{}",
@@ -440,6 +497,46 @@ mod tests {
         );
         let error = parse(&text).expect_err("deep nesting");
         assert!(error.to_string().contains("nesting exceeds"));
+    }
+
+    #[test]
+    fn accepts_the_byte_limit_and_rejects_one_byte_over() {
+        let mut exact = String::from("{}");
+        exact.push_str(&" ".repeat(MAX_JSONC_BYTES - exact.len()));
+        assert_eq!(exact.len(), MAX_JSONC_BYTES);
+        parse(&exact).expect("exact byte limit");
+
+        let error = parse(&" ".repeat(MAX_JSONC_BYTES + 1)).expect_err("over byte limit");
+        assert!(error.to_string().contains("over the"), "{error}");
+    }
+
+    #[test]
+    fn records_top_level_key_positions_only() {
+        let (_, positions) =
+            parse_with_top_level_positions("{\n  \"a\": {\"nested\": 1},\n  \"b\": 2\n}")
+                .expect("valid document");
+        assert_eq!(
+            positions.get("a"),
+            Some(&SourcePosition { line: 2, column: 3 })
+        );
+        assert_eq!(
+            positions.get("b"),
+            Some(&SourcePosition { line: 3, column: 3 })
+        );
+        assert!(!positions.contains_key("nested"));
+    }
+
+    #[test]
+    fn records_byte_columns_after_unicode() {
+        let (_, positions) =
+            parse_with_top_level_positions(r#"{"説明":"x","秘密":1}"#).expect("valid document");
+        assert_eq!(
+            positions.get("秘密"),
+            Some(&SourcePosition {
+                line: 1,
+                column: 15
+            })
+        );
     }
 
     #[test]

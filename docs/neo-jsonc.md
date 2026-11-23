@@ -37,8 +37,10 @@ The parser is bounded:
 | Document bytes | 1 MiB (`MAX_JSONC_BYTES`, `MAX_MANIFEST_BYTES`) |
 | Nesting depth | 128 (`MAX_JSONC_DEPTH`) |
 
+A document of exactly the size or depth limit is accepted; one byte or one level over is rejected.
 Errors carry a line and byte column when one is available. They do not echo document text, field
-values, unknown keys, schemes, filesystem paths, or specifiers.
+values, unknown keys, schemes, filesystem paths, or specifiers. An unknown-field error reports the
+opening quote of the top-level key but omits the key and its value.
 
 ## Fields
 
@@ -216,9 +218,9 @@ alias.
 
 ## Reserved and unknown fields
 
-Unknown keys are rejected. The key itself is not included in the error message, because an
-arbitrary key is caller text. These reserved names get a specific reason instead of a generic
-unknown field:
+Unknown keys are rejected. The error reports the key's line and byte column, but not the key or
+its value, because an arbitrary key is caller text. These reserved names get a specific reason
+instead of a generic unknown field:
 
 | Field | Reason |
 | --- | --- |
@@ -253,10 +255,11 @@ unknown field:
 - The crate reads no network. `Manifest::from_path` reads only the path it is given, and at most
   `MAX_MANIFEST_BYTES + 1` bytes from it.
 - It reads no credential, environment variable, or cache.
-- Error messages omit the supplied filesystem path, unknown keys, unknown schemes, and specifier
-  text. Canonical HTTPS URLs may contain a query because a query is part of module identity, but
-  errors never echo the URL or its query. A manifest author should still avoid putting a secret in
-  a committed import target.
+- Error messages omit the supplied filesystem path, unknown keys and values, unknown schemes, and
+  specifier text. Unknown-field errors locate the key by line and byte column instead. Canonical
+  HTTPS URLs may contain a query because a query is part of module identity, but errors never echo
+  the URL or its query. A manifest author should still avoid putting a secret in a committed import
+  target.
 - Validation is not authorization. A well-formed manifest does not prove a package, path, or host
   is safe to use.
 - Import mapping is not a sandbox. A future runtime integration must keep the existing remote

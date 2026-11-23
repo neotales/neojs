@@ -135,7 +135,7 @@ impl Manifest {
                 limit: MAX_MANIFEST_BYTES,
             });
         }
-        let value = jsonc::parse(text)?;
+        let (value, positions) = jsonc::parse_with_top_level_positions(text)?;
         let Value::Object(object) = value else {
             return Err(invalid_field(
                 "manifest",
@@ -164,7 +164,13 @@ impl Manifest {
                 "exclude" => exclude = parse_patterns(value, "exclude")?,
                 "imports" => imports = parse_imports(value)?,
                 "workspaces" => workspaces = parse_patterns(value, "workspaces")?,
-                other => return Err(unknown_field(other)),
+                other => {
+                    let position = positions
+                        .get(other)
+                        .copied()
+                        .unwrap_or(jsonc::SourcePosition::START);
+                    return Err(unknown_field(other, position));
+                }
             }
         }
 
@@ -866,7 +872,7 @@ fn invalid_field(field: &'static str, reason: impl Into<String>) -> Error {
     }
 }
 
-fn unknown_field(field: &str) -> Error {
+fn unknown_field(field: &str, position: jsonc::SourcePosition) -> Error {
     for &(reserved, reason) in RESERVED_FIELDS {
         if reserved == field {
             return Error::UnsupportedField {
@@ -875,5 +881,8 @@ fn unknown_field(field: &str) -> Error {
             };
         }
     }
-    Error::UnknownField
+    Error::UnknownField {
+        line: position.line,
+        column: position.column,
+    }
 }
