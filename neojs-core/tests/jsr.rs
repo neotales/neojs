@@ -12,6 +12,7 @@
 #![cfg(feature = "test-support")]
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -69,6 +70,7 @@ impl Reply {
 /// A scripted HTTPS server keyed by the full request URL.
 struct Server {
     replies: Mutex<HashMap<String, Reply>>,
+    sequences: Mutex<HashMap<String, VecDeque<Reply>>>,
     seen: Mutex<Vec<String>>,
     fail_if_called: bool,
 }
@@ -77,6 +79,7 @@ impl Server {
     fn new() -> Self {
         Self {
             replies: Mutex::new(HashMap::new()),
+            sequences: Mutex::new(HashMap::new()),
             seen: Mutex::new(Vec::new()),
             fail_if_called: false,
         }
@@ -95,6 +98,15 @@ impl Server {
         self
     }
 
+    /// Answers successive requests for one URL from a queue.
+    fn with_sequence(self, url: String, replies: Vec<Reply>) -> Self {
+        self.sequences
+            .lock()
+            .expect("sequence lock")
+            .insert(url, replies.into());
+        self
+    }
+
     fn transport(
         self: &Arc<Self>,
     ) -> impl Fn(&str, Duration, Option<&str>, Option<&str>) -> Result<TestRemoteResponse, String>
@@ -107,13 +119,22 @@ impl Server {
             if server.fail_if_called {
                 return Err("the scripted transport must not be called".to_string());
             }
-            let reply = server
-                .replies
+            let queued = server
+                .sequences
                 .lock()
-                .expect("reply lock")
-                .get(url)
-                .cloned()
-                .ok_or_else(|| format!("no scripted reply for {url}"))?;
+                .expect("sequence lock")
+                .get_mut(url)
+                .and_then(VecDeque::pop_front);
+            let reply = match queued {
+                Some(reply) => reply,
+                None => server
+                    .replies
+                    .lock()
+                    .expect("reply lock")
+                    .get(url)
+                    .cloned()
+                    .ok_or_else(|| format!("no scripted reply for {url}"))?,
+            };
             Ok(TestRemoteResponse {
                 status: reply.status,
                 location: reply.location.map(str::to_owned),
@@ -1066,6 +1087,229 @@ if (!String(caught).includes("already a verified JSR module")) {
         server.request_count(requested),
         1,
         "the ordinary redirect must be fetched once"
+    );
+}
+
+// Integration test: `import.meta.resolve` on an ordinary jsr.io URL does not
+// load it. It must not register an ordinary identity that blocks a later `jsr:`
+// import.
+#[test]
+fn an_import_meta_resolve_of_an_ordinary_registry_url_does_not_block_jsr() {
+    let target = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let body = b"export const value = 1;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", body)], &[(".", "./mod.js")])),
+            )
+            .with(target.clone(), Reply::ok(body.as_slice())),
+    );
+
+    run(
+        &server,
+        r#"
+const resolved = import.meta.resolve("https://jsr.io/@scope/pkg/1.0.0/mod.js");
+if (resolved !== "https://jsr.io/@scope/pkg/1.0.0/mod.js") {
+    throw new Error(`unexpected resolution ${resolved}`);
+}
+const jsr = await import("jsr:@scope/pkg@1");
+if (jsr.value !== 1) throw new Error("the jsr: import was blocked");
+"#,
+    )
+    .expect("an unresolved ordinary URL must not block a jsr: import");
+    assert_eq!(
+        server.request_count(&target),
+        1,
+        "only the jsr: load fetches the target"
+    );
+}
+
+// Integration test: `import.meta.resolve` on a `jsr:` specifier is pending, not
+// loaded. It must not block a later ordinary redirect to the same URL.
+#[test]
+fn an_import_meta_resolve_of_jsr_does_not_block_an_ordinary_redirect() {
+    let requested = "https://elsewhere.test/entry.js";
+    let target = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let body = b"export const value = 5;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", body)], &[(".", "./mod.js")])),
+            )
+            .with(target.clone(), Reply::ok(body.as_slice()))
+            .with(
+                requested.to_string(),
+                Reply::redirect("https://jsr.io/@scope/pkg/1.0.0/mod.js"),
+            ),
+    );
+
+    run(
+        &server,
+        r#"
+const resolved = import.meta.resolve("jsr:@scope/pkg@1");
+if (resolved !== "https://jsr.io/@scope/pkg/1.0.0/mod.js") {
+    throw new Error(`unexpected resolution ${resolved}`);
+}
+const direct = await import("https://elsewhere.test/entry.js");
+if (direct.value !== 5) throw new Error("the ordinary redirect was blocked");
+"#,
+    )
+    .expect("a pending jsr: resolution must not block an ordinary redirect");
+    assert_eq!(
+        server.request_count(&target),
+        1,
+        "import.meta.resolve must not fetch the target"
+    );
+}
+
+// Integration test: a failed ordinary load is not recorded. A later `jsr:`
+// import of the same URL must load and verify normally.
+#[test]
+fn a_failed_ordinary_load_does_not_block_a_jsr_import() {
+    let target = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let body = b"export const value = 3;\n";
+    let server = Arc::new(
+        Server::new()
+            .with_sequence(
+                target.clone(),
+                vec![Reply::status(404), Reply::ok(body.as_slice())],
+            )
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", body)], &[(".", "./mod.js")])),
+            ),
+    );
+
+    run(
+        &server,
+        r#"
+let failed = null;
+try {
+    await import("https://jsr.io/@scope/pkg/1.0.0/mod.js");
+} catch (error) {
+    failed = error;
+}
+if (failed === null) throw new Error("the ordinary load was expected to fail");
+const jsr = await import("jsr:@scope/pkg@1");
+if (jsr.value !== 3) throw new Error("the jsr: import was blocked by a failed load");
+"#,
+    )
+    .expect("a failed ordinary load must not poison the jsr: identity");
+    assert_eq!(
+        server.request_count(&target),
+        2,
+        "the failed ordinary attempt and the verified jsr: load each fetch once"
+    );
+}
+
+// Integration test: a failed JSR load is not marked loaded. A later ordinary
+// redirect to the same URL must load as ordinary.
+#[test]
+fn a_failed_jsr_load_does_not_block_an_ordinary_redirect() {
+    let requested = "https://elsewhere.test/entry.js";
+    let target = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let declared = b"export const value = 1;\n";
+    let actual = b"export const value = 4;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(
+                    &[("/mod.js", declared)],
+                    &[(".", "./mod.js")],
+                )),
+            )
+            .with(target.clone(), Reply::ok(actual.as_slice()))
+            .with(
+                requested.to_string(),
+                Reply::redirect("https://jsr.io/@scope/pkg/1.0.0/mod.js"),
+            ),
+    );
+
+    run(
+        &server,
+        r#"
+let failed = null;
+try {
+    await import("jsr:@scope/pkg@1");
+} catch (error) {
+    failed = error;
+}
+if (failed === null) throw new Error("the jsr: load was expected to fail");
+const direct = await import("https://elsewhere.test/entry.js");
+if (direct.value !== 4) throw new Error("the ordinary redirect was blocked");
+"#,
+    )
+    .expect("a failed jsr: load must not poison the ordinary identity");
+    assert_eq!(
+        server.request_count(&target),
+        2,
+        "the failed verified load and the ordinary redirect each fetch once"
+    );
+    assert_eq!(server.request_count(requested), 1);
+}
+
+// Integration test: an ordinary redirect to a differently encoded canonical
+// jsr.io path is recorded under the canonical identity, so a later `jsr:`
+// import cannot reuse it.
+#[test]
+fn an_encoded_redirect_to_a_registry_identity_is_detected() {
+    let requested = "https://elsewhere.test/entry.js";
+    let encoded = "https://jsr.io/@scope/pkg/1.0.0/m%6Fd.js";
+    let canonical = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let body = b"export const value = 1;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                requested.to_string(),
+                Reply::redirect("https://jsr.io/@scope/pkg/1.0.0/m%6Fd.js"),
+            )
+            .with(encoded.to_string(), Reply::ok(body.as_slice()))
+            .with(canonical.clone(), Reply::ok(body.as_slice()))
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", body)], &[(".", "./mod.js")])),
+            ),
+    );
+
+    let message = error_message(run(
+        &server,
+        r#"
+const direct = await import("https://elsewhere.test/entry.js");
+if (direct.value !== 1) throw new Error("the encoded redirect did not load");
+await import("jsr:@scope/pkg@1");
+"#,
+    ));
+    assert!(
+        message.contains("already loaded as an ordinary HTTPS module"),
+        "{message}"
+    );
+    assert_eq!(
+        server.request_count(encoded) + server.request_count(&canonical),
+        1,
+        "the jsr: resolution must not fetch the encoded or canonical file again"
     );
 }
 
