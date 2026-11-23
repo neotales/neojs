@@ -87,8 +87,14 @@ pub mod test_support {
         crate::strings::test_reads()
     }
 
-    /// Reset the streaming-search read counters.
+    /// Reset the streaming-search read counters and injected failure.
     pub fn reset_strings_text_reads() {
         crate::strings::reset_test_reads();
+    }
+
+    /// Make the read after `loads` successful windows fail with a
+    /// guest-visible exception.
+    pub fn fail_strings_after_loads(loads: usize) {
+        crate::strings::fail_after_loads(loads);
     }
 }

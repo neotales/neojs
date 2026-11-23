@@ -69,3 +69,58 @@ fn the_read_work_grows_with_the_limit_not_the_text() {
         "the limit copied the whole {TEXT_UNITS}-unit text"
     );
 }
+
+#[test]
+fn an_adversarial_append_rope_copies_only_the_bounded_prefix() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    let source = r#"
+import { lastIndexOfFold } from "neo:strings";
+let text = "";
+for (let index = 0; index < 50000; index += 1) text += "a";
+const result = lastIndexOfFold(text, "q", 10000);
+if (result !== -1) throw new Error(`unexpected result: ${result}`);
+"#;
+    let mut runtime = Runtime::new().expect("runtime");
+    test_support::reset_strings_text_reads();
+    runtime
+        .run_source("memory.js", source)
+        .expect("rope search");
+    let (units, windows) = test_support::strings_text_reads();
+    assert!(
+        units <= 10_000 + 64,
+        "rope search copied {units} units, expected at most {}",
+        10_000 + 64
+    );
+    assert!(windows <= 11, "rope search read {windows} windows");
+}
+
+#[test]
+fn a_read_failure_stops_immediately_and_reaches_the_guest() {
+    let _guard = TEST_LOCK.lock().expect("test lock");
+    let source = r#"
+import { lastIndexOfFold } from "neo:strings";
+const text = "a".repeat(1000000);
+let caught;
+try {
+    lastIndexOfFold(text, "q", 10000);
+} catch (error) {
+    caught = error;
+}
+if (!(caught instanceof Error)) throw new Error("the injected error was not guest-visible");
+if (caught.message !== "injected strings read failure") {
+    throw new Error(`the original exception was masked: ${caught.message}`);
+}
+"#;
+    let mut runtime = Runtime::new().expect("runtime");
+    test_support::reset_strings_text_reads();
+    test_support::fail_strings_after_loads(1);
+    runtime
+        .run_source("memory.js", source)
+        .expect("the guest catches the injected exception");
+    let (units, windows) = test_support::strings_text_reads();
+    assert!(windows == 1, "the failed scan read {windows} windows");
+    assert!(
+        units <= WINDOW_UNITS,
+        "the failed scan copied {units} units"
+    );
+}

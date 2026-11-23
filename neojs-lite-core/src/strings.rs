@@ -26,6 +26,15 @@ static TEXT_UNITS_READ: std::sync::atomic::AtomicUsize = std::sync::atomic::Atom
 #[cfg(feature = "test-support")]
 static TEXT_WINDOWS_READ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Number of successful windows before an injected read failure.
+#[cfg(feature = "test-support")]
+static FAIL_AFTER_LOADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Sentinel for no injected read failure.
+#[cfg(feature = "test-support")]
+const NO_INJECTED_FAILURE: usize = usize::MAX;
+
 /// Returns `(units, windows)` copied from QuickJS strings by the streaming
 /// search.
 #[cfg(feature = "test-support")]
@@ -36,11 +45,34 @@ pub(crate) fn test_reads() -> (usize, usize) {
     )
 }
 
-/// Resets the streaming-search read counters.
+/// Resets the streaming-search read counters and injected failure.
 #[cfg(feature = "test-support")]
 pub(crate) fn reset_test_reads() {
     TEXT_UNITS_READ.store(0, std::sync::atomic::Ordering::Relaxed);
     TEXT_WINDOWS_READ.store(0, std::sync::atomic::Ordering::Relaxed);
+    FAIL_AFTER_LOADS.store(NO_INJECTED_FAILURE, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Makes the read after `loads` successful windows fail with a guest-visible
+/// exception.
+#[cfg(feature = "test-support")]
+pub(crate) fn fail_after_loads(loads: usize) {
+    FAIL_AFTER_LOADS.store(loads, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Returns whether the current load should be the injected failure.
+#[cfg(feature = "test-support")]
+fn should_fail_load() -> bool {
+    let remaining = FAIL_AFTER_LOADS.load(std::sync::atomic::Ordering::Relaxed);
+    if remaining == NO_INJECTED_FAILURE {
+        return false;
+    }
+    if remaining == 0 {
+        FAIL_AFTER_LOADS.store(NO_INJECTED_FAILURE, std::sync::atomic::Ordering::Relaxed);
+        return true;
+    }
+    FAIL_AFTER_LOADS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    false
 }
 
 /// Creates the frozen public module object.
@@ -145,7 +177,11 @@ fn js_length<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Result<usize> {
         )
     };
     if raw.tag == i64::from(qjs::JS_TAG_EXCEPTION) {
-        return Err(rquickjs::Error::Unknown);
+        return Err(if ctx.has_exception() {
+            rquickjs::Error::Exception
+        } else {
+            rquickjs::Error::Unknown
+        });
     }
     let length = unsafe { Value::from_raw(ctx.clone(), raw) };
     length
@@ -167,7 +203,6 @@ struct Utf16Text<'js> {
     read_limit: usize,
     window_start: usize,
     window: Vec<u16>,
-    failed: bool,
 }
 
 impl<'js> Utf16Text<'js> {
@@ -190,60 +225,53 @@ impl<'js> Utf16Text<'js> {
             read_limit: usize::MAX,
             window_start: 0,
             window: Vec::new(),
-            failed: false,
         })
     }
 
-    fn load(&mut self, start: usize) {
+    fn load(&mut self, start: usize) -> Result<()> {
+        #[cfg(feature = "test-support")]
+        if should_fail_load() {
+            return Err(Exception::throw_message(
+                &self.ctx,
+                "injected strings read failure",
+            ));
+        }
         let end = (start + logic::WINDOW_UNITS)
             .min(self.length)
             .min(self.read_limit.max(start + 1));
-        let piece: Value<'js> = match self.slice.call((This(self.text.clone()), start, end)) {
-            Ok(piece) => piece,
-            Err(_) => {
-                self.failed = true;
-                return;
-            }
-        };
-        match js_units(&self.ctx, &piece) {
-            Ok(units) => {
-                self.window = units;
-                self.window_start = start;
-                #[cfg(feature = "test-support")]
-                {
-                    TEXT_UNITS_READ
-                        .fetch_add(self.window.len(), std::sync::atomic::Ordering::Relaxed);
-                    TEXT_WINDOWS_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            Err(_) => self.failed = true,
+        let piece: Value<'js> = self.slice.call((This(self.text.clone()), start, end))?;
+        let units = js_units(&self.ctx, &piece)?;
+        self.window = units;
+        self.window_start = start;
+        #[cfg(feature = "test-support")]
+        {
+            TEXT_UNITS_READ.fetch_add(self.window.len(), std::sync::atomic::Ordering::Relaxed);
+            TEXT_WINDOWS_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        Ok(())
     }
 }
 
 impl logic::Utf16Source for Utf16Text<'_> {
+    type Error = rquickjs::Error;
+
     fn len(&self) -> usize {
         self.length
     }
 
-    fn set_read_limit(&mut self, end: usize) {
+    fn set_read_limit(&mut self, end: usize) -> std::result::Result<(), Self::Error> {
         self.read_limit = end;
+        Ok(())
     }
 
-    fn unit(&mut self, index: usize) -> u16 {
-        if self.failed {
-            return 0;
-        }
+    fn unit(&mut self, index: usize) -> std::result::Result<u16, Self::Error> {
         if index < self.window_start || index >= self.window_start + self.window.len() {
-            self.load(index);
-        }
-        if self.failed {
-            return 0;
+            self.load(index)?;
         }
         self.window
             .get(index - self.window_start)
             .copied()
-            .unwrap_or(0)
+            .ok_or(rquickjs::Error::Unknown)
     }
 }
 
@@ -287,7 +315,11 @@ fn js_units<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Result<Vec<u16>> {
     let raw =
         unsafe { qjs::JS_ToCStringLenUTF16(ctx.as_raw().as_ptr(), &mut length, value.as_raw()) };
     if raw.is_null() {
-        return Err(rquickjs::Error::Unknown);
+        return Err(if ctx.has_exception() {
+            rquickjs::Error::Exception
+        } else {
+            rquickjs::Error::Unknown
+        });
     }
     // SAFETY: QuickJS returns `length` initialized UTF-16 code units that stay
     // valid until `JS_FreeCStringUTF16`.
@@ -307,7 +339,11 @@ fn js_string<'js>(ctx: &Ctx<'js>, units: &[u16]) -> Result<Value<'js>> {
         )
     };
     if raw.tag == i64::from(qjs::JS_TAG_EXCEPTION) {
-        return Err(rquickjs::Error::Unknown);
+        return Err(if ctx.has_exception() {
+            rquickjs::Error::Exception
+        } else {
+            rquickjs::Error::Unknown
+        });
     }
     // SAFETY: the value is a fresh string owned by this context.
     Ok(unsafe { Value::from_raw(ctx.clone(), raw) })
@@ -354,16 +390,10 @@ fn index_of_fold<'js>(
     let search = required_string(&ctx, &search, logic::SEARCH_MESSAGE)?;
     let from_index = optional_index(&ctx, &from_index)?;
     let mut source = Utf16Text::new(&ctx, &text)?;
-    let result = logic::index_of_fold_source(&mut source, &search, from_index);
-    if source.failed {
-        return Err(Exception::throw_internal(
-            &ctx,
-            "strings text access failed",
-        ));
-    }
-    match result {
+    match logic::index_of_fold_source(&mut source, &search, from_index) {
         Ok(index) => Ok(index_value(index)),
-        Err(error) => Err(Exception::throw_range(&ctx, error.message())),
+        Err(logic::SearchError::Index(error)) => Err(Exception::throw_range(&ctx, error.message())),
+        Err(logic::SearchError::Source(error)) => Err(error),
     }
 }
 
@@ -377,16 +407,10 @@ fn last_index_of_fold<'js>(
     let search = required_string(&ctx, &search, logic::SEARCH_MESSAGE)?;
     let from_index = optional_index(&ctx, &from_index)?;
     let mut source = Utf16Text::new(&ctx, &text)?;
-    let result = logic::last_index_of_fold_source(&mut source, &search, from_index);
-    if source.failed {
-        return Err(Exception::throw_internal(
-            &ctx,
-            "strings text access failed",
-        ));
-    }
-    match result {
+    match logic::last_index_of_fold_source(&mut source, &search, from_index) {
         Ok(index) => Ok(index_value(index)),
-        Err(error) => Err(Exception::throw_range(&ctx, error.message())),
+        Err(logic::SearchError::Index(error)) => Err(Exception::throw_range(&ctx, error.message())),
+        Err(logic::SearchError::Source(error)) => Err(error),
     }
 }
 
