@@ -30,7 +30,10 @@
 //! `neo:strings`, `test`, `neo:test`, `uuid`, `neo:uuid`, `uuid/v4`,
 //! `neo:uuid/v4`, `uuid/v7`, and `neo:uuid/v7`. The `uuid/v4` and `uuid/v7`
 //! subpaths are thin modules whose named and default exports are the same
-//! functions as `uuid.v4` and `uuid.v7`.
+//! functions as `uuid.v4` and `uuid.v7`. The global `Neo` reports `engine`
+//! `"neo"`; `Neo.getBuiltInModulesList` returns one frozen array containing each
+//! built-in's bare registry name followed by its canonical `neo:` specifier,
+//! including both UUID subpaths.
 //!
 //! `assert` is a synchronous assertion surface inspired by Node's
 //! `assert/strict` and Deno's `@std/assert`. The registry object is the

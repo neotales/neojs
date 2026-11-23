@@ -183,7 +183,10 @@ impl Runtime {
     /// `uuid`
     /// built-in modules are cached in that realm, and both bare and
     /// `neo:`-prefixed import specifiers resolve to them; a new `Runtime`
-    /// creates a new realm, new functions, and new module instances. The
+    /// creates a new realm, new functions, and new module instances. The global
+    /// `Neo` reports `engine` `"neo"`, and `Neo.getBuiltInModulesList` returns
+    /// one frozen array of each bare name and canonical `neo:` specifier in
+    /// registration order. The
     /// `age`, `crypto`, `path`, `ssh`, `stdio`, and `uuid` modules register their
     /// private host ops in that realm before user code runs; `chars`, `os`,
     /// `slices`, `strings`, and `test` are plain ECMAScript, and `assert` calls

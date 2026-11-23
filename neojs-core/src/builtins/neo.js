@@ -1,7 +1,10 @@
 // neojs built-in modules.
 //
 // This script is evaluated once per realm before the entry module. It installs
-// the global `Neo` object and the module objects that object caches. `assert`
+// the global `Neo` object and the module objects that object caches.
+// `Neo.engine` is `"neo"` for this V8 runtime, and
+// `Neo.getBuiltInModulesList` returns every implemented bare and canonical
+// `neo:` module specifier as one frozen array. `assert`
 // calls one private host op that observes a genuine native Promise; `chars` and
 // `console` are plain ECMAScript; `crypto` calls thirty-two private host ops:
 // four use the operating system CSPRNG and AES-256-GCM in
@@ -75,7 +78,10 @@
     // Look up modules through a bound intrinsic, not `modules.get`. A dynamic
     // property lookup would consult the mutable `Map.prototype.get`, letting
     // later code replace lookups or receive the private registry map itself.
+    // The same reasoning applies to the one-time iteration that builds the
+    // public module list.
     const mapGet = Function.prototype.call.bind(Map.prototype.get);
+    const mapForEachEntry = Function.prototype.call.bind(Map.prototype.forEach);
     const makeError = Error;
     const makeTypeError = TypeError;
     const makeRangeError = RangeError;
@@ -7220,6 +7226,16 @@
         ["uuid/v7", uuidV7Module],
     ]);
 
+    // One registry name and one canonical `neo:` specifier per built-in, in
+    // the registry's insertion order. Building this from `modules` keeps the
+    // public list aligned with what `getBuiltInModule` and the loader actually
+    // implement, including the `uuid/v4` and `uuid/v7` subpaths.
+    const builtInModuleList = [];
+    mapForEachEntry(modules, (_module, name) => {
+        builtInModuleList.push(name, `neo:${name}`);
+    });
+    freeze(builtInModuleList);
+
     /**
      * Return a built-in module by name, or `undefined` when the name is not
      * implemented. The same module object is returned for every lookup.
@@ -7234,8 +7250,27 @@
         return mapGet(modules, name);
     }
 
+    /**
+     * Return every implemented built-in module specifier as one frozen array.
+     *
+     * Entries are in registration order. Each built-in contributes its bare
+     * registry name followed by its canonical `neo:` specifier, so the
+     * `uuid/v4` and `uuid/v7` subpaths and both spellings of every module are
+     * present. The array is frozen and the same array is returned for every
+     * call, so a caller cannot change later results. It lists no Node modules:
+     * a `node:` opt-in is not implemented.
+     */
+    function getBuiltInModulesList() {
+        return builtInModuleList;
+    }
+
+    // The engine name is `neo` for this V8 runtime. The QuickJS runtime is
+    // `neo-lite`; it does not install this global yet and has no built-in
+    // modules to list.
+    const engine = "neo";
+
     Object.defineProperty(globalThis, "Neo", {
-        value: Object.freeze({ getBuiltInModule }),
+        value: Object.freeze({ engine, getBuiltInModule, getBuiltInModulesList }),
         writable: false,
         enumerable: false,
         configurable: false,
