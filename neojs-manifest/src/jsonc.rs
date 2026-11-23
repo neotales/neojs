@@ -5,9 +5,10 @@
 //! - `//` line comments and `/* ... */` block comments, outside strings.
 //! - A single trailing comma in an object or array.
 //!
-//! Comments do not nest. A leading UTF-8 byte-order mark is ignored. Everything
-//! else is JSON: single quotes, unquoted keys, `NaN`, `Infinity`, hexadecimal
-//! numbers, and multiple top-level values are rejected.
+//! Comments do not nest. A leading UTF-8 byte-order mark is skipped rather than
+//! parsed; its three bytes still count toward the size limit and byte columns.
+//! Everything else is JSON: single quotes, unquoted keys, `NaN`, `Infinity`,
+//! hexadecimal numbers, and multiple top-level values are rejected.
 //!
 //! Duplicate keys are rejected at every object depth instead of silently taking
 //! the last value. `serde_json`'s data model does not retain duplicate keys, so
@@ -25,7 +26,7 @@ use serde_json::{Map, Value};
 
 use crate::Error;
 
-/// Maximum bytes accepted by [`parse`].
+/// Maximum bytes in the input document accepted by [`parse`].
 pub const MAX_JSONC_BYTES: usize = 1024 * 1024;
 
 /// Maximum nesting depth accepted by [`parse`].
@@ -37,8 +38,9 @@ pub const MAX_JSONC_DEPTH: usize = 128;
 /// Parses one JSONC document.
 ///
 /// Returns the same [`serde_json::Value`] shape as `serde_json`, with comments
-/// removed and trailing commas accepted. A leading byte-order mark is ignored.
-/// Object keys are unique at every depth.
+/// removed and trailing commas accepted. A leading byte-order mark is skipped
+/// as syntax but remains part of the document for byte positions and the size
+/// limit. Object keys are unique at every depth.
 ///
 /// # Errors
 ///
@@ -78,7 +80,6 @@ struct ParsedDocument {
 }
 
 fn parse_document(text: &str, record_top_level_positions: bool) -> Result<ParsedDocument, Error> {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     if text.len() > MAX_JSONC_BYTES {
         return Err(Error::Jsonc {
             line: 1,
@@ -90,10 +91,14 @@ fn parse_document(text: &str, record_top_level_positions: bool) -> Result<Parsed
         });
     }
 
+    // Keep the original text so positions count the BOM bytes. The parser
+    // starts after the BOM, which is the only place it is accepted.
+    let start = if text.starts_with('\u{feff}') { 3 } else { 0 };
     let mut parser = Parser {
         text,
         bytes: text.as_bytes(),
-        position: 0,
+        position: start,
+        line_index: LineIndex::new(text),
         record_top_level_positions,
         top_level_positions: BTreeMap::new(),
     };
@@ -119,8 +124,44 @@ struct Parser<'a> {
     text: &'a str,
     bytes: &'a [u8],
     position: usize,
+    line_index: LineIndex,
     record_top_level_positions: bool,
     top_level_positions: BTreeMap<String, SourcePosition>,
+}
+
+/// Precomputed byte offsets of line starts.
+///
+/// Building it scans the document once. A position lookup is a binary search,
+/// so recording positions for many keys does not rescan each key's prefix.
+struct LineIndex {
+    starts: Vec<usize>,
+    len: usize,
+}
+
+impl LineIndex {
+    fn new(text: &str) -> Self {
+        let mut starts = Vec::with_capacity(1);
+        starts.push(0);
+        for (index, byte) in text.bytes().enumerate() {
+            if byte == b'\n' {
+                starts.push(index + 1);
+            }
+        }
+        Self {
+            starts,
+            len: text.len(),
+        }
+    }
+
+    fn position(&self, offset: usize) -> SourcePosition {
+        let offset = offset.min(self.len);
+        let line = self.starts.partition_point(|start| *start <= offset).max(1);
+        let line_start = self.starts[line - 1];
+        SourcePosition {
+            line,
+            column: offset - line_start + 1,
+        }
+    }
 }
 
 impl Parser<'_> {
@@ -170,9 +211,8 @@ impl Parser<'_> {
             let key_position = self.position;
             let key = self.parse_string()?;
             if self.record_top_level_positions && depth == 0 {
-                let (line, column) = line_and_column(self.text, key_position);
-                self.top_level_positions
-                    .insert(key.clone(), SourcePosition { line, column });
+                let position = self.line_index.position(key_position);
+                self.top_level_positions.insert(key.clone(), position);
             }
             self.skip_trivia()?;
             if self.peek() != Some(b':') {
@@ -181,8 +221,11 @@ impl Parser<'_> {
             self.position += 1;
             let value = self.parse_value(depth + 1)?;
             if object.insert(key, value).is_some() {
-                let (line, column) = line_and_column(self.text, key_position);
-                return Err(Error::DuplicateKey { line, column });
+                let position = self.line_index.position(key_position);
+                return Err(Error::DuplicateKey {
+                    line: position.line,
+                    column: position.column,
+                });
             }
             self.skip_trivia()?;
             match self.peek() {
@@ -380,31 +423,13 @@ impl Parser<'_> {
     }
 
     fn syntax(&self, position: usize, message: impl Into<String>) -> Error {
-        let (line, column) = line_and_column(self.text, position);
+        let position = self.line_index.position(position);
         Error::Jsonc {
-            line,
-            column,
+            line: position.line,
+            column: position.column,
             message: message.into(),
         }
     }
-}
-
-/// Returns a one-based line and byte column for a byte offset.
-///
-/// Columns count bytes rather than Unicode scalar values so the numbers stay
-/// cheap to compute and match the byte-oriented scanner. Errors do not echo the
-/// surrounding text.
-fn line_and_column(text: &str, position: usize) -> (usize, usize) {
-    let position = position.min(text.len());
-    let mut line = 1;
-    let mut line_start = 0;
-    for (index, byte) in text.as_bytes()[..position].iter().enumerate() {
-        if *byte == b'\n' {
-            line += 1;
-            line_start = index + 1;
-        }
-    }
-    (line, position - line_start + 1)
 }
 
 #[cfg(test)]
@@ -540,7 +565,61 @@ mod tests {
     }
 
     #[test]
-    fn line_and_column_are_one_based() {
+    fn records_positions_relative_to_the_original_bom() {
+        let (_, positions) =
+            parse_with_top_level_positions("\u{feff}{\"a\":1,\n\"b\":2}").expect("valid document");
+        assert_eq!(
+            positions.get("a"),
+            Some(&SourcePosition { line: 1, column: 5 })
+        );
+        assert_eq!(
+            positions.get("b"),
+            Some(&SourcePosition { line: 2, column: 1 })
+        );
+    }
+
+    #[test]
+    fn many_keys_keep_position_recording_bounded() {
+        use std::fmt::Write as _;
+        use std::time::Duration;
+        use std::time::Instant;
+
+        const KEYS: usize = 80_000;
+        let mut text = String::from("{");
+        let mut expected = Vec::with_capacity(KEYS);
+        for index in 0..KEYS {
+            if index > 0 {
+                text.push(',');
+            }
+            let offset = text.len();
+            write!(&mut text, "\"k{index}\":0").expect("write to string");
+            expected.push((format!("k{index}"), offset));
+        }
+        text.push('}');
+        assert!(text.len() <= MAX_JSONC_BYTES, "{} bytes", text.len());
+
+        let started = Instant::now();
+        let (_, positions) = parse_with_top_level_positions(&text).expect("valid document");
+        let elapsed = started.elapsed();
+
+        assert_eq!(positions.len(), KEYS);
+        for (key, offset) in &expected {
+            assert_eq!(
+                positions.get(key),
+                Some(&SourcePosition {
+                    line: 1,
+                    column: *offset + 1
+                })
+            );
+        }
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "position recording regressed to a prefix scan: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn syntax_errors_report_one_based_line_and_column() {
         let error = parse("{\n  \"a\": ]\n}").expect_err("bad value");
         match error {
             Error::Jsonc { line, column, .. } => {

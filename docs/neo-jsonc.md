@@ -24,7 +24,9 @@ The parser accepts standard JSON plus:
 
 - `//` line comments and `/* ... */` block comments, outside strings.
 - One trailing comma per object or array, for example `{"a": 1,}` or `["a",]`.
-- An optional leading UTF-8 byte-order mark.
+- An optional leading UTF-8 byte-order mark. It is skipped as syntax, but its three bytes count
+  toward the size limit and toward byte columns, so positions remain relative to the original
+  input.
 
 Comments do not nest. Single quotes, unquoted keys, `NaN`, `Infinity`, hexadecimal numbers, and
 multiple top-level values are rejected. Duplicate keys are rejected at every object depth; the
@@ -38,9 +40,11 @@ The parser is bounded:
 | Nesting depth | 128 (`MAX_JSONC_DEPTH`) |
 
 A document of exactly the size or depth limit is accepted; one byte or one level over is rejected.
-Errors carry a line and byte column when one is available. They do not echo document text, field
-values, unknown keys, schemes, filesystem paths, or specifiers. An unknown-field error reports the
-opening quote of the top-level key but omits the key and its value.
+Line starts are precomputed in one pass, so recording many key positions is linear in the document
+size rather than rescanning each key's prefix. Errors carry a line and byte column when one is
+available. They do not echo document text, field values, unknown keys, schemes, filesystem paths, or
+specifiers. An unknown-field error reports the opening quote of the top-level key but omits the key
+and its value.
 
 ## Fields
 

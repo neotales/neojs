@@ -230,6 +230,36 @@ fn unknown_field_reports_a_byte_column_after_unicode() {
 }
 
 #[test]
+fn unknown_field_position_includes_a_first_line_bom() {
+    let text = "\u{feff}{\"name\":\"@a/b\",\"秘密\":true}";
+    let error = Manifest::parse(text).expect_err("unknown field");
+    let message = error.to_string();
+    match error {
+        Error::UnknownField { line, column } => {
+            assert_eq!(line, 1);
+            assert_eq!(column, 19);
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+    assert!(!message.contains("秘密"), "{message}");
+}
+
+#[test]
+fn unknown_field_position_after_a_bom_on_a_later_line() {
+    let text = "\u{feff}{\n  \"name\": \"@a/b\",\n  \"秘密\": true\n}";
+    let error = Manifest::parse(text).expect_err("unknown field");
+    let message = error.to_string();
+    match error {
+        Error::UnknownField { line, column } => {
+            assert_eq!(line, 3);
+            assert_eq!(column, 3);
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+    assert!(!message.contains("秘密"), "{message}");
+}
+
+#[test]
 fn rejects_duplicate_keys_and_invalid_types() {
     let duplicate = Manifest::parse(r#"{"name":"@a/b","name":"@c/d"}"#).expect_err("duplicate");
     assert!(matches!(duplicate, Error::DuplicateKey { .. }));
