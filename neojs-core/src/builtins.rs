@@ -27,7 +27,9 @@
 //! `chars.toUpper`/`chars.toLower`, the registry property, and the module
 //! namespace's named exports all refer to the same function objects. The ES
 //! module namespace itself is a distinct object from the registry object.
-//! `slices` is gated with `neo-slices`, which implies `neo-chars`.
+//! `slices` is implemented separately in `builtins/slices.impl.js`; that file is
+//! compiled in only with `neo-slices`, so a build without the feature does not
+//! carry its implementation bytes. `neo-slices` implies `neo-chars`.
 //! `crypto` calls private host ops registered by [`crate::crypto`],
 //! [`crate::crypto_cipher`], [`crate::crypto_hash`], and
 //! [`crate::crypto_shamir`]; it
@@ -152,9 +154,16 @@ const CHARS_DECLARATION_TOKEN: &str = "// __NEO_CHARS_DECLARATION__";
 /// The marker replaced with the `chars` registry entry.
 const CHARS_REGISTRY_TOKEN: &str = "// __NEO_CHARS_REGISTRY_ENTRY__";
 
-/// The markers around the inline `slices` implementation.
-const SLICES_IMPL_START_TOKEN: &str = "// __NEO_SLICES_IMPL_START__";
-const SLICES_IMPL_END_TOKEN: &str = "// __NEO_SLICES_IMPL_END__";
+/// The marker replaced with the separate `slices` implementation source.
+///
+/// The implementation is not part of [`NEO_SHIM_SOURCE`]. It is compiled in
+/// only when `neo-slices` is enabled, so a disabled build does not carry its
+/// bytes.
+const SLICES_IMPL_TOKEN: &str = "// __NEO_SLICES_IMPL__";
+
+/// The `slices` implementation, compiled only when `neo-slices` is enabled.
+#[cfg(feature = "neo-slices")]
+const SLICES_IMPL_SOURCE: &str = include_str!("builtins/slices.impl.js");
 
 /// The marker replaced with the `slices` registry entry.
 const SLICES_REGISTRY_TOKEN: &str = "// __NEO_SLICES_REGISTRY_ENTRY__";
@@ -164,28 +173,6 @@ const OS_PLATFORM_TOKEN: &str = "__NEO_OS_PLATFORM__";
 
 /// The placeholder replaced with the build target's `std::env::consts::ARCH`.
 const OS_ARCH_TOKEN: &str = "__NEO_OS_ARCH__";
-
-/// Removes one marked region, including both markers.
-///
-/// The markers are static comments in [`NEO_SHIM_SOURCE`]. This is source
-/// selection at build time, not a runtime filter: a feature that is off must
-/// remove the bytes instead of leaving unreachable code in the realm shim.
-#[cfg(not(feature = "neo-slices"))]
-fn remove_marked_region(source: &str, start: &str, end: &str) -> String {
-    let Some(start_index) = source.find(start) else {
-        debug_assert!(false, "missing start marker: {start}");
-        return source.to_owned();
-    };
-    let Some(relative_end) = source[start_index..].find(end) else {
-        debug_assert!(false, "missing end marker: {end}");
-        return source.to_owned();
-    };
-    let end_index = start_index + relative_end + end.len();
-    let mut result = String::with_capacity(source.len() - (end_index - start_index));
-    result.push_str(&source[..start_index]);
-    result.push_str(&source[end_index..]);
-    result
-}
 
 /// Returns the shim with the build target's `os` constants substituted and the
 /// selected built-in source and registration spliced in.
@@ -197,11 +184,12 @@ fn remove_marked_region(source: &str, start: &str, end: &str) -> String {
 ///
 /// `neo-chars` replaces the declaration marker with
 /// [`neojs_builtins::chars::IMPLEMENTATION`], the same source the QuickJS shim
-/// evaluates, and adds the registry entry. `neo-slices` adds the `slices`
-/// implementation and registry entry; it implies `neo-chars` because `CharSlice`
-/// captures `chars.toUpper` and `chars.toLower`. A disabled module's source,
-/// registry entry, loader entry, and name are all absent. The default V8
-/// features keep both present, so the default surface is unchanged.
+/// evaluates, and adds the registry entry. `neo-slices` splices the separate
+/// `slices.impl.js` source and registry entry; it implies `neo-chars` because
+/// `CharSlice` captures `chars.toUpper` and `chars.toLower`. A disabled module's
+/// source, registry entry, loader entry, and name are all absent. The `slices`
+/// source is not compiled into a disabled build at all. The default V8 features
+/// keep both present, so the default surface is unchanged.
 pub(crate) fn neo_shim() -> String {
     let shim = NEO_SHIM_SOURCE
         .replace(OS_PLATFORM_TOKEN, &js_string(std::env::consts::OS))
@@ -221,19 +209,16 @@ pub(crate) fn neo_shim() -> String {
 
     #[cfg(feature = "neo-slices")]
     let shim = shim
-        .replace(SLICES_IMPL_START_TOKEN, "")
-        .replace(SLICES_IMPL_END_TOKEN, "")
+        .replace(SLICES_IMPL_TOKEN, SLICES_IMPL_SOURCE)
         .replace(SLICES_REGISTRY_TOKEN, "[\"slices\", slices],");
     #[cfg(not(feature = "neo-slices"))]
-    let shim = {
-        let shim = remove_marked_region(&shim, SLICES_IMPL_START_TOKEN, SLICES_IMPL_END_TOKEN);
-        shim.replace(SLICES_REGISTRY_TOKEN, "")
-    };
+    let shim = shim
+        .replace(SLICES_IMPL_TOKEN, "")
+        .replace(SLICES_REGISTRY_TOKEN, "");
 
     debug_assert!(!shim.contains(CHARS_DECLARATION_TOKEN));
     debug_assert!(!shim.contains(CHARS_REGISTRY_TOKEN));
-    debug_assert!(!shim.contains(SLICES_IMPL_START_TOKEN));
-    debug_assert!(!shim.contains(SLICES_IMPL_END_TOKEN));
+    debug_assert!(!shim.contains(SLICES_IMPL_TOKEN));
     debug_assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
     shim
 }
@@ -596,7 +581,7 @@ pub(crate) fn implemented_specifiers() -> String {
 mod tests {
     use super::{
         CHARS_DECLARATION_TOKEN, CHARS_REGISTRY_TOKEN, OS_ARCH_TOKEN, OS_PLATFORM_TOKEN,
-        SLICES_IMPL_END_TOKEN, SLICES_IMPL_START_TOKEN, SLICES_REGISTRY_TOKEN, neo_shim,
+        SLICES_IMPL_TOKEN, SLICES_REGISTRY_TOKEN, neo_shim,
     };
     use deno_core::url::Url;
 
@@ -612,8 +597,7 @@ mod tests {
         assert!(!shim.contains(OS_ARCH_TOKEN));
         assert!(!shim.contains(CHARS_DECLARATION_TOKEN));
         assert!(!shim.contains(CHARS_REGISTRY_TOKEN));
-        assert!(!shim.contains(SLICES_IMPL_START_TOKEN));
-        assert!(!shim.contains(SLICES_IMPL_END_TOKEN));
+        assert!(!shim.contains(SLICES_IMPL_TOKEN));
         assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
         assert!(
             shim.contains(&format!("platform: \"{}\"", std::env::consts::OS)),

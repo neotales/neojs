@@ -320,9 +320,10 @@ takes the bare names in the list. The `neo:` entries are the canonical import sp
 entries are registry names and import aliases, so `Neo.getBuiltInModule("neo:age")` returns
 `undefined`. The V8 build enables the positive `neo-chars` and `neo-slices` features by default;
 `--no-default-features` removes both modules, their realm-shim source, their registry entries, and
-their loader entries. `neo-slices` implies `neo-chars` because `CharSlice` captures
-`chars.toUpper`/`chars.toLower`. Features are additive across the dependency graph and are not a
-sandbox.
+their loader entries. The `slices` implementation is a separate source file included only when
+`neo-slices` is enabled, so a disabled build does not embed its bytes. `neo-slices` implies
+`neo-chars` because `CharSlice` captures `chars.toUpper`/`chars.toLower`. Features are additive across
+the dependency graph and are not a sandbox.
 
 The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"` and,
 with its default `neo-chars` feature, implements one shared built-in, `neo:chars`.
