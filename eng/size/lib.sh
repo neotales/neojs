@@ -392,13 +392,17 @@ size_append_record() {
     local ledger=$1 record=$2 lock=$3
     local key context_key existing_key other_key errors
 
-    errors=$(size_record_errors "$record")
-    [ -z "$errors" ] || size_die "refusing to append an invalid record: $errors"
-
-    key=$(size_record_key "$record")
-    context_key=$(size_context_key "$record")
+    # The keys are derived from the record, not supplied by the caller, so add
+    # them before validating; size_record_errors checks both.
+    key=$(size_record_key "$record") ||
+        size_die "could not derive a record key; the record is malformed"
+    context_key=$(size_context_key "$record") ||
+        size_die "could not derive a context key; the record is malformed"
     record=$(jq -c --arg key "$key" --arg context_key "$context_key" \
         '.key = $key | .context_key = $context_key' <<<"$record")
+
+    errors=$(size_record_errors "$record")
+    [ -z "$errors" ] || size_die "refusing to append an invalid record: $errors"
 
     mkdir -p -- "$(dirname -- "$ledger")" "$(dirname -- "$lock")"
     exec 200>"$lock"

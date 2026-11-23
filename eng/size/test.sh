@@ -212,6 +212,15 @@ else
 fi
 assert_contains "$TMP/append.log" "already recorded" "idempotent append reports the existing key"
 
+RAW=$(fixture)
+size_append_record "$TMP/raw.jsonl" "$RAW" "$TMP/raw.lock" >/dev/null 2>"$TMP/raw.err"
+if jq -e '.key and .context_key' "$TMP/raw.jsonl" >/dev/null 2>&1; then
+    ok "append derives keys for a record that lacks them"
+else
+    fail "append did not derive keys"
+    cat "$TMP/raw.err" >&2
+fi
+
 SECOND=$(jq -c '
   .artifact.package = "neojs-lite"
   | .artifact.bin = "neojs-lite"
