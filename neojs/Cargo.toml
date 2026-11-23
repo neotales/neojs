@@ -9,14 +9,25 @@ rust-version.workspace = true
 authors.workspace = true
 
 [dependencies]
-neojs-core = { version = "0.1.0", path = "../neojs-core" }
+# The command-line bundle is explicit rather than inherited from neojs-core's
+# defaults: a change to the library defaults must not silently change what the
+# `neojs` binary advertises. Modules are selected here; this is not a sandbox
+# and does not change the process authority of the code that runs.
+neojs-core = { version = "0.1.0", path = "../neojs-core", default-features = false, features = [
+    "neo-strings",
+] }
 # Deterministic shell-style expansion for `neojs test`.
 glob.workspace = true
 
 [dev-dependencies]
 # The duplicate dependency enables the test-only fault injection for this
-# package's tests. A normal `cargo build -p neojs` does not include dev-deps.
-neojs-core = { version = "0.1.0", path = "../neojs-core", features = ["test-support"] }
+# package's tests. A normal `cargo build -p neojs` does not include dev-deps. The
+# module bundle is repeated so tests exercise the same explicit selection as the
+# binary instead of re-enabling neojs-core defaults.
+neojs-core = { version = "0.1.0", path = "../neojs-core", default-features = false, features = [
+    "neo-strings",
+    "test-support",
+] }
 neotales-ssh.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

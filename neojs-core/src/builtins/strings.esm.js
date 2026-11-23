@@ -1,15 +1,17 @@
 // The `strings` built-in module as seen by `import ... from "strings"` or
 // `import ... from "neo:strings"`.
 //
-// The implementations live in `neo.js`, which the runtime evaluates once per
-// realm. This file only re-exports them, so every named export is the same
-// function object as the matching property of
+// The implementations live in `strings.impl.js`, which `neo_shim` includes in
+// the realm shim only when the `neo-strings` feature is enabled. This adapter is
+// itself included only under that feature. It only re-exports the functions, so
+// every named export is the same function object as the matching property of
 // `Neo.getBuiltInModule("strings")`. Nothing here reaches the private module
 // registry: it reads the public module object and binds its properties.
 //
 // The exported list must match the properties of the `strings` object in
-// `neo.js`. `neojs-core/tests/runtime.rs` asserts that the two lists are
-// identical and that each export is identity-equal to the registry property.
+// `strings.impl.js`. `neojs-core/tests/runtime.rs` asserts that the two lists
+// are identical and that each export is identity-equal to the registry
+// property.
 //
 // The module namespace object is immutable by the language, and the module
 // object behind it is frozen, so neither path can replace a function. Adding a

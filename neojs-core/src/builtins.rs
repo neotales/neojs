@@ -1,6 +1,20 @@
 //! JavaScript evaluated in every runtime before the entry module, and the
 //! synthetic ECMAScript modules that import specifiers reach.
 //!
+//! # Module selection
+//!
+//! Every public Neo module that can be built independently has an engine-local
+//! Cargo feature named `neo-<module>`; `neo-strings` is the first. A default
+//! build enables all of them, so the V8 runtime surface is unchanged.
+//! Disabling one removes the module's registry name, its implementation from
+//! the realm shim, and its `include_str!` adapter, and the loader then reports
+//! the specifier as unimplemented. The selection is derived from this crate's
+//! own features because Cargo features are additive and unify across the
+//! dependency graph: a module is present whenever any dependent enables it.
+//! Module selection is compile-time surface selection, not a sandbox; the
+//! remaining code still runs with the process's authority. Node modules have no
+//! feature and remain rejected (`node:` is not implemented).
+//!
 //! The scripts here install globals that neojs supplies: currently
 //! [`neo_shim`], which defines the `Neo` object and its cached built-in
 //! modules. `chars`, `console`, `os`, `slices`, `strings`, and `test` are
@@ -70,13 +84,14 @@
 //!
 //! [`AGE_MODULE`], [`ASSERT_MODULE`], [`CHARS_MODULE`], [`CONSOLE_MODULE`],
 //! [`CRYPTO_MODULE`], [`OS_MODULE`], [`PATH_MODULE`], [`SLICES_MODULE`],
-//! [`SSH_MODULE`], [`STDIO_MODULE`], [`STRINGS_MODULE`], [`TEST_MODULE`],
+//! [`SSH_MODULE`], [`STDIO_MODULE`], the `strings` module source, [`TEST_MODULE`],
 //! [`UUID_MODULE`], [`UUID_V4_MODULE`], and [`UUID_V7_MODULE`]
-//! are not evaluated as scripts. They are the sources returned by the module
-//! loader for the built-in specifiers [`AGE_SPECIFIER`], [`ASSERT_SPECIFIER`],
+//! are not evaluated as scripts. In a default build they are the sources
+//! returned by the module loader for the built-in specifiers
+//! [`AGE_SPECIFIER`], [`ASSERT_SPECIFIER`],
 //! [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`], [`CRYPTO_SPECIFIER`],
 //! [`OS_SPECIFIER`], [`PATH_SPECIFIER`], [`SLICES_SPECIFIER`],
-//! [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], [`STRINGS_SPECIFIER`],
+//! [`SSH_SPECIFIER`], [`STDIO_SPECIFIER`], the `strings` specifier,
 //! [`TEST_SPECIFIER`], [`UUID_SPECIFIER`], [`UUID_V4_SPECIFIER`], and
 //! [`UUID_V7_SPECIFIER`], and for their bare names.
 //! All read the public module objects installed by [`neo_shim`], so the registry
@@ -112,22 +127,65 @@ use deno_core::url::Url;
 /// `undefined`.
 const NEO_SHIM_SOURCE: &str = include_str!("builtins/neo.js");
 
+/// The marker where the `strings` implementation is inserted when it is on.
+const STRINGS_IMPL_TOKEN: &str = "// __NEO_STRINGS_IMPL__";
+
+/// The marker where the `strings` entry in the shim's registry is inserted.
+const STRINGS_REGISTRY_TOKEN: &str = "// __NEO_STRINGS_REGISTRY_ENTRY__";
+
+/// The `strings` implementation, compiled only when `neo-strings` is enabled.
+///
+/// The implementation lives in its own file so a disabled build excludes its
+/// bytes instead of leaving unreachable code in the monolithic shim.
+#[cfg(feature = "neo-strings")]
+const STRINGS_IMPL_SOURCE: &str = include_str!("builtins/strings.impl.js");
+
+/// The shim line that registers `strings` by name.
+#[cfg(feature = "neo-strings")]
+const STRINGS_REGISTRY_ENTRY: &str = "[\"strings\", strings],";
+
 /// The placeholder replaced with the build target's `std::env::consts::OS`.
 const OS_PLATFORM_TOKEN: &str = "__NEO_OS_PLATFORM__";
 
 /// The placeholder replaced with the build target's `std::env::consts::ARCH`.
 const OS_ARCH_TOKEN: &str = "__NEO_OS_ARCH__";
 
-/// Returns the shim with the build target's `os` constants substituted.
+/// Returns the shim with the build target's `os` constants substituted and the
+/// enabled built-in modules spliced in.
 ///
 /// [`NEO_SHIM_SOURCE`] holds two placeholders, one per `neo:os` value. They are
 /// replaced with ECMAScript string literals for this build's
 /// `std::env::consts::OS` and `std::env::consts::ARCH`, so the module reports the
 /// target the runtime was compiled for and reads no host state at runtime.
+///
+/// The commit-time shim contains one implementation marker and one registry
+/// marker per module that has a `neo-*` feature. A disabled module's markers are
+/// replaced with nothing, so its implementation, its registry name, and (through
+/// [`source`]) its adapter are absent from the evaluated realm. The selection is
+/// read from this crate's features because Cargo unifies features across the
+/// dependency graph; the registry cannot be derived from a shared backend that
+/// does not know which engine build is being assembled.
 pub(crate) fn neo_shim() -> String {
-    NEO_SHIM_SOURCE
+    let shim = NEO_SHIM_SOURCE
         .replace(OS_PLATFORM_TOKEN, &js_string(std::env::consts::OS))
-        .replace(OS_ARCH_TOKEN, &js_string(std::env::consts::ARCH))
+        .replace(OS_ARCH_TOKEN, &js_string(std::env::consts::ARCH));
+
+    // Module selection is resolved here, from this engine crate's own feature
+    // set. The shared `neojs-module-policy` crate deliberately knows nothing
+    // about it: features unify across the dependency graph, so the registry
+    // must be derived from the engine build that actually contains each module.
+    #[cfg(feature = "neo-strings")]
+    let shim = shim
+        .replace(STRINGS_IMPL_TOKEN, STRINGS_IMPL_SOURCE)
+        .replace(STRINGS_REGISTRY_TOKEN, STRINGS_REGISTRY_ENTRY);
+    #[cfg(not(feature = "neo-strings"))]
+    let shim = shim
+        .replace(STRINGS_IMPL_TOKEN, "")
+        .replace(STRINGS_REGISTRY_TOKEN, "");
+
+    debug_assert!(!shim.contains(STRINGS_IMPL_TOKEN));
+    debug_assert!(!shim.contains(STRINGS_REGISTRY_TOKEN));
+    shim
 }
 
 /// Encodes `value` as a double-quoted ECMAScript string literal.
@@ -309,9 +367,11 @@ const SLICES_MODULE: &str = include_str!("builtins/slices.esm.js");
 
 /// The canonical module specifier for the `strings` built-in.
 ///
-/// Both `"strings"` and `"neo:strings"` resolve to this URL, so the engine
-/// caches one module instance for both spellings. It is not a `file:` URL and
-/// is never read from disk.
+/// It exists only with the `neo-strings` feature, which is enabled by default.
+/// Both `"strings"` and `"neo:strings"` resolve to this URL when enabled, so the
+/// engine caches one module instance for both spellings. It is not a `file:` URL
+/// and is never read from disk.
+#[cfg(feature = "neo-strings")]
 pub(crate) const STRINGS_SPECIFIER: &str = "neo:strings";
 
 /// The ECMAScript module source served for [`STRINGS_SPECIFIER`].
@@ -319,6 +379,9 @@ pub(crate) const STRINGS_SPECIFIER: &str = "neo:strings";
 /// It re-exports the function objects from the public `strings` module object,
 /// so the module and `Neo.getBuiltInModule("strings")` share identity. The
 /// implementations are plain ECMAScript in [`neo_shim`]; no host op is called.
+/// The `include_str!` is inside the feature so a disabled build does not embed
+/// the adapter.
+#[cfg(feature = "neo-strings")]
 const STRINGS_MODULE: &str = include_str!("builtins/strings.esm.js");
 
 /// The canonical module specifier for the `test` built-in.
@@ -393,6 +456,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("slices", SLICES_SPECIFIER),
     ("ssh", SSH_SPECIFIER),
     ("stdio", STDIO_SPECIFIER),
+    #[cfg(feature = "neo-strings")]
     ("strings", STRINGS_SPECIFIER),
     ("test", TEST_SPECIFIER),
     ("uuid", UUID_SPECIFIER),
@@ -433,6 +497,7 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         SLICES_SPECIFIER => Some(SLICES_MODULE),
         SSH_SPECIFIER => Some(SSH_MODULE),
         STDIO_SPECIFIER => Some(STDIO_MODULE),
+        #[cfg(feature = "neo-strings")]
         STRINGS_SPECIFIER => Some(STRINGS_MODULE),
         TEST_SPECIFIER => Some(TEST_MODULE),
         UUID_SPECIFIER => Some(UUID_MODULE),
@@ -456,16 +521,23 @@ pub(crate) fn implemented_specifiers() -> String {
 mod tests {
     use super::OS_ARCH_TOKEN;
     use super::OS_PLATFORM_TOKEN;
+    use super::STRINGS_IMPL_TOKEN;
+    use super::STRINGS_REGISTRY_TOKEN;
     use super::neo_shim;
+    use deno_core::url::Url;
 
     /// The shim is not valid JavaScript until the two `os` placeholders are
     /// replaced, so a missing substitution must fail here rather than at the
-    /// first `Runtime::new`.
+    /// first `Runtime::new`. The module markers are checked the same way: a
+    /// marker left in the evaluated shim is a comment, which would silently
+    /// drop a module instead of failing.
     #[test]
-    fn shim_substitutes_the_build_target_constants() {
+    fn shim_substitutes_the_build_target_constants_and_module_markers() {
         let shim = neo_shim();
         assert!(!shim.contains(OS_PLATFORM_TOKEN));
         assert!(!shim.contains(OS_ARCH_TOKEN));
+        assert!(!shim.contains(STRINGS_IMPL_TOKEN));
+        assert!(!shim.contains(STRINGS_REGISTRY_TOKEN));
         assert!(
             shim.contains(&format!("platform: \"{}\"", std::env::consts::OS)),
             "platform literal is missing from the shim"
@@ -474,5 +546,53 @@ mod tests {
             shim.contains(&format!("arch: \"{}\"", std::env::consts::ARCH)),
             "arch literal is missing from the shim"
         );
+
+        #[cfg(feature = "neo-strings")]
+        {
+            assert!(
+                shim.contains("function lastIndexOfFold"),
+                "the enabled strings implementation is missing"
+            );
+            assert!(
+                shim.contains("[\"strings\", strings]"),
+                "the enabled strings registry entry is missing"
+            );
+        }
+        #[cfg(not(feature = "neo-strings"))]
+        {
+            assert!(
+                !shim.contains("function lastIndexOfFold"),
+                "the disabled strings implementation is present"
+            );
+            assert!(
+                !shim.contains("[\"strings\", strings]"),
+                "the disabled strings registry entry is present"
+            );
+        }
+    }
+
+    /// A disabled module must be absent from both the name table the loader
+    /// consults and the source table it serves. The same module enabled is
+    /// present in both.
+    #[test]
+    fn module_tables_follow_the_neo_strings_feature() {
+        let url = Url::parse("neo:strings").expect("valid specifier");
+        #[cfg(feature = "neo-strings")]
+        {
+            assert_eq!(super::resolve("strings"), Some(super::STRINGS_SPECIFIER));
+            assert_eq!(
+                super::resolve("neo:strings"),
+                Some(super::STRINGS_SPECIFIER)
+            );
+            assert!(super::source(&url).is_some());
+            assert!(super::implemented_specifiers().contains("neo:strings"));
+        }
+        #[cfg(not(feature = "neo-strings"))]
+        {
+            assert_eq!(super::resolve("strings"), None);
+            assert_eq!(super::resolve("neo:strings"), None);
+            assert!(super::source(&url).is_none());
+            assert!(!super::implemented_specifiers().contains("strings"));
+        }
     }
 }

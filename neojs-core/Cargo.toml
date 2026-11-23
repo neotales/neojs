@@ -9,7 +9,19 @@ rust-version.workspace = true
 authors.workspace = true
 
 [features]
-default = []
+# A default build keeps the existing V8 runtime surface. Every public Neo module
+# that gains an independent implementation gets its own `neo-*` feature, and the
+# default enables each one. Node modules are intentionally absent: there is no
+# `node:*` feature, so Node built-ins remain rejected by default.
+default = ["neo-strings"]
+# The `neo:strings` built-in and its `strings`/`neo:strings` import specifiers.
+# This is engine-local selection, not a security boundary: disabling it removes
+# the public module, its implementation, adapter, and registration from the
+# build, but executable code keeps the process's authority. Cargo features are
+# additive and unify across the dependency graph, so a build that another
+# dependent enables a module for contains that module. Select modules through
+# features; never treat a disabled module as a sandbox.
+neo-strings = []
 # Test-only fault injection for the peer-close reply branch. Never enabled by a
 # normal build; `neojs` enables it only for its own dev/test targets.
 test-support = []

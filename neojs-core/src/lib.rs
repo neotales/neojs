@@ -4,6 +4,23 @@
 //! and drains V8's event loop. A runtime is single-use; a second entry module
 //! returns [`Error::RuntimeConsumed`].
 //!
+//! # Module selection
+//!
+//! Public Neo modules that can be built independently have an engine-local
+//! Cargo feature named `neo-<module>`. `neo-strings` is the first; it is in the
+//! crate's default features, so a default build keeps the existing V8 surface.
+//! Disabling a module removes its public registry name, its implementation from
+//! the realm shim, and its module adapter, and the loader reports the specifier
+//! as unimplemented. Features are additive and unify across the dependency
+//! graph, so a module is present whenever any dependent enables it; a build
+//! cannot promise that a module compiled out here is absent from the whole
+//! process.
+//!
+//! Module selection is compile-time surface selection, **not a sandbox**. It
+//! does not remove the process authority of code that still runs, does not
+//! create a permission boundary, and does not change the remote-loading opt-in.
+//! Node modules have no feature: `node:` specifiers remain rejected.
+//!
 //! [`Runtime::new`] is local-only. [`Runtime::with_remote`] adds an explicit
 //! opt-in for HTTPS modules: it accepts an HTTPS entry through
 //! [`Runtime::run_url`] and lets any module import an absolute `https:` URL.
@@ -21,10 +38,11 @@
 //! [`RemoteOptions`] sets the per-module deadline, body, aggregate byte,
 //! module-count, and redirect limits, and the cache directory.
 //!
-//! It provides the `age`, `assert`, `chars`, `console`, `crypto`, `os`, `path`,
-//! `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid` built-in modules
-//! through `Neo.getBuiltInModule(name)` and through the module specifiers `age`,
-//! `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`, `console`,
+//! A default build provides the `age`, `assert`, `chars`, `console`, `crypto`,
+//! `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid`
+//! built-in modules through `Neo.getBuiltInModule(name)` and through the module
+//! specifiers `age`, `neo:age`, `assert`, `neo:assert`, `chars`, `neo:chars`,
+//! `console`,
 //! `neo:console`, `crypto`, `neo:crypto`, `os`, `neo:os`, `path`, `neo:path`,
 //! `slices`, `neo:slices`, `ssh`, `neo:ssh`, `stdio`, `neo:stdio`, `strings`,
 //! `neo:strings`, `test`, `neo:test`, `uuid`, `neo:uuid`, `uuid/v4`,
