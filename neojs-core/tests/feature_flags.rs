@@ -1,8 +1,9 @@
-//! Feature-surface tests for the shared `chars` and dependent `slices` modules.
+//! Feature-surface tests for the shared `chars` and `strings` modules and the
+//! dependent `slices` module.
 //!
 //! The full V8 suite runs with the default features. These tests are intended
-//! for the feature matrix: `--no-default-features`, `--no-default-features
-//! --features neo-chars`, and the default set. A disabled module must disappear
+//! for the feature matrix: `--no-default-features`, one feature at a time, and
+//! the default set. A disabled module must disappear
 //! from the loader, the registry, and the introspection list, and its source
 //! must not remain in the evaluated shim. Only canonical `neo:` specifiers are
 //! importable and registry keys.
@@ -133,4 +134,60 @@ try {
 if (imported) throw new Error("neo:slices was importable while disabled");
 "#)
     .expect("slices absent");
+}
+
+#[test]
+#[cfg(feature = "neo-strings")]
+fn strings_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:strings")) {
+    throw new Error(`strings is missing from the list: ${JSON.stringify(list)}`);
+}
+if (list.includes("strings")) {
+    throw new Error(`a bare strings name is listed: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:strings");
+if (registry === undefined || typeof registry !== "object") {
+    throw new Error("the strings registry object is missing");
+}
+if (Neo.getBuiltInModule("strings") !== undefined) {
+    throw new Error("the registry accepted a bare strings name");
+}
+const namespace = await import("neo:strings");
+if (namespace === registry) {
+    throw new Error("the ES module namespace must be distinct from the registry object");
+}
+if (namespace.equalFold !== registry.equalFold) {
+    throw new Error("the namespace export is not the registry function");
+}
+if (!namespace.equalFold("K", "\u212A")) throw new Error("strings did not fold");
+"#)
+    .expect("strings feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-strings"))]
+fn strings_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:strings") || list.includes("strings")) {
+    throw new Error(`strings is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:strings") !== undefined) {
+    throw new Error("the canonical strings registry object is still present");
+}
+if (Neo.getBuiltInModule("strings") !== undefined) {
+    throw new Error("a bare strings name returned a module");
+}
+let imported = false;
+try {
+    await import("neo:strings");
+    imported = true;
+} catch {
+    // Expected: the loader has no strings entry.
+}
+if (imported) throw new Error("neo:strings was importable while disabled");
+"#)
+    .expect("strings absent");
 }

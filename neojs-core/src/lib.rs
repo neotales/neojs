@@ -237,25 +237,26 @@
 //! `neojs-core/src/uuid.rs` for the bit layout, ordering limits, and error
 //! contract.
 //!
-//! `strings` is plain ECMAScript: folded matching (`equalFold`,
-//! `startsWithFold`, `endsWithFold`, `indexOfFold`, `lastIndexOfFold`) and
-//! trimming of a caller-supplied code point set (`trim`, `trimStart`,
-//! `trimEnd`). Folding is ECMAScript's simple case folding, decided per code
-//! point by V8's own RegExp `/iu` canonicalization, so it ships no Unicode
-//! table, is locale-independent, and follows the Unicode data in the V8 build.
-//! It is not `toLowerCase()` comparison: `"K"` equals U+212A KELVIN SIGN,
-//! `"s"` equals U+017F LONG S, `"I"` does not equal U+0131 DOTLESS I, and
-//! `"ss"` does not equal `"ß"`. Indices are UTF-16 code unit offsets like
-//! `String.prototype.indexOf`, and overlapping occurrences are found. Searching
-//! is linear in the text plus the search string (KMP over simple-fold
-//! equivalence) and uses O(search) extra memory, so a repeated prefix cannot
-//! make it quadratic. `lastIndexOfFold` stops as soon as no match can begin at
-//! or before its limit, so a small limit does not scan a long tail. A lone
-//! surrogate is compared as itself and never matches half of a pair. With no
-//! `chars`, trimming is exactly `String.prototype.trim`, so it uses
-//! JavaScript's whitespace set rather than `neo:chars`' Go-derived
-//! `isSpace`. The module does not coerce arguments and calls no host op; it
-//! adds no capability beyond the strings it is given.
+//! `strings` is a native Rust binding shared with NeoJS Lite through
+//! `neojs-builtins`: folded matching (`equalFold`, `startsWithFold`,
+//! `endsWithFold`, `indexOfFold`, `lastIndexOfFold`) and trimming of a
+//! caller-supplied code point set (`trim`, `trimStart`, `trimEnd`). It operates
+//! on UTF-16 code units and preserves lone surrogates. Folding is Unicode 16.0
+//! simple case folding from a fixed table, so it ships a table instead of
+//! following the V8 build, is locale-independent, and classifies the same input
+//! the same way in both engines. It is not `toLowerCase()` comparison: `"K"`
+//! equals U+212A KELVIN SIGN, `"s"` equals U+017F LONG S, `"I"` does not equal
+//! U+0131 DOTLESS I, and `"ss"` does not equal `"ß"`. Indices are UTF-16 code
+//! unit offsets like `String.prototype.indexOf`, and overlapping occurrences
+//! are found. Searching is linear in the text plus the search string (KMP over
+//! simple-fold equivalence) and uses O(search) extra memory, so a repeated
+//! prefix cannot make it quadratic. `lastIndexOfFold` stops as soon as no match
+//! can begin at or before its limit, so a small limit does not scan a long tail.
+//! A lone surrogate is compared as itself and never matches half of a pair.
+//! With no `chars`, trimming is exactly `String.prototype.trim`, so it uses
+//! JavaScript's whitespace set rather than `neo:chars`' Go-derived `isSpace`.
+//! The module does not coerce arguments and calls no host op; it adds no
+//! capability beyond the strings it is given.
 //!
 //! `ssh` is a synchronous command-execution slice over the MIT-licensed
 //! `neotales-ssh` crate: `connect` dials one host, completes the SSH handshake
@@ -295,9 +296,10 @@
 //! `stdio`, and `strings`, both paths expose the same classes, functions, and
 //! shared stream objects;
 //! the
-//! namespace is a separate container over them. `chars` and `slices` are
-//! present only when the `neo-chars` and `neo-slices` features are enabled; a
-//! default V8 build enables both, and `neo-slices` implies `neo-chars`. For
+//! namespace is a separate container over them. `chars`, `strings`, and
+//! `slices` are present only when the `neo-chars`, `neo-strings`, and
+//! `neo-slices` features are enabled; a default V8 build enables all three, and
+//! `neo-slices` implies `neo-chars`. For
 //! `assert`, the registry
 //! object is the callable function, and the module also has a default export
 //! whose value is that function. For `console`, the registry object is the
@@ -378,6 +380,8 @@ mod remote;
 mod runtime;
 mod ssh;
 mod stdio;
+#[cfg(feature = "neo-strings")]
+mod strings;
 mod typescript;
 mod uuid;
 

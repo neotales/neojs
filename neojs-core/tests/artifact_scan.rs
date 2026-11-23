@@ -1,9 +1,10 @@
 //! Artifact-level checks for feature-selected built-in implementation bytes.
 //!
-//! The `chars` needle is the Rust error text used by the native binding, not a
-//! marker added only for testing. A disabled build does not link the binding, so
-//! the text is absent; an enabled build must contain it. The `slices` needles are
-//! from its JavaScript implementation, which is still JavaScript.
+//! The `chars` and `strings` needles are Rust error texts used by the native
+//! bindings, not markers added only for testing. A disabled build does not link
+//! the binding, so the text is absent; an enabled build must contain it. The
+//! `slices` needles are from its JavaScript implementation, which is still
+//! JavaScript.
 //!
 //! The needles are decoded from hex at runtime. They never appear contiguously
 //! in this test's own data, so the test source cannot satisfy its own scan.
@@ -15,6 +16,9 @@ use neojs_core::Runtime;
 /// `NON_SCALAR_MESSAGE` from the Rust `chars` implementation and binding.
 const CHARS_SEQUENCE_ONE_HEX: &str =
     "76616c7565206d757374206265206120556e69636f6465207363616c61722076616c7565";
+
+/// `FROM_INDEX_NOT_INTEGER` from the Rust `strings` implementation and binding.
+const STRINGS_SEQUENCE_ONE_HEX: &str = "66726f6d496e646578206d75737420626520616e20696e7465676572";
 
 /// `const CHAR_STATE = Symbol("charSliceState");` from `slices.impl.js`.
 const SLICES_SEQUENCE_ONE_HEX: &str =
@@ -69,6 +73,12 @@ fn embedded_implementation_bytes_follow_the_features() {
     assert_sequences(&artifact, &chars, true, "chars is enabled");
     #[cfg(not(feature = "neo-chars"))]
     assert_sequences(&artifact, &chars, false, "chars is disabled");
+
+    let strings = [STRINGS_SEQUENCE_ONE_HEX];
+    #[cfg(feature = "neo-strings")]
+    assert_sequences(&artifact, &strings, true, "strings is enabled");
+    #[cfg(not(feature = "neo-strings"))]
+    assert_sequences(&artifact, &strings, false, "strings is disabled");
 
     let slices = [SLICES_SEQUENCE_ONE_HEX, SLICES_SEQUENCE_TWO_HEX];
     #[cfg(feature = "neo-slices")]
