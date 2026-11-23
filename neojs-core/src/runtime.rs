@@ -1282,7 +1282,16 @@ if (typed !== alias) throw new Error("the typed alias lost module identity");
 "#,
         ))
         .expect("the typed module and alias resolve and load");
-        deno_core::futures::executor::block_on(js.mod_evaluate(main_id))
+        // `mod_evaluate` alone can return Ok while a top-level rejection is
+        // thrown into V8. Drive the event loop, as the runtime does for a real
+        // entry, and assert both the event-loop result and the evaluation
+        // result.
+        let evaluation = js.mod_evaluate(main_id);
+        deno_core::futures::executor::block_on(
+            js.run_event_loop(deno_core::PollEventLoopOptions::default()),
+        )
+        .expect("the typed import graph's event loop completes");
+        deno_core::futures::executor::block_on(evaluation)
             .expect("the typed import graph evaluates");
     }
 }
