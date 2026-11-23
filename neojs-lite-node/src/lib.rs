@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::ffi::c_char;
 
 use rquickjs::Array;
-use rquickjs::Atom;
 use rquickjs::Ctx;
 use rquickjs::Exception;
 use rquickjs::Function;
@@ -46,6 +45,19 @@ const MAX_ARG_BYTES: usize = 65_536;
 const MAX_ENV_ENTRIES: usize = 128;
 const MAX_ENV_BYTES: usize = 65_536;
 const MAX_PATH_BYTES: usize = 4_096;
+/// The six option keys the native module implements.
+const KNOWN_OPTIONS: [&str; 6] = ["cwd", "env", "input", "timeout", "maxBuffer", "encoding"];
+/// Most enumerable string keys accepted on an options object.
+const MAX_OPTION_KEYS: u32 = 6;
+/// Most option key UTF-16 code units accepted before conversion.
+const MAX_OPTION_KEY_UNITS: u32 = MAX_PATH_BYTES as u32;
+/// Shape slots scanned for options. This covers all slots, including deleted,
+/// non-enumerable and symbol slots, so a hostile shape is rejected before any
+/// property list is allocated.
+const MAX_OPTION_SCAN: u32 = 64;
+/// Shape slots scanned for an environment object. It is larger than the entry
+/// cap because non-enumerable and symbol slots also count toward the scan.
+const MAX_ENV_SCAN: u32 = 4_096;
 
 thread_local! {
     /// Policies for live QuickJS contexts, keyed by the context pointer.
@@ -271,26 +283,21 @@ fn read_options<'js>(
     if !value.is_object() || value.is_array() {
         return Err(invalid(ctx, "options must be an object"));
     }
-    if value.is_proxy() {
-        return Err(coded_error(
-            ctx,
-            "ERR_NODE_UNSUPPORTED",
-            "Proxy options are not supported by the native child_process module",
-        ));
-    }
     let object = value.as_object().expect("checked object");
 
-    let known_options = [
-        Atom::from_str(ctx.clone(), "cwd")?,
-        Atom::from_str(ctx.clone(), "env")?,
-        Atom::from_str(ctx.clone(), "input")?,
-        Atom::from_str(ctx.clone(), "timeout")?,
-        Atom::from_str(ctx.clone(), "maxBuffer")?,
-        Atom::from_str(ctx.clone(), "encoding")?,
-    ];
-    for key in object.keys::<Atom>() {
-        let key = key?;
-        if !known_options.iter().any(|known| known == &key) {
+    // Enumerate through the bounded QuickJS helper. It rejects Proxy and every
+    // exotic object before any trap can run, counts every shape slot against a
+    // scan bound, and allocates only after the key bound passes.
+    let keys = bounded_string_keys(
+        ctx,
+        object,
+        MAX_OPTION_KEYS,
+        MAX_OPTION_SCAN,
+        MAX_OPTION_KEY_UNITS,
+    )
+    .map_err(|error| bounded_option_error(ctx, error))?;
+    for key in keys {
+        if !KNOWN_OPTIONS.contains(&key.as_str()) {
             return Err(coded_error(
                 ctx,
                 "ERR_NODE_UNSUPPORTED",
@@ -432,27 +439,184 @@ fn read_argument<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Result<String> {
     }
 }
 
+/// Why the bounded QuickJS key snapshot was rejected.
+#[derive(Debug, PartialEq, Eq)]
+enum BoundedKeysError {
+    /// More enumerable string keys than the caller allows.
+    TooManyKeys,
+    /// More shape slots than the caller allows.
+    ScanLimit,
+    /// A Proxy, an exotic object, or a non-string atom.
+    Unsupported,
+    /// The property snapshot could not be allocated.
+    Memory,
+    /// A key is not valid UTF-8 after conversion (for example, a lone
+    /// surrogate that QuickJS encodes as an invalid UTF-8 sequence).
+    InvalidKey,
+    /// QuickJS raised an exception or produced an unreadable key.
+    Exception,
+}
+
+/// Returns the own enumerable string keys of a plain QuickJS object.
+///
+/// The work happens in the vendored `rquickjs-sys` helper
+/// `JS_GetOwnEnumerableStringKeysBounded`, which:
+///
+/// * rejects Proxy and every object with exotic property handlers before any
+///   callback or trap can run, so `ownKeys` is never entered;
+/// * counts every shape slot against `max_scan` before allocating anything;
+/// * counts enumerable string keys against `max_keys`, with checked arithmetic,
+///   before allocating;
+/// * preserves the JavaScript order: integer keys ascending, then other string
+///   keys in insertion order;
+/// * checks each key's UTF-16 length against `max_key_len` before converting it
+///   to the UTF-8 C string this function copies.
+///
+/// The returned atoms are released through an RAII guard on every path. This
+/// function is the only property-enumeration path used by the adapter.
+#[allow(unsafe_code)]
+fn bounded_string_keys<'js>(
+    ctx: &Ctx<'js>,
+    object: &Object<'js>,
+    max_keys: u32,
+    max_scan: u32,
+    max_key_len: u32,
+) -> std::result::Result<Vec<String>, BoundedKeysError> {
+    use rquickjs::qjs;
+
+    // These values mirror the JSBoundedKeysStatus C enum in the vendored
+    // QuickJS header. They are part of the audited patch surface.
+    const OK: i32 = 0;
+    const TOO_MANY_KEYS: i32 = 1;
+    const SCAN_LIMIT: i32 = 2;
+    const UNSUPPORTED: i32 = 3;
+    const MEMORY: i32 = 4;
+
+    /// Frees the atom snapshot even when key conversion or validation fails.
+    struct EnumGuard {
+        raw: *mut qjs::JSContext,
+        tab: *mut qjs::JSPropertyEnum,
+        len: u32,
+    }
+
+    impl Drop for EnumGuard {
+        fn drop(&mut self) {
+            if !self.tab.is_null() {
+                // SAFETY: the table and length come from a successful bounded
+                // enumeration, and this is the only owner of that allocation.
+                unsafe {
+                    qjs::JS_FreePropertyEnum(self.raw, self.tab, self.len);
+                }
+            }
+        }
+    }
+
+    let raw = ctx.as_raw().as_ptr();
+    let mut tab: *mut qjs::JSPropertyEnum = std::ptr::null_mut();
+    let mut len = 0u32;
+    let mut scanned = 0u32;
+
+    // SAFETY: `raw` is the live context belonging to `ctx`, `object` belongs to
+    // the same context, and the out pointers are valid stack locations.
+    let status = unsafe {
+        qjs::JS_GetOwnEnumerableStringKeysBounded(
+            raw,
+            object.as_raw(),
+            max_keys,
+            max_scan,
+            &mut tab,
+            &mut len,
+            &mut scanned,
+        )
+    };
+
+    let guard = EnumGuard { raw, tab, len };
+    match status {
+        OK => {}
+        TOO_MANY_KEYS => return Err(BoundedKeysError::TooManyKeys),
+        SCAN_LIMIT => return Err(BoundedKeysError::ScanLimit),
+        UNSUPPORTED => return Err(BoundedKeysError::Unsupported),
+        MEMORY => return Err(BoundedKeysError::Memory),
+        _ => return Err(BoundedKeysError::Exception),
+    }
+
+    let mut keys = Vec::with_capacity(len as usize);
+    for index in 0..len {
+        // SAFETY: the guard holds a table of `len` initialised entries.
+        let atom = unsafe { (*guard.tab.add(index as usize)).atom };
+        let mut byte_len = 0usize;
+        let mut ptr: *const c_char = std::ptr::null();
+        // SAFETY: `atom` belongs to `raw` and is held by the guard; `ptr` and
+        // `byte_len` are valid stack locations. The helper checks the key's
+        // UTF-16 length before it allocates the UTF-8 string.
+        let status = unsafe {
+            qjs::JS_AtomToCStringLenBounded(raw, &mut byte_len, atom, max_key_len, &mut ptr)
+        };
+        match status {
+            OK => {}
+            TOO_MANY_KEYS => return Err(BoundedKeysError::TooManyKeys),
+            UNSUPPORTED => return Err(BoundedKeysError::Unsupported),
+            _ => return Err(BoundedKeysError::Exception),
+        }
+        // SAFETY: on success the helper returned a NUL-terminated buffer of
+        // `byte_len` bytes owned by this context.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, byte_len) };
+        let key = std::str::from_utf8(bytes).map(str::to_owned);
+        // SAFETY: `ptr` came from `JS_AtomToCStringLenBounded` and is freed once.
+        unsafe {
+            qjs::JS_FreeCString(raw, ptr);
+        }
+        let key = key.map_err(|_| BoundedKeysError::InvalidKey)?;
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+fn bounded_option_error<'js>(ctx: &Ctx<'js>, error: BoundedKeysError) -> rquickjs::Error {
+    match error {
+        BoundedKeysError::InvalidKey => {
+            coded_error(ctx, "ERR_NODE_UNSUPPORTED", "an option is not implemented")
+        }
+        BoundedKeysError::Exception => {
+            let _ = ctx.catch();
+            invalid(ctx, "options could not be read")
+        }
+        _ => coded_error(ctx, "ERR_NODE_UNSUPPORTED", "an option is not implemented"),
+    }
+}
+
+fn bounded_env_error<'js>(ctx: &Ctx<'js>, error: BoundedKeysError) -> rquickjs::Error {
+    match error {
+        BoundedKeysError::Unsupported => coded_error(
+            ctx,
+            "ERR_NODE_UNSUPPORTED",
+            "Proxy options.env is not supported by the native child_process module",
+        ),
+        BoundedKeysError::InvalidKey => invalid(ctx, "an environment name is not valid"),
+        BoundedKeysError::Exception => {
+            let _ = ctx.catch();
+            request_too_large(ctx)
+        }
+        _ => request_too_large(ctx),
+    }
+}
+
 fn read_env<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Result<BTreeMap<String, String>> {
     if !value.is_object() || value.is_array() {
         return Err(invalid(ctx, "options.env must be an object"));
     }
-    if value.is_proxy() {
-        return Err(coded_error(
-            ctx,
-            "ERR_NODE_UNSUPPORTED",
-            "Proxy options.env is not supported by the native child_process module",
-        ));
-    }
     let object = value.as_object().expect("checked object");
+    let names = bounded_string_keys(
+        ctx,
+        object,
+        MAX_ENV_ENTRIES as u32,
+        MAX_ENV_SCAN,
+        MAX_PATH_BYTES as u32,
+    )
+    .map_err(|error| bounded_env_error(ctx, error))?;
     let mut environment = BTreeMap::new();
     let mut total = 0usize;
-    for key in object.keys::<Atom>() {
-        let key = key?;
-        if environment.len() >= MAX_ENV_ENTRIES {
-            return Err(request_too_large(ctx));
-        }
-        let key_value = key.to_value()?;
-        let name = read_string(ctx, &key_value, "environment name", MAX_PATH_BYTES)?;
+    for name in names {
         if name.is_empty() || name.contains('=') || name.contains('\0') {
             return Err(invalid(ctx, "an environment name is not valid"));
         }
@@ -730,4 +894,201 @@ fn request_too_large(ctx: &Ctx<'_>) -> rquickjs::Error {
 
 fn js_string<'js>(ctx: &Ctx<'js>, text: &str) -> Result<rquickjs::String<'js>> {
     rquickjs::String::from_str(ctx.clone(), text)
+}
+
+#[cfg(test)]
+mod bounded_key_tests {
+    use super::{BoundedKeysError, bounded_string_keys};
+    use rquickjs::{Context, Runtime, Value};
+
+    fn with_object<R>(
+        script: &str,
+        f: impl for<'js> FnOnce(&rquickjs::Ctx<'js>, &rquickjs::Object<'js>) -> R,
+    ) -> R {
+        let runtime = Runtime::new().expect("runtime");
+        let context = Context::full(&runtime).expect("context");
+        context.with(|ctx| {
+            let value: Value = ctx.eval(script).expect("script");
+            let object = value.as_object().expect("object");
+            f(&ctx, object)
+        })
+    }
+
+    fn keys(script: &str, max_keys: u32, max_scan: u32, max_key_len: u32) -> Vec<String> {
+        with_object(script, |ctx, object| {
+            bounded_string_keys(ctx, object, max_keys, max_scan, max_key_len).expect("keys")
+        })
+    }
+
+    fn error(script: &str, max_keys: u32, max_scan: u32, max_key_len: u32) -> BoundedKeysError {
+        with_object(script, |ctx, object| {
+            match bounded_string_keys(ctx, object, max_keys, max_scan, max_key_len) {
+                Ok(found) => panic!("expected an error, got {found:?}"),
+                Err(error) => error,
+            }
+        })
+    }
+
+    #[test]
+    fn integer_keys_are_ascending_then_other_keys_keep_insertion_order() {
+        let found = keys(r#"({ b: 1, "10": 2, "2": 3, a: 4, "1": 5 })"#, 16, 64, 64);
+        assert_eq!(found, ["1", "2", "10", "b", "a"]);
+    }
+
+    #[test]
+    fn an_empty_object_needs_no_allocation() {
+        assert!(keys("({})", 0, 0, 64).is_empty());
+    }
+
+    #[test]
+    fn the_key_bound_is_inclusive_and_one_more_is_rejected() {
+        let found = keys(
+            "(() => { const o = {}; for (let i = 0; i < 128; i += 1) o[`k${i}`] = i; return o; })()",
+            128,
+            4_096,
+            64,
+        );
+        assert_eq!(found.len(), 128);
+        assert_eq!(
+            error(
+                "(() => { const o = {}; for (let i = 0; i < 129; i += 1) o[`k${i}`] = i; return o; })()",
+                128,
+                4_096,
+                64,
+            ),
+            BoundedKeysError::TooManyKeys
+        );
+    }
+
+    #[test]
+    fn deleted_and_non_enumerable_slots_are_scanned_but_not_returned() {
+        let found = keys(
+            r#"(() => {
+                const o = {};
+                Object.defineProperty(o, "hidden", { value: 1, enumerable: false });
+                o.visible = 1;
+                o.gone = 1;
+                delete o.gone;
+                return o;
+            })()"#,
+            16,
+            64,
+            64,
+        );
+        assert_eq!(found, ["visible"]);
+    }
+
+    #[test]
+    fn symbol_slots_count_against_the_scan_bound_and_are_not_returned() {
+        let found = keys(
+            "(() => { const o = { visible: 1 }; for (let i = 0; i < 10; i += 1) o[Symbol(`s${i}`)] = i; return o; })()",
+            16,
+            64,
+            64,
+        );
+        assert_eq!(found, ["visible"]);
+        assert_eq!(
+            error(
+                "(() => { const o = {}; for (let i = 0; i < 100; i += 1) o[Symbol(`s${i}`)] = i; return o; })()",
+                16,
+                64,
+                64,
+            ),
+            BoundedKeysError::ScanLimit
+        );
+    }
+
+    #[test]
+    fn a_key_longer_than_the_bound_is_rejected_before_conversion() {
+        assert_eq!(
+            error(r#"({ ok: 1, ["x".repeat(100000)]: 2 })"#, 16, 64, 4_096,),
+            BoundedKeysError::TooManyKeys
+        );
+    }
+
+    #[test]
+    fn arrays_and_typed_arrays_are_rejected_instead_of_dropping_indexes() {
+        assert_eq!(
+            error(r#"["a", "b"]"#, 16, 64, 64),
+            BoundedKeysError::Unsupported
+        );
+        assert_eq!(
+            error("new Uint8Array([1, 2])", 16, 64, 64),
+            BoundedKeysError::Unsupported
+        );
+    }
+
+    #[test]
+    fn a_lone_surrogate_key_is_rejected_as_invalid() {
+        assert_eq!(
+            error(r#"({ "\uD800": 1 })"#, 16, 64, 64),
+            BoundedKeysError::InvalidKey
+        );
+    }
+
+    #[test]
+    fn a_proxy_is_rejected_before_its_own_keys_trap_runs() {
+        let runtime = Runtime::new().expect("runtime");
+        let context = Context::full(&runtime).expect("context");
+        context.with(|ctx| {
+            let value: Value = ctx
+                .eval(
+                    r#"globalThis.trapCount = 0;
+                       new Proxy({ a: 1 }, {
+                           ownKeys(target) {
+                               globalThis.trapCount += 1;
+                               return Reflect.ownKeys(target);
+                           },
+                       })"#,
+                )
+                .expect("script");
+            let object = value.as_object().expect("object");
+            assert_eq!(
+                match bounded_string_keys(&ctx, object, 16, 64, 64) {
+                    Ok(found) => panic!("expected an error, got {found:?}"),
+                    Err(error) => error,
+                },
+                BoundedKeysError::Unsupported
+            );
+            let traps: i64 = ctx.eval("globalThis.trapCount").expect("counter");
+            assert_eq!(traps, 0);
+        });
+    }
+
+    #[test]
+    fn getters_are_not_read_during_enumeration() {
+        let runtime = Runtime::new().expect("runtime");
+        let context = Context::full(&runtime).expect("context");
+        context.with(|ctx| {
+            let value: Value = ctx
+                .eval(
+                    r#"globalThis.getterCount = 0;
+                       ({
+                           a: 1,
+                           get boom() {
+                               globalThis.getterCount += 1;
+                               throw new Error("boom");
+                           },
+                       })"#,
+                )
+                .expect("script");
+            let object = value.as_object().expect("object");
+            let found = bounded_string_keys(&ctx, object, 16, 64, 64).expect("keys");
+            assert_eq!(found, ["a", "boom"]);
+            let gets: i64 = ctx.eval("globalThis.getterCount").expect("counter");
+            assert_eq!(gets, 0);
+        });
+    }
+
+    #[test]
+    fn a_throwing_object_conversion_does_not_leak_the_snapshot() {
+        // The guard must release the atom table when a later key is rejected;
+        // repeating the failing call exercises the cleanup path.
+        for _ in 0..64 {
+            assert_eq!(
+                error(r#"({ ok: 1, ["x".repeat(100000)]: 2 })"#, 16, 64, 4_096,),
+                BoundedKeysError::TooManyKeys
+            );
+        }
+    }
 }

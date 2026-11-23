@@ -327,8 +327,9 @@ for (const call of oversized) {
 
 #[test]
 fn native_property_keys_are_bounded_after_enumeration() {
+    require("/bin/echo");
     run(
-        policy(&[]),
+        policy(&["/bin/echo"]),
         r#"
 const childProcess = await import("node:child_process");
 const hugeKey = "x".repeat(100000);
@@ -423,6 +424,101 @@ if (code !== "ERR_NODE_UNSUPPORTED") {
 }
 if (ownKeysCalls !== 0) {
     throw new Error(`Proxy env invoked ownKeys ${ownKeysCalls} time(s)`);
+}
+
+const hiddenOptions = { encoding: "utf8" };
+for (let index = 0; index < 100; index += 1) {
+    Object.defineProperty(hiddenOptions, `hidden${index}`, {
+        value: 1,
+        enumerable: false,
+    });
+}
+code = null;
+try {
+    childProcess.execFileSync("/bin/echo", [], hiddenOptions);
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_UNSUPPORTED") {
+    throw new Error(`hidden option slots: ${code}`);
+}
+
+const hiddenEnv = {};
+for (let index = 0; index < 5000; index += 1) {
+    Object.defineProperty(hiddenEnv, `HIDDEN_${index}`, {
+        value: "1",
+        enumerable: false,
+    });
+}
+code = null;
+try {
+    childProcess.execFileSync("/bin/echo", [], { encoding: "utf8", env: hiddenEnv });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_REQUEST_TOO_LARGE") {
+    throw new Error(`hidden env slots: ${code}`);
+}
+
+code = null;
+try {
+    childProcess.execFileSync("/bin/echo", [], {
+        encoding: "utf8",
+        env: { "\uD800": "value" },
+    });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_INVALID_ARG_VALUE") {
+    throw new Error(`lone surrogate env key: ${code}`);
+}
+
+code = null;
+try {
+    childProcess.execFileSync("/bin/echo", [], {
+        encoding: "utf8",
+        "\uD800": true,
+    });
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_UNSUPPORTED") {
+    throw new Error(`lone surrogate option key: ${code}`);
+}
+
+const fullEnv = {};
+for (let index = 0; index < 128; index += 1) {
+    fullEnv[`KEY_${index}`] = "value";
+}
+const full = childProcess.execFileSync("/bin/echo", ["full"], {
+    encoding: "utf8",
+    env: fullEnv,
+});
+if (!full.includes("full")) {
+    throw new Error("128 environment keys did not run");
+}
+
+const throwingEnv = {};
+Object.defineProperty(throwingEnv, "BOOM", {
+    enumerable: true,
+    get() {
+        throw new Error("boom");
+    },
+});
+let message = null;
+try {
+    childProcess.execFileSync("/bin/echo", [], { encoding: "utf8", env: throwingEnv });
+} catch (error) {
+    message = String(error && error.message);
+}
+if (!message || !message.includes("boom")) {
+    throw new Error(`throwing env getter: ${message}`);
+}
+const recovered = childProcess.execFileSync("/bin/echo", ["after"], {
+    encoding: "utf8",
+});
+if (!recovered.includes("after")) {
+    throw new Error("runtime did not recover after a getter error");
 }
 "#,
     )
