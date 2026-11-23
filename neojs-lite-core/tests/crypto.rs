@@ -386,6 +386,33 @@ if (crypto.generateEnvelopeKey().length !== 32) throw new Error("generateEnvelop
 }
 
 #[test]
+fn crypto_does_not_invoke_javascript_validation_hooks() {
+    run_js(
+        r#"
+import { decrypt, encrypt } from "neo:crypto";
+const RealUint8Array = Uint8Array;
+let calls = 0;
+Object.defineProperty(RealUint8Array, Symbol.hasInstance, {
+    value() { calls += 1; return true; },
+});
+const key = new RealUint8Array(32);
+const plain = new RealUint8Array([42]);
+const aad = new RealUint8Array([7]);
+Object.defineProperty(key, "byteLength", { get() { calls += 1; return 32; } });
+Object.defineProperty(plain, "byteLength", { get() { calls += 1; return 1; } });
+Object.defineProperty(aad, "byteLength", { get() { calls += 1; return 1; } });
+const envelope = encrypt(key, plain, aad);
+Object.defineProperty(envelope, "byteLength", {
+    get() { calls += 1; return 34; },
+});
+const result = decrypt(key, envelope, aad);
+if (calls) throw new Error("observable validation hook was invoked");
+if (result.length !== 1 || result[0] !== 42) throw new Error("roundtrip");
+"#,
+    );
+}
+
+#[test]
 fn crypto_rejects_non_uint8array_shapes() {
     run_js(
         r#"
