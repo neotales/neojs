@@ -275,11 +275,12 @@ else
     fail "dry run created a ledger"
 fi
 
-: >"$TMP/fake-v8.a.gz"
+printf 'fake-v8\n' | gzip -c >"$TMP/fake-v8.a.gz"
 expect_status 0 "dry run attributes the V8 archive to neojs" \
     env RUSTY_V8_ARCHIVE="$TMP/fake-v8.a.gz" \
     bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs --ledger "$TMP/dry.jsonl"
 assert_contains "$TMP/stdout" "v8 archive input: {" "neojs records the V8 archive"
+assert_contains "$TMP/stdout" '"archive_sha256"' "neojs records the wrapper hash for provenance"
 
 expect_status 0 "dry run omits the V8 archive for neojs-lite" \
     env RUSTY_V8_ARCHIVE="$TMP/fake-v8.a.gz" \

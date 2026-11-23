@@ -37,9 +37,12 @@ input that can move the byte count:
   compiler versions, because `neojs-lite` compiles QuickJS and `neojs` links
   V8;
 - `build.features` and `build.no_default_features`;
-- `build.v8_archive` — the prebuilt V8 archive name and SHA-256, when one is
-  supplied **and the package's dependency graph reaches V8**. A `neojs-lite`
-  record does not claim an archive its QuickJS build never read;
+- `build.v8_archive` — the prebuilt V8 archive name, the SHA-256 of the
+  **decompressed** static library, and the SHA-256 of the supplied `.a.gz` as
+  provenance, when one is supplied **and the package's dependency graph reaches
+  V8**. The decompressed digest is the comparable input; the wrapper digest is
+  not part of the key, because two machines can gzip the same `.a` differently.
+  A `neojs-lite` record does not claim an archive its QuickJS build never read;
 - `build.cargo_lock_sha256` — the dependency graph;
 - `build.workspace_path_sha256` — the build path, hashed. Rust embeds source
   paths in some strings, so two worktrees can differ by a few bytes even at the
@@ -122,10 +125,10 @@ bytes and no digest; it is never a zero.
 Cargo is invoked with `--offline` by default. That flag does not stop a Cargo
 build script from downloading its own inputs, notably the prebuilt V8 archive.
 To keep a V8 build offline, set `RUSTY_V8_ARCHIVE` to a matching
-`librusty_v8_*.a.gz` file. The tracker records the archive basename and SHA-256
-under `build.v8_archive`; it does not trust the filename alone. `--online`
-exists for a fresh CI cache, but it is opt-in and is recorded as
-`"offline": false`.
+`librusty_v8_*.a.gz` file. The tracker records the archive basename, the
+decompressed content digest and the wrapper digest under `build.v8_archive`; it
+does not trust the filename alone. `--online` exists for a fresh CI cache, but
+it is opt-in and is recorded as `"offline": false`.
 
 ## Ledger
 

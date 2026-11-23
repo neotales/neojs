@@ -187,12 +187,18 @@ done < <(compgen -e | grep -E '^CARGO_PROFILE_RELEASE_' | sort || true)
 
 V8_ARCHIVE_JSON='null'
 if [ -n "${RUSTY_V8_ARCHIVE:-}" ]; then
+    size_require gzip
     [ -r "$RUSTY_V8_ARCHIVE" ] ||
         size_die "RUSTY_V8_ARCHIVE is set but not readable: $RUSTY_V8_ARCHIVE"
+    # Compare the decompressed static archive, not the gzip wrapper: two
+    # machines can gzip the same .a differently and still build the same
+    # binary. The wrapper hash is kept as provenance but is not part of the
+    # record key.
     V8_ARCHIVE_JSON=$(jq -n \
         --arg name "$(basename -- "$RUSTY_V8_ARCHIVE")" \
-        --arg sha256 "$(sha256sum "$RUSTY_V8_ARCHIVE" | awk '{print $1}')" \
-        '{name: $name, sha256: $sha256}')
+        --arg sha256 "$(gzip -dc "$RUSTY_V8_ARCHIVE" | sha256sum | awk '{print $1}')" \
+        --arg archive_sha256 "$(sha256sum "$RUSTY_V8_ARCHIVE" | awk '{print $1}')" \
+        '{name: $name, sha256: $sha256, archive_sha256: $archive_sha256}')
 fi
 
 RUSTC_VERSION=$(rustc "+$TOOLCHAIN" -V)

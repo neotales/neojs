@@ -70,7 +70,10 @@ size_record_key_filter() {
     offline: .build.offline,
     cargo_lock_sha256: .build.cargo_lock_sha256,
     workspace_path_sha256: .build.workspace_path_sha256,
-    v8_archive: .build.v8_archive,
+    v8_archive: (if .build.v8_archive == null then null else {
+      name: .build.v8_archive.name,
+      sha256: .build.v8_archive.sha256
+    } end),
     env_overrides: .build.env_overrides
   },
   measurement: {
@@ -114,7 +117,10 @@ size_context_key_filter() {
     offline: .build.offline,
     cargo_lock_sha256: .build.cargo_lock_sha256,
     workspace_path_sha256: .build.workspace_path_sha256,
-    v8_archive: .build.v8_archive,
+    v8_archive: (if .build.v8_archive == null then null else {
+      name: .build.v8_archive.name,
+      sha256: .build.v8_archive.sha256
+    } end),
     env_overrides: .build.env_overrides
   }
 }
@@ -264,6 +270,9 @@ size_record_errors() {
            "build.v8_archive.name must be a basename"
          elif (.build.v8_archive.sha256 | asstr | hex64 | not) then
            "build.v8_archive.sha256 must be a sha256"
+         elif (.build.v8_archive.archive_sha256 != null and
+               (.build.v8_archive.archive_sha256 | asstr | hex64 | not)) then
+           "build.v8_archive.archive_sha256 must be a sha256 when present"
          else empty end
        else empty end),
       (if .status == "ok" then
