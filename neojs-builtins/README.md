@@ -38,8 +38,10 @@ Every shared module has its own Cargo feature. `chars` is the first.
   enables `neo-chars`, so the existing surface is unchanged. `neo-slices`
   implies `neo-chars`, because `CharSlice` captures `chars.toUpper` and
   `chars.toLower`; disabling `neo-chars` also disables `slices` and removes both
-  source blocks, registry entries, and loader entries. A `neo-chars`-only build
-  keeps `chars` and omits `slices`.
+  source files, registry entries, and loader entries. The `slices`
+  implementation is a separate file included only under `neo-slices`, so a
+  disabled build does not embed its bytes. A `neo-chars`-only build keeps
+  `chars` and omits `slices`.
 * `neojs-lite-core` has the same positive `neo-chars` feature, enabled by its
   default feature set. `default-features = false` removes the dependency, the
   implementation source, the registry object, the loader entry, and the
@@ -112,6 +114,21 @@ capability. It is not a sandbox.
 registry key. The fixture covers Unicode boundaries, scalar and category edge
 cases, expanding case mappings, error classes, captured intrinsics, and module
 import identity.
+
+## Artifact checks
+
+The engine test suites include artifact scans. Each scan reads its own test
+executable and looks for a unique sentinel embedded in the JavaScript source.
+V8 checks both `chars` and `slices`; QuickJS checks `chars`. A disabled build
+must not contain the sentinel, and an enabled build must contain it. A hex-encoded
+control string from the always-present shim proves the scan is reading real
+source bytes rather than passing vacuously. The sentinels are decoded from hex at
+runtime, so the test source cannot itself supply the searched bytes.
+
+The V8 `slices` implementation is a separate file,
+`neojs-core/src/builtins/slices.impl.js`, included only under `neo-slices`. The
+previous monolithic shim embedded it unconditionally and removed it from the
+evaluated text at runtime; that is no longer how a disabled build is produced.
 
 ## Integration state and known conflicts
 

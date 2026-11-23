@@ -195,4 +195,5 @@
         toLower,
         toUpper,
     });
+    // Artifact sentinel: NEO_CHARS_ARTIFACT_3F8C2D1A
 })()
