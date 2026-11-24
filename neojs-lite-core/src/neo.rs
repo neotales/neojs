@@ -1,9 +1,10 @@
 //! Native `Neo` introspection object for the QuickJS runtime.
 //!
-//! The registry, the module list, and the native `neo:chars` and
-//! `neo:strings` objects are Rust values. Shared ECMAScript modules
-//! (`neo:assert` and `neo:test`) are constructed once per context from their
-//! shared factories in `neojs-builtins` with native QuickJS host hooks.
+//! The registry, the module list, and the native `neo:chars`, `neo:os`,
+//! `neo:strings`, and `neo:uuid` (`neo:uuid`, `neo:uuid/v4`, `neo:uuid/v7`)
+//! objects are Rust values. Shared ECMAScript modules (`neo:assert` and
+//! `neo:test`) are constructed once per context from their shared factories in
+//! `neojs-builtins` with native QuickJS host hooks.
 
 #[cfg(feature = "neo-test")]
 use std::cell::RefCell;
@@ -27,6 +28,9 @@ pub(super) struct NeoState {
     /// The frozen public `neo:chars` object, when the feature is selected.
     #[cfg(feature = "neo-chars")]
     pub(super) chars: Option<Persistent<Object<'static>>>,
+    /// The frozen public `neo:os` object, when the feature is selected.
+    #[cfg(feature = "neo-os")]
+    pub(super) os: Option<Persistent<Object<'static>>>,
     /// The frozen public `neo:strings` object, when the feature is selected.
     #[cfg(feature = "neo-strings")]
     pub(super) strings: Option<Persistent<Object<'static>>>,
@@ -45,6 +49,15 @@ pub(super) struct NeoState {
     /// The JS unhandled rejection callback registered by `neo:test`.
     #[cfg(feature = "neo-test")]
     pub(super) rejection_handler: RefCell<Option<Persistent<Function<'static>>>>,
+    /// The frozen public `neo:uuid` object, when the feature is selected.
+    #[cfg(feature = "neo-uuid")]
+    pub(super) uuid: Option<Persistent<Object<'static>>>,
+    /// The frozen public `neo:uuid/v4` object, when the feature is selected.
+    #[cfg(feature = "neo-uuid")]
+    pub(super) uuid_v4: Option<Persistent<Object<'static>>>,
+    /// The frozen public `neo:uuid/v7` object, when the feature is selected.
+    #[cfg(feature = "neo-uuid")]
+    pub(super) uuid_v7: Option<Persistent<Object<'static>>>,
     /// The frozen canonical module list returned for every call.
     pub(super) list: Persistent<Array<'static>>,
 }
@@ -69,6 +82,8 @@ pub(super) fn install<'js>(
     let assert: Option<Value<'js>> = Some(build_assert(ctx)?);
     #[cfg(feature = "neo-chars")]
     let chars: Option<Object<'js>> = Some(super::chars::object(ctx)?);
+    #[cfg(feature = "neo-os")]
+    let os: Option<Object<'js>> = Some(super::os::object(ctx)?);
     #[cfg(feature = "neo-strings")]
     let strings: Option<Object<'js>> = Some(super::strings::object(ctx)?);
     #[cfg(feature = "neo-strings")]
@@ -80,14 +95,18 @@ pub(super) fn install<'js>(
     };
     #[cfg(feature = "neo-test")]
     let (test_module, test_ensure_handler) = build_test(ctx, rejections)?;
+    #[cfg(feature = "neo-uuid")]
+    let uuid_objects = super::uuid::objects(ctx)?;
 
     let list = Array::new(ctx.clone())?;
     #[cfg_attr(
         not(any(
             feature = "neo-assert",
             feature = "neo-chars",
+            feature = "neo-os",
             feature = "neo-strings",
-            feature = "neo-test"
+            feature = "neo-test",
+            feature = "neo-uuid"
         )),
         allow(unused_mut)
     )]
@@ -102,6 +121,11 @@ pub(super) fn install<'js>(
         list.set(index, neojs_builtins::chars::SPECIFIER)?;
         index += 1;
     }
+    #[cfg(feature = "neo-os")]
+    if os.is_some() {
+        list.set(index, neojs_builtins::os::SPECIFIER)?;
+        index += 1;
+    }
     #[cfg(feature = "neo-strings")]
     if strings.is_some() {
         list.set(index, neojs_builtins::strings::SPECIFIER)?;
@@ -112,6 +136,15 @@ pub(super) fn install<'js>(
         list.set(index, neojs_builtins::test::SPECIFIER)?;
         index += 1;
     }
+    #[cfg(feature = "neo-uuid")]
+    {
+        list.set(index, neojs_builtins::uuid::SPECIFIER)?;
+        index += 1;
+        list.set(index, neojs_builtins::uuid::V4_SPECIFIER)?;
+        index += 1;
+        list.set(index, neojs_builtins::uuid::V7_SPECIFIER)?;
+        index += 1;
+    }
     let _ = index;
     freeze(ctx, list.as_object())?;
 
@@ -120,6 +153,8 @@ pub(super) fn install<'js>(
         assert: assert.map(|value| Persistent::save(ctx, value)),
         #[cfg(feature = "neo-chars")]
         chars: chars.map(|chars| Persistent::save(ctx, chars)),
+        #[cfg(feature = "neo-os")]
+        os: os.map(|os| Persistent::save(ctx, os)),
         #[cfg(feature = "neo-strings")]
         strings: strings.map(|strings| Persistent::save(ctx, strings)),
         #[cfg(feature = "neo-strings")]
@@ -130,6 +165,12 @@ pub(super) fn install<'js>(
         test_ensure_handler: Some(Persistent::save(ctx, test_ensure_handler)),
         #[cfg(feature = "neo-test")]
         rejection_handler: RefCell::new(None),
+        #[cfg(feature = "neo-uuid")]
+        uuid: Some(Persistent::save(ctx, uuid_objects.uuid)),
+        #[cfg(feature = "neo-uuid")]
+        uuid_v4: Some(Persistent::save(ctx, uuid_objects.v4)),
+        #[cfg(feature = "neo-uuid")]
+        uuid_v7: Some(Persistent::save(ctx, uuid_objects.v7)),
         list: Persistent::save(ctx, list),
     })
     .map_err(|_| rquickjs::Error::Unknown)?;
@@ -255,6 +296,13 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
         };
         return Ok(chars.clone().restore(&ctx)?.into_value());
     }
+    #[cfg(feature = "neo-os")]
+    if name == neojs_builtins::os::SPECIFIER {
+        let Some(os) = state.os.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(os.clone().restore(&ctx)?.into_value());
+    }
     #[cfg(feature = "neo-strings")]
     if name == neojs_builtins::strings::SPECIFIER {
         let Some(strings) = state.strings.as_ref() else {
@@ -279,11 +327,34 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
         };
         return Ok(test.clone().restore(&ctx)?.into_value());
     }
+    #[cfg(feature = "neo-uuid")]
+    if name == neojs_builtins::uuid::SPECIFIER {
+        let Some(uuid) = state.uuid.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(uuid.clone().restore(&ctx)?.into_value());
+    }
+    #[cfg(feature = "neo-uuid")]
+    if name == neojs_builtins::uuid::V4_SPECIFIER {
+        let Some(uuid_v4) = state.uuid_v4.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(uuid_v4.clone().restore(&ctx)?.into_value());
+    }
+    #[cfg(feature = "neo-uuid")]
+    if name == neojs_builtins::uuid::V7_SPECIFIER {
+        let Some(uuid_v7) = state.uuid_v7.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(uuid_v7.clone().restore(&ctx)?.into_value());
+    }
     #[cfg(not(any(
         feature = "neo-assert",
         feature = "neo-chars",
+        feature = "neo-os",
         feature = "neo-strings",
-        feature = "neo-test"
+        feature = "neo-test",
+        feature = "neo-uuid"
     )))]
     let _ = (&state, &name);
     Ok(Value::new_undefined(ctx.clone()))

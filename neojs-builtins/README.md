@@ -20,10 +20,10 @@ Each module contributes a `BuiltinModule` descriptor with its canonical `neo:`
 specifier, exact export names, and `Backend` (`Backend::Rust` or
 `Backend::Ecmascript`):
 
-* **`Backend::Rust` (`chars`, `strings`)**: pure Rust implementations with total
-  predicates and explicit results. V8 creates native V8 function objects and
-  registers native synthetic modules; QuickJS exports native QuickJS functions
-  from native modules.
+* **`Backend::Rust` (`chars`, `os`, `strings`, `uuid`)**: pure Rust
+  implementations with total predicates, target constants, or explicit error
+  results. V8 binds native V8 function objects or host ops; QuickJS exports
+  native QuickJS values and functions from native modules.
 * **`Backend::Ecmascript` (`assert`, `test`)**: shared ECMAScript factory
   functions (`assert.js`, `test.js`) and `.esm.js` re-export wrappers
   parameterized by engine-supplied host hooks (`isNativePromise`,
@@ -35,17 +35,19 @@ class identity while the ES module namespace remains a distinct object.
 
 ## Module selection
 
-Every shared module has its own Cargo feature: `assert`, `chars`, `strings`, and
-`test`.
+Every shared module has its own Cargo feature: `assert`, `chars`, `os`,
+`strings`, `test`, and `uuid` (`uuid` registers `neo:uuid`, `neo:uuid/v4`, and
+`neo:uuid/v7`).
 
-* `neojs-core` enables `assert` and `test` unconditionally and `chars` and
-  `strings` in its default feature set. `neo-slices` implies `neo-chars` because
-  `CharSlice` captures the native `chars.toUpper` and `chars.toLower`
-  functions.
-* `neojs-lite-core` enables `neo-assert`, `neo-chars`, `neo-strings`, and
-  `neo-test` in its default feature set. `default-features = false` removes the
-  `neojs-builtins` dependency, the registry entries, the loader entries, and the
-  introspection list entries.
+* `neojs-core` enables `assert`, `os`, `test`, and `uuid` unconditionally and
+  `chars` and `strings` in its default feature set. `neo-slices` implies
+  `neo-chars` because `CharSlice` captures the native `chars.toUpper` and
+  `chars.toLower` functions.
+* `neojs-lite-core` enables `neo-assert`, `neo-chars`, `neo-os`, `neo-strings`,
+  `neo-test`, and `neo-uuid` in its default feature set.
+  `default-features = false` removes the `neojs-builtins` dependency (and
+  transitive `getrandom`/`uuid`), the registry entries, the loader entries, and
+  the introspection list entries.
 * `neojs-builtins` itself has no default module features. A build without a
   module has no descriptor and no implementation code for it.
 
@@ -99,6 +101,35 @@ out-of-range value, or `NaN` returns `false`. `toLower` and `toUpper` throw
 
 The module calls no host op, reads no environment or file, and adds no
 capability. It is not a sandbox.
+
+## `neo:os`
+
+The canonical specifier and registry key is `neo:os`.
+
+| Export | Contract |
+| --- | --- |
+| `platform` | `std::env::consts::OS` for the compilation target (e.g. `"linux"`, `"macos"`, `"windows"`). |
+| `arch` | `std::env::consts::ARCH` for the compilation target (e.g. `"x86_64"`, `"aarch64"`). |
+
+Uses Rust's target vocabulary rather than Node's (`macos`, not `darwin`;
+`aarch64`, not `arm64`). Performs no host probe, reads no environment variable
+or file, and installs no global.
+
+## `neo:uuid`
+
+Canonical specifiers and registry keys: `neo:uuid` (exports `v4`, `v7`),
+`neo:uuid/v4` (named `v4` and `default`), and `neo:uuid/v7` (named `v7` and
+`default`). Both engines share one function object per version across all
+specifiers.
+
+| Export | Contract |
+| --- | --- |
+| `v4` | Synchronous RFC 9562 version 4 UUID (36-char lowercase hyphenated text) from OS CSPRNG via fallible `getrandom::fill` + `uuid::Builder`. |
+| `v7` | Synchronous RFC 9562 version 7 UUID (48-bit Unix ms timestamp + 74 random bits from OS CSPRNG). Refuses times outside `0..2^48` ms with `NEO_UUID_CLOCK`. |
+
+Both reject any arguments with `TypeError`, have no insecure fallback, never
+panic on CSPRNG failure (returning `Error` with `code: "NEO_UUID_RANDOM"` and a
+fixed non-secret `cause`), and promise no monotonicity.
 
 ## `neo:strings`
 

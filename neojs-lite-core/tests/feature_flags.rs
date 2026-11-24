@@ -20,11 +20,19 @@ fn expected_list() -> String {
     if cfg!(feature = "neo-chars") {
         entries.push(r#""neo:chars""#);
     }
+    if cfg!(feature = "neo-os") {
+        entries.push(r#""neo:os""#);
+    }
     if cfg!(feature = "neo-strings") {
         entries.push(r#""neo:strings""#);
     }
     if cfg!(feature = "neo-test") {
         entries.push(r#""neo:test""#);
+    }
+    if cfg!(feature = "neo-uuid") {
+        entries.push(r#""neo:uuid""#);
+        entries.push(r#""neo:uuid/v4""#);
+        entries.push(r#""neo:uuid/v7""#);
     }
     format!("[{}]", entries.join(", "))
 }
@@ -253,6 +261,120 @@ try {
 if (imported) throw new Error("neo:test was importable while disabled");
 "#)
     .expect("test absent");
+}
+
+#[test]
+#[cfg(feature = "neo-os")]
+fn os_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:os")) {
+    throw new Error(`os is missing from the list: ${JSON.stringify(list)}`);
+}
+if (list.includes("os")) {
+    throw new Error(`a bare os name is listed: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:os");
+if (registry === undefined || typeof registry !== "object" || !Object.isFrozen(registry)) {
+    throw new Error("the os registry object is missing or unfrozen");
+}
+if (Neo.getBuiltInModule("os") !== undefined) {
+    throw new Error("the registry accepted a bare os name");
+}
+const namespace = await import("neo:os");
+if (namespace === registry) {
+    throw new Error("the ES module namespace must be distinct from the registry object");
+}
+if (namespace.platform !== registry.platform || namespace.arch !== registry.arch) {
+    throw new Error("the namespace exports do not match the registry");
+}
+"#)
+    .expect("os feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-os"))]
+fn os_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:os") || list.includes("os")) {
+    throw new Error(`os is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:os") !== undefined) {
+    throw new Error("the canonical os registry object is still present");
+}
+if (Neo.getBuiltInModule("os") !== undefined) {
+    throw new Error("a bare os name returned a module");
+}
+let imported = false;
+try {
+    await import("neo:os");
+    imported = true;
+} catch {
+    // Expected: the loader has no os entry.
+}
+if (imported) throw new Error("neo:os was importable while disabled");
+"#)
+    .expect("os absent");
+}
+
+#[test]
+#[cfg(feature = "neo-uuid")]
+fn uuid_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+for (const specifier of ["neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]) {
+    if (!list.includes(specifier)) {
+        throw new Error(`${specifier} is missing from the list: ${JSON.stringify(list)}`);
+    }
+    const registry = Neo.getBuiltInModule(specifier);
+    if (registry === undefined || typeof registry !== "object" || !Object.isFrozen(registry)) {
+        throw new Error(`the ${specifier} registry object is missing or unfrozen`);
+    }
+    const bare = specifier.slice("neo:".length);
+    if (list.includes(bare) || Neo.getBuiltInModule(bare) !== undefined) {
+        throw new Error(`bare ${bare} leaked into registry or list`);
+    }
+}
+const uuidNs = await import("neo:uuid");
+const v4Ns = await import("neo:uuid/v4");
+const v7Ns = await import("neo:uuid/v7");
+const uuidReg = Neo.getBuiltInModule("neo:uuid");
+if (uuidNs === uuidReg) throw new Error("namespace must be distinct from registry");
+if (uuidNs.v4 !== uuidReg.v4 || v4Ns.v4 !== uuidReg.v4 || v4Ns.default !== uuidReg.v4) {
+    throw new Error("v4 identity mismatch");
+}
+if (uuidNs.v7 !== uuidReg.v7 || v7Ns.v7 !== uuidReg.v7 || v7Ns.default !== uuidReg.v7) {
+    throw new Error("v7 identity mismatch");
+}
+"#)
+    .expect("uuid feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-uuid"))]
+fn uuid_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+for (const specifier of ["neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]) {
+    const bare = specifier.slice("neo:".length);
+    if (list.includes(specifier) || list.includes(bare)) {
+        throw new Error(`${specifier} is still listed: ${JSON.stringify(list)}`);
+    }
+    if (Neo.getBuiltInModule(specifier) !== undefined || Neo.getBuiltInModule(bare) !== undefined) {
+        throw new Error(`${specifier} registry object is still present`);
+    }
+    let imported = false;
+    try {
+        await import(specifier);
+        imported = true;
+    } catch {
+        // Expected: the loader has no uuid entry.
+    }
+    if (imported) throw new Error(`${specifier} was importable while disabled`);
+}
+"#)
+    .expect("uuid absent");
 }
 
 #[test]

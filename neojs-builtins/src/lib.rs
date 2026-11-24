@@ -10,28 +10,30 @@
 //!
 //! A module contributes:
 //!
-//! * either a Rust implementation (`Backend::Rust`, e.g. `chars` and `strings`)
-//!   with total predicates and explicit error results, or a shared ECMAScript
-//!   factory and ESM wrapper (`Backend::Ecmascript`, e.g. `assert` and `test`)
-//!   parameterized by engine host hooks;
+//! * either a Rust implementation (`Backend::Rust`, e.g. `chars`, `os`,
+//!   `strings`, and `uuid`) with total predicates and explicit error results,
+//!   or a shared ECMAScript factory and ESM wrapper (`Backend::Ecmascript`,
+//!   e.g. `assert` and `test`) parameterized by engine host hooks;
 //! * a [`BuiltinModule`] descriptor with the canonical specifier and the exact
 //!   export names.
 //!
 //! Each engine keeps its own binding. For Rust modules, V8 creates native V8
-//! function objects and QuickJS exports native QuickJS functions. For shared
-//! ECMAScript modules, each engine evaluates the shared factory once per realm
-//! with its native host hooks and serves the shared `.esm.js` wrapper.
+//! function objects or host ops and QuickJS exports native QuickJS values and
+//! functions. For shared ECMAScript modules, each engine evaluates the shared
+//! factory once per realm with its native host hooks and serves the shared
+//! `.esm.js` wrapper.
 //!
 //! # Module selection
 //!
-//! Every shared module has its own Cargo feature. `assert`, `chars`, `strings`,
-//! and `test` are the current modules. The features are off by default; a
-//! dependent that wants a module enables it. `neojs-core` enables `assert` and
-//! `test` unconditionally and `chars`/`strings` in its default feature set;
-//! `neojs-lite-core` enables all four in its default feature set. Cargo features
-//! are additive and unify across the dependency graph, so a build that another
-//! dependent enables a module for contains that module. Selecting modules is
-//! compile-time surface selection, not a sandbox.
+//! Every shared module has its own Cargo feature. `assert`, `chars`, `os`,
+//! `strings`, `test`, and `uuid` are the current modules (`uuid` registers
+//! `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`). The features are off by
+//! default; a dependent that wants a module enables it. `neojs-core` enables
+//! `assert`, `os`, `test`, and `uuid` unconditionally and `chars`/`strings` in
+//! its default feature set; `neojs-lite-core` enables all six in its default
+//! feature set. Cargo features are additive and unify across the dependency
+//! graph, so a build that another dependent enables a module for contains that
+//! module. Selecting modules is compile-time surface selection, not a sandbox.
 //!
 //! # Precise limits
 //!
@@ -73,10 +75,14 @@ pub struct BuiltinModule {
 pub mod assert;
 #[cfg(feature = "chars")]
 pub mod chars;
+#[cfg(feature = "os")]
+pub mod os;
 #[cfg(feature = "strings")]
 pub mod strings;
 #[cfg(feature = "test")]
 pub mod test;
+#[cfg(feature = "uuid")]
+pub mod uuid;
 
 /// Every shared module this build selected, in registration order.
 pub static MODULES: &[BuiltinModule] = &[
@@ -84,10 +90,18 @@ pub static MODULES: &[BuiltinModule] = &[
     assert::MODULE,
     #[cfg(feature = "chars")]
     chars::MODULE,
+    #[cfg(feature = "os")]
+    os::MODULE,
     #[cfg(feature = "strings")]
     strings::MODULE,
     #[cfg(feature = "test")]
     test::MODULE,
+    #[cfg(feature = "uuid")]
+    uuid::MODULE,
+    #[cfg(feature = "uuid")]
+    uuid::V4_MODULE,
+    #[cfg(feature = "uuid")]
+    uuid::V7_MODULE,
 ];
 
 /// Returns the shared module for a canonical specifier, or `None`.
@@ -143,6 +157,24 @@ mod tests {
             assert!(module("neo:chars").is_none());
         }
 
+        #[cfg(feature = "os")]
+        {
+            assert_eq!(
+                module("neo:os").map(|builtin| builtin.specifier),
+                Some("neo:os")
+            );
+            assert!(module("os").is_none());
+            assert!(module("NEO:os").is_none());
+            assert!(module("neo:os?x").is_none());
+            assert!(module("neo:os#x").is_none());
+            assert_eq!(os::MODULE.specifier, "neo:os");
+            assert_eq!(os::MODULE.backend, Backend::Rust);
+        }
+        #[cfg(not(feature = "os"))]
+        {
+            assert!(module("neo:os").is_none());
+        }
+
         #[cfg(feature = "strings")]
         {
             assert_eq!(
@@ -179,11 +211,45 @@ mod tests {
             assert!(module("neo:test").is_none());
         }
 
+        #[cfg(feature = "uuid")]
+        {
+            for specifier in ["neo:uuid", "neo:uuid/v4", "neo:uuid/v7"] {
+                assert_eq!(
+                    module(specifier).map(|builtin| builtin.specifier),
+                    Some(specifier)
+                );
+            }
+            for invalid in [
+                "uuid",
+                "uuid/v4",
+                "uuid/v7",
+                "NEO:uuid",
+                "neo:uuid?x",
+                "neo:uuid#x",
+            ] {
+                assert!(module(invalid).is_none(), "{invalid}");
+            }
+            assert_eq!(uuid::MODULE.specifier, "neo:uuid");
+            assert_eq!(uuid::MODULE.backend, Backend::Rust);
+            assert_eq!(uuid::V4_MODULE.specifier, "neo:uuid/v4");
+            assert_eq!(uuid::V4_MODULE.backend, Backend::Rust);
+            assert_eq!(uuid::V7_MODULE.specifier, "neo:uuid/v7");
+            assert_eq!(uuid::V7_MODULE.backend, Backend::Rust);
+        }
+        #[cfg(not(feature = "uuid"))]
+        {
+            assert!(module("neo:uuid").is_none());
+            assert!(module("neo:uuid/v4").is_none());
+            assert!(module("neo:uuid/v7").is_none());
+        }
+
         #[cfg(not(any(
             feature = "assert",
             feature = "chars",
+            feature = "os",
             feature = "strings",
-            feature = "test"
+            feature = "test",
+            feature = "uuid"
         )))]
         assert!(MODULES.is_empty());
     }
@@ -194,7 +260,10 @@ mod tests {
             assert!(builtin.specifier.starts_with("neo:"));
             assert!(!builtin.exports.is_empty());
             match builtin.specifier {
-                "neo:chars" | "neo:strings" => assert_eq!(builtin.backend, Backend::Rust),
+                "neo:chars" | "neo:os" | "neo:strings" | "neo:uuid" | "neo:uuid/v4"
+                | "neo:uuid/v7" => {
+                    assert_eq!(builtin.backend, Backend::Rust)
+                }
                 "neo:assert" | "neo:test" => assert_eq!(builtin.backend, Backend::Ecmascript),
                 other => panic!("unexpected built-in module: {other}"),
             }

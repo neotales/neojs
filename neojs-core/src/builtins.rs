@@ -196,8 +196,11 @@ const SLICES_REGISTRY_TOKEN: &str = "// __NEO_SLICES_REGISTRY_ENTRY__";
 /// A disabled module's registry entry, loader entry, and name are all absent.
 pub(crate) fn neo_shim() -> String {
     let shim = NEO_SHIM_SOURCE
-        .replace(OS_PLATFORM_TOKEN, &js_string(std::env::consts::OS))
-        .replace(OS_ARCH_TOKEN, &js_string(std::env::consts::ARCH))
+        .replace(
+            OS_PLATFORM_TOKEN,
+            &js_string(neojs_builtins::os::platform()),
+        )
+        .replace(OS_ARCH_TOKEN, &js_string(neojs_builtins::os::arch()))
         .replace(ASSERT_IMPL_TOKEN, neojs_builtins::assert::FACTORY_SOURCE)
         .replace(TEST_IMPL_TOKEN, neojs_builtins::test::FACTORY_SOURCE);
 
@@ -353,7 +356,7 @@ const CRYPTO_MODULE: &str = include_str!("builtins/crypto.esm.js");
 /// Only `neo:os` resolves to this URL. It is the canonical and only module
 /// specifier for this built-in, so the engine caches one module instance for
 /// every importer. It is not a `file:` URL and is never read from disk.
-pub(crate) const OS_SPECIFIER: &str = "neo:os";
+pub(crate) const OS_SPECIFIER: &str = neojs_builtins::os::SPECIFIER;
 
 /// The ECMAScript module source served for [`OS_SPECIFIER`].
 ///
@@ -467,7 +470,7 @@ const TEST_MODULE: &str = neojs_builtins::test::ESM_SOURCE;
 /// Only `neo:uuid` resolves to this URL. It is the canonical and only module
 /// specifier for this built-in, so the engine caches one module instance for
 /// every importer. It is not a `file:` URL and is never read from disk.
-pub(crate) const UUID_SPECIFIER: &str = "neo:uuid";
+pub(crate) const UUID_SPECIFIER: &str = neojs_builtins::uuid::SPECIFIER;
 
 /// The ECMAScript module source served for [`UUID_SPECIFIER`].
 ///
@@ -482,7 +485,7 @@ const UUID_MODULE: &str = include_str!("builtins/uuid.esm.js");
 /// Only `neo:uuid/v4` resolves to this URL. It is a thin module over the
 /// same function as `uuid.v4`, with that function as both the named
 /// `v4` export and the default export. It is not read from disk.
-pub(crate) const UUID_V4_SPECIFIER: &str = "neo:uuid/v4";
+pub(crate) const UUID_V4_SPECIFIER: &str = neojs_builtins::uuid::V4_SPECIFIER;
 
 /// The ECMAScript module source served for [`UUID_V4_SPECIFIER`].
 ///
@@ -495,7 +498,7 @@ const UUID_V4_MODULE: &str = include_str!("builtins/uuid-v4.esm.js");
 /// Only `neo:uuid/v7` resolves to this URL. It is a thin module over the
 /// same function as `uuid.v7`, with that function as both the named
 /// `v7` export and the default export. It is not read from disk.
-pub(crate) const UUID_V7_SPECIFIER: &str = "neo:uuid/v7";
+pub(crate) const UUID_V7_SPECIFIER: &str = neojs_builtins::uuid::V7_SPECIFIER;
 
 /// The ECMAScript module source served for [`UUID_V7_SPECIFIER`].
 ///

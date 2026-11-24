@@ -10,14 +10,15 @@ authors.workspace = true
 readme = "README.md"
 
 [features]
-# A default Lite build keeps the shared `neo:assert`, `neo:chars`,
-# `neo:strings`, and `neo:test` modules. A consumer that wants the smallest
-# QuickJS runtime can disable default features; the CLI below selects the
-# modules explicitly so a change to these defaults cannot silently change what
-# the command advertises. Cargo features are additive and unify across the
-# dependency graph: a module is present whenever any dependent enables it.
-# Selection is compile-time surface selection, not a sandbox.
-default = ["neo-assert", "neo-chars", "neo-strings", "neo-test"]
+# A default Lite build keeps the shared `neo:assert`, `neo:chars`, `neo:os`,
+# `neo:strings`, `neo:test`, and `neo:uuid` (`neo:uuid`, `neo:uuid/v4`,
+# `neo:uuid/v7`) modules. A consumer that wants the smallest QuickJS runtime
+# can disable default features; the CLI below selects the modules explicitly so
+# a change to these defaults cannot silently change what the command
+# advertises. Cargo features are additive and unify across the dependency graph:
+# a module is present whenever any dependent enables it. Selection is
+# compile-time surface selection, not a sandbox.
+default = ["neo-assert", "neo-chars", "neo-os", "neo-strings", "neo-test", "neo-uuid"]
 # The shared `assert` module and its Promise observation host hooks. This
 # enables the optional `neojs-builtins` dependency and its `assert` module.
 neo-assert = ["dep:neojs-builtins", "neojs-builtins/assert"]
@@ -25,6 +26,9 @@ neo-assert = ["dep:neojs-builtins", "neojs-builtins/assert"]
 # declaration, and introspection list entry. This enables the optional
 # `neojs-builtins` dependency and its `chars` module.
 neo-chars = ["dep:neojs-builtins", "neojs-builtins/chars"]
+# The shared `os` Rust constants (`platform`, `arch`), native registry object,
+# native module declaration, and introspection list entry.
+neo-os = ["dep:neojs-builtins", "neojs-builtins/os"]
 # The shared `strings` Rust logic, native registry object, native module
 # declaration, and introspection list entry. This enables the optional
 # `neojs-builtins` dependency and its `strings` module.
@@ -32,6 +36,11 @@ neo-strings = ["dep:neojs-builtins", "neojs-builtins/strings"]
 # The shared `test` module, its host hooks, and `Runtime::run_tests`. This
 # enables the optional `neojs-builtins` dependency and its `test` module.
 neo-test = ["dep:neojs-builtins", "neojs-builtins/test"]
+# The shared `uuid` (`neo:uuid`, `neo:uuid/v4`, `neo:uuid/v7`) Rust logic,
+# native registry objects, native module declarations, and introspection list
+# entries. This enables `neojs-builtins/uuid` (and its fallible `getrandom` +
+# `uuid::Builder` dependencies); `--no-default-features` keeps all of them out.
+neo-uuid = ["dep:neojs-builtins", "neojs-builtins/uuid"]
 # Test-only streaming-read counters for the bounded text access tests. Never
 # enabled by a normal build.
 test-support = []

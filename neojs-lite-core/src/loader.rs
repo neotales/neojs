@@ -73,8 +73,10 @@ impl Resolver for FileResolver {
         #[cfg(any(
             feature = "neo-assert",
             feature = "neo-chars",
+            feature = "neo-os",
             feature = "neo-strings",
-            feature = "neo-test"
+            feature = "neo-test",
+            feature = "neo-uuid"
         ))]
         if let Some(builtin) = neojs_builtins::module(name) {
             return Ok(builtin.specifier.to_owned());
@@ -169,14 +171,17 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
-        // `neo:chars` and `neo:strings` are native QuickJS modules (`declare_def`)
-        // with no ECMAScript source; `neo:assert` and `neo:test` declare the
-        // shared `.esm.js` re-export wrappers from `neojs-builtins`.
+        // `neo:chars`, `neo:os`, `neo:strings`, `neo:uuid`, `neo:uuid/v4`, and
+        // `neo:uuid/v7` are native QuickJS modules (`declare_def`) with no
+        // ECMAScript source; `neo:assert` and `neo:test` declare the shared
+        // `.esm.js` re-export wrappers from `neojs-builtins`.
         #[cfg(any(
             feature = "neo-assert",
             feature = "neo-chars",
+            feature = "neo-os",
             feature = "neo-strings",
-            feature = "neo-test"
+            feature = "neo-test",
+            feature = "neo-uuid"
         ))]
         if let Some(builtin) = neojs_builtins::module(name) {
             match builtin.specifier {
@@ -188,6 +193,10 @@ impl Loader for FileLoader {
                 neojs_builtins::chars::SPECIFIER => {
                     return Module::declare_def::<crate::chars::CharsModule, _>(ctx.clone(), name);
                 }
+                #[cfg(feature = "neo-os")]
+                neojs_builtins::os::SPECIFIER => {
+                    return Module::declare_def::<crate::os::OsModule, _>(ctx.clone(), name);
+                }
                 #[cfg(feature = "neo-strings")]
                 neojs_builtins::strings::SPECIFIER => {
                     return Module::declare_def::<crate::strings::StringsModule, _>(
@@ -198,6 +207,18 @@ impl Loader for FileLoader {
                 #[cfg(feature = "neo-test")]
                 neojs_builtins::test::SPECIFIER => {
                     return Module::declare(ctx.clone(), name, neojs_builtins::test::ESM_SOURCE);
+                }
+                #[cfg(feature = "neo-uuid")]
+                neojs_builtins::uuid::SPECIFIER => {
+                    return Module::declare_def::<crate::uuid::UuidModule, _>(ctx.clone(), name);
+                }
+                #[cfg(feature = "neo-uuid")]
+                neojs_builtins::uuid::V4_SPECIFIER => {
+                    return Module::declare_def::<crate::uuid::UuidV4Module, _>(ctx.clone(), name);
+                }
+                #[cfg(feature = "neo-uuid")]
+                neojs_builtins::uuid::V7_SPECIFIER => {
+                    return Module::declare_def::<crate::uuid::UuidV7Module, _>(ctx.clone(), name);
                 }
                 _ => {
                     return Err(Error::new_loading_message(

@@ -2046,8 +2046,10 @@ dependencies = [
 name = "neojs-builtins"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "sha2 0.11.1",
  "unicode-general-category",
+ "uuid",
 ]
 
 [[package]]
@@ -2081,7 +2083,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "ureq",
- "uuid",
  "zeroize",
 ]
 

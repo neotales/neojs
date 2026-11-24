@@ -32,9 +32,10 @@
 //!   `String`.
 //! * `console.log` and `console.error` write to the process streams.
 //! * A minimal `Neo` global reports `engine` `"neo-lite"`. With the default
-//!   `neo-assert`, `neo-chars`, `neo-strings`, and `neo-test` features the
-//!   registry contains the canonical shared modules `neo:assert`, `neo:chars`,
-//!   `neo:strings`, and `neo:test`.
+//!   `neo-assert`, `neo-chars`, `neo-os`, `neo-strings`, `neo-test`, and
+//!   `neo-uuid` features the registry contains the canonical shared modules
+//!   `neo:assert`, `neo:chars`, `neo:os`, `neo:strings`, `neo:test`, `neo:uuid`,
+//!   `neo:uuid/v4`, and `neo:uuid/v7`.
 //!   `Neo.getBuiltInModulesList()` returns one frozen array of canonical
 //!   specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
 //!   registry object whose named exports share identity with the module
@@ -42,9 +43,10 @@
 //!   or another scheme returns `undefined`; a non-string name throws
 //!   `TypeError`. With `default-features = false` the registry and list are
 //!   empty and no module source is compiled in. The implementations come from
-//!   the engine-neutral `neojs-builtins` crate (`chars` and `strings` bound as
-//!   native QuickJS modules, `assert` and `test` evaluated from the shared
-//!   ECMAScript factories with native QuickJS Promise and queue hooks).
+//!   the engine-neutral `neojs-builtins` crate (`chars`, `os`, `strings`, and
+//!   `uuid` bound as native QuickJS modules, `assert` and `test` evaluated from
+//!   the shared ECMAScript factories with native QuickJS Promise and queue
+//!   hooks).
 //!
 //! # What is not implemented yet
 //!
@@ -58,9 +60,10 @@
 //!   an external event fails with an error instead of hanging, and
 //!   `test(..., { timeout })` is rejected explicitly.
 //! * **Most built-in `neo:` modules are absent.** With their features enabled
-//!   this crate implements the shared `neo:assert`, `neo:chars`, `neo:strings`,
-//!   and `neo:test` modules only. Other V8 modules are not importable here, and
-//!   the `Neo` list does not claim them.
+//!   this crate implements the shared `neo:assert`, `neo:chars`, `neo:os`,
+//!   `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`
+//!   modules only. Other V8 modules are not importable here, and the `Neo` list
+//!   does not claim them.
 //! * **No sandbox.** Permissions, host capabilities, and isolation are not
 //!   implemented.
 //!
@@ -73,16 +76,23 @@ mod runtime;
 #[cfg(feature = "neo-chars")]
 mod chars;
 mod neo;
+#[cfg(feature = "neo-os")]
+mod os;
 #[cfg(any(feature = "neo-assert", feature = "neo-test"))]
 mod promise;
 #[cfg(feature = "neo-strings")]
 mod strings;
+#[cfg(feature = "neo-uuid")]
+mod uuid;
 
 pub use runtime::{Error, Runtime, TestReport};
 
 /// Test-only hooks. Compiled only with the off-by-default `test-support`
 /// feature, which a normal build never enables.
-#[cfg(all(feature = "test-support", feature = "neo-strings"))]
+#[cfg(all(
+    feature = "test-support",
+    any(feature = "neo-strings", feature = "neo-uuid")
+))]
 #[doc(hidden)]
 pub mod test_support {
     /// Return `(units, windows)` copied from QuickJS strings by the last
@@ -90,23 +100,36 @@ pub mod test_support {
     ///
     /// Used to prove that a small `fromIndex` reads a bounded prefix instead of
     /// copying the whole text.
+    #[cfg(feature = "neo-strings")]
     pub fn strings_text_reads() -> (usize, usize) {
         crate::strings::test_reads()
     }
 
     /// Return the number of source read attempts, including a failed one.
+    #[cfg(feature = "neo-strings")]
     pub fn strings_text_attempts() -> usize {
         crate::strings::test_attempts()
     }
 
     /// Reset the streaming-search read counters and injected failure.
+    #[cfg(feature = "neo-strings")]
     pub fn reset_strings_text_reads() {
         crate::strings::reset_test_reads();
     }
 
     /// Make the read after `loads` successful windows fail with a
     /// guest-visible exception.
+    #[cfg(feature = "neo-strings")]
     pub fn fail_strings_after_loads(loads: usize) {
         crate::strings::fail_after_loads(loads);
+    }
+
+    /// Make the next UUID entropy draw fail with `NEO_UUID_RANDOM`.
+    ///
+    /// The injection is consumed once and exists so the JavaScript error path
+    /// can be tested deterministically without a production hook.
+    #[cfg(feature = "neo-uuid")]
+    pub fn fail_next_uuid_random() {
+        crate::uuid::fail_next_uuid_random();
     }
 }

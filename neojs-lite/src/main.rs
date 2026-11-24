@@ -249,7 +249,7 @@ Options:
   --               End option parsing, for a file or pattern beginning with `-`
 
 Built-in modules:
-  neo:assert, neo:chars, neo:strings, neo:test
+  neo:assert, neo:chars, neo:os, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7
 
 `neojs-lite test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh

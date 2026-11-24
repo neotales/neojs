@@ -39,11 +39,19 @@ fn expected_list() -> (String, usize) {
     if cfg!(feature = "neo-chars") {
         entries.push(r#""neo:chars""#);
     }
+    if cfg!(feature = "neo-os") {
+        entries.push(r#""neo:os""#);
+    }
     if cfg!(feature = "neo-strings") {
         entries.push(r#""neo:strings""#);
     }
     if cfg!(feature = "neo-test") {
         entries.push(r#""neo:test""#);
+    }
+    if cfg!(feature = "neo-uuid") {
+        entries.push(r#""neo:uuid""#);
+        entries.push(r#""neo:uuid/v4""#);
+        entries.push(r#""neo:uuid/v7""#);
     }
     (format!("[{}]", entries.join(", ")), entries.len())
 }

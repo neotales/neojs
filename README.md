@@ -364,16 +364,18 @@ implements the shared `neo:chars` and `neo:strings` modules; it does not impleme
 modules.
 
 The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"` and,
-with its default `neo-chars` and `neo-strings` features, implements the shared built-ins
-`neo:chars` and `neo:strings`. `Neo.getBuiltInModulesList()` is one frozen array of canonical
-specifiers (`["neo:chars", "neo:strings"]`), and `Neo.getBuiltInModule(specifier)` returns the
-frozen registry object whose named functions are the same function objects the module namespace
-exports; the namespace itself is a distinct object. With `default-features = false` the registry and
-list are empty. A bare name, another scheme, or any other specifier returns `undefined`; a non-string
-name throws `TypeError`. That list is not a claim that another V8 module is planned or available.
-The `chars` and `strings` Rust logic comes from the engine-neutral `neojs-builtins` crate and is
-bound as native QuickJS modules; there is no JavaScript wrapper. See `neojs-builtins/README.md` for
-the shared contract and its Unicode-version limits.
+with its default `neo-assert`, `neo-chars`, `neo-os`, `neo-strings`, `neo-test`, and `neo-uuid`
+features, implements the shared built-ins `neo:assert`, `neo:chars`, `neo:os`, `neo:strings`,
+`neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`. `Neo.getBuiltInModulesList()` is one
+frozen array of canonical specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
+registry object whose named exports share identity with the module namespace exports; the
+namespace itself is a distinct object. With `default-features = false` the registry and list are
+empty. A bare name, another scheme, or any other specifier returns `undefined`; a non-string name
+throws `TypeError`. That list is not a claim that another V8 module is planned or available. The
+shared Rust and ECMAScript logic comes from the engine-neutral `neojs-builtins` crate (`chars`,
+`os`, `strings`, and `uuid` bound as native QuickJS modules; `assert` and `test` evaluated from
+shared factories with native QuickJS Promise and queue hooks). See `neojs-builtins/README.md` for
+the shared contract and its limits.
 
 **Use the stdio built-in.** `Neo.getBuiltInModule("neo:stdio")` returns a frozen module object cached
 for the realm. `neo:stdio` is the canonical and only module specifier. It exports `Readable`,
@@ -1719,16 +1721,16 @@ promise still rejected without a handler when the queue empties is an error; rej
 primitive values and an Error's own data without invoking getters, proxies, `toString`, or `String`.
 It does **not** implement TypeScript, host asynchrony or timers, most `neo:` built-in modules,
 permissions, or a sandbox, and it does not claim parity with the V8 runtime. It installs a minimal
-`Neo` global whose engine is `"neo-lite"`; with the default `neo-assert`, `neo-chars`, `neo-strings`, and
-`neo-test` features its built-in module list is the canonical
-`["neo:assert", "neo:chars", "neo:strings", "neo:test"]`.
+`Neo` global whose engine is `"neo-lite"`; with the default `neo-assert`, `neo-chars`, `neo-os`,
+`neo-strings`, `neo-test`, and `neo-uuid` features its built-in module list is the canonical
+`["neo:assert", "neo:chars", "neo:os", "neo:strings", "neo:test", "neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]`.
 `Neo.getBuiltInModule(specifier)` returns the frozen registry object whose named exports share
 identity with the module namespace exports; the namespace itself is a distinct object. With
 `default-features = false` the list is empty. A bare name, another scheme, or any other specifier
-returns `undefined`, and a non-string name throws `TypeError`. All four modules come from the
-engine-neutral `neojs-builtins` crate (`chars` and `strings` bound as native QuickJS modules;
-`assert` and `test` evaluated from shared ECMAScript factories with native QuickJS Promise and
-queue hooks). `neojs-lite-core::Runtime::run_tests` and `neojs-lite test <file-or-glob>...` run
+returns `undefined`, and a non-string name throws `TypeError`. All shared modules come from the
+engine-neutral `neojs-builtins` crate (`chars`, `os`, `strings`, and `uuid` bound as native QuickJS
+modules; `assert` and `test` evaluated from shared ECMAScript factories with native QuickJS Promise
+and queue hooks). `neojs-lite-core::Runtime::run_tests` and `neojs-lite test <file-or-glob>...` run
 `neo:test` suites on QuickJS using the same `TestReport` contract and deterministic glob expansion
 (`neojs-module-policy`) as `neojs test`, rejecting `test(..., { timeout })` explicitly because
 QuickJS has no host timers. The `neojs-builtins` crate has no V8 or QuickJS dependency. Both
@@ -1766,10 +1768,10 @@ SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
 authentication, the built-in module registry and its `Neo.engine` and `Neo.getBuiltInModulesList`
 introspection, and the embedding API above. The QuickJS runtime (`neojs-lite-core` / `neojs-lite`)
-reports `Neo.engine` `"neo-lite"` and implements the shared `neo:assert`, `neo:chars`,
-`neo:strings`, and `neo:test` modules by default (or an empty list with
-`default-features = false`); other V8 modules and TypeScript remain absent there. Features outside
-this list are not implemented.
+reports `Neo.engine` `"neo-lite"` and implements the shared `neo:assert`, `neo:chars`, `neo:os`,
+`neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` modules by default (or an
+empty list with `default-features = false`); other V8 modules and TypeScript remain absent there.
+Features outside this list are not implemented.
 
 - TypeScript has no type checking and no transpilation. Only syntax that can be erased is accepted:
   `enum`, `namespace`, parameter properties, `import =`, `export =`, decorators, and angle-bracket

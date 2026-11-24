@@ -20,8 +20,10 @@ path = "src/main.rs"
 neojs-lite-core = { version = "0.1.0", path = "../neojs-lite-core", default-features = false, features = [
     "neo-assert",
     "neo-chars",
+    "neo-os",
     "neo-strings",
     "neo-test",
+    "neo-uuid",
 ] }
 # Deterministic shell-style expansion for `neojs-lite test`.
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy", features = ["test-glob"] }

@@ -43,7 +43,7 @@ deno_error.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
 httpdate.workspace = true
-neojs-builtins = { workspace = true, features = ["assert", "test"] }
+neojs-builtins = { workspace = true, features = ["assert", "os", "test", "uuid"] }
 neojs-manifest = { version = "0.1.0", path = "../neojs-manifest" }
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
 neotales-age.workspace = true
@@ -56,7 +56,6 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 ureq.workspace = true
-uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

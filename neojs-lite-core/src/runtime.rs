@@ -393,8 +393,10 @@ impl Runtime {
     /// `console` and the native `Neo` introspection global.
     ///
     /// `Neo.engine` is `"neo-lite"`. With the default `neo-assert`, `neo-chars`,
-    /// `neo-strings`, and `neo-test` features the registry contains the canonical
-    /// modules `neo:assert`, `neo:chars`, `neo:strings`, and `neo:test`.
+    /// `neo-os`, `neo-strings`, `neo-test`, and `neo-uuid` features the
+    /// registry contains the canonical modules `neo:assert`, `neo:chars`,
+    /// `neo:os`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and
+    /// `neo:uuid/v7`.
     /// `Neo.getBuiltInModulesList()` returns one frozen array of canonical
     /// specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
     /// registry object whose named exports share identity with the module
