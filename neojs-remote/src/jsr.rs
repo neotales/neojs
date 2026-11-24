@@ -1,30 +1,12 @@
-//! Groundwork for native `jsr:` module resolution.
+//! Native `jsr:` module resolution, registry contract, and offline cache
+//! registry.
 //!
-//! # Status
-//!
-//! This module is the deterministic core of `jsr:` support: strict specifier
+//! This module is the engine-neutral core of `jsr:` support: strict specifier
 //! parsing, registry-metadata parsing, version selection, entrypoint
-//! resolution, and per-file size and checksum verification. It performs no I/O.
-//! The crate-private [`crate::jsr_loader`] wires it to deno_core's module loader
-//! over the opt-in HTTPS transport in [`crate::remote`].
-//! [`crate::Runtime::with_remote`] and `neojs --allow-remote` enable it; a
-//! default runtime still rejects every `jsr:` import. A direct
-//! `https://jsr.io/...` import from a local or ordinary remote module is an
-//! ordinary HTTPS module and does not use this resolver; an explicit jsr.io URL
-//! imported inside a JSR graph is checked against the manifest.
-//!
-//! The integration imports a package's exported entrypoints and the relative
-//! modules they import. A `gh:`/`github:` or absolute `https:` import is
-//! delegated to the remote loader, so it is an ordinary remote module rather
-//! than a verified registry one. It does not implement `npm:`, `node:`, or
-//! import maps, so a JSR package that depends on one of those fails at
-//! resolution. It
-//! has no lockfile, offline or frozen policy, dist-tags, private registry or
-//! authentication support, custom origin, or publisher signature. Metadata is
-//! trusted through HTTPS to the public `jsr.io` origin, and a file is executed
-//! only after its length and SHA-256 match the version metadata. That is content
-//! integrity against a corrupted or substituted file relative to the retrieved
-//! metadata, not publisher identity or an authentication boundary for the cache.
+//! resolution, per-file size and checksum verification, canonical `jsr.io` URL
+//! helpers, the [`Registry`] trait, [`RemoteRegistry`], and the offline
+//! [`CacheRegistry`]. It has no JavaScript engine dependency; `neojs-core`
+//! wires it to `deno_core::ModuleLoader` in its `jsr_loader` adapter.
 //!
 //! # Scope
 //!
@@ -37,9 +19,7 @@
 //! parser rejects percent escapes, backslashes, query and fragment markers,
 //! control characters, empty segments, `.`, `..`, and `*`. It never decodes a
 //! percent escape: a `%` is rejected instead of being interpreted, so `%2e%2e`
-//! cannot become `..`. These checks keep a package path answerable from the
-//! registry API; they are not a filesystem containment boundary for a future
-//! cache and do not replace one.
+//! cannot become `..`.
 //!
 //! # SemVer
 //!
@@ -73,45 +53,10 @@
 //!
 //! [`VersionMetadata::verify_file`] checks a file's byte length and
 //! `sha256-<lowercase hex>` checksum against the manifest before a later loader
-//! executes those bytes. That verifies downloaded content against metadata; it
-//! does not establish publisher identity and does not protect an extracted
-//! cache from later mutation.
-//!
-//! JSON parsing uses `serde_json`. A duplicate recognized field on a fixed
-//! object (for example the top-level `scope` or `name`, or a manifest entry's
-//! `size` or `checksum`) is rejected by serde. A duplicate key inside a
-//! map-like object (`versions` entries, `manifest` entries, or `exports`
-//! entries) is not diagnosed; serde_json inserts into a `BTreeMap` and the last
-//! value wins. This parser is the only interpreter of those bytes in this
-//! process, but a duplicate map key remains ambiguity that a later cache or
-//! lockfile must not inherit. The `moduleGraph1` and `moduleGraph2` fields are
-//! not interpreted; they are a fetch optimization, not part of module identity.
-//!
-//! # Integration and limits
-//!
-//! [`crate::jsr_loader`] uses a [`crate::jsr_loader::RemoteRegistry`] over the
-//! remote client. The package metadata, version metadata, and each file are
-//! ordinary HTTPS GETs to `https://jsr.io/...`; the remote client caches them by
-//! URL under its own freshness and revalidation policy. A cached body is still
-//! checked against the manifest length and checksum before use. That proves
-//! consistency with the retrieved metadata, not publisher identity; a local
-//! attacker who consistently rewrites both the cached metadata and the cached
-//! body can keep them consistent.
-//!
-//! [`deno_core::ModuleLoader::resolve`] is synchronous, so the first import of a
-//! package or version fetches its metadata on the isolate thread, using the same
-//! blocking transport as remote module loading. That is a latency limitation,
-//! not a trust boundary; avoiding it needs a prefetch or an asynchronous
-//! resolution stage. Parsed package and version metadata are cached for the
-//! runtime's lifetime, so a second import of the same package does no metadata
-//! I/O.
-//!
-//! Redirects are followed by the remote client, one checked hop at a time,
-//! under its HTTPS-only and redirect-limit policy; the loader never follows one
-//! itself. Private registries, authentication, custom origins, lockfiles,
-//! offline or frozen policy, dist-tags, package tarballs, the optional
-//! `moduleGraph1`/`moduleGraph2` hints, and the QuickJS runtime are not in
-//! scope. The public `jsr.io` origin is the only registry origin.
+//! executes those bytes. That verifies downloaded content against the retrieved
+//! metadata; it does not establish publisher identity and is not an
+//! authentication boundary for the local cache (an attacker who consistently
+//! rewrites both a cached manifest and a cached body can keep them matching).
 //!
 //! # Limits
 //!
@@ -119,13 +64,7 @@
 //! [`MAX_CONSTRAINT_BYTES`] and [`MAX_COMPARATORS`] comparators, one metadata
 //! document at most [`MAX_METADATA_BYTES`], and one package at most
 //! [`MAX_VERSIONS`], [`MAX_MANIFEST_ENTRIES`], and [`MAX_EXPORTS`] entries.
-//! Path text after its required prefix is at most [`MAX_PATH_BYTES`]. These
-//! bound a single parse; they are not a network, memory, or dependency-graph
-//! budget for a full load.
-//!
-//! Primary references: <https://jsr.io/docs/native-imports>,
-//! <https://jsr.io/docs/api>, <https://jsr.io/docs/package-configuration>, and
-//! <https://jsr.io/docs/packages#yanking-versions>.
+//! Path text after its required prefix is at most [`MAX_PATH_BYTES`].
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -133,94 +72,550 @@ use std::fmt;
 use semver::{Version, VersionReq};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use url::Url;
+
+use crate::remote::{Cache, DEFAULT_MAX_MODULE_BYTES, RemoteClient, RemoteError};
+
+/// The public registry origin used in canonical module URLs.
+pub const REGISTRY_ORIGIN: &str = "https://jsr.io";
+
+/// The public registry host.
+pub const REGISTRY_HOST: &str = "jsr.io";
 
 /// Maximum bytes in one `jsr:` specifier, including the scheme.
-pub(crate) const MAX_SPECIFIER_BYTES: usize = 2 * 1024;
+pub const MAX_SPECIFIER_BYTES: usize = 2 * 1024;
 
 /// Maximum bytes in one version constraint.
-pub(crate) const MAX_CONSTRAINT_BYTES: usize = 128;
+pub const MAX_CONSTRAINT_BYTES: usize = 128;
 
 /// Maximum comma-separated comparators in one version constraint.
-pub(crate) const MAX_COMPARATORS: usize = 8;
+pub const MAX_COMPARATORS: usize = 8;
 
 /// Minimum characters in a scope name.
-pub(crate) const MIN_SCOPE_CHARS: usize = 2;
+pub const MIN_SCOPE_CHARS: usize = 2;
 
 /// Maximum characters in a scope name.
-pub(crate) const MAX_SCOPE_CHARS: usize = 20;
+pub const MAX_SCOPE_CHARS: usize = 20;
 
 /// Minimum characters in a package name.
-pub(crate) const MIN_NAME_CHARS: usize = 2;
+pub const MIN_NAME_CHARS: usize = 2;
 
 /// Maximum characters in a package name.
-pub(crate) const MAX_NAME_CHARS: usize = 58;
+pub const MAX_NAME_CHARS: usize = 58;
 
 /// Maximum bytes in one subpath.
-pub(crate) const MAX_SUBPATH_BYTES: usize = 512;
+pub const MAX_SUBPATH_BYTES: usize = 512;
 
 /// Maximum bytes in one metadata JSON document.
-pub(crate) const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
 
 /// Maximum versions listed by one package metadata document.
-pub(crate) const MAX_VERSIONS: usize = 10_000;
+pub const MAX_VERSIONS: usize = 10_000;
 
 /// Maximum files listed by one version manifest.
-pub(crate) const MAX_MANIFEST_ENTRIES: usize = 10_000;
+pub const MAX_MANIFEST_ENTRIES: usize = 10_000;
 
 /// Maximum entrypoints listed by one version metadata document.
-pub(crate) const MAX_EXPORTS: usize = 1_000;
+pub const MAX_EXPORTS: usize = 1_000;
 
 /// Maximum bytes in a manifest path, export key, or export target after its
 /// required prefix.
-pub(crate) const MAX_PATH_BYTES: usize = 1024;
+pub const MAX_PATH_BYTES: usize = 1024;
 
-/// A failure while parsing or resolving JSR metadata.
+/// Resource bounds for one runtime's JSR module graph.
 ///
-/// This is a private groundwork error, not a JavaScript error code. The text is
-/// for people and is not a stable wire contract.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Error {
-    /// A `jsr:` specifier is malformed.
-    Specifier(String),
-    /// A version constraint is not a supported SemVer requirement.
-    Constraint(String),
-    /// Package or version metadata is malformed.
-    Metadata(String),
-    /// No published version can satisfy the request.
-    Version(String),
-    /// The requested entrypoint does not exist.
-    Export(String),
-    /// A file is not listed in the version manifest.
-    Manifest(String),
-    /// A file's length or checksum does not match its manifest entry.
-    Integrity(String),
+/// The defaults are deliberately modest. They bound one runtime's work; they
+/// are not a network deadline, a CPU budget, or a sandbox.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Maximum declared and downloaded bytes in one file.
+    pub max_file_bytes: usize,
+    /// Maximum distinct files in one module graph.
+    pub max_graph_files: usize,
+    /// Maximum declared and downloaded bytes across one module graph.
+    pub max_graph_bytes: usize,
+    /// Maximum distinct package and version metadata documents fetched.
+    pub max_metadata_documents: usize,
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Specifier(reason) => write!(formatter, "invalid jsr: specifier: {reason}"),
-            Self::Constraint(reason) => {
-                write!(formatter, "invalid jsr: version constraint: {reason}")
-            }
-            Self::Metadata(reason) => write!(formatter, "invalid JSR metadata: {reason}"),
-            Self::Version(reason) => write!(formatter, "cannot resolve JSR version: {reason}"),
-            Self::Export(reason) => write!(formatter, "cannot resolve JSR entrypoint: {reason}"),
-            Self::Manifest(reason) => write!(formatter, "invalid JSR manifest: {reason}"),
-            Self::Integrity(reason) => write!(formatter, "JSR file verification failed: {reason}"),
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: 8 * 1024 * 1024,
+            max_graph_files: 256,
+            max_graph_bytes: 32 * 1024 * 1024,
+            max_metadata_documents: 128,
         }
     }
 }
 
-impl std::error::Error for Error {}
+/// A failure while parsing or resolving JSR metadata.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// A `jsr:` specifier is malformed.
+    #[error("invalid jsr: specifier: {0}")]
+    Specifier(String),
+    /// A version constraint is not a supported SemVer requirement.
+    #[error("invalid jsr: version constraint: {0}")]
+    Constraint(String),
+    /// Package or version metadata is malformed.
+    #[error("invalid JSR metadata: {0}")]
+    Metadata(String),
+    /// No published version can satisfy the request.
+    #[error("cannot resolve JSR version: {0}")]
+    Version(String),
+    /// The requested entrypoint does not exist.
+    #[error("cannot resolve JSR entrypoint: {0}")]
+    Export(String),
+    /// A file is not listed in the version manifest.
+    #[error("invalid JSR manifest: {0}")]
+    Manifest(String),
+    /// A file's length or checksum does not match its manifest entry.
+    #[error("JSR file verification failed: {0}")]
+    Integrity(String),
+}
+
+/// A failure a registry transport or cache reports to a JSR loader.
+///
+/// The loader adds the package, file, and importer context. A transport must
+/// follow redirects itself and must not put credentials or other secrets in a
+/// [`Self::Redirect`] location or an [`Self::Unavailable`] reason; both are
+/// shown to the program and the user.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum RegistryError {
+    /// The registry (or offline cache) has no such package, version, or file.
+    #[error("the registry document was not found")]
+    NotFound,
+    /// The transport returned a redirect without following it.
+    ///
+    /// [`RemoteRegistry`] lets the remote client follow checked redirects and
+    /// never returns this. It remains part of the [`Registry`] contract so
+    /// another registry can report a redirect the loader must not follow.
+    #[error("the registry transport redirected to `{0}`")]
+    Redirect(String),
+    /// The transport or cache could not complete the request for another reason.
+    #[error("{0}")]
+    Unavailable(String),
+}
+
+/// A synchronous source of JSR registry metadata and file bytes.
+pub trait Registry {
+    /// Returns the `meta.json` document for a package.
+    fn package_metadata(&self, package: &PackageId) -> Result<String, RegistryError>;
+
+    /// Returns the `<version>_meta.json` document for an exact package version.
+    fn version_metadata(&self, package: &PackageVersion) -> Result<String, RegistryError>;
+
+    /// Returns one manifest file's bytes.
+    fn file(&self, package: &PackageVersion, path: &str) -> Result<Vec<u8>, RegistryError>;
+}
+
+/// A [`Registry`] backed by the opt-in HTTPS transport and cache.
+///
+/// The registry builds every URL from a validated [`PackageId`],
+/// [`PackageVersion`], or manifest path. It never accepts a URL or a path from
+/// JavaScript, so a `jsr:` specifier's subpath cannot select another origin or
+/// another package version. The remote client owns redirects, TLS, deadlines,
+/// credentials policy, and the cache.
+pub struct RemoteRegistry {
+    remote: RemoteClient,
+}
+
+impl RemoteRegistry {
+    /// Creates a registry over an existing remote client.
+    ///
+    /// The client carries the runtime's request, module, byte, redirect, and
+    /// deadline limits and its user-profile cache.
+    pub fn new(remote: RemoteClient) -> Self {
+        Self { remote }
+    }
+
+    /// Fetches one registry document and returns its body.
+    fn fetch(&self, url: Url) -> Result<Vec<u8>, RegistryError> {
+        match self.remote.fetch(&url) {
+            Ok(fetched) => Ok(fetched.body),
+            Err(RemoteError::HttpStatus {
+                status: 404 | 410, ..
+            }) => Err(RegistryError::NotFound),
+            Err(error) => Err(RegistryError::Unavailable(error.to_string())),
+        }
+    }
+}
+
+impl Registry for RemoteRegistry {
+    fn package_metadata(&self, package: &PackageId) -> Result<String, RegistryError> {
+        let subject = package.to_string();
+        let url = package_metadata_url(package)?;
+        let bytes = self.fetch(url)?;
+        decode_text(bytes, "package metadata", &subject)
+    }
+
+    fn version_metadata(&self, package: &PackageVersion) -> Result<String, RegistryError> {
+        let subject = package.to_string();
+        let url = version_metadata_url(package)?;
+        let bytes = self.fetch(url)?;
+        decode_text(bytes, "version metadata", &subject)
+    }
+
+    fn file(&self, package: &PackageVersion, path: &str) -> Result<Vec<u8>, RegistryError> {
+        let url = file_url(package, path)?;
+        self.fetch(url)
+    }
+}
+
+/// An offline [`Registry`] backed solely by the disk [`Cache`].
+///
+/// Reads use [`Cache::load_offline_with_limit`], which takes no write locks,
+/// ignores `max-age` expiry, verifies SHA-256 checksums, honors `.tomb`
+/// tombstones, and follows bounded `.redir` redirect pointers. It performs zero
+/// network requests and compiles without the `network` feature.
+#[derive(Clone, Debug)]
+pub struct CacheRegistry {
+    cache: Cache,
+    max_file_bytes: usize,
+}
+
+impl CacheRegistry {
+    /// Creates an offline registry over `cache` with a per-file cap of
+    /// [`DEFAULT_MAX_MODULE_BYTES`] (16 MiB).
+    ///
+    /// Absent, tombstoned, corrupt, or oversized entries return
+    /// [`RegistryError::NotFound`]. Invalid URLs, redirect loops, and excess
+    /// redirect hops return [`RegistryError::Unavailable`].
+    pub fn new(cache: Cache) -> Self {
+        Self {
+            cache,
+            max_file_bytes: DEFAULT_MAX_MODULE_BYTES,
+        }
+    }
+
+    /// Creates an offline registry over `cache` with an explicit
+    /// `max_file_bytes` cap in bytes.
+    ///
+    /// Cached metadata documents or files larger than `max_file_bytes` bytes,
+    /// as well as absent, tombstoned, or corrupt entries, return
+    /// [`RegistryError::NotFound`]. Redirect loops and excess hops return
+    /// [`RegistryError::Unavailable`].
+    pub fn with_max_file_bytes(cache: Cache, max_file_bytes: usize) -> Self {
+        Self {
+            cache,
+            max_file_bytes,
+        }
+    }
+
+    fn load(&self, url: Url) -> Result<Vec<u8>, RegistryError> {
+        match self
+            .cache
+            .load_offline_with_limit(&url, self.max_file_bytes)
+        {
+            Ok(Some(hit)) => Ok(hit.body),
+            Ok(None) => Err(RegistryError::NotFound),
+            Err(error) => Err(RegistryError::Unavailable(error.to_string())),
+        }
+    }
+}
+
+impl Registry for CacheRegistry {
+    fn package_metadata(&self, package: &PackageId) -> Result<String, RegistryError> {
+        let subject = package.to_string();
+        let url = package_metadata_url(package)?;
+        let bytes = self.load(url)?;
+        decode_text(bytes, "package metadata", &subject)
+    }
+
+    fn version_metadata(&self, package: &PackageVersion) -> Result<String, RegistryError> {
+        let subject = package.to_string();
+        let url = version_metadata_url(package)?;
+        let bytes = self.load(url)?;
+        decode_text(bytes, "version metadata", &subject)
+    }
+
+    fn file(&self, package: &PackageVersion, path: &str) -> Result<Vec<u8>, RegistryError> {
+        let url = file_url(package, path)?;
+        self.load(url)
+    }
+}
+
+/// Builds the `meta.json` URL for a validated [`PackageId`].
+pub fn package_metadata_url(package: &PackageId) -> Result<Url, RegistryError> {
+    registry_url(
+        format!("{REGISTRY_ORIGIN}/{package}/meta.json"),
+        "package metadata",
+        &package.to_string(),
+    )
+}
+
+/// Builds the `<version>_meta.json` URL for a validated [`PackageVersion`].
+pub fn version_metadata_url(package: &PackageVersion) -> Result<Url, RegistryError> {
+    registry_url(
+        format!(
+            "{REGISTRY_ORIGIN}/{}/{}_meta.json",
+            package.package, package.version
+        ),
+        "version metadata",
+        &package.to_string(),
+    )
+}
+
+/// Builds the canonical file URL for a validated [`PackageVersion`] and
+/// manifest path.
+pub fn file_url(package: &PackageVersion, path: &str) -> Result<Url, RegistryError> {
+    validate_manifest_path(path).map_err(RegistryError::Unavailable)?;
+    registry_url(
+        format!(
+            "{REGISTRY_ORIGIN}/{}/{}{}",
+            package.package,
+            package.version,
+            encode_path(path)
+        ),
+        "file",
+        &format!("{package}:{path}"),
+    )
+}
+
+fn registry_url(text: String, action: &str, subject: &str) -> Result<Url, RegistryError> {
+    Url::parse(&text).map_err(|error| {
+        RegistryError::Unavailable(format!(
+            "cannot build the {action} URL for `{subject}`: {error}"
+        ))
+    })
+}
+
+fn decode_text(bytes: Vec<u8>, action: &str, subject: &str) -> Result<String, RegistryError> {
+    String::from_utf8(bytes).map_err(|_| {
+        RegistryError::Unavailable(format!("the {action} for `{subject}` is not valid UTF-8"))
+    })
+}
+
+/// One resolved module identity plus its manifest path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleKey {
+    /// The package and exact version.
+    pub id: PackageVersion,
+    /// The leading-`/` manifest path.
+    pub path: String,
+}
+
+/// Returns whether a specifier is a relative URL reference.
+pub fn is_relative_reference(specifier: &str) -> bool {
+    specifier == "."
+        || specifier == ".."
+        || specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || specifier.starts_with('/')
+        || specifier.starts_with('\\')
+        || specifier.starts_with(".\\")
+        || specifier.starts_with("..\\")
+}
+
+/// Returns why a registry module cannot import a local-file URL.
+///
+/// A JSR module may import another registry module or a neojs built-in. It may
+/// not reach the local filesystem through `file:`; that keeps the module graph
+/// on the registry and avoids turning a registry package into a reader for the
+/// user's files. This is a module-graph boundary, not a sandbox.
+pub fn local_file_reason(specifier: &str) -> Option<&'static str> {
+    let Ok(url) = Url::parse(specifier) else {
+        return None;
+    };
+    if url.scheme() == "file" {
+        return Some(
+            "a JSR module cannot import a local file; only registry modules and built-in modules are allowed",
+        );
+    }
+    None
+}
+
+/// Builds the canonical URL for one resolved module.
+pub fn canonical_module_url(resolved: &ResolvedModule) -> Result<Url, String> {
+    let file = resolved
+        .target
+        .path
+        .strip_prefix('/')
+        .ok_or_else(|| "the manifest path has no leading `/`".to_owned())?;
+    let text = format!(
+        "{REGISTRY_ORIGIN}/{}/{}/{}",
+        resolved.package,
+        resolved.version,
+        encode_path(file)
+    );
+    let url = Url::parse(&text)
+        .map_err(|error| format!("cannot build the module URL for `{resolved}`: {error}"))?;
+    let key = canonical_url_for(&ModuleKey {
+        id: PackageVersion {
+            package: resolved.package.clone(),
+            version: resolved.version.clone(),
+        },
+        path: resolved.target.path.clone(),
+    })?;
+    if key != url {
+        return Err(format!(
+            "the module URL for `{resolved}` did not round-trip through its identity"
+        ));
+    }
+    Ok(url)
+}
+
+/// Builds the canonical URL for a parsed module identity.
+pub fn canonical_url_for(module: &ModuleKey) -> Result<Url, String> {
+    let file = module
+        .path
+        .strip_prefix('/')
+        .ok_or_else(|| "the manifest path has no leading `/`".to_owned())?;
+    Url::parse(&format!(
+        "{REGISTRY_ORIGIN}/{}/{}/{}",
+        module.id.package,
+        module.id.version,
+        encode_path(file)
+    ))
+    .map_err(|error| format!("cannot build the canonical module URL: {error}"))
+}
+
+/// Returns the identities a registry URL can be registered under.
+///
+/// A canonical module URL is represented by its parsed string and its
+/// re-encoded canonical form. Checking both prevents an ordinary redirect and a
+/// `jsr:` resolution from disagreeing only because they encoded the path
+/// differently.
+pub fn registry_identities(url: &Url) -> Vec<String> {
+    let mut identities = vec![url.to_string()];
+    if let Ok(Some(module)) = parse_module_url(url)
+        && let Ok(canonical) = canonical_url_for(&module)
+    {
+        let canonical = canonical.to_string();
+        if canonical != identities[0] {
+            identities.push(canonical);
+        }
+    }
+    identities
+}
+
+/// Returns registry identities for a URL only when it is on the public origin.
+pub fn registry_identities_if_registry(url: &Url) -> Vec<String> {
+    if url.scheme() == "https" && url.host_str() == Some(REGISTRY_HOST) {
+        registry_identities(url)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Parses and validates one canonical registry URL.
+///
+/// Returns `None` when the URL is not on the registry origin, so the caller can
+/// delegate it. A malformed module path on the registry origin is an error,
+/// never a silent fallthrough.
+pub fn parse_module_url(url: &Url) -> Result<Option<ModuleKey>, String> {
+    if url.scheme() != "https"
+        || url.host_str() != Some(REGISTRY_HOST)
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Ok(None);
+    }
+    let Some(rest) = url.path().strip_prefix('/') else {
+        return Ok(None);
+    };
+    let mut segments = rest.split('/');
+    let Some(scope_segment) = segments.next() else {
+        return Ok(None);
+    };
+    let Some(scope) = scope_segment.strip_prefix('@') else {
+        return Ok(None);
+    };
+    let Some(name) = segments.next() else {
+        return Ok(None);
+    };
+    let Some(version_text) = segments.next() else {
+        return Ok(None);
+    };
+    let encoded_file = segments.collect::<Vec<_>>().join("/");
+    if encoded_file.is_empty() {
+        return Err("the module URL names no file".to_owned());
+    }
+    let package = PackageId::new(scope, name)?;
+    let version = Version::parse(version_text)
+        .map_err(|_| format!("`{version_text}` is not a valid version"))?;
+    if version.to_string() != version_text {
+        return Err(format!("`{version_text}` is not canonical SemVer"));
+    }
+    let file = decode_path(&encoded_file)?;
+    let path = format!("/{file}");
+    validate_manifest_path(&path)?;
+    Ok(Some(ModuleKey {
+        id: PackageVersion { package, version },
+        path,
+    }))
+}
+
+/// Encodes a registry path for a URL, preserving `/` as a separator.
+///
+/// The encoder is deliberately small and paired with [`decode_path`]. It does
+/// not decode arbitrary percent escapes from user input: a `%` in a specifier
+/// or a relative import is rejected before this point.
+fn encode_path(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                encoded.push(char::from(byte))
+            }
+            _ => {
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+    }
+    encoded
+}
+
+/// Decodes the encoder's output back to a UTF-8 registry path.
+fn decode_path(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let Some(high) = bytes.get(index + 1).and_then(|byte| hex_value(*byte)) else {
+                return Err("the module path has a malformed percent escape".to_owned());
+            };
+            let Some(low) = bytes.get(index + 2).and_then(|byte| hex_value(*byte)) else {
+                return Err("the module path has a malformed percent escape".to_owned());
+            };
+            let value = high << 4 | low;
+            if matches!(value, b'/' | b'\\') {
+                return Err("the module path percent-encodes a path separator".to_owned());
+            }
+            decoded.push(value);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| "the module path is not valid UTF-8".to_owned())
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
 
 /// A validated JSR package identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PackageId {
+pub struct PackageId {
     /// The scope without the leading `@`.
-    pub(crate) scope: String,
+    pub scope: String,
     /// The package name without a scope prefix.
-    pub(crate) name: String,
+    pub name: String,
 }
 
 impl PackageId {
@@ -230,7 +625,7 @@ impl PackageId {
     /// digits, and hyphens, with the documented length limits and no leading
     /// hyphen. A caller that already has a validated [`PackageId`] must not
     /// re-parse it through untrusted text.
-    pub(crate) fn new(scope: &str, name: &str) -> Result<Self, String> {
+    pub fn new(scope: &str, name: &str) -> Result<Self, String> {
         validate_scope(scope)?;
         validate_package_name(name)?;
         Ok(Self {
@@ -252,11 +647,11 @@ impl fmt::Display for PackageId {
 /// `PackageVersion` is constructed from a validated [`PackageId`] and an exact
 /// parsed [`Version`]; it is not parsed from untrusted text.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PackageVersion {
+pub struct PackageVersion {
     /// The package.
-    pub(crate) package: PackageId,
+    pub package: PackageId,
     /// The exact version.
-    pub(crate) version: Version,
+    pub version: Version,
 }
 
 impl fmt::Display for PackageVersion {
@@ -267,17 +662,16 @@ impl fmt::Display for PackageVersion {
 
 /// A validated package subpath, stored without its leading `/`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Subpath(String);
+pub struct Subpath(String);
 
 impl Subpath {
     /// Returns the subpath text without its leading `/`.
-    #[cfg(test)]
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Returns the package export key for this subpath.
-    pub(crate) fn export_key(&self) -> String {
+    pub fn export_key(&self) -> String {
         format!("./{}", self.0)
     }
 
@@ -300,13 +694,13 @@ impl Subpath {
 
 /// A parsed and validated `jsr:@scope/name[@constraint][/subpath]` specifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Specifier {
+pub struct Specifier {
     /// The package the specifier names.
-    pub(crate) package: PackageId,
+    pub package: PackageId,
     /// The version constraint, or no constraint when one was omitted.
-    pub(crate) constraint: VersionConstraint,
+    pub constraint: VersionConstraint,
     /// The optional entrypoint subpath.
-    pub(crate) subpath: Option<Subpath>,
+    pub subpath: Option<Subpath>,
 }
 
 impl Specifier {
@@ -317,7 +711,7 @@ impl Specifier {
     /// name and ends at the next `/`; a subpath is everything after that
     /// separator. No query, fragment, whitespace trimming, or percent decoding
     /// is performed.
-    pub(crate) fn parse(input: &str) -> Result<Self, Error> {
+    pub fn parse(input: &str) -> Result<Self, Error> {
         if input.len() > MAX_SPECIFIER_BYTES {
             return Err(Error::Specifier(format!(
                 "the specifier is {} bytes, over the {MAX_SPECIFIER_BYTES}-byte limit",
@@ -391,7 +785,7 @@ impl Specifier {
 
     /// Returns the entrypoint key: `.` for the default entrypoint, otherwise
     /// the `./`-prefixed subpath.
-    pub(crate) fn export_key(&self) -> String {
+    pub fn export_key(&self) -> String {
         match &self.subpath {
             Some(subpath) => subpath.export_key(),
             None => ".".to_owned(),
@@ -401,18 +795,20 @@ impl Specifier {
 
 /// A validated SemVer constraint.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VersionConstraint {
+pub struct VersionConstraint {
     /// The original text, or `None` when the specifier omitted a constraint.
-    pub(crate) raw: Option<String>,
+    pub raw: Option<String>,
     /// The requirement used for range matching. An exact constraint is
     /// selected through [`Self::exact`] and does not use this requirement.
-    pub(crate) req: VersionReq,
+    pub req: VersionReq,
     /// The exact version when the constraint names one.
-    pub(crate) exact: Option<Version>,
+    pub exact: Option<Version>,
 }
 
 impl VersionConstraint {
-    fn unconstrained() -> Self {
+    /// Returns an unconstrained requirement matching the latest non-yanked
+    /// stable version.
+    pub fn unconstrained() -> Self {
         Self {
             raw: None,
             req: VersionReq::STAR,
@@ -420,7 +816,8 @@ impl VersionConstraint {
         }
     }
 
-    fn parse(raw: &str) -> Result<Self, Error> {
+    /// Parses one SemVer version or requirement string.
+    pub fn parse(raw: &str) -> Result<Self, Error> {
         if raw.len() > MAX_CONSTRAINT_BYTES {
             return Err(Error::Constraint(format!(
                 "the constraint is {} bytes, over the {MAX_CONSTRAINT_BYTES}-byte limit",
@@ -484,18 +881,18 @@ fn normalize_bare_partial(raw: &str) -> String {
 
 /// A published version selected from package metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SelectedVersion {
+pub struct SelectedVersion {
     /// The exact published version.
-    pub(crate) version: Version,
+    pub version: Version,
     /// Whether the registry marks this version yanked.
-    pub(crate) yanked: bool,
+    pub yanked: bool,
 }
 
 /// Validated `meta.json` package metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PackageMetadata {
+pub struct PackageMetadata {
     /// The package this metadata belongs to.
-    pub(crate) package: PackageId,
+    pub package: PackageId,
     versions: BTreeMap<Version, bool>,
 }
 
@@ -518,7 +915,7 @@ impl PackageMetadata {
     /// Scope and package names are revalidated, version keys must be canonical
     /// SemVer, and at least one version must be listed. Unknown fields are
     /// ignored for forward compatibility.
-    pub(crate) fn parse(json: &str) -> Result<Self, Error> {
+    pub fn parse(json: &str) -> Result<Self, Error> {
         if json.len() > MAX_METADATA_BYTES {
             return Err(Error::Metadata(format!(
                 "the package metadata is {} bytes, over the {MAX_METADATA_BYTES}-byte limit",
@@ -574,7 +971,7 @@ impl PackageMetadata {
     /// unless the requirement names a compatible prerelease. When several
     /// versions remain, the greatest SemVer precedence wins; `Version`'s total
     /// order breaks any equal-precedence build-metadata tie deterministically.
-    pub(crate) fn select(&self, constraint: &VersionConstraint) -> Result<SelectedVersion, Error> {
+    pub fn select(&self, constraint: &VersionConstraint) -> Result<SelectedVersion, Error> {
         if let Some(exact) = &constraint.exact {
             let Some(yanked) = self.versions.get(exact) else {
                 return Err(Error::Version(format!(
@@ -625,7 +1022,7 @@ impl PackageMetadata {
 /// Validated `<version>_meta.json` version metadata bound to one package
 /// version.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VersionMetadata {
+pub struct VersionMetadata {
     package_version: PackageVersion,
     manifest: BTreeMap<String, ManifestEntry>,
     exports: Option<BTreeMap<String, String>>,
@@ -659,22 +1056,21 @@ enum RawExports {
 
 /// One resolved entrypoint and its manifest entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ExportTarget {
+pub struct ExportTarget {
     /// The export key matched: `.` or a `./`-prefixed key.
-    pub(crate) key: String,
+    pub key: String,
     /// The manifest path, with a leading `/`.
-    pub(crate) path: String,
+    pub path: String,
     /// The declared file length in bytes.
-    pub(crate) size: u64,
+    pub size: u64,
     /// The declared SHA-256 digest.
-    pub(crate) checksum: [u8; 32],
+    pub checksum: [u8; 32],
 }
 
 impl ExportTarget {
     /// Verifies downloaded bytes against this entry's declared length and
     /// SHA-256 checksum.
-    #[cfg(test)]
-    pub(crate) fn verify(&self, bytes: &[u8]) -> Result<(), Error> {
+    pub fn verify(&self, bytes: &[u8]) -> Result<(), Error> {
         verify_bytes(&self.path, self.size, &self.checksum, bytes)
     }
 }
@@ -693,7 +1089,7 @@ impl VersionMetadata {
     /// Export targets are not required to appear in the manifest here;
     /// [`Self::resolve_export`] reports that inconsistency when an entrypoint is
     /// actually requested.
-    pub(crate) fn parse(json: &str, package_version: PackageVersion) -> Result<Self, Error> {
+    pub fn parse(json: &str, package_version: PackageVersion) -> Result<Self, Error> {
         if json.len() > MAX_METADATA_BYTES {
             return Err(Error::Metadata(format!(
                 "the version metadata is {} bytes, over the {MAX_METADATA_BYTES}-byte limit",
@@ -766,7 +1162,7 @@ impl VersionMetadata {
     }
 
     /// Returns the package version this metadata was parsed for.
-    pub(crate) fn package_version(&self) -> &PackageVersion {
+    pub fn package_version(&self) -> &PackageVersion {
         &self.package_version
     }
 
@@ -775,7 +1171,7 @@ impl VersionMetadata {
     /// `key` is `.` for the default entrypoint or a `./`-prefixed key. A
     /// missing exports map, a missing key, and an export whose target is absent
     /// from the manifest are distinct errors.
-    pub(crate) fn resolve_export(&self, key: &str) -> Result<ExportTarget, Error> {
+    pub fn resolve_export(&self, key: &str) -> Result<ExportTarget, Error> {
         validate_export_key(key).map_err(Error::Export)?;
         let exports = self.exports.as_ref().ok_or_else(|| {
             Error::Export(format!(
@@ -810,7 +1206,7 @@ impl VersionMetadata {
     /// [`Error::Manifest`]. A caller uses this to reject an oversized download
     /// before fetching it; the length is checked again by
     /// [`Self::verify_file`] against the actual bytes.
-    pub(crate) fn file_size(&self, path: &str) -> Result<u64, Error> {
+    pub fn file_size(&self, path: &str) -> Result<u64, Error> {
         validate_manifest_path(path).map_err(Error::Manifest)?;
         self.manifest
             .get(path)
@@ -823,7 +1219,7 @@ impl VersionMetadata {
     /// The path must be a manifest key with a leading `/`. A missing entry is a
     /// [`Error::Manifest`]; a length or checksum mismatch is
     /// [`Error::Integrity`].
-    pub(crate) fn verify_file(&self, path: &str, bytes: &[u8]) -> Result<(), Error> {
+    pub fn verify_file(&self, path: &str, bytes: &[u8]) -> Result<(), Error> {
         validate_manifest_path(path).map_err(Error::Manifest)?;
         let entry = self
             .manifest
@@ -835,16 +1231,16 @@ impl VersionMetadata {
 
 /// A module resolved to one exact version and one manifest file.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedModule {
+pub struct ResolvedModule {
     /// The resolved package.
-    pub(crate) package: PackageId,
+    pub package: PackageId,
     /// The exact resolved version.
-    pub(crate) version: Version,
+    pub version: Version,
     /// Whether the exact version is yanked. Only an explicit exact import can
     /// produce `true`.
-    pub(crate) yanked: bool,
+    pub yanked: bool,
     /// The matched entrypoint and its manifest entry.
-    pub(crate) target: ExportTarget,
+    pub target: ExportTarget,
 }
 
 impl ResolvedModule {
@@ -852,7 +1248,7 @@ impl ResolvedModule {
     ///
     /// The default entrypoint has no suffix. Other entrypoints use the export
     /// key without its `./` prefix, so `./join` becomes `/join`.
-    pub(crate) fn canonical_specifier(&self) -> String {
+    pub fn canonical_specifier(&self) -> String {
         let mut text = format!("jsr:{}@{}", self.package, self.version);
         if self.target.key != "." {
             text.push('/');
@@ -869,11 +1265,8 @@ impl ResolvedModule {
     /// Returns the registry-relative module path, without the `https://jsr.io/`
     /// origin: `@scope/name/version/file`.
     ///
-    /// The path is not URL-encoded. [`crate::jsr_loader::RemoteRegistry`]
-    /// encodes it and builds the request URL; see [`Self::canonical_specifier`]
-    /// for the JavaScript-facing form.
-    #[cfg(test)]
-    pub(crate) fn registry_path(&self) -> String {
+    /// The path is not URL-encoded.
+    pub fn registry_path(&self) -> String {
         let file = self
             .target
             .path
@@ -883,8 +1276,7 @@ impl ResolvedModule {
     }
 
     /// Verifies downloaded bytes against the resolved manifest entry.
-    #[cfg(test)]
-    pub(crate) fn verify(&self, bytes: &[u8]) -> Result<(), Error> {
+    pub fn verify(&self, bytes: &[u8]) -> Result<(), Error> {
         self.target.verify(bytes)
     }
 }
@@ -900,7 +1292,7 @@ impl fmt::Display for ResolvedModule {
 /// The package metadata must describe the specifier's package. The version
 /// metadata must be bound to the exact package version selected from that
 /// package metadata; a mismatch is rejected before any entrypoint is resolved.
-pub(crate) fn resolve_module(
+pub fn resolve_module(
     specifier: &Specifier,
     package: &PackageMetadata,
     version_metadata: &VersionMetadata,
@@ -1027,7 +1419,8 @@ fn normalize_export_target(target: &str) -> Result<String, String> {
     Ok(format!("./{rest}"))
 }
 
-pub(crate) fn validate_manifest_path(path: &str) -> Result<&str, String> {
+/// Validates a leading-`/` manifest path.
+pub fn validate_manifest_path(path: &str) -> Result<&str, String> {
     let Some(rest) = path.strip_prefix('/') else {
         return Err(format!("the manifest path `{path}` must start with `/`"));
     };
@@ -1103,7 +1496,10 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::remote::{RemoteOptions, RemoteTransport, TestRemoteResponse};
 
     const MOD_FILE: &[u8] = b"export const value = 1;\n";
     const MOD_SHA: &str = "sha256-5d8f65d2774e206bc9f7a7a4ad39ca2dc563b5c31e46ab57ef4874961237ce29";
@@ -1716,5 +2112,254 @@ mod tests {
         );
         let error = error_text(PackageMetadata::parse(&json));
         assert!(error.contains("over the 4194304-byte limit"), "{error}");
+    }
+
+    #[test]
+    fn cache_registry_resolves_cached_jsr_package_offline_even_when_stale() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pkg_json = r#"{"scope":"scope","name":"pkg","versions":{"1.1.0":{}}}"#;
+
+        let transport: Arc<dyn RemoteTransport> =
+            crate::remote::test_transport(move |url, _, _, _| {
+                let (status, location, body) = match url {
+                    "https://jsr.io/@scope/pkg/meta.json" => {
+                        (200, None, pkg_json.as_bytes().to_vec())
+                    }
+                    "https://jsr.io/@scope/pkg/1.1.0_meta.json" => (
+                        302,
+                        Some("https://cdn.example.test/jsr/1.1.0_meta.json"),
+                        Vec::new(),
+                    ),
+                    "https://cdn.example.test/jsr/1.1.0_meta.json" => {
+                        (200, None, VERSION_JSON.as_bytes().to_vec())
+                    }
+                    "https://jsr.io/@scope/pkg/1.1.0/mod.ts" => (200, None, MOD_FILE.to_vec()),
+                    other => return Err(format!("unexpected URL: {other}")),
+                };
+                Ok(TestRemoteResponse {
+                    status,
+                    location: location.map(str::to_owned),
+                    declared_length: None,
+                    etag: None,
+                    last_modified: None,
+                    // Cacheable (non-no-store) but immediately stale (`max-age=0`).
+                    cache_control: Some("max-age=0".to_string()),
+                    date: None,
+                    age: None,
+                    body,
+                })
+            });
+
+        let client = RemoteClient::with_transport(
+            RemoteOptions::new().with_cache_dir(dir.path()),
+            transport,
+        );
+        let remote_registry = RemoteRegistry::new(client);
+        let spec = Specifier::parse("jsr:@scope/pkg@1").expect("spec");
+
+        // Warm the cache via the live RemoteRegistry (including redirect on version metadata).
+        let pkg_meta = PackageMetadata::parse(
+            &remote_registry
+                .package_metadata(&spec.package)
+                .expect("live pkg meta"),
+        )
+        .expect("parse pkg");
+        let sel = pkg_meta.select(&spec.constraint).expect("select");
+        let pv = PackageVersion {
+            package: spec.package.clone(),
+            version: sel.version,
+        };
+        let ver_meta = VersionMetadata::parse(
+            &remote_registry
+                .version_metadata(&pv)
+                .expect("live ver meta"),
+            pv.clone(),
+        )
+        .expect("parse ver");
+        let resolved = resolve_module(&spec, &pkg_meta, &ver_meta).expect("resolve");
+        let live_bytes = remote_registry
+            .file(&pv, &resolved.target.path)
+            .expect("live file");
+        ver_meta
+            .verify_file(&resolved.target.path, &live_bytes)
+            .expect("verify live");
+
+        // Now resolve completely offline via CacheRegistry.
+        let offline_registry = CacheRegistry::new(Cache::new(dir.path()));
+        let off_pkg = PackageMetadata::parse(
+            &offline_registry
+                .package_metadata(&spec.package)
+                .expect("offline pkg meta"),
+        )
+        .expect("parse offline pkg");
+        let off_ver = VersionMetadata::parse(
+            &offline_registry
+                .version_metadata(&pv)
+                .expect("offline ver meta"),
+            pv.clone(),
+        )
+        .expect("parse offline ver");
+        let off_resolved = resolve_module(&spec, &off_pkg, &off_ver).expect("offline resolve");
+        let off_bytes = offline_registry
+            .file(&pv, &off_resolved.target.path)
+            .expect("offline file");
+        off_ver
+            .verify_file(&off_resolved.target.path, &off_bytes)
+            .expect("verify offline");
+        assert_eq!(off_bytes, MOD_FILE);
+
+        // Missing package returns RegistryError::NotFound.
+        let missing = PackageId::new("missing", "pkg").expect("id");
+        assert_eq!(
+            offline_registry.package_metadata(&missing),
+            Err(RegistryError::NotFound)
+        );
+    }
+
+    #[test]
+    fn cache_registry_enforces_max_file_bytes_tombstones_yanked_and_integrity() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pkg_json =
+            r#"{"scope":"scope","name":"pkg","versions":{"1.0.0":{},"1.0.1":{"yanked":true}}}"#;
+        let yanked_ver_json = format!(
+            r#"{{"manifest":{{"/mod.ts":{{"size":{},"checksum":"{MOD_SHA}"}}}},"exports":{{".":"./mod.ts"}}}}"#,
+            MOD_FILE.len()
+        );
+        let tampered_bytes = b"export const value = 9;\n".to_vec();
+
+        let transport: Arc<dyn RemoteTransport> =
+            crate::remote::test_transport(move |url, _, _, _| {
+                let (status, cache_control, body) = match url {
+                    "https://jsr.io/@scope/pkg/meta.json" => {
+                        (200, Some("max-age=60"), pkg_json.as_bytes().to_vec())
+                    }
+                    "https://jsr.io/@scope/pkg/1.0.0_meta.json" => {
+                        (200, Some("max-age=60"), VERSION_JSON.as_bytes().to_vec())
+                    }
+                    "https://jsr.io/@scope/pkg/1.0.1_meta.json" => {
+                        (200, Some("max-age=60"), yanked_ver_json.as_bytes().to_vec())
+                    }
+                    "https://jsr.io/@scope/pkg/1.0.0/mod.ts" => {
+                        (200, Some("max-age=60"), MOD_FILE.to_vec())
+                    }
+                    "https://jsr.io/@scope/pkg/1.0.1/mod.ts" => {
+                        (200, Some("max-age=60"), tampered_bytes.clone())
+                    }
+                    "https://jsr.io/@scope/tomb/meta.json" => {
+                        (200, Some("no-store"), pkg_json.as_bytes().to_vec())
+                    }
+                    other => return Err(format!("unexpected URL: {other}")),
+                };
+                Ok(TestRemoteResponse {
+                    status,
+                    cache_control: cache_control.map(str::to_owned),
+                    body,
+                    ..Default::default()
+                })
+            });
+
+        let client = RemoteClient::with_transport(
+            RemoteOptions::new().with_cache_dir(dir.path()),
+            transport,
+        );
+        let remote_registry = RemoteRegistry::new(client);
+        let pkg = PackageId::new("scope", "pkg").expect("pkg");
+        let v100 = PackageVersion {
+            package: pkg.clone(),
+            version: Version::parse("1.0.0").expect("v100"),
+        };
+        let v101 = PackageVersion {
+            package: pkg.clone(),
+            version: Version::parse("1.0.1").expect("v101"),
+        };
+        let tomb_pkg = PackageId::new("scope", "tomb").expect("tomb");
+
+        // Warm all entries (including a `no-store` tombstone on `@scope/tomb`).
+        remote_registry.package_metadata(&pkg).expect("pkg");
+        remote_registry.version_metadata(&v100).expect("v100 meta");
+        remote_registry.version_metadata(&v101).expect("v101 meta");
+        remote_registry.file(&v100, "/mod.ts").expect("v100 file");
+        remote_registry.file(&v101, "/mod.ts").expect("v101 file");
+        remote_registry.package_metadata(&tomb_pkg).expect("tomb");
+
+        let offline = CacheRegistry::new(Cache::new(dir.path()));
+
+        // Range skips yanked `1.0.1` and picks `1.0.0`; exact `1.0.1` selects yanked.
+        let off_pkg = PackageMetadata::parse(&offline.package_metadata(&pkg).expect("off pkg"))
+            .expect("parse off pkg");
+        let ranged = off_pkg
+            .select(
+                &Specifier::parse("jsr:@scope/pkg@1")
+                    .expect("spec")
+                    .constraint,
+            )
+            .expect("ranged");
+        assert_eq!(ranged.version.to_string(), "1.0.0");
+        assert!(!ranged.yanked);
+        let exact_yanked = off_pkg
+            .select(
+                &Specifier::parse("jsr:@scope/pkg@1.0.1")
+                    .expect("spec")
+                    .constraint,
+            )
+            .expect("exact yanked");
+        assert_eq!(exact_yanked.version.to_string(), "1.0.1");
+        assert!(exact_yanked.yanked);
+
+        // Tombstoned entry returns `RegistryError::NotFound`.
+        assert_eq!(
+            offline.package_metadata(&tomb_pkg),
+            Err(RegistryError::NotFound)
+        );
+
+        // Tampered cached file fails `VersionMetadata::verify_file`.
+        let off_v101_meta = VersionMetadata::parse(
+            &offline.version_metadata(&v101).expect("off v101 meta"),
+            v101.clone(),
+        )
+        .expect("parse v101");
+        let bad_bytes = offline.file(&v101, "/mod.ts").expect("load tampered bytes");
+        let verify_err = off_v101_meta
+            .verify_file("/mod.ts", &bad_bytes)
+            .expect_err("checksum mismatch must fail");
+        assert!(matches!(verify_err, Error::Integrity(_)), "{verify_err}");
+
+        // `with_max_file_bytes` rejects an oversized cached file as `NotFound`.
+        let small = CacheRegistry::with_max_file_bytes(Cache::new(dir.path()), 8);
+        assert_eq!(small.file(&v100, "/mod.ts"), Err(RegistryError::NotFound));
+    }
+
+    #[test]
+    fn remote_registry_maps_404_and_410_to_not_found() {
+        for status in [404u16, 410] {
+            let transport = crate::remote::test_transport(move |_, _, _, _| {
+                Ok(TestRemoteResponse {
+                    status,
+                    cache_control: Some("no-store".to_string()),
+                    ..Default::default()
+                })
+            });
+            let client =
+                RemoteClient::with_transport(RemoteOptions::new().without_cache(), transport);
+            let registry = RemoteRegistry::new(client);
+            let pkg = PackageId::new("scope", "missing").expect("pkg");
+            assert_eq!(
+                registry.package_metadata(&pkg),
+                Err(RegistryError::NotFound)
+            );
+        }
+
+        let transport = crate::remote::test_transport(|_, _, _, _| {
+            Ok(TestRemoteResponse {
+                status: 503,
+                cache_control: Some("no-store".to_string()),
+                ..Default::default()
+            })
+        });
+        let client = RemoteClient::with_transport(RemoteOptions::new().without_cache(), transport);
+        let registry = RemoteRegistry::new(client);
+        let pkg = PackageId::new("scope", "down").expect("pkg");
+        let err = registry.package_metadata(&pkg).unwrap_err();
+        assert!(matches!(err, RegistryError::Unavailable(_)), "{err:?}");
     }
 }

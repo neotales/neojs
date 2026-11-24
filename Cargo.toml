@@ -7,6 +7,7 @@ members = [
     "neojs-dbapi",
     "neojs-manifest",
     "neojs-module-policy",
+    "neojs-remote",
     "neojs-lite-core",
     "neojs-lite",
 ]
@@ -25,6 +26,7 @@ default-members = [
     "neojs-dbapi",
     "neojs-manifest",
     "neojs-module-policy",
+    "neojs-remote",
 ]
 
 [workspace.package]
@@ -67,6 +69,9 @@ deno_error = "0.7"
 # runtimes; it has no engine dependency. Each dependent selects modules through
 # its features.
 neojs-builtins = { version = "0.1.0", path = "neojs-builtins" }
+# Engine-neutral HTTPS transport, global cache, GitHub normalization, and JSR
+# resolution. Has no JS engine dependency; `network` enables `ureq` + `rustls`.
+neojs-remote = { version = "0.1.0", path = "neojs-remote" }
 # Shell-style test-file expansion for `neojs test`. The crate is already in the
 # graph through `deno_ast`; this pins the reviewed 0.3.4 version.
 glob = "0.3.4"

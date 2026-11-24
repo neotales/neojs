@@ -47,10 +47,10 @@
 //! created with remote loading enabled. It is not an allowlist, a sandbox, or
 //! SSRF protection: after the module runs it has the process's authority.
 
-use deno_core::url::Url;
 use neojs_manifest::Error as ManifestError;
 use neojs_manifest::NormalizedSpecifier;
 use neojs_manifest::normalize_specifier;
+use url::Url;
 
 /// Returns the raw HTTPS URL for a `gh:` or `github:` specifier.
 ///
@@ -60,7 +60,7 @@ use neojs_manifest::normalize_specifier;
 ///
 /// Validation happens before any network access or cache lookup. A successful
 /// URL is credential-free and has no query or fragment.
-pub(crate) fn github_url(specifier: &str) -> Option<Result<Url, String>> {
+pub fn github_url(specifier: &str) -> Option<Result<Url, String>> {
     let (scheme, rest) = specifier.split_once(':')?;
     let canonical_scheme = if scheme.eq_ignore_ascii_case("gh") {
         "gh"

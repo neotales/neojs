@@ -15,7 +15,7 @@
 //! GitHub specifier is parsed and normalized to a credential-free
 //! `https://raw.githubusercontent.com/owner/repo/ref/path` URL before it is
 //! resolved, so it takes the same remote path as an explicit HTTPS import; see
-//! [`crate::github`] for the accepted grammar. Every other scheme is rejected
+//! [`neojs_remote::github`] for the accepted grammar. Every other scheme is rejected
 //! with a reason that names the missing feature instead of failing later inside
 //! V8. A bare specifier is never a built-in module, even when it matches a
 //! registry name; `age` is rejected where `neo:age` resolves.
@@ -67,11 +67,12 @@ use std::path::Path;
 use std::rc::Rc;
 
 use crate::builtins;
-use crate::remote::RemoteClient;
-use crate::remote::diagnostic_url;
-use crate::remote::display_url;
-use crate::remote::validate_url;
 use crate::typescript;
+use neojs_remote::RemoteClient;
+use neojs_remote::diagnostic_url;
+use neojs_remote::display_url;
+use neojs_remote::github_url;
+use neojs_remote::validate_url;
 
 pub(crate) use neojs_module_policy::{ModuleFormat, module_format};
 
@@ -249,7 +250,7 @@ impl FileModuleLoader {
                     .to_string(),
             ));
         }
-        validate_url(&url).map_err(JsErrorBox::generic)?;
+        validate_url(&url).map_err(|error| JsErrorBox::generic(error.to_string()))?;
         Ok(url)
     }
 }
@@ -275,7 +276,7 @@ impl ModuleLoader for FileModuleLoader {
         // `gh:` and `github:` are not a transport of their own: they name one
         // credential-free raw HTTPS URL. Resolving them here, before the
         // referrer branch, makes them work from a local or a remote importer.
-        if let Some(github) = crate::github::github_url(specifier) {
+        if let Some(github) = github_url(specifier) {
             return match github {
                 Ok(url) => self.resolve_https(url),
                 // The parser's reason is fixed text. The specifier itself is

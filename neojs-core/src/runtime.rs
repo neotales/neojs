@@ -42,17 +42,18 @@ use crate::loader::ModuleFormat;
 use crate::loader::PreparedEntry;
 use crate::loader::module_format;
 use crate::path::neojs_path;
-use crate::remote::Redactions;
-use crate::remote::RemoteClient;
-use crate::remote::RemoteOptions;
-use crate::remote::diagnostic_url;
-use crate::remote::display_url;
-use crate::remote::redact_core_error;
-use crate::remote::validate_url;
+use crate::remote_redact::redact_core_error;
 use crate::ssh::neojs_ssh;
 use crate::stdio::neojs_stdio;
 use crate::typescript;
 use crate::uuid::neojs_uuid;
+use neojs_remote::Redactions;
+use neojs_remote::RemoteClient;
+use neojs_remote::RemoteOptions;
+use neojs_remote::diagnostic_url;
+use neojs_remote::display_url;
+use neojs_remote::github_url;
+use neojs_remote::validate_url;
 
 /// Installs the five console methods neojs supports.
 ///
@@ -356,12 +357,12 @@ impl Runtime {
                 std::time::Duration,
                 Option<&str>,
                 Option<&str>,
-            ) -> Result<crate::remote::TestRemoteResponse, String>
+            ) -> Result<neojs_remote::TestRemoteResponse, String>
             + Send
             + Sync
             + 'static,
     {
-        let transport = crate::remote::test_transport(fetch);
+        let transport = neojs_remote::test_transport(fetch);
         Self::build(
             CONSOLE_SHIM,
             neo_shim(),
@@ -573,7 +574,7 @@ impl Runtime {
     /// [`Error::RemoteDisabled`] without a network request. The entry must be
     /// an `https:` URL, which must have a host and no username or password, or
     /// a `gh:`/`github:` GitHub specifier. A GitHub specifier is rewritten to
-    /// its raw HTTPS URL before fetching; see [`crate::github`] for the
+    /// its raw HTTPS URL before fetching; see [`neojs_remote::github`] for the
     /// accepted grammar.
     ///
     /// Entry preparation follows the same single-use rule as [`Runtime::run_file`]:
@@ -977,7 +978,7 @@ fn prepare_entry(path: &Path) -> Result<(Url, String), Error> {
 /// final URL, and `import.meta.url` is the final URL. Errors describe a
 /// sanitized URL, so a password in a malformed input is not echoed.
 fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, Error> {
-    let requested = match crate::github::github_url(url) {
+    let requested = match github_url(url) {
         Some(Ok(url)) => url,
         Some(Err(reason)) => {
             return Err(Error::RemoteEntry {
@@ -992,14 +993,14 @@ fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, 
     };
     validate_url(&requested).map_err(|reason| Error::RemoteEntry {
         url: display_url(&requested),
-        reason,
+        reason: reason.to_string(),
     })?;
 
     let fetched = remote
         .fetch_entry(&requested)
         .map_err(|reason| Error::RemoteEntry {
             url: display_url(&requested),
-            reason,
+            reason: reason.to_string(),
         })?;
     let body_len = fetched.body.len();
     let module_charged = fetched.module_charged;
