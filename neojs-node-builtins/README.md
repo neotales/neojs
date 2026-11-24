@@ -40,7 +40,10 @@ functions; it has no JavaScript source, bridge, or host op.
 On Unix, pipes are non-blocking and driven by `poll` on the calling thread; no
 reader or writer threads are created. A timeout, output overflow, or an
 inherited pipe left after the direct child exits triggers a bounded drain and a
-process-group SIGKILL, so a descendant cannot keep a join blocked. That case is
+process-group SIGKILL. A descendant holding a pipe cannot keep pipe draining
+blocked. The direct child is then reaped with a blocking `wait()`; that final
+reap is not bounded by the request deadline, so the call can outlive it if the
+operating system does not complete the kill or reap. The inherited-pipe case is
 reported as an explicit incomplete error, never a successful status with
 possibly truncated output. An unexpected pipe read error is an explicit I/O
 error, never end-of-file. A descendant that creates a new process group and

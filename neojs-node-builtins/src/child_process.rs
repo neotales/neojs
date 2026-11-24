@@ -1,4 +1,5 @@
-//! The bounded synchronous child-process runner.
+//! The synchronous child-process runner with bounded buffers and a polling/kill
+//! deadline. The final direct-child reap is a blocking `wait()`.
 //!
 //! A request has already been parsed and type-checked by [`crate::protocol`].
 //! This module re-validates every limit before spawning, so an adapter cannot
@@ -66,7 +67,9 @@ pub const MAX_REQUEST_BYTES: usize = 4_194_304;
 /// A descendant that inherited a piped descriptor can keep it open after the
 /// direct child exits. Unix completion polls for this grace period, then kills
 /// the direct child's process group and stops. It never joins a blocked reader
-/// thread, so a descendant cannot defeat the deadline.
+/// thread, so a descendant cannot defeat the pipe-drain deadline. The final
+/// direct-child reap is still a blocking `wait()` and can outlive the request
+/// deadline if the operating system does not complete the kill or reap.
 #[cfg(unix)]
 const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(50);
 
@@ -88,7 +91,8 @@ thread_local! {
     static LAST_PID: Cell<Option<u32>> = const { Cell::new(None) };
 }
 
-/// The default maximum wall-clock time for one child process.
+/// The default polling/kill deadline for one child process. This is not a
+/// hard wall-clock bound on the final blocking reap.
 pub const DEFAULT_MAX_TIMEOUT: Duration = Duration::from_secs(10);
 /// The default maximum bytes retained for one output stream.
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_048_576;
@@ -112,7 +116,8 @@ pub const DEFAULT_MAX_ENV_BYTES: usize = 65_536;
 /// piped stream is then an overflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
-    /// Maximum wall-clock time for one request.
+    /// Polling/kill deadline for one request. The final direct-child reap uses
+    /// a blocking `wait()` and can outlive this deadline.
     pub max_timeout: Duration,
     /// Maximum retained bytes for each of stdout and stderr.
     pub max_output_bytes: usize,
@@ -143,7 +148,7 @@ impl Default for Limits {
 }
 
 impl Limits {
-    /// Sets the wall-clock bound for one request.
+    /// Sets the polling/kill deadline for one request.
     pub fn with_max_timeout(mut self, max_timeout: Duration) -> Self {
         self.max_timeout = max_timeout;
         self
@@ -579,15 +584,17 @@ fn platform_supported() -> bool {
 fn platform_unsupported() -> ChildProcessError {
     ChildProcessError::new(
         "ERR_NODE_CHILD_PROCESS_UNSUPPORTED",
-        "bounded child-process completion is implemented on Unix only",
+        "the Unix child-process runner is not available on this platform",
     )
 }
 
 /// Kills and reaps a spawned child if execution unwinds early.
 ///
 /// The guard is armed immediately after `spawn` and disarmed only after the
-/// bounded runner has completed and reaped the direct child. A post-spawn setup
-/// failure therefore cannot leak a running process.
+/// runner has completed and reaped the direct child. A post-spawn setup failure
+/// therefore cannot leak a running process. Cleanup uses a blocking `wait()`;
+/// if the operating system does not complete the kill or reap, cleanup can
+/// block past the request deadline.
 struct ChildGuard<'a> {
     child: &'a mut Child,
     armed: bool,
@@ -616,15 +623,18 @@ impl Drop for ChildGuard<'_> {
     }
 }
 
-/// Runs a spawned child to a bounded completion on Unix.
+/// Runs a spawned child with a bounded polling/kill deadline on Unix.
 ///
 /// Pipes are non-blocking and driven by `poll` on the calling thread. No reader
 /// or writer thread is created, so a descendant that inherits a pipe and keeps
-/// it open cannot make a join unbounded. After the direct child exits, or after
-/// a timeout or output overflow, the runner drains for [`PIPE_DRAIN_GRACE`],
-/// kills the child's process group, and returns. An escaped descendant in a new
-/// process group may still hold a pipe, but the runner has already stopped
-/// polling and drops its ends; there is no thread left waiting for it.
+/// it open cannot make pipe draining unbounded. After the direct child exits,
+/// or after a timeout or output overflow, the runner drains for
+/// [`PIPE_DRAIN_GRACE`], kills the child's process group, and then reaps the
+/// direct child with a blocking `wait()`. That final wait is not bounded by the
+/// deadline: if the operating system does not complete the kill or reap, the
+/// call can block past it. An escaped descendant in a new process group may
+/// still hold a pipe, but the runner has already stopped polling and drops its
+/// ends; there is no thread left waiting for it.
 #[cfg(unix)]
 fn execute(
     child: &mut std::process::Child,
@@ -831,8 +841,9 @@ fn execute(
         }
     }
 
-    // The direct child is killed or already reaped; wait only for it. A
-    // descendant that escaped the process group is not tracked.
+    // The direct child is killed or already reaped; wait only for it. This is
+    // a blocking reap and is not bounded by the request deadline. A descendant
+    // that escaped the process group is not tracked.
     let status = child.wait().ok();
     let (status_code, signal_name) = match status {
         Some(status) if !timed_out && !limit_exceeded && !incomplete && !io_error => {
@@ -854,11 +865,12 @@ fn execute(
     })
 }
 
-/// Non-Unix completion is refused rather than emulated with unbounded joins.
+/// Non-Unix completion is refused rather than emulated with the Unix runner.
 ///
 /// The bounded runner uses POSIX poll and process groups. A platform without
-/// that implementation gets a clear failure, not a reader thread that a
-/// descendant can keep blocked forever.
+/// that implementation gets a clear failure. This path kills and reaps the
+/// direct child with a blocking `wait()` and does not provide a wall-clock
+/// bound.
 #[cfg(not(unix))]
 fn execute(
     child: &mut std::process::Child,
@@ -870,7 +882,7 @@ fn execute(
     let _ = child.wait();
     Err(ChildProcessError::new(
         "ERR_NODE_CHILD_PROCESS_UNSUPPORTED",
-        "bounded child-process completion is implemented on Unix only",
+        "the Unix child-process runner is not available on this platform",
     ))
 }
 

@@ -54,7 +54,8 @@ continue to reject `node:` imports.
 
 ## Rust-native module status
 
-The child-process implementations, policy, and bounded synchronous runner are
+The child-process implementations, policy, and synchronous runner with bounded
+buffers and a polling/kill deadline are
 Rust in `neojs-node-builtins`. Both adapters expose that core as native modules:
 
 * The QuickJS adapter uses `Module::declare_def`/`ModuleDef`; its exports are
@@ -228,7 +229,7 @@ implemented`. Resolution never falls through to a `neo:` module.
 | `ERR_NODE_REQUEST_TOO_LARGE` | A native input/argument/environment/path field, or a QuickJS key table, exceeds its hard cap. |
 | `ERR_INVALID_ARG_VALUE` | A value or property name is invalid, including an empty or unpaired-surrogate environment/option key. |
 | `ERR_MEMORY_ALLOCATION_FAILED` | A bounded property-name buffer could not be allocated; the adapter throws a coded error instead of returning `undefined`. |
-| `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` | Bounded child-process completion is not implemented on this platform. |
+| `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` | The Unix child-process runner is not available on this platform. |
 | `ETIMEDOUT` | The child was killed at the timeout. |
 | `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` | An output stream exceeded `maxBuffer`. |
 | `ERR_NODE_CHILD_PROCESS_INCOMPLETE` | The direct child exited while a descendant still held a piped stream; the result is an explicit error, not a success with possibly truncated output. |
@@ -250,13 +251,16 @@ resource bound, not a sandbox.
   is already an exact absolute path.
 * There is no shell, `stdio: inherit`, or detached process. Arguments are passed
   directly to the executable.
-* Default limits are a 10-second timeout, 1 MiB per output stream, 1 MiB of
-  input, 256 arguments and 64 KiB of argument bytes, and 128 environment entries
-  and 64 KiB of environment bytes. The policy caps every request; a larger
-  `timeout` or `maxBuffer` is rejected rather than clamped.
+* Default limits are a 10-second polling/kill deadline, 1 MiB per output
+  stream, 1 MiB of input, 256 arguments and 64 KiB of argument bytes, and 128
+  environment entries and 64 KiB of environment bytes. The policy caps every
+  request; a larger `timeout` or `maxBuffer` is rejected rather than clamped.
+  The timeout is not a hard wall-clock bound on the whole call.
 * A timeout or output overflow kills the child's process group after a short
   bounded drain, returns any captured prefix, and reports `timedOut` or
-  `limitExceeded`.
+  `limitExceeded`. The runner then reaps the direct child with a blocking
+  `wait()`, which can outlive the deadline if the operating system does not
+  complete the kill or reap.
 * If the direct child exits while a descendant still holds an inherited pipe,
   the runner drains for a short grace and then kills the child's process group.
   Because output may be incomplete, the result is an explicit
@@ -275,8 +279,9 @@ resource bound, not a sandbox.
   `.error` unless a timeout, overflow, incomplete read, or I/O failure occurred.
 * `spawnSync(file, undefined, options)` and the same form of `execFileSync`
   retain the third argument as options.
-* Bounded pipe completion is implemented on Unix with non-blocking pipes and
-  `poll`; no reader or writer threads are created. Another platform returns
+* Unix pipe polling and process-group kill use non-blocking pipes and `poll`;
+  no reader or writer threads are created. The final direct-child reap uses a
+  blocking `wait()` and is not bounded by the deadline. Another platform returns
   `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` before spawning a child.
 * The allowlist matches canonical paths, not inodes or contents. Protect the
   executable **and every ancestor directory** from untrusted writes; otherwise

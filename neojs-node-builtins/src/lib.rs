@@ -7,7 +7,8 @@
 //!
 //! * which Node module specifiers are implemented;
 //! * how a child-process program is authorised;
-//! * the bounded synchronous process runner and its error codes;
+//! * the synchronous process runner with bounded buffers and a polling/kill
+//!   deadline, and its error codes;
 //! * the bounded JSON request protocol used by the shared protocol tests.
 //!
 //! # Support, exactly
@@ -34,20 +35,24 @@
 //! path. There is no `PATH` lookup, no shell, no inherited environment, and no
 //! `stdio: inherit`.
 //!
-//! The policy also caps wall-clock time, input, output per stream, argument
-//! count and bytes, and environment size. On Unix, pipes are non-blocking and
-//! driven by `poll` on the calling thread; no reader or writer thread is
-//! created. A timeout or output overflow kills the child's process group after
-//! a short bounded drain. A direct child that exits while a descendant still
-//! holds a piped descriptor gets the same bounded drain and group kill; because
-//! output may be incomplete, that case is reported as an explicit incomplete
-//! error, never a successful status. An unexpected pipe read error is reported
-//! as an explicit I/O error, never treated as end-of-file. A descendant that
-//! creates a new process group and escapes is not tracked. The optional JSON
-//! protocol used by the shared tests has a hard serialized-size cap before
-//! parsing; neither engine adapter uses it. Bounded child-process completion is
-//! implemented on Unix; another platform rejects before spawning rather than
-//! using an unbounded join.
+//! The policy also sets a polling/kill deadline and caps input, output per
+//! stream, argument count and bytes, and environment size. The deadline is not
+//! a hard wall-clock bound on the whole call: after the kill the runner reaps
+//! the direct child with a blocking `wait()`, so the call can outlive the
+//! deadline if the operating system does not complete the kill or reap. On
+//! Unix, pipes are non-blocking and driven by `poll` on the calling thread; no
+//! reader or writer thread is created. A timeout or output overflow kills the
+//! child's process group after a short bounded drain. A direct child that exits
+//! while a descendant still holds a piped descriptor gets the same bounded
+//! drain and group kill; because output may be incomplete, that case is
+//! reported as an explicit incomplete error, never a successful status. An
+//! unexpected pipe read error is reported as an explicit I/O error, never
+//! treated as end-of-file. A descendant that creates a new process group and
+//! escapes is not tracked. The optional JSON protocol used by the shared tests
+//! has a hard serialized-size cap before parsing; neither engine adapter uses
+//! it. Unix pipe polling and process-group kill are implemented; another
+//! platform rejects before spawning. The blocking final reap is not a sandbox
+//! boundary.
 //!
 //! This is **not a sandbox**. An allowed executable runs with the authority of
 //! the neojs process. It can read and write files, use the network, and start
