@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -43,6 +44,10 @@ impl Drop for FileCleanupGuard {
     }
 }
 
+fn is_path_sep(byte: u8) -> bool {
+    byte == b'/' || (cfg!(windows) && byte == b'\\')
+}
+
 fn validate_path(path: &Path) -> Result<(), FsError> {
     let os = path.as_os_str();
     if os.is_empty() {
@@ -60,6 +65,77 @@ fn validate_path(path: &Path) -> Result<(), FsError> {
         });
     }
     Ok(())
+}
+
+fn has_trailing_dot_segment(path: &Path) -> bool {
+    let mut bytes = path.as_os_str().as_encoded_bytes();
+    while bytes.len() > 1 && is_path_sep(bytes[bytes.len() - 1]) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes.ends_with(b"/.") || (cfg!(windows) && bytes.ends_with(b"\\."))
+}
+
+/// Normalizes a path for `lstat` and `remove` so trailing directory separators
+/// do not cause the OS to follow a symbolic link to a directory.
+fn normalize_no_follow_path(path: &Path) -> Result<Cow<'_, Path>, FsError> {
+    if has_trailing_dot_segment(path) {
+        return Err(FsError::InvalidPath {
+            reason: "path must not end with a trailing '.' segment",
+            source: None,
+        });
+    }
+    let bytes = path.as_os_str().as_encoded_bytes();
+    if bytes.last().copied().is_some_and(is_path_sep) {
+        // `Path::components()` strips trailing separators on non-root paths
+        // while preserving filesystem roots (`/` on Unix, drive/UNC roots on Windows).
+        let normalized: PathBuf = path.components().collect();
+        return Ok(Cow::Owned(normalized));
+    }
+    Ok(Cow::Borrowed(path))
+}
+
+fn map_open_file_error(path: &Path, err: io::Error) -> FsError {
+    // On Windows, opening a directory as a file (or copying over one) reports
+    // `PermissionDenied` rather than `IsADirectory`.
+    #[cfg(windows)]
+    if err.kind() == io::ErrorKind::PermissionDenied
+        && fs::metadata(path).is_ok_and(|meta| meta.is_dir())
+    {
+        return FsError::IsADirectory {
+            source: io::Error::from(io::ErrorKind::IsADirectory),
+        };
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+    map_io_error(err)
+}
+
+fn is_same_file(from: &Path, src_meta: &Metadata, to: &Path) -> Result<bool, FsError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = from;
+        match fs::metadata(to) {
+            Ok(dst_meta) => {
+                Ok(src_meta.dev() == dst_meta.dev() && src_meta.ino() == dst_meta.ino())
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(map_io_error(err)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = src_meta;
+        match fs::metadata(to) {
+            Ok(_) => {
+                let canon_from = fs::canonicalize(from).map_err(map_io_error)?;
+                let canon_to = fs::canonicalize(to).map_err(map_io_error)?;
+                Ok(canon_from == canon_to)
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(map_io_error(err)),
+        }
+    }
 }
 
 fn system_time_to_ms(time: SystemTime) -> Option<i64> {
@@ -98,7 +174,7 @@ fn random_temp_name() -> Result<String, FsError> {
     Ok(name)
 }
 
-fn create_unique_temp_file(parent: &Path) -> Result<(File, FileCleanupGuard), FsError> {
+fn create_unique_temp_file(parent: &Path) -> Result<(FileCleanupGuard, File), FsError> {
     for _ in 0..MAX_TEMP_ATTEMPTS {
         let candidate = parent.join(random_temp_name()?);
         let mut open_opts = OpenOptions::new();
@@ -109,7 +185,7 @@ fn create_unique_temp_file(parent: &Path) -> Result<(File, FileCleanupGuard), Fs
             open_opts.mode(0o600);
         }
         match open_opts.open(&candidate) {
-            Ok(file) => return Ok((file, FileCleanupGuard::new(candidate))),
+            Ok(file) => return Ok((FileCleanupGuard::new(candidate), file)),
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(map_io_error(err)),
         }
@@ -150,7 +226,7 @@ pub fn read_file(path: impl AsRef<Path>, options: ReadOptions) -> Result<Vec<u8>
     let path = path.as_ref();
     validate_path(path)?;
 
-    let file = File::open(path).map_err(map_io_error)?;
+    let file = File::open(path).map_err(|err| map_open_file_error(path, err))?;
     let meta = file.metadata().map_err(map_io_error)?;
     if meta.is_dir() {
         return Err(FsError::IsADirectory {
@@ -240,6 +316,10 @@ pub fn read_text_file(path: impl AsRef<Path>, options: ReadOptions) -> Result<St
 /// [`crate::FsErrorCode::InvalidPath`] and rejects conflicting
 /// `create_new + append` options with [`crate::FsErrorCode::InvalidArgument`].
 ///
+/// This is a direct, non-atomic write: an I/O failure mid-write can leave a
+/// truncated or partially written destination file. Use [`write_file_atomic`]
+/// when all-or-nothing replacement is required.
+///
 /// # Example
 ///
 /// ```
@@ -281,7 +361,9 @@ pub fn write_file(
         .append(options.append)
         .truncate(!options.append && !options.create_new);
 
-    let mut file = open_opts.open(path).map_err(map_io_error)?;
+    let mut file = open_opts
+        .open(path)
+        .map_err(|err| map_open_file_error(path, err))?;
     file.write_all(bytes.as_ref()).map_err(map_io_error)?;
     Ok(())
 }
@@ -312,13 +394,16 @@ pub fn write_text_file(
 ///
 /// Writes to a unique sibling file in `path`'s parent directory created with
 /// `create_new(true)` and a random suffix from [`getrandom::fill`] (`0o600` on
-/// Unix). Optionally calls `sync_all()` (`options.sync`), cleans up the
-/// temporary file on any failure without masking the original error, and
-/// commits the file to `path`.
+/// Unix). Optionally calls `sync_all()` (`options.sync`, plus a best-effort
+/// parent directory sync on Unix), closes the handle and unlinks the temporary
+/// file via RAII on any failure without masking the original error, and commits
+/// the file to `path`.
 ///
+/// Rejects empty/NUL paths, trailing directory separators, `.`, and trailing
+/// `/.` (`\.` on Windows) segments with [`crate::FsErrorCode::InvalidPath`].
 /// When `options.overwrite` is `false`, any existing entry at `path` (including
-/// a symlink) causes [`crate::FsErrorCode::AlreadyExists`] without clobbering
-/// the destination.
+/// a symlink) fails with [`crate::FsErrorCode::AlreadyExists`] without
+/// clobbering the destination.
 ///
 /// # Example
 ///
@@ -350,9 +435,15 @@ pub fn write_file_atomic(
     validate_path(path)?;
 
     let encoded = path.as_os_str().as_encoded_bytes();
-    if encoded.ends_with(b"/") || (cfg!(windows) && encoded.ends_with(b"\\")) {
+    if encoded.last().copied().is_some_and(is_path_sep) {
         return Err(FsError::InvalidPath {
             reason: "target path must not end with a directory separator",
+            source: None,
+        });
+    }
+    if encoded == b"." || has_trailing_dot_segment(path) {
+        return Err(FsError::InvalidPath {
+            reason: "target path must name a file, not '.'",
             source: None,
         });
     }
@@ -380,12 +471,16 @@ pub fn write_file_atomic(
         }
     }
 
-    let (mut file, mut guard) = create_unique_temp_file(parent)?;
-    file.write_all(bytes.as_ref()).map_err(map_io_error)?;
-    if options.sync {
-        file.sync_all().map_err(map_io_error)?;
+    // `guard` is bound before `file` and `file` is scoped below so the OS handle
+    // closes before `guard` unlinks the temp file on any error return.
+    let (mut guard, file) = create_unique_temp_file(parent)?;
+    {
+        let mut file = file;
+        file.write_all(bytes.as_ref()).map_err(map_io_error)?;
+        if options.sync {
+            file.sync_all().map_err(map_io_error)?;
+        }
     }
-    drop(file);
 
     if options.overwrite {
         fs::rename(guard.path(), path).map_err(map_io_error)?;
@@ -490,7 +585,10 @@ pub fn stat(path: impl AsRef<Path>) -> Result<FileInfo, FsError> {
 /// Returns metadata for `path` without following symbolic links.
 ///
 /// When `path` is a symbolic link (even a dangling one), `info.is_symlink` is
-/// `true`.
+/// `true`. Trailing directory separators on non-root paths are stripped before
+/// inspecting metadata so `lstat("link/")` inspects the symlink itself rather
+/// than resolving through it, and trailing `/.` (`\.` on Windows) segments are
+/// rejected with [`crate::FsErrorCode::InvalidPath`].
 ///
 /// # Example
 ///
@@ -507,8 +605,9 @@ pub fn stat(path: impl AsRef<Path>) -> Result<FileInfo, FsError> {
 pub fn lstat(path: impl AsRef<Path>) -> Result<FileInfo, FsError> {
     let path = path.as_ref();
     validate_path(path)?;
+    let path = normalize_no_follow_path(path)?;
 
-    let meta = fs::symlink_metadata(path).map_err(map_io_error)?;
+    let meta = fs::symlink_metadata(path.as_ref()).map_err(map_io_error)?;
     Ok(file_info_from_metadata(&meta))
 }
 
@@ -598,8 +697,11 @@ pub fn mkdir(path: impl AsRef<Path>, options: MkdirOptions) -> Result<(), FsErro
 
 /// Removes a file, symbolic link, or directory at `path`.
 ///
-/// Never follows symbolic links: removing a symlink unlinks the link itself
-/// without touching its target, even when `options.recursive` is `true`.
+/// Never follows symbolic links: trailing directory separators on non-root
+/// paths are stripped before inspecting metadata so `remove("link/", ...)`
+/// unlinks the symlink itself without touching its target, even when
+/// `options.recursive` is `true`. Trailing `/.` (`\.` on Windows) segments are
+/// rejected with [`crate::FsErrorCode::InvalidPath`].
 ///
 /// When `options.recursive` is `false`, removes files, symlinks, and empty
 /// directories; non-empty directories fail with
@@ -627,6 +729,8 @@ pub fn mkdir(path: impl AsRef<Path>, options: MkdirOptions) -> Result<(), FsErro
 pub fn remove(path: impl AsRef<Path>, options: RemoveOptions) -> Result<(), FsError> {
     let path = path.as_ref();
     validate_path(path)?;
+    let path = normalize_no_follow_path(path)?;
+    let path = path.as_ref();
 
     let meta = fs::symlink_metadata(path).map_err(map_io_error)?;
     let file_type = meta.file_type();
@@ -682,9 +786,17 @@ pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<(), FsErro
 /// Copies a regular file from `from` to `to` according to `options`.
 ///
 /// Fails with [`crate::FsErrorCode::IsADirectory`] if `from` resolves to a
-/// directory. When `options.overwrite` is `false` (the default), opens `to`
-/// with `create_new(true)` to prevent TOCTOU clobbering and fails with
-/// [`crate::FsErrorCode::AlreadyExists`] if `to` already exists.
+/// directory.
+///
+/// * When `options.overwrite` is `false` (the default), opens `to` with
+///   `create_new(true)` to prevent TOCTOU clobbering and fails with
+///   [`crate::FsErrorCode::AlreadyExists`] if `to` already exists. On Unix,
+///   the destination file is created with mode `(src_mode & 0o777) | 0o200`
+///   before copying bytes, then updated to `src`'s permissions; on partial
+///   write failure the newly created `to` is closed and removed via RAII.
+/// * When `options.overwrite` is `true`, if `from` and `to` resolve to the
+///   same underlying file (same `(dev, ino)` on Unix, or matching canonical
+///   paths elsewhere), returns `Ok(())` as a safe no-op without truncating.
 ///
 /// # Example
 ///
@@ -719,7 +831,7 @@ pub fn copy_file(
     validate_path(from)?;
     validate_path(to)?;
 
-    let mut src = File::open(from).map_err(map_io_error)?;
+    let mut src = File::open(from).map_err(|err| map_open_file_error(from, err))?;
     let src_meta = src.metadata().map_err(map_io_error)?;
     if src_meta.is_dir() {
         return Err(FsError::IsADirectory {
@@ -728,22 +840,36 @@ pub fn copy_file(
     }
 
     if options.overwrite {
+        if is_same_file(from, &src_meta, to)? {
+            return Ok(());
+        }
         drop(src);
-        fs::copy(from, to).map(|_| ()).map_err(map_io_error)?;
+        fs::copy(from, to)
+            .map(|_| ())
+            .map_err(|err| map_open_file_error(to, err))?;
         return Ok(());
     }
 
-    let mut dst = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(to)
-        .map_err(map_io_error)?;
-    let mut guard = FileCleanupGuard::new(to.to_path_buf());
-    io::copy(&mut src, &mut dst).map_err(map_io_error)?;
-    if let Err(err) = dst.set_permissions(src_meta.permissions())
-        && err.kind() != io::ErrorKind::Unsupported
+    let mut dst_opts = OpenOptions::new();
+    dst_opts.write(true).create_new(true);
+    #[cfg(unix)]
     {
-        return Err(map_io_error(err));
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        dst_opts.mode((src_meta.mode() & 0o777) | 0o200);
+    }
+
+    let dst = dst_opts
+        .open(to)
+        .map_err(|err| map_open_file_error(to, err))?;
+    let mut guard = FileCleanupGuard::new(to.to_path_buf());
+    {
+        let mut dst = dst;
+        io::copy(&mut src, &mut dst).map_err(map_io_error)?;
+        if let Err(err) = dst.set_permissions(src_meta.permissions())
+            && err.kind() != io::ErrorKind::Unsupported
+        {
+            return Err(map_io_error(err));
+        }
     }
     guard.disarm();
     Ok(())
