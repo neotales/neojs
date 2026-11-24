@@ -1593,13 +1593,16 @@ fn refuses_a_bare_import_and_exits_1() {
 #[test]
 fn refuses_a_neo_import_and_exits_1() {
     let project = Project::new();
-    let file = project.write("main.js", "import fs from \"neo:fs\";\nconsole.log(fs);\n");
+    let file = project.write(
+        "main.js",
+        "import x from \"neo:nonexistent\";\nconsole.log(x);\n",
+    );
 
     let output = run_file(&file);
 
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
-    assert!(message.contains("neo:fs"), "{message}");
+    assert!(message.contains("neo:nonexistent"), "{message}");
     assert!(message.contains("not implemented"), "{message}");
 }
 
