@@ -1,17 +1,17 @@
 //! HTTPS module transport and the user-profile module cache.
 //!
-//! Remote loading is opt-in per [`crate::Runtime`]; a default runtime never
-//! performs a network request. When enabled, only `https:` URLs are accepted
-//! here. The loader resolves a `gh:` or `github:` specifier to one such URL
-//! first ([`crate::github`]), so this client sees the same HTTPS request and
-//! applies the same policy. `http:`, `data:`, `blob:`, and `file:` are not
-//! remote transports, and a remote module cannot import a `file:` module.
+//! Remote loading is opt-in per runtime; a default runtime never performs a
+//! network request. When enabled, only `https:` URLs are accepted here. A
+//! `gh:` or `github:` specifier is normalized to one such URL first
+//! ([`crate::github`]), so this client sees the same HTTPS request and applies
+//! the same policy. `http:`, `data:`, `blob:`, and `file:` are not remote
+//! transports.
 //!
 //! The client is deliberately small:
 //!
-//! - TLS is provided by the reviewed `rustls` backend through `ureq`, with the
-//!   Mozilla root store bundled by `webpki-roots`. No native or user root store
-//!   is consulted.
+//! - When the `network` feature is enabled, TLS is provided by the reviewed
+//!   `rustls` backend through `ureq`, with the Mozilla root store bundled by
+//!   `webpki-roots`. No native or user root store is consulted.
 //! - No cookies, authorization header, referrer, proxy from the environment, or
 //!   client certificate is sent. A URL with a username or password is rejected
 //!   before a request is made, so a credential cannot be forwarded by accident.
@@ -28,9 +28,9 @@
 //!
 //! Downloaded modules are cached by default in one user-profile package
 //! directory, `$XDG_CACHE_HOME/neojs/packages` or `$HOME/.cache/neojs/packages`
-//! (`%USERPROFILE%\.cache\neojs\packages` on Windows). The cache
-//! key is the SHA-256 of the canonical URL including its query, so a URL query
-//! never appears as a file name and two URLs that differ by query are cached
+//! (`%USERPROFILE%\.cache\neojs\packages` on Windows). The cache key is the
+//! SHA-256 of the canonical URL including its query, so a URL query never
+//! appears as a file name and two URLs that differ by query are cached
 //! separately. A body is written to a temporary file in the cache directory and
 //! atomically renamed into place, so concurrent processes cannot publish a
 //! partial entry.
@@ -47,72 +47,16 @@
 //!
 //! Each entry records the body length and SHA-256 digest; a mismatch or a
 //! truncation is a cache miss, not an executable body. Header and metadata
-//! lines are bounded, one file handle is used per read, and the body length is
+//! lines are bounded, one file handle is used per read, the body length is
 //! checked before allocation, and a body followed by extra bytes is rejected.
 //! Publications are serialized by a per-key lock file. Each request receives a
 //! monotonic per-key revision from a revision file updated under that lock, so
-//! ordering does not depend on the wall clock. A separate representation
-//! identity combines the validator (when present) with the actual body digest,
-//! so a weak ETag shared by different bytes is not treated as the same
-//! representation. A `200` publishes only when its request revision is newer than
-//! the current entry or tombstone, a `304` publishes only when the current
-//! representation still matches and its request revision is not older, and
-//! `no-store` publishes an absent-entry tombstone. A `304` merges only headers
-//! it supplies; when it has no usable `Date`/`Age`, the current entry's age plus
-//! resident time is used under the lock, so it cannot undo a more conservative
-//! age from an earlier revalidation.
-//! Thus an older `200` cannot resurrect an entry after a newer `no-store`, and a
-//! `304` cannot outrank a later-started `200` or `no-store`. Lock acquisition for
-//! revision allocation and publication is capped at 250 ms and at the remaining
-//! fetch deadline. With a longer deadline, a held or stale lock skips the cache
-//! operation and the fetch continues to the network. When the remaining deadline
-//! is at or below the cap, the lock may consume all of it and the fetch times out
-//! before the transport is contacted.
-//! This detects corruption, torn writes, and lost-update races, not an adversary
-//! who can write both the metadata and the body in the user's cache directory.
-//! There is no signature or content-addressed store, so the cache does not pin a
-//! version or provide integrity beyond transport TLS and those consistency
-//! checks. A cache read or write failure is ignored: the module is fetched and
-//! the program continues. Openness of the cache directory is the user's
-//! responsibility.
+//! ordering does not depend on the wall clock.
 //!
-//! One runtime's remote graph is bounded by a per-module body limit, an
-//! aggregate byte limit, and a maximum number of remote modules. A module and
-//! its bytes are admitted before the network or cache is consulted, a body is
-//! read only up to the remaining aggregate allowance, and a rejected module is
-//! neither fetched nor published to the cache. Each distinct requested URL
-//! consumes one module slot even when its fetch fails, so repeatedly caught
-//! oversized imports cannot grow the graph without bound. Retrying the same URL
-//! reuses its slot but repeats the I/O. A separate request limit counts every
-//! network request, including retries and each redirect hop, so retrying one URL
-//! cannot bypass the network bound. Requests already spent are never refunded,
-//! including by a failed entry preflight: module/byte/redaction charges are
-//! released, but a runtime that exhausts requests needs a new `Runtime` for a
-//! fresh budget. The redaction URL set and its rollback are capped by the module
-//! limit. The deadline is per module, not a wall-clock
-//! bound on the whole graph: JavaScript can keep running and dynamically import
-//! more modules, each with its own deadline, until the aggregate module or byte
-//! limit is reached. Module execution and compilation are trusted; these are
-//! resource bounds, not a sandbox or a bound on CPU or V8 heap used by a program.
-//!
-//! Generated V8 errors are redacted as they leave the runtime: known remote
-//! module URLs are removed from stack-frame locations, from the generated
-//! ` at <URL>:line:column` suffix, and from generated link/resolution messages
-//! only when both the error name and message prefix match a V8 diagnostic shape.
-//! Module identity and `import.meta.url` remain the final URL. A user-thrown
-//! `Error` whose message merely contains "Cannot find module" or ` at <URL>:`
-//! keeps its text, as do a quoted relative string and a custom stack, so code
-//! that puts a URL (or any other value) in its own error still exposes it. A
-//! user-thrown `SyntaxError`/`TypeError` that exactly copies a generated prefix
-//! and location shape is indistinguishable from V8's own text and may be
-//! redacted too. Module specifiers are not secret storage.
-//!
-//! This is not SSRF protection. There is no host allowlist, no private-address
-//! rejection, and no DNS pinning: neojs fetches whatever HTTPS URL the program
-//! names, using the process's network authority. Remote code has the same
-//! authority as local code once it runs; it is not a sandbox. The cache is an
-//! internal part of module loading; neojs exposes no `fetch`-style API and no
-//! way for JavaScript to read the cache.
+//! Offline callers can use [`Cache::load_offline`] to read and SHA-256-verify
+//! cached entries without taking write locks, without consulting `max-age`
+//! freshness expiry, and without any network dependency, while still honoring
+//! `.tomb` tombstones and bounded redirect-pointer cache records (`.redir`).
 
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -133,18 +77,14 @@ use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use deno_core::error::CoreError;
-use deno_core::error::CoreErrorKind;
-use deno_core::error::JsError;
-use deno_core::url::Url;
-use deno_error::JsErrorBox;
 use sha2::Digest;
 use sha2::Sha256;
+use url::Url;
 
 /// Default maximum size of one remote module body.
-const DEFAULT_MAX_MODULE_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_MODULE_BYTES: usize = 16 * 1024 * 1024;
 /// Default maximum number of redirects followed for one module.
-const DEFAULT_MAX_REDIRECTS: u32 = 5;
+pub const DEFAULT_MAX_REDIRECTS: u32 = 5;
 /// Default deadline for one module fetch, including redirects and the body.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default maximum number of distinct modules fetched by one runtime.
@@ -160,8 +100,123 @@ const CACHE_LOCK_BUDGET: Duration = Duration::from_millis(250);
 const CACHE_MAGIC: &str = "neojs-remote-cache 5";
 /// The first line of an absent-entry tombstone.
 const TOMBSTONE_MAGIC: &str = "neojs-remote-tombstone 5";
-/// Largest metadata block accepted from a cache entry.
+/// The first line of a redirect-pointer cache record.
+const REDIRECT_MAGIC: &str = "neojs-remote-redirect 5";
+/// Largest metadata block accepted from a cache entry or redirect record.
 const MAX_META_BYTES: usize = 64 * 1024;
+
+/// Failure returned by the remote module client, URL validator, or offline
+/// cache reader.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum RemoteError {
+    /// The URL does not use `https:`.
+    #[error("only https: module URLs are supported; `{scheme}` is not")]
+    UnsupportedScheme { scheme: String },
+
+    /// The URL carries a username or password.
+    #[error("module URLs with a username or password are not supported")]
+    CredentialsNotSupported,
+
+    /// The URL has no host.
+    #[error("the module URL has no host")]
+    MissingHost,
+
+    /// The configured timeout is zero.
+    #[error("the remote timeout is zero")]
+    ZeroTimeout,
+
+    /// The configured timeout overflows `Instant`.
+    #[error("the remote timeout is too large")]
+    TimeoutOverflow,
+
+    /// The fetch deadline expired before a response arrived.
+    #[error("timed out fetching {url}")]
+    FetchTimedOut { url: String },
+
+    /// The fetch deadline expired while reading the response body.
+    #[error("timed out reading the module body from {url}")]
+    BodyTimedOut { url: String },
+
+    /// The distinct module budget was exhausted.
+    #[error("the remote module graph exceeds the {limit} module limit")]
+    ModuleLimitExceeded { limit: usize },
+
+    /// The HTTP request budget was exhausted.
+    #[error("the remote module graph exceeds the {limit} request limit")]
+    RequestLimitExceeded { limit: usize },
+
+    /// The aggregate remote body byte budget was exhausted.
+    #[error("the remote module graph exceeds the {limit} byte total limit")]
+    TotalByteLimitExceeded { limit: usize },
+
+    /// The diagnostic-redaction URL table reached the module limit.
+    #[error("cannot retain another remote module URL for diagnostic redaction")]
+    RedactionLimitExceeded,
+
+    /// The underlying transport returned an error.
+    #[error("request for {url} failed: {reason}")]
+    RequestFailed { url: String, reason: String },
+
+    /// The server returned `304 Not Modified` without a cached body.
+    #[error("HTTP 304 from {url} without a cached module")]
+    UnexpectedNotModified { url: String },
+
+    /// A `3xx` redirect response lacked a `Location` header.
+    #[error("HTTP {status} from {url} has no Location header")]
+    MissingRedirectLocation { status: u16, url: String },
+
+    /// Redirect traversal exceeded the configured hop bound.
+    #[error("too many redirects fetching {url}; the limit is {limit}")]
+    TooManyRedirects { url: String, limit: u32 },
+
+    /// Cached redirect pointers formed a cycle.
+    #[error("redirect loop detected while resolving {url}")]
+    RedirectLoop { url: String },
+
+    /// A redirect `Location` could not be resolved against the current URL.
+    #[error("cannot resolve the redirect location from {url}: {reason}")]
+    InvalidRedirectLocation { url: String, reason: String },
+
+    /// A redirect targeted a non-`https:` scheme.
+    #[error("refusing a redirect to a `{scheme}` URL; remote modules require https:")]
+    RedirectUnsupportedScheme { scheme: String },
+
+    /// A redirect target carried credentials.
+    #[error("refusing a redirect URL with a username or password")]
+    RedirectCredentialsNotSupported,
+
+    /// A redirect target had no host.
+    #[error("refusing a redirect URL with no host")]
+    RedirectMissingHost,
+
+    /// The server returned a non-2xx/3xx HTTP status code.
+    #[error("HTTP {status} from {url}")]
+    HttpStatus { status: u16, url: String },
+
+    /// The declared `Content-Length` exceeded the module or graph byte limit.
+    #[error(
+        "module body from {url} declares {declared} bytes, above the {limit} byte {budget_label}"
+    )]
+    DeclaredLengthExceeded {
+        url: String,
+        declared: u64,
+        limit: usize,
+        budget_label: &'static str,
+    },
+
+    /// Reading the response stream failed.
+    #[error("cannot read the module body from {url}: {reason}")]
+    BodyReadFailed { url: String, reason: String },
+
+    /// Streaming the response body exceeded the module or graph byte limit.
+    #[error("module body from {url} is larger than the {limit} byte {budget_label}")]
+    BodyLimitExceeded {
+        url: String,
+        limit: usize,
+        budget_label: &'static str,
+    },
+}
 
 /// Limits and cache settings for remote module fetches.
 ///
@@ -238,7 +293,7 @@ impl RemoteOptions {
     /// Sets how many distinct remote modules one runtime may load.
     ///
     /// The entry module counts. A zero limit rejects the remote entry before
-    /// V8 loads it.
+    /// an engine loads it.
     pub fn with_max_remote_modules(mut self, max_remote_modules: usize) -> Self {
         self.max_remote_modules = max_remote_modules;
         self
@@ -249,7 +304,7 @@ impl RemoteOptions {
     /// Every network request counts, including retries of the same URL and each
     /// redirect hop. Cache hits do not count. A failed entry preflight refunds
     /// its module/byte/redaction charge but not the request it already spent; a
-    /// runtime that exhausts this budget needs a new `Runtime` to renew it. A
+    /// runtime that exhausts this budget needs a new client to renew it. A
     /// zero limit refuses all network requests.
     pub fn with_max_requests(mut self, max_requests: usize) -> Self {
         self.max_requests = max_requests;
@@ -352,53 +407,62 @@ fn cache_dir_from(cache_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<
 
 /// A fetched module body and the URL it was finally read from.
 #[derive(Debug)]
-pub(crate) struct FetchedModule {
+pub struct FetchedModule {
     /// The response body bytes.
-    pub(crate) body: Vec<u8>,
+    pub body: Vec<u8>,
     /// The URL of the final response, after any redirects and without a
     /// fragment. It differs from the requested URL when a redirect was
     /// followed.
-    pub(crate) final_url: Url,
+    pub final_url: Url,
     /// Whether this fetch consumed a new distinct module slot.
-    pub(crate) module_charged: bool,
+    pub module_charged: bool,
+}
+
+/// A verified module read offline from the disk cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfflineModule {
+    /// The verified cached body bytes.
+    pub body: Vec<u8>,
+    /// The canonical final URL after resolving any cached redirect pointers.
+    pub final_url: Url,
 }
 
 /// One HTTP response, with an unread body.
-pub(crate) struct RemoteResponse {
+pub struct RemoteResponse {
     /// The HTTP status code.
-    pub(crate) status: u16,
+    pub status: u16,
     /// The `Location` header, when present.
-    pub(crate) location: Option<String>,
+    pub location: Option<String>,
     /// The declared `Content-Length`, when present and parseable.
-    pub(crate) declared_length: Option<u64>,
+    pub declared_length: Option<u64>,
     /// The `ETag` header, when present.
-    pub(crate) etag: Option<String>,
+    pub etag: Option<String>,
     /// The `Last-Modified` header, when present.
-    pub(crate) last_modified: Option<String>,
+    pub last_modified: Option<String>,
     /// The `Cache-Control` header, when present.
-    pub(crate) cache_control: Option<String>,
+    pub cache_control: Option<String>,
     /// The `Date` header, when present.
-    pub(crate) date: Option<String>,
+    pub date: Option<String>,
     /// The `Age` header, when present.
-    pub(crate) age: Option<String>,
+    pub age: Option<String>,
     /// The response body, read lazily so the caller can bound it.
-    pub(crate) body: Box<dyn Read + Send>,
+    pub body: Box<dyn Read + Send>,
 }
 
 /// One request, including the validators for a conditional GET.
-pub(crate) struct RemoteRequest<'a> {
+pub struct RemoteRequest<'a> {
     /// The URL to request, without a fragment.
-    pub(crate) url: &'a Url,
+    pub url: &'a Url,
     /// The time left before the fetch deadline.
-    pub(crate) timeout: Duration,
+    pub timeout: Duration,
     /// An `If-None-Match` value, when a stale cache entry has an ETag.
-    pub(crate) if_none_match: Option<&'a str>,
+    pub if_none_match: Option<&'a str>,
     /// An `If-Modified-Since` value, when a stale cache entry has one.
-    pub(crate) if_modified_since: Option<&'a str>,
+    pub if_modified_since: Option<&'a str>,
 }
 
 /// Performs one request without following redirects.
-pub(crate) trait RemoteTransport: Send + Sync {
+pub trait RemoteTransport: Send + Sync {
     /// Requests `request.url`, returning headers and an unread body.
     ///
     /// An HTTP error status is returned as a response, not as an error, so the
@@ -406,7 +470,7 @@ pub(crate) trait RemoteTransport: Send + Sync {
     fn get(&self, request: &RemoteRequest<'_>) -> Result<RemoteResponse, String>;
 }
 
-/// The aggregate limits shared by all clones of one runtime's remote client.
+/// The aggregate limits shared by all clones of one client.
 #[derive(Default)]
 struct RemoteBudget {
     modules: AtomicUsize,
@@ -425,15 +489,14 @@ impl RemoteBudget {
         options: &'a RemoteOptions,
         charge_module: bool,
         retain_on_error: bool,
-    ) -> Result<Admission<'a>, String> {
+    ) -> Result<Admission<'a>, RemoteError> {
         if charge_module {
             let modules = self.modules.fetch_add(1, Ordering::SeqCst) + 1;
             if modules > options.max_remote_modules {
                 self.modules.fetch_sub(1, Ordering::SeqCst);
-                return Err(format!(
-                    "the remote module graph exceeds the {} module limit",
-                    options.max_remote_modules
-                ));
+                return Err(RemoteError::ModuleLimitExceeded {
+                    limit: options.max_remote_modules,
+                });
             }
         }
         Ok(Admission {
@@ -446,13 +509,12 @@ impl RemoteBudget {
     }
 
     /// Charges one network request, including retries and redirect hops.
-    fn charge_request(&self, options: &RemoteOptions) -> Result<(), String> {
+    fn charge_request(&self, options: &RemoteOptions) -> Result<(), RemoteError> {
         let requests = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
         if requests > options.max_requests {
-            return Err(format!(
-                "the remote module graph exceeds the {} request limit",
-                options.max_requests
-            ));
+            return Err(RemoteError::RequestLimitExceeded {
+                limit: options.max_requests,
+            });
         }
         Ok(())
     }
@@ -479,7 +541,7 @@ impl Admission<'_> {
 
     /// Charges the body bytes. On failure the admission is rolled back and the
     /// caller must not publish the cache entry.
-    fn commit(&mut self, bytes: usize) -> Result<(), String> {
+    fn commit(&mut self, bytes: usize) -> Result<(), RemoteError> {
         let total = self
             .budget
             .bytes
@@ -487,10 +549,9 @@ impl Admission<'_> {
             .saturating_add(bytes);
         if total > self.options.max_total_bytes {
             self.budget.bytes.fetch_sub(bytes, Ordering::SeqCst);
-            return Err(format!(
-                "the remote module graph exceeds the {} byte total limit",
-                self.options.max_total_bytes
-            ));
+            return Err(RemoteError::TotalByteLimitExceeded {
+                limit: self.options.max_total_bytes,
+            });
         }
         self.committed = true;
         Ok(())
@@ -505,12 +566,12 @@ impl Drop for Admission<'_> {
     }
 }
 
-/// Remote module URLs that may appear in generated V8 diagnostics.
-pub(crate) type Redactions = Arc<Mutex<BTreeSet<String>>>;
+/// Remote module URLs that may appear in generated engine diagnostics.
+pub type Redactions = Arc<Mutex<BTreeSet<String>>>;
 
 /// A configured remote module client.
 #[derive(Clone)]
-pub(crate) struct RemoteClient {
+pub struct RemoteClient {
     options: RemoteOptions,
     transport: Arc<dyn RemoteTransport>,
     cache: Option<Arc<Cache>>,
@@ -525,7 +586,8 @@ pub(crate) struct RemoteClient {
 
 impl RemoteClient {
     /// Creates a client using the rustls-backed HTTPS transport.
-    pub(crate) fn new(options: RemoteOptions) -> Self {
+    #[cfg(feature = "network")]
+    pub fn new(options: RemoteOptions) -> Self {
         let cache = options
             .cache_dir
             .as_ref()
@@ -543,10 +605,7 @@ impl RemoteClient {
 
     /// Creates a client over an injected transport.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_transport(
-        options: RemoteOptions,
-        transport: Arc<dyn RemoteTransport>,
-    ) -> Self {
+    pub fn with_transport(options: RemoteOptions, transport: Arc<dyn RemoteTransport>) -> Self {
         let cache = options
             .cache_dir
             .as_ref()
@@ -567,7 +626,7 @@ impl RemoteClient {
     /// The runtime is still unused, so an entry that was fetched but rejected
     /// for its format, UTF-8, or TypeScript must not spend a module slot or
     /// bytes from a later retry.
-    pub(crate) fn refund_entry(&self, requested: &Url, bytes: usize, module_charged: bool) {
+    pub fn refund_entry(&self, requested: &Url, bytes: usize, module_charged: bool) {
         if module_charged {
             self.budget.modules.fetch_sub(1, Ordering::SeqCst);
             self.attempted
@@ -582,8 +641,8 @@ impl RemoteClient {
         self.budget.bytes.fetch_sub(bytes, Ordering::SeqCst);
     }
 
-    /// Returns the shared set of module URLs to redact from V8 diagnostics.
-    pub(crate) fn redactions(&self) -> Redactions {
+    /// Returns the shared set of module URLs to redact from engine diagnostics.
+    pub fn redactions(&self) -> Redactions {
         Arc::clone(&self.redactions)
     }
 
@@ -607,7 +666,7 @@ impl RemoteClient {
     /// The set is capped by the module limit: one final URL per admitted module.
     /// A successful load that would need a new entry after the cap fails instead
     /// of executing with an unredactable diagnostic URL.
-    fn record_url(&self, url: &Url) -> Result<(), String> {
+    fn record_url(&self, url: &Url) -> Result<(), RemoteError> {
         let mut redactions = self
             .redactions
             .lock()
@@ -617,16 +676,14 @@ impl RemoteClient {
             return Ok(());
         }
         if redactions.len() >= self.options.max_remote_modules {
-            return Err(
-                "cannot retain another remote module URL for diagnostic redaction".to_string(),
-            );
+            return Err(RemoteError::RedactionLimitExceeded);
         }
         redactions.insert(url);
         Ok(())
     }
 
     /// Fetches one imported module.
-    pub(crate) fn fetch(&self, requested: &Url) -> Result<FetchedModule, String> {
+    pub fn fetch(&self, requested: &Url) -> Result<FetchedModule, RemoteError> {
         self.fetch_impl(requested, false)
     }
 
@@ -634,7 +691,7 @@ impl RemoteClient {
     ///
     /// A failed entry fetch releases its slot, so a preflight failure does not
     /// spend the graph budget.
-    pub(crate) fn fetch_entry(&self, requested: &Url) -> Result<FetchedModule, String> {
+    pub fn fetch_entry(&self, requested: &Url) -> Result<FetchedModule, RemoteError> {
         self.fetch_impl(requested, true)
     }
 
@@ -643,10 +700,10 @@ impl RemoteClient {
     /// The URL is validated first. The returned body and final URL are the
     /// final response; the final URL is what the module map aliases the
     /// requested URL to.
-    fn fetch_impl(&self, requested: &Url, entry_mode: bool) -> Result<FetchedModule, String> {
+    fn fetch_impl(&self, requested: &Url, entry_mode: bool) -> Result<FetchedModule, RemoteError> {
         validate_url(requested)?;
         if self.options.timeout.is_zero() {
-            return Err("the remote timeout is zero".to_string());
+            return Err(RemoteError::ZeroTimeout);
         }
         let key = request_url(requested).to_string();
         let already_attempted = self
@@ -681,20 +738,43 @@ impl RemoteClient {
         result
     }
 
+    /// Publishes a bounded redirect pointer from `initial` to `final_url` when
+    /// redirects occurred within `DEFAULT_MAX_REDIRECTS` and the final entry is
+    /// cached (non-`no-store`).
+    fn publish_redirect_pointer(
+        &self,
+        initial: &Url,
+        final_url: &Url,
+        redirects: u32,
+        initial_generation: Option<&str>,
+        deadline: Instant,
+    ) {
+        if redirects == 0 || redirects > DEFAULT_MAX_REDIRECTS || initial == final_url {
+            return;
+        }
+        if let (Some(generation), Some(cache)) = (initial_generation, &self.cache) {
+            let _ = cache.store_redirect_if_newer(initial, final_url, generation, deadline);
+        }
+    }
+
     fn fetch_body(
         &self,
         requested: &Url,
         admission: &mut Admission<'_>,
-    ) -> Result<FetchedModule, String> {
+    ) -> Result<FetchedModule, RemoteError> {
         let deadline = Instant::now()
             .checked_add(self.options.timeout)
-            .ok_or_else(|| "the remote timeout is too large".to_string())?;
-        let mut current = request_url(requested);
-        let mut redirects = 0;
+            .ok_or(RemoteError::TimeoutOverflow)?;
+        let initial = request_url(requested);
+        let mut current = initial.clone();
+        let mut initial_generation: Option<String> = None;
+        let mut redirects = 0u32;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(format!("timed out fetching {}", display_url(&current)));
+                return Err(RemoteError::FetchTimedOut {
+                    url: display_url(&current),
+                });
             }
 
             let now = unix_now();
@@ -707,6 +787,13 @@ impl RemoteClient {
             {
                 self.record_url(&current)?;
                 admission.commit(cached.body.len())?;
+                self.publish_redirect_pointer(
+                    &initial,
+                    &current,
+                    redirects,
+                    initial_generation.as_deref(),
+                    deadline,
+                );
                 return Ok(FetchedModule {
                     body: cached.body.clone(),
                     final_url: current,
@@ -721,9 +808,14 @@ impl RemoteClient {
             // avoid the request budget by failing while allocating a token.
             self.budget.charge_request(&self.options)?;
             let request_generation = self.next_request_generation(&current, deadline);
+            if redirects == 0 {
+                initial_generation = request_generation.clone();
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(format!("timed out fetching {}", display_url(&current)));
+                return Err(RemoteError::FetchTimedOut {
+                    url: display_url(&current),
+                });
             }
             let request_started = Instant::now();
             let response = self
@@ -734,18 +826,18 @@ impl RemoteClient {
                     if_none_match: etag,
                     if_modified_since: last_modified,
                 })
-                .map_err(|reason| {
-                    format!("request for {} failed: {reason}", display_url(&current))
+                .map_err(|reason| RemoteError::RequestFailed {
+                    url: display_url(&current),
+                    reason,
                 })?;
             let received_at = unix_now();
             let response_delay = duration_secs_ceil(request_started.elapsed());
 
             if response.status == 304 {
                 let Some(cached) = cached else {
-                    return Err(format!(
-                        "HTTP 304 from {} without a cached module",
-                        display_url(&current)
-                    ));
+                    return Err(RemoteError::UnexpectedNotModified {
+                        url: display_url(&current),
+                    });
                 };
                 let cache_control_present = response.cache_control.is_some();
                 let directives = CacheDirectives::parse(response.cache_control.as_deref());
@@ -788,14 +880,23 @@ impl RemoteClient {
                             generation,
                             deadline,
                         );
-                    } else {
-                        let _ = cache.merge_revalidated(
+                    } else if cache
+                        .merge_revalidated(
                             &current,
                             &update,
                             &expected_representation,
                             generation,
                             deadline,
                             self.options.max_module_bytes,
+                        )
+                        .is_ok()
+                    {
+                        self.publish_redirect_pointer(
+                            &initial,
+                            &current,
+                            redirects,
+                            initial_generation.as_deref(),
+                            deadline,
                         );
                     }
                 }
@@ -808,24 +909,22 @@ impl RemoteClient {
 
             if (300..=399).contains(&response.status) {
                 let Some(location) = response.location.as_deref() else {
-                    return Err(format!(
-                        "HTTP {} from {} has no Location header",
-                        response.status,
-                        display_url(&current)
-                    ));
+                    return Err(RemoteError::MissingRedirectLocation {
+                        status: response.status,
+                        url: display_url(&current),
+                    });
                 };
                 if redirects >= self.options.max_redirects {
-                    return Err(format!(
-                        "too many redirects fetching {}; the limit is {}",
-                        display_url(requested),
-                        self.options.max_redirects
-                    ));
+                    return Err(RemoteError::TooManyRedirects {
+                        url: display_url(requested),
+                        limit: self.options.max_redirects,
+                    });
                 }
                 let target = current.join(location).map_err(|error| {
-                    format!(
-                        "cannot resolve the redirect location from {}: {error}",
-                        display_url(&current)
-                    )
+                    RemoteError::InvalidRedirectLocation {
+                        url: display_url(&current),
+                        reason: error.to_string(),
+                    }
                 })?;
                 validate_redirect(&target)?;
                 current = request_url(&target);
@@ -834,11 +933,10 @@ impl RemoteClient {
             }
 
             if !(200..=299).contains(&response.status) {
-                return Err(format!(
-                    "HTTP {} from {}",
-                    response.status,
-                    display_url(&current)
-                ));
+                return Err(RemoteError::HttpStatus {
+                    status: response.status,
+                    url: display_url(&current),
+                });
             }
             let remaining_bytes = admission.remaining_bytes();
             let limit = self.options.max_module_bytes.min(remaining_bytes);
@@ -850,10 +948,12 @@ impl RemoteClient {
             if let Some(length) = response.declared_length
                 && length > limit as u64
             {
-                return Err(format!(
-                    "module body from {} declares {length} bytes, above the {limit} byte {budget_label}",
-                    display_url(&current)
-                ));
+                return Err(RemoteError::DeclaredLengthExceeded {
+                    url: display_url(&current),
+                    declared: length,
+                    limit,
+                    budget_label,
+                });
             }
             let body = read_bounded(response.body, limit, deadline, &current, budget_label)?;
             self.record_url(&current)?;
@@ -883,7 +983,15 @@ impl RemoteClient {
                         generation: generation.to_string(),
                         representation,
                     };
-                    let _ = cache.store_if_newer(&current, &entry, deadline);
+                    if cache.store_if_newer(&current, &entry, deadline).is_ok() {
+                        self.publish_redirect_pointer(
+                            &initial,
+                            &current,
+                            redirects,
+                            initial_generation.as_deref(),
+                            deadline,
+                        );
+                    }
                 }
             }
             return Ok(FetchedModule {
@@ -896,38 +1004,36 @@ impl RemoteClient {
 }
 
 /// Rejects a URL that is not a credential-free HTTPS URL.
-pub(crate) fn validate_url(url: &Url) -> Result<(), String> {
+pub fn validate_url(url: &Url) -> Result<(), RemoteError> {
     if url.scheme() != "https" {
-        return Err(format!(
-            "only https: module URLs are supported; `{}` is not",
-            url.scheme()
-        ));
+        return Err(RemoteError::UnsupportedScheme {
+            scheme: url.scheme().to_string(),
+        });
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("module URLs with a username or password are not supported".to_string());
+        return Err(RemoteError::CredentialsNotSupported);
     }
     if url.host_str().is_none() {
-        return Err("the module URL has no host".to_string());
+        return Err(RemoteError::MissingHost);
     }
     Ok(())
 }
 
 /// Rejects a redirect target that is not a credential-free HTTPS URL.
 ///
-/// The message names the source URL but not the target, so a credential in a
-/// malformed `Location` header is not echoed.
-fn validate_redirect(target: &Url) -> Result<(), String> {
+/// The message names the source URL's policy, not the target, so a credential
+/// in a malformed `Location` header is not echoed.
+fn validate_redirect(target: &Url) -> Result<(), RemoteError> {
     if target.scheme() != "https" {
-        return Err(format!(
-            "refusing a redirect to a `{}` URL; remote modules require https:",
-            target.scheme()
-        ));
+        return Err(RemoteError::RedirectUnsupportedScheme {
+            scheme: target.scheme().to_string(),
+        });
     }
     if !target.username().is_empty() || target.password().is_some() {
-        return Err("refusing a redirect URL with a username or password".to_string());
+        return Err(RemoteError::RedirectCredentialsNotSupported);
     }
     if target.host_str().is_none() {
-        return Err("refusing a redirect URL with no host".to_string());
+        return Err(RemoteError::RedirectMissingHost);
     }
     Ok(())
 }
@@ -945,7 +1051,7 @@ fn request_url(url: &Url) -> Url {
 ///
 /// A query can contain a signed token, so it is not written to an error or a
 /// log line even though it is part of the cache key.
-pub(crate) fn display_url(url: &Url) -> String {
+pub fn display_url(url: &Url) -> String {
     diagnostic_url(url).to_string()
 }
 
@@ -953,7 +1059,7 @@ pub(crate) fn display_url(url: &Url) -> String {
 ///
 /// Credentials, the query, and the fragment are removed, so a type-stripping
 /// error cannot echo a signed query even though it names the module URL.
-pub(crate) fn diagnostic_url(url: &Url) -> Url {
+pub fn diagnostic_url(url: &Url) -> Url {
     let mut clean = url.clone();
     let _ = clean.set_username("");
     let _ = clean.set_password(None);
@@ -962,264 +1068,37 @@ pub(crate) fn diagnostic_url(url: &Url) -> Url {
     clean
 }
 
-/// Redacts known remote module URLs from a V8 diagnostic without touching the
-/// script's exception value.
-///
-/// Only URLs recorded by this client are replaced, and only in generated
-/// locations: stack-frame file names, frame lines after the first, and the
-/// generated ` at <URL>:line:column` suffix. `exception_message` and
-/// `source_line` are otherwise preserved, and a custom stack supplied by the
-/// script is kept as-is.
-pub(crate) fn redact_core_error(error: CoreError, redactions: &Redactions) -> CoreError {
-    let urls = redactions
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
-    if urls.is_empty() {
-        return error;
-    }
-    let CoreError(kind) = error;
-    let kind = match *kind {
-        CoreErrorKind::Js(js) => CoreErrorKind::Js(Box::new(redact_js_error(*js, &urls))),
-        other => {
-            let original = CoreError(Box::new(other));
-            let text = original.to_string();
-            let redacted = redact_generated_mentions(&text, &urls, true, true);
-            if redacted == text {
-                return original;
-            }
-            CoreErrorKind::JsBox(JsErrorBox::generic(redacted))
-        }
-    };
-    CoreError(Box::new(kind))
-}
-
-fn redact_js_error(mut error: JsError, urls: &BTreeSet<String>) -> JsError {
-    for frame in &mut error.frames {
-        if let Some(file_name) = frame.file_name.take() {
-            frame.file_name = Some(redact_known_urls(&file_name, urls));
-        }
-        if let Some(eval_origin) = frame.eval_origin.take() {
-            frame.eval_origin = Some(redact_known_urls(&eval_origin, urls));
-        }
-    }
-    if !error.stack_is_custom {
-        // V8 puts generated locations in syntax, link, and resolution errors.
-        // The name and prefix must identify a generated shape; a user value is
-        // preserved even if its text happens to contain "Cannot find module" or
-        // an ` at <URL>:` fragment.
-        let (generated_link, generated_location) =
-            generated_flags(&error.exception_message, error.name.as_deref());
-        if let Some(stack) = error.stack.take() {
-            error.stack = Some(redact_stack(
-                &stack,
-                urls,
-                generated_link,
-                generated_location,
-            ));
-        }
-        error.exception_message = redact_generated_mentions(
-            &error.exception_message,
-            urls,
-            generated_link,
-            generated_location,
-        );
-        error.message = error.message.take().map(|message| {
-            let (generated_link, generated_location) =
-                generated_flags(&message, error.name.as_deref());
-            redact_generated_mentions(&message, urls, generated_link, generated_location)
-        });
-    }
-    error.cause = error
-        .cause
-        .take()
-        .map(|cause| Box::new(redact_js_error(*cause, urls)));
-    error.aggregated = error.aggregated.take().map(|aggregated| {
-        aggregated
-            .into_iter()
-            .map(|error| redact_js_error(error, urls))
-            .collect()
-    });
-    error
-}
-
-/// Redacts generated frame lines. The first stack line is the exception value,
-/// so it is only rewritten when the error is positively identified as a
-/// generated link or location diagnostic.
-fn redact_stack(
-    stack: &str,
-    urls: &BTreeSet<String>,
-    generated_link: bool,
-    generated_location: bool,
-) -> String {
-    let mut lines = stack.lines();
-    let Some(first) = lines.next() else {
-        return String::new();
-    };
-    let mut redacted = if generated_location {
-        redact_generated_mentions(first, urls, generated_link, generated_location)
-    } else {
-        String::from(first)
-    };
-    for line in lines {
-        redacted.push('\n');
-        redacted.push_str(&redact_known_urls(line, urls));
-    }
-    redacted
-}
-
-/// Replaces known module URLs in generated diagnostic positions.
-///
-/// It handles ` at <URL>:line:column` and a URL quoted as a module specifier in
-/// a link or resolution error. Other mentions, including an exception value that
-/// carries an unrelated URL, are preserved.
-fn redact_generated_mentions(
-    message: &str,
-    urls: &BTreeSet<String>,
-    generated_link: bool,
-    generated_location: bool,
-) -> String {
-    let mut redacted = message.to_string();
-    for url in urls {
-        let replacement = redact_url_string(url);
-        if generated_location {
-            redacted = redacted.replace(&format!(" at {url}:"), &format!(" at {replacement}:"));
-        }
-        if generated_link {
-            redacted = redacted.replace(&format!("'{url}'"), &format!("'{replacement}'"));
-            redacted = redacted.replace(&format!("\"{url}\""), &format!("\"{replacement}\""));
-        }
-    }
-    if generated_link {
-        redact_quoted_specifier_queries(&redacted)
-    } else {
-        redacted
-    }
-}
-
-/// Returns whether a message has the structure of a generated V8 link or
-/// location diagnostic.
-///
-/// The name and message prefix must both match a generated shape. A user-thrown
-/// `Error` whose text happens to contain "Cannot find module" or ` at <URL>:`
-/// does not qualify.
-fn generated_flags(message: &str, name: Option<&str>) -> (bool, bool) {
-    let diagnostic_name = matches!(name, Some("SyntaxError") | Some("TypeError"));
-    let message = message
-        .strip_prefix("Uncaught SyntaxError: ")
-        .or_else(|| message.strip_prefix("Uncaught TypeError: "))
-        .or_else(|| message.strip_prefix("Uncaught (in promise) SyntaxError: "))
-        .or_else(|| message.strip_prefix("Uncaught (in promise) TypeError: "))
-        .unwrap_or(message);
-    let link = diagnostic_name
-        && message.starts_with("The requested module ")
-        && message.contains(" does not provide an export");
-    let location = diagnostic_name
-        && message.contains(" at ")
-        && (link
-            || [
-                "Unexpected token",
-                "Unexpected identifier",
-                "Invalid or unexpected token",
-                "Missing initializer",
-                "Identifier '",
-                "Invalid left-hand side",
-            ]
-            .iter()
-            .any(|prefix| message.starts_with(prefix)));
-    (link, location)
-}
-
-/// Removes the query from a quoted relative module specifier in a generated
-/// message, such as `'./module.js?token=secret'` in a link error. Other quoted
-/// text is preserved.
-fn redact_quoted_specifier_queries(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let quote = bytes[index];
-        if (quote == b'\'' || quote == b'"')
-            && let Some(offset) = bytes[index + 1..].iter().position(|byte| *byte == quote)
-        {
-            let end = index + 1 + offset;
-            let inner = &text[index + 1..end];
-            if is_relative_specifier_with_query(inner) {
-                output.push(quote);
-                output
-                    .extend_from_slice(inner.split(['?', '#']).next().unwrap_or(inner).as_bytes());
-                output.push(quote);
-                index = end + 1;
-                continue;
-            }
-        }
-        output.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8(output).unwrap_or_else(|_| text.to_string())
-}
-
-fn is_relative_specifier_with_query(specifier: &str) -> bool {
-    let looks_relative = specifier.starts_with("./")
-        || specifier.starts_with("../")
-        || specifier.starts_with('/')
-        || specifier.starts_with("https://")
-        || specifier.starts_with("http://");
-    looks_relative && specifier.contains('?') && !specifier.chars().any(char::is_whitespace)
-}
-
-/// Replaces exact known module URLs, longest first so one URL cannot corrupt a
-/// longer one that shares its prefix.
-fn redact_known_urls(text: &str, urls: &BTreeSet<String>) -> String {
-    let mut urls = urls.iter().collect::<Vec<_>>();
-    urls.sort_by_key(|url| std::cmp::Reverse(url.len()));
-    let mut redacted = text.to_string();
-    for url in urls {
-        if redacted.contains(url) {
-            redacted = redacted.replace(url, &redact_url_string(url));
-        }
-    }
-    redacted
-}
-
-fn redact_url_string(url: &str) -> String {
-    match Url::parse(url) {
-        Ok(url) => diagnostic_url(&url).to_string(),
-        Err(_) => url.to_string(),
-    }
-}
-
 /// Reads at most `limit` bytes, checking the deadline between reads.
 fn read_bounded(
     mut body: Box<dyn Read + Send>,
     limit: usize,
     deadline: Instant,
     url: &Url,
-    budget_label: &str,
-) -> Result<Vec<u8>, String> {
+    budget_label: &'static str,
+) -> Result<Vec<u8>, RemoteError> {
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
         if Instant::now() >= deadline {
-            return Err(format!(
-                "timed out reading the module body from {}",
-                display_url(url)
-            ));
+            return Err(RemoteError::BodyTimedOut {
+                url: display_url(url),
+            });
         }
-        let read = body.read(&mut buffer).map_err(|error| {
-            format!(
-                "cannot read the module body from {}: {error}",
-                display_url(url)
-            )
-        })?;
+        let read = body
+            .read(&mut buffer)
+            .map_err(|error| RemoteError::BodyReadFailed {
+                url: display_url(url),
+                reason: error.to_string(),
+            })?;
         if read == 0 {
             return Ok(bytes);
         }
         if bytes.len() + read > limit {
-            return Err(format!(
-                "module body from {} is larger than the {limit} byte {budget_label}",
-                display_url(url)
-            ));
+            return Err(RemoteError::BodyLimitExceeded {
+                url: display_url(url),
+                limit,
+                budget_label,
+            });
         }
         bytes.extend_from_slice(&buffer[..read]);
     }
@@ -1333,6 +1212,13 @@ impl CachedModule {
     }
 }
 
+/// A cached redirect pointer from one URL key to its resolved target URL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RedirectRecord {
+    target: Url,
+    generation: String,
+}
+
 /// Reads one line without allowing the line itself to allocate past `limit`.
 fn read_line_bounded<R: BufRead>(reader: &mut R, limit: usize) -> Option<String> {
     let mut bytes = Vec::new();
@@ -1397,6 +1283,32 @@ fn parse_metadata(metadata: &str) -> Option<(CachedModule, usize, String)> {
         body_length?,
         body_sha256?,
     ))
+}
+
+/// Parses the metadata block of a redirect-pointer cache record.
+fn parse_redirect_metadata(metadata: &str) -> Option<RedirectRecord> {
+    let mut generation = None;
+    let mut target = None;
+    for line in metadata.lines() {
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        match name {
+            "generation" => {
+                if !value.is_empty() {
+                    generation = Some(value.to_string());
+                }
+            }
+            "target" => target = hex_decode(value),
+            _ => {}
+        }
+    }
+    let target = Url::parse(&target?).ok()?;
+    validate_redirect(&target).ok()?;
+    Some(RedirectRecord {
+        target: request_url(&target),
+        generation: generation?,
+    })
 }
 
 /// Returns a stable identity for the cached representation.
@@ -1495,16 +1407,30 @@ fn response_age(date: Option<&str>, age: Option<&str>, now: u64, response_delay:
 /// reader sees either the old entry or the new one, never a partial file. A
 /// per-key lock file serializes publication across processes so an older `304`
 /// cannot replace a newer `200`.
-struct Cache {
+#[derive(Clone, Debug)]
+pub struct Cache {
     dir: PathBuf,
 }
 
 impl Cache {
-    fn new(dir: PathBuf) -> Self {
+    /// Creates a cache handle rooted at `dir`.
+    pub fn new(dir: PathBuf) -> Self {
         Self { dir }
     }
 
-    /// Returns the canonical cache key: the URL without a fragment.
+    /// Returns the default user-profile cache directory, when available from
+    /// environment variables (`XDG_CACHE_HOME`, `HOME`, or `USERPROFILE`).
+    pub fn default_dir() -> Option<PathBuf> {
+        default_cache_dir()
+    }
+
+    /// Returns the root directory of this cache.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Returns the canonical cache key: the URL without credentials or a
+    /// fragment.
     fn key(url: &Url) -> String {
         let mut key = url.clone();
         let _ = key.set_username("");
@@ -1520,6 +1446,24 @@ impl Cache {
     fn path(&self, url: &Url) -> PathBuf {
         let digest = Sha256::digest(Self::key(url).as_bytes());
         self.dir.join(hex_encode(&digest))
+    }
+
+    fn tombstone_path(&self, url: &Url) -> PathBuf {
+        let mut path = self.path(url).into_os_string();
+        path.push(".tomb");
+        PathBuf::from(path)
+    }
+
+    fn revision_path(&self, url: &Url) -> PathBuf {
+        let mut path = self.path(url).into_os_string();
+        path.push(".rev");
+        PathBuf::from(path)
+    }
+
+    fn redirect_path(&self, url: &Url) -> PathBuf {
+        let mut path = self.path(url).into_os_string();
+        path.push(".redir");
+        PathBuf::from(path)
     }
 
     /// Opens an entry and reads its bounded header and metadata block.
@@ -1579,6 +1523,65 @@ impl Cache {
         Some(entry)
     }
 
+    /// Reads and SHA-256-verifies a cached entry offline using the default
+    /// module size limit.
+    ///
+    /// This takes no write locks, ignores `max-age` freshness expiry (returning
+    /// valid verified cached bytes even if stale), honors `.tomb` tombstones,
+    /// and resolves bounded `.redir` redirect pointers (up to
+    /// [`DEFAULT_MAX_REDIRECTS`] hops, rejecting redirect loops and excess
+    /// hops).
+    pub fn load_offline(&self, url: &Url) -> Result<Option<OfflineModule>, RemoteError> {
+        self.load_offline_with_limit(url, DEFAULT_MAX_MODULE_BYTES)
+    }
+
+    /// Reads and SHA-256-verifies a cached entry offline with an explicit
+    /// `max_body` limit.
+    pub fn load_offline_with_limit(
+        &self,
+        url: &Url,
+        max_body: usize,
+    ) -> Result<Option<OfflineModule>, RemoteError> {
+        validate_url(url)?;
+        let mut current = request_url(url);
+        let mut visited = BTreeSet::new();
+        visited.insert(Self::key(&current));
+        let mut hops = 0u32;
+        loop {
+            if self.read_tombstone(&current).is_some() {
+                return Ok(None);
+            }
+            if let Some(entry) = self.load(&current, max_body) {
+                return Ok(Some(OfflineModule {
+                    body: entry.body,
+                    final_url: current,
+                }));
+            }
+            let Some(redirect) = self.read_redirect(&current) else {
+                return Ok(None);
+            };
+            let target = request_url(&redirect.target);
+            let target_key = Self::key(&target);
+            if visited.contains(&target_key) {
+                return Err(RemoteError::RedirectLoop {
+                    url: display_url(url),
+                });
+            }
+            if hops >= DEFAULT_MAX_REDIRECTS {
+                return Err(RemoteError::TooManyRedirects {
+                    url: display_url(url),
+                    limit: DEFAULT_MAX_REDIRECTS,
+                });
+            }
+            if self.read_tombstone(&current).is_some() {
+                return Ok(None);
+            }
+            visited.insert(target_key);
+            current = target;
+            hops += 1;
+        }
+    }
+
     /// Acquires the per-key publication lock.
     fn lock(&self, url: &Url, deadline: Instant) -> std::io::Result<CacheLock> {
         std::fs::create_dir_all(&self.dir)?;
@@ -1606,18 +1609,6 @@ impl Cache {
                 Err(error) => return Err(error),
             }
         }
-    }
-
-    fn tombstone_path(&self, url: &Url) -> PathBuf {
-        let mut path = self.path(url).into_os_string();
-        path.push(".tomb");
-        PathBuf::from(path)
-    }
-
-    fn revision_path(&self, url: &Url) -> PathBuf {
-        let mut path = self.path(url).into_os_string();
-        path.push(".rev");
-        PathBuf::from(path)
     }
 
     /// Allocates the next request-order revision for a key.
@@ -1674,11 +1665,35 @@ impl Cache {
         }
     }
 
-    /// Returns the current published generation, including a tombstone for an
-    /// absent entry.
+    fn read_redirect(&self, url: &Url) -> Option<RedirectRecord> {
+        let file = File::open(self.redirect_path(url)).ok()?;
+        let mut reader = BufReader::new(file);
+        let magic = read_line_bounded(&mut reader, 64)?;
+        if magic.trim_end() != REDIRECT_MAGIC {
+            return None;
+        }
+        let length_line = read_line_bounded(&mut reader, 32)?;
+        let metadata_length: usize = length_line.trim().parse().ok()?;
+        if metadata_length > MAX_META_BYTES {
+            return None;
+        }
+        let mut metadata = vec![0u8; metadata_length];
+        reader.read_exact(&mut metadata).ok()?;
+        let mut extra = [0u8; 1];
+        if reader.read(&mut extra).ok()? != 0 {
+            return None;
+        }
+        parse_redirect_metadata(std::str::from_utf8(&metadata).ok()?)
+    }
+
+    /// Returns the current published generation, including a tombstone or
+    /// redirect pointer.
     fn state(&self, url: &Url) -> Option<String> {
         if let Some(generation) = self.read_tombstone(url) {
             return Some(generation);
+        }
+        if let Some(redirect) = self.read_redirect(url) {
+            return Some(redirect.generation);
         }
         self.read_metadata(url)
             .map(|(entry, _, _)| entry.generation)
@@ -1690,11 +1705,12 @@ impl Cache {
         let _lock = self.lock(url, Instant::now() + Duration::from_secs(5))?;
         self.write_entry(url, entry)?;
         let _ = std::fs::remove_file(self.tombstone_path(url));
+        let _ = std::fs::remove_file(self.redirect_path(url));
         Ok(())
     }
 
     /// Publishes a fresh `200` only when its request is newer than the current
-    /// generation or tombstone.
+    /// generation, redirect pointer, or tombstone.
     fn store_if_newer(
         &self,
         url: &Url,
@@ -1709,6 +1725,29 @@ impl Cache {
             return Ok(false);
         }
         self.write_entry(url, entry)?;
+        let _ = std::fs::remove_file(self.tombstone_path(url));
+        let _ = std::fs::remove_file(self.redirect_path(url));
+        Ok(true)
+    }
+
+    /// Publishes a bounded redirect pointer only when its request is newer than
+    /// the current entry, redirect pointer, or tombstone.
+    fn store_redirect_if_newer(
+        &self,
+        url: &Url,
+        target: &Url,
+        generation: &str,
+        deadline: Instant,
+    ) -> std::io::Result<bool> {
+        let _lock = self.lock(url, deadline)?;
+        if self
+            .state(url)
+            .is_some_and(|current| current.as_str() >= generation)
+        {
+            return Ok(false);
+        }
+        self.write_redirect(url, target, generation)?;
+        let _ = std::fs::remove_file(self.path(url));
         let _ = std::fs::remove_file(self.tombstone_path(url));
         Ok(true)
     }
@@ -1756,6 +1795,7 @@ impl Cache {
         current.generation = generation.to_string();
         self.write_entry(url, &current)?;
         let _ = std::fs::remove_file(self.tombstone_path(url));
+        let _ = std::fs::remove_file(self.redirect_path(url));
         Ok(true)
     }
 
@@ -1808,6 +1848,7 @@ impl Cache {
         }
         self.write_tombstone(url, generation)?;
         let _ = std::fs::remove_file(self.path(url));
+        let _ = std::fs::remove_file(self.redirect_path(url));
         Ok(true)
     }
 
@@ -1828,6 +1869,7 @@ impl Cache {
         }
         self.write_tombstone(url, generation)?;
         let _ = std::fs::remove_file(self.path(url));
+        let _ = std::fs::remove_file(self.redirect_path(url));
         Ok(true)
     }
 
@@ -1850,6 +1892,42 @@ impl Cache {
             }
             writeln!(file, "{TOMBSTONE_MAGIC}\n{generation}")?;
             std::fs::rename(&temporary, self.tombstone_path(url))
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    fn write_redirect(&self, url: &Url, target: &Url, generation: &str) -> std::io::Result<()> {
+        let metadata = format!(
+            "generation={generation}\ntarget={}\n",
+            hex_encode(request_url(target).as_str().as_bytes())
+        );
+        if metadata.len() > MAX_META_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "redirect metadata exceeds maximum size",
+            ));
+        }
+        let temporary = self.dir.join(format!(
+            ".redir-{}-{}-{}",
+            std::process::id(),
+            unix_now(),
+            TEMPORARY_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            write!(file, "{REDIRECT_MAGIC}\n{}\n{metadata}", metadata.len())?;
+            std::fs::rename(&temporary, self.redirect_path(url))
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temporary);
@@ -1902,10 +1980,12 @@ impl Drop for CacheLock {
 static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The production transport: blocking HTTPS through `ureq` and `rustls`.
+#[cfg(feature = "network")]
 struct UreqTransport {
     agent: ureq::Agent,
 }
 
+#[cfg(feature = "network")]
 impl UreqTransport {
     /// Returns the one production agent configuration.
     ///
@@ -1949,6 +2029,7 @@ impl UreqTransport {
 ///
 /// Neither `ureq`'s message nor its URL is used: a URL can carry a signed query
 /// and the transport message can include it. The category is enough to act on.
+#[cfg(feature = "network")]
 fn ureq_error_reason(error: ureq::Error) -> String {
     let Some(error) = error.into_transport() else {
         return "HTTP transport error".to_string();
@@ -1971,6 +2052,7 @@ fn ureq_error_reason(error: ureq::Error) -> String {
     reason.to_string()
 }
 
+#[cfg(feature = "network")]
 impl RemoteTransport for UreqTransport {
     fn get(&self, request: &RemoteRequest<'_>) -> Result<RemoteResponse, String> {
         let mut call = self
@@ -2015,7 +2097,7 @@ impl RemoteTransport for UreqTransport {
 }
 
 /// A scripted response for the test-only transport hook.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 #[derive(Clone, Debug, Default)]
 pub struct TestRemoteResponse {
@@ -2039,10 +2121,10 @@ pub struct TestRemoteResponse {
     pub body: Vec<u8>,
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 struct ClosureTransport<F>(F);
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 impl<F> RemoteTransport for ClosureTransport<F>
 where
     F: Fn(&str, Duration, Option<&str>, Option<&str>) -> Result<TestRemoteResponse, String>
@@ -2071,8 +2153,8 @@ where
 }
 
 /// Wraps a closure as an injected transport.
-#[cfg(feature = "test-support")]
-pub(crate) fn test_transport<F>(fetch: F) -> Arc<dyn RemoteTransport>
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_transport<F>(fetch: F) -> Arc<dyn RemoteTransport>
 where
     F: Fn(&str, Duration, Option<&str>, Option<&str>) -> Result<TestRemoteResponse, String>
         + Send
@@ -2087,24 +2169,22 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::Read;
     use std::io::Write;
-    use std::net::TcpListener;
     use std::path::Path;
     use std::path::PathBuf;
     use std::process::Command;
     use std::process::Stdio;
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
     use std::time::Instant;
     use std::time::SystemTime;
 
-    use deno_core::url::Url;
     use sha2::Digest;
     use sha2::Sha256;
+    use url::Url;
 
     use super::RemoteClient;
+    use super::RemoteError;
     use super::RemoteOptions;
     use super::RemoteRequest;
     use super::RemoteResponse;
@@ -2217,7 +2297,10 @@ mod tests {
         let client = client(options(), transport);
         let url = Url::parse("https://example.test/mod.js").expect("url");
 
-        let error = client.fetch(&url).expect_err("downgrade must fail");
+        let error = client
+            .fetch(&url)
+            .expect_err("downgrade must fail")
+            .to_string();
         assert!(error.contains("https"), "{error}");
         assert_eq!(saw.seen.lock().expect("seen").len(), 1);
     }
@@ -2228,7 +2311,10 @@ mod tests {
         let client = client(options(), transport);
         let url = Url::parse("https://example.test/mod.js").expect("url");
 
-        let error = client.fetch(&url).expect_err("file target must fail");
+        let error = client
+            .fetch(&url)
+            .expect_err("file target must fail")
+            .to_string();
         assert!(error.contains("file"), "{error}");
     }
 
@@ -2241,7 +2327,10 @@ mod tests {
         let client = client(options().with_max_redirects(1), Arc::clone(&transport));
         let url = Url::parse("https://example.test/mod.js").expect("url");
 
-        let error = client.fetch(&url).expect_err("second redirect must fail");
+        let error = client
+            .fetch(&url)
+            .expect_err("second redirect must fail")
+            .to_string();
         assert!(error.contains("too many redirects"), "{error}");
     }
 
@@ -2251,7 +2340,10 @@ mod tests {
         let client = client(options().with_max_redirects(0), transport);
         let url = Url::parse("https://example.test/mod.js").expect("url");
 
-        let error = client.fetch(&url).expect_err("redirect must fail");
+        let error = client
+            .fetch(&url)
+            .expect_err("redirect must fail")
+            .to_string();
         assert!(error.contains("too many redirects"), "{error}");
     }
 
@@ -2262,7 +2354,10 @@ mod tests {
         let client = client(options(), transport);
         let url = Url::parse("https://user:secret@example.test/mod.js").expect("url");
 
-        let error = client.fetch(&url).expect_err("credentials must fail");
+        let error = client
+            .fetch(&url)
+            .expect_err("credentials must fail")
+            .to_string();
         assert!(error.contains("username or password"), "{error}");
         assert!(!error.contains("secret"), "{error}");
         assert!(saw.seen.lock().expect("seen").is_empty());
@@ -2274,7 +2369,10 @@ mod tests {
         let client = client(options(), transport);
         let url = Url::parse("https://example.test/mod.js?token=secret").expect("url");
 
-        let error = client.fetch(&url).expect_err("missing response must fail");
+        let error = client
+            .fetch(&url)
+            .expect_err("missing response must fail")
+            .to_string();
         assert!(!error.contains("token"), "{error}");
         assert!(!error.contains("secret"), "{error}");
     }
@@ -2295,7 +2393,10 @@ mod tests {
         let client = client(options().with_max_module_bytes(10), transport);
         let url = Url::parse("https://example.test/mod.js").expect("url");
 
-        let error = client.fetch(&url).expect_err("length must fail");
+        let error = client
+            .fetch(&url)
+            .expect_err("length must fail")
+            .to_string();
         assert!(error.contains("10 byte limit"), "{error}");
     }
 
@@ -2315,7 +2416,7 @@ mod tests {
         let client = client(options().with_max_module_bytes(9), transport);
         let url = Url::parse("https://example.test/mod.js").expect("url");
 
-        let error = client.fetch(&url).expect_err("body must fail");
+        let error = client.fetch(&url).expect_err("body must fail").to_string();
         assert!(error.contains("larger than the 9 byte limit"), "{error}");
     }
 
@@ -2328,7 +2429,10 @@ mod tests {
         ] {
             let client = client(options(), ScriptedTransport::new(Vec::new()));
             let url = Url::parse(specifier).expect("url");
-            let error = client.fetch(&url).expect_err("scheme must fail");
+            let error = client
+                .fetch(&url)
+                .expect_err("scheme must fail")
+                .to_string();
             assert!(error.contains(scheme), "{specifier}: {error}");
         }
     }
@@ -2353,7 +2457,10 @@ mod tests {
         let saw = Arc::clone(&transport);
         let client = client(options().with_timeout(Duration::ZERO), transport);
         let url = Url::parse("https://example.test/mod.js").expect("url");
-        let error = client.fetch(&url).expect_err("zero timeout must fail");
+        let error = client
+            .fetch(&url)
+            .expect_err("zero timeout must fail")
+            .to_string();
         assert!(error.contains("timeout"), "{error}");
         assert!(saw.seen.lock().expect("seen").is_empty());
     }
@@ -2487,7 +2594,7 @@ mod tests {
                 etag: None,
                 last_modified: None,
                 cache_control: Some("max-age=60".to_string()),
-                date: Some(date.clone()),
+                date: Some(date),
                 age: None,
                 body: Box::new(std::io::Cursor::new(b"body".to_vec())),
             },
@@ -2813,7 +2920,10 @@ mod tests {
         let one = Url::parse("https://example.test/one.js").expect("url");
         let two = Url::parse("https://example.test/two.js").expect("url");
         module_limited.fetch(&one).expect("first module");
-        let error = module_limited.fetch(&two).expect_err("module limit");
+        let error = module_limited
+            .fetch(&two)
+            .expect_err("module limit")
+            .to_string();
         assert!(error.contains("1 module limit"), "{error}");
 
         let transport = ScriptedTransport::new(vec![
@@ -2822,7 +2932,10 @@ mod tests {
         ]);
         let byte_limited = client(options().with_max_total_bytes(7), Arc::clone(&transport));
         byte_limited.fetch(&one).expect("first bytes");
-        let error = byte_limited.fetch(&two).expect_err("byte limit");
+        let error = byte_limited
+            .fetch(&two)
+            .expect_err("byte limit")
+            .to_string();
         assert!(
             error.contains("remaining graph budget") || error.contains("byte total limit"),
             "{error}"
@@ -2845,7 +2958,8 @@ mod tests {
         request_limited.fetch(&url).expect("first request");
         let error = request_limited
             .fetch(&url)
-            .expect_err("the retry exceeds the request cap");
+            .expect_err("the retry exceeds the request cap")
+            .to_string();
         assert!(error.contains("1 request limit"), "{error}");
         assert_eq!(saw.seen.lock().expect("seen").len(), 1);
 
@@ -2854,7 +2968,8 @@ mod tests {
         let client = client(options().with_max_requests(1), transport);
         let error = client
             .fetch(&url)
-            .expect_err("the redirect hop exceeds the request cap");
+            .expect_err("the redirect hop exceeds the request cap")
+            .to_string();
         assert!(error.contains("1 request limit"), "{error}");
         assert_eq!(saw.seen.lock().expect("seen").len(), 1);
     }
@@ -2872,7 +2987,10 @@ mod tests {
             transport,
         );
         client.fetch(&url).expect("first request");
-        let error = client.fetch(&url).expect_err("second request rejected");
+        let error = client
+            .fetch(&url)
+            .expect_err("second request rejected")
+            .to_string();
         assert!(error.contains("1 request limit"), "{error}");
         let revision = std::fs::read_to_string(cache.revision_path(&url)).expect("revision file");
         assert_eq!(revision, "1\n");
@@ -2894,7 +3012,8 @@ mod tests {
         client.fetch(&one).expect_err("the first body is oversized");
         let error = client
             .fetch(&two)
-            .expect_err("the failed import kept its slot");
+            .expect_err("the failed import kept its slot")
+            .to_string();
         assert!(error.contains("1 module limit"), "{error}");
         assert_eq!(saw.seen.lock().expect("seen").len(), 1);
     }
@@ -2921,7 +3040,8 @@ mod tests {
             .expect("retrying the same URL reuses its distinct slot");
         let error = client
             .fetch(&two)
-            .expect_err("a new URL needs another slot");
+            .expect_err("a new URL needs another slot")
+            .to_string();
         assert!(error.contains("1 module limit"), "{error}");
         assert_eq!(saw.seen.lock().expect("seen").len(), 2);
     }
@@ -2938,7 +3058,8 @@ mod tests {
         client.fetch(&one).expect("first final URL is recorded");
         let error = client
             .fetch(&one)
-            .expect_err("a retry with a new final URL exceeds the redaction cap");
+            .expect_err("a retry with a new final URL exceeds the redaction cap")
+            .to_string();
         assert!(error.contains("cannot retain"), "{error}");
     }
 
@@ -2961,7 +3082,8 @@ mod tests {
         let started = Instant::now();
         let error = client
             .fetch(&url)
-            .expect_err("deadline is exhausted by the lock");
+            .expect_err("deadline is exhausted by the lock")
+            .to_string();
         assert!(error.contains("timed out"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(saw.seen.lock().expect("seen").is_empty());
@@ -3116,7 +3238,8 @@ mod tests {
         );
         let error = retry
             .fetch_entry(&url)
-            .expect_err("the cached body exceeds the total budget");
+            .expect_err("the cached body exceeds the total budget")
+            .to_string();
         assert!(error.contains("5 byte total limit"), "{error}");
         retry
             .fetch_entry(&other)
@@ -3161,7 +3284,8 @@ mod tests {
         client.fetch(&one).expect("first body fits");
         let error = client
             .fetch(&two)
-            .expect_err("remaining budget is one byte");
+            .expect_err("remaining budget is one byte")
+            .to_string();
         assert!(error.contains("remaining graph budget"), "{error}");
         assert_eq!(
             std::fs::read_dir(dir.path())
@@ -3363,7 +3487,7 @@ mod tests {
             let url = url.clone();
             let stop = Arc::clone(&stop);
             readers.push(std::thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                     if let Some(entry) = cache.load(&url, 8192) {
                         assert_eq!(entry.body.len(), 1024);
                         assert!(matches!(entry.body[0], b'a'..=b'd'));
@@ -3397,375 +3521,400 @@ mod tests {
         for writer in writers {
             writer.join().expect("writer");
         }
-        stop.store(true, Ordering::Relaxed);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
         for reader in readers {
             reader.join().expect("reader");
         }
         assert_eq!(cache.load(&url, 8192).expect("final").body.len(), 1024);
     }
 
-    fn certificate() -> (Vec<u8>, Vec<u8>) {
-        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
-            .expect("self-signed certificate");
-        (
-            certified.cert.der().to_vec(),
-            certified.signing_key.serialize_der(),
-        )
-    }
+    #[cfg(feature = "network")]
+    mod network_tests {
+        use std::io::Read;
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::process::Command;
+        use std::process::Stdio;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
 
-    fn spawn_tls_server(cert_der: Vec<u8>, key_der: Vec<u8>) -> (u16, std::thread::JoinHandle<()>) {
-        use rustls::pki_types::CertificateDer;
-        use rustls::pki_types::PrivateKeyDer;
-        use rustls::pki_types::PrivatePkcs8KeyDer;
+        use url::Url;
 
-        let config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![CertificateDer::from(cert_der)],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der)),
+        use super::super::RemoteRequest;
+        use super::super::RemoteTransport;
+        use super::super::UreqTransport;
+
+        fn certificate() -> (Vec<u8>, Vec<u8>) {
+            let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+                .expect("self-signed certificate");
+            (
+                certified.cert.der().to_vec(),
+                certified.signing_key.serialize_der(),
             )
-            .expect("server config");
-        let config = Arc::new(config);
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        let handle = std::thread::spawn(move || {
-            let Ok((tcp, _)) = listener.accept() else {
-                return;
-            };
-            let Ok(connection) = rustls::ServerConnection::new(config) else {
-                return;
-            };
-            let mut stream = rustls::StreamOwned::new(connection, tcp);
-            let mut request = [0u8; 4096];
-            let _ = stream.read(&mut request);
-            let body = b"export default 1;\n";
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.write_all(body);
-            let _ = stream.flush();
-        });
-        (port, handle)
-    }
+        }
 
-    fn spawn_counting_tls_server(
-        cert_der: Vec<u8>,
-        key_der: Vec<u8>,
-        expected: usize,
-    ) -> (u16, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
-        use rustls::pki_types::CertificateDer;
-        use rustls::pki_types::PrivateKeyDer;
-        use rustls::pki_types::PrivatePkcs8KeyDer;
+        fn spawn_tls_server(
+            cert_der: Vec<u8>,
+            key_der: Vec<u8>,
+        ) -> (u16, std::thread::JoinHandle<()>) {
+            use rustls::pki_types::CertificateDer;
+            use rustls::pki_types::PrivateKeyDer;
+            use rustls::pki_types::PrivatePkcs8KeyDer;
 
-        let config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![CertificateDer::from(cert_der)],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der)),
-            )
-            .expect("server config");
-        let config = Arc::new(config);
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
-        listener
-            .set_nonblocking(true)
-            .expect("nonblocking listener");
-        let port = listener.local_addr().expect("addr").port();
-        let accepted = Arc::new(AtomicUsize::new(0));
-        let count = Arc::clone(&accepted);
-        let handle = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while count.load(Ordering::SeqCst) < expected && std::time::Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((tcp, _)) => {
-                        count.fetch_add(1, Ordering::SeqCst);
-                        let config = Arc::clone(&config);
-                        std::thread::spawn(move || {
-                            let Ok(connection) = rustls::ServerConnection::new(config) else {
-                                return;
-                            };
-                            let mut stream = rustls::StreamOwned::new(connection, tcp);
-                            let mut request = [0u8; 4096];
-                            let _ = stream.read(&mut request);
-                            let body = b"export default 1;\n";
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
-                                body.len()
-                            );
-                            let _ = stream.write_all(response.as_bytes());
-                            let _ = stream.write_all(body);
-                            let _ = stream.flush();
-                            // Hold the connection open long enough that a
-                            // pooling client would try to reuse it.
-                            std::thread::sleep(Duration::from_secs(2));
-                        });
+            let config = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![CertificateDer::from(cert_der)],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der)),
+                )
+                .expect("server config");
+            let config = Arc::new(config);
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let handle = std::thread::spawn(move || {
+                let Ok((tcp, _)) = listener.accept() else {
+                    return;
+                };
+                let Ok(connection) = rustls::ServerConnection::new(config) else {
+                    return;
+                };
+                let mut stream = rustls::StreamOwned::new(connection, tcp);
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let body = b"export default 1;\n";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body);
+                let _ = stream.flush();
+            });
+            (port, handle)
+        }
+
+        fn spawn_counting_tls_server(
+            cert_der: Vec<u8>,
+            key_der: Vec<u8>,
+            expected: usize,
+        ) -> (u16, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+            use rustls::pki_types::CertificateDer;
+            use rustls::pki_types::PrivateKeyDer;
+            use rustls::pki_types::PrivatePkcs8KeyDer;
+
+            let config = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![CertificateDer::from(cert_der)],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der)),
+                )
+                .expect("server config");
+            let config = Arc::new(config);
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let port = listener.local_addr().expect("addr").port();
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&accepted);
+            let handle = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while count.load(Ordering::SeqCst) < expected
+                    && std::time::Instant::now() < deadline
+                {
+                    match listener.accept() {
+                        Ok((tcp, _)) => {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            let config = Arc::clone(&config);
+                            std::thread::spawn(move || {
+                                let Ok(connection) = rustls::ServerConnection::new(config) else {
+                                    return;
+                                };
+                                let mut stream = rustls::StreamOwned::new(connection, tcp);
+                                let mut request = [0u8; 4096];
+                                let _ = stream.read(&mut request);
+                                let body = b"export default 1;\n";
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                                    body.len()
+                                );
+                                let _ = stream.write_all(response.as_bytes());
+                                let _ = stream.write_all(body);
+                                let _ = stream.flush();
+                                // Hold the connection open long enough that a
+                                // pooling client would try to reuse it.
+                                std::thread::sleep(Duration::from_secs(2));
+                            });
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => return,
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => return,
                 }
-            }
-        });
-        (port, accepted, handle)
-    }
+            });
+            (port, accepted, handle)
+        }
 
-    fn trusted_tls_config(cert_der: &[u8]) -> Arc<rustls::ClientConfig> {
-        use rustls::pki_types::CertificateDer;
+        fn trusted_tls_config(cert_der: &[u8]) -> Arc<rustls::ClientConfig> {
+            use rustls::pki_types::CertificateDer;
 
-        let mut roots = rustls::RootCertStore::empty();
-        roots
-            .add(CertificateDer::from(cert_der.to_vec()))
-            .expect("trust test certificate");
-        Arc::new(
-            rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth(),
-        )
-    }
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(CertificateDer::from(cert_der.to_vec()))
+                .expect("trust test certificate");
+            Arc::new(
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            )
+        }
 
-    fn trusted_agent(cert_der: &[u8]) -> ureq::Agent {
-        super::UreqTransport::agent_builder()
-            .timeout(Duration::from_secs(5))
-            .tls_config(trusted_tls_config(cert_der))
-            .build()
-    }
+        fn trusted_agent(cert_der: &[u8]) -> ureq::Agent {
+            UreqTransport::agent_builder()
+                .timeout(Duration::from_secs(5))
+                .tls_config(trusted_tls_config(cert_der))
+                .build()
+        }
 
-    #[test]
-    fn a_real_transport_error_never_echoes_the_query() {
-        let url = Url::parse("https://127.0.0.1:1/mod.js?token=sentinel").expect("url");
-        let error = super::UreqTransport::new()
-            .get(&super::RemoteRequest {
-                url: &url,
-                timeout: Duration::from_secs(1),
-                if_none_match: None,
-                if_modified_since: None,
-            })
-            .err()
-            .expect("connection refused");
-        assert!(!error.contains("sentinel"), "{error}");
-        assert!(!error.contains("token"), "{error}");
-    }
+        #[test]
+        fn a_real_transport_error_never_echoes_the_query() {
+            let url = Url::parse("https://127.0.0.1:1/mod.js?token=sentinel").expect("url");
+            let error = UreqTransport::new()
+                .get(&RemoteRequest {
+                    url: &url,
+                    timeout: Duration::from_secs(1),
+                    if_none_match: None,
+                    if_modified_since: None,
+                })
+                .err()
+                .expect("connection refused");
+            assert!(!error.contains("sentinel"), "{error}");
+            assert!(!error.contains("token"), "{error}");
+        }
 
-    #[test]
-    fn the_production_transport_negotiates_tls_and_rejects_an_untrusted_certificate() {
-        let (cert_der, key_der) = certificate();
+        #[test]
+        fn the_production_transport_negotiates_tls_and_rejects_an_untrusted_certificate() {
+            let (cert_der, key_der) = certificate();
 
-        let (port, handle) = spawn_tls_server(cert_der.clone(), key_der.clone());
-        let url =
-            Url::parse(&format!("https://127.0.0.1:{port}/mod.js?token=sentinel")).expect("url");
-        let untrusted = super::UreqTransport::new();
-        let error = untrusted
-            .get(&super::RemoteRequest {
-                url: &url,
-                timeout: Duration::from_secs(5),
-                if_none_match: None,
-                if_modified_since: None,
-            })
-            .err()
-            .expect("a self-signed certificate is untrusted");
-        assert!(!error.contains("sentinel"), "{error}");
-        assert!(!error.contains(&port.to_string()), "{error}");
-        handle.join().expect("server");
-
-        let (port, handle) = spawn_tls_server(cert_der.clone(), key_der);
-        let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js")).expect("url");
-        let transport = super::UreqTransport::with_agent(trusted_agent(&cert_der));
-        let response = transport
-            .get(&super::RemoteRequest {
-                url: &url,
-                timeout: Duration::from_secs(5),
-                if_none_match: None,
-                if_modified_since: None,
-            })
-            .expect("trusted TLS response");
-        assert_eq!(response.status, 200);
-        let mut body = Vec::new();
-        response
-            .body
-            .take(1024)
-            .read_to_end(&mut body)
-            .expect("body");
-        assert_eq!(body, b"export default 1;\n");
-        handle.join().expect("server");
-    }
-
-    #[test]
-    fn production_transport_does_not_hide_pooled_retries() {
-        let (cert_der, key_der) = certificate();
-        let (port, accepted, handle) = spawn_counting_tls_server(cert_der.clone(), key_der, 2);
-        let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js")).expect("url");
-        let transport = super::UreqTransport::with_agent(trusted_agent(&cert_der));
-        for _ in 0..2 {
-            let response = transport
-                .get(&super::RemoteRequest {
+            let (port, handle) = spawn_tls_server(cert_der.clone(), key_der.clone());
+            let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js?token=sentinel"))
+                .expect("url");
+            let untrusted = UreqTransport::new();
+            let error = untrusted
+                .get(&RemoteRequest {
                     url: &url,
                     timeout: Duration::from_secs(5),
                     if_none_match: None,
                     if_modified_since: None,
                 })
-                .expect("TLS response");
+                .err()
+                .expect("a self-signed certificate is untrusted");
+            assert!(!error.contains("sentinel"), "{error}");
+            assert!(!error.contains(&port.to_string()), "{error}");
+            handle.join().expect("server");
+
+            let (port, handle) = spawn_tls_server(cert_der.clone(), key_der);
+            let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js")).expect("url");
+            let transport = UreqTransport::with_agent(trusted_agent(&cert_der));
+            let response = transport
+                .get(&RemoteRequest {
+                    url: &url,
+                    timeout: Duration::from_secs(5),
+                    if_none_match: None,
+                    if_modified_since: None,
+                })
+                .expect("trusted TLS response");
             assert_eq!(response.status, 200);
             let mut body = Vec::new();
             response
                 .body
                 .take(1024)
                 .read_to_end(&mut body)
-                .expect("consume body");
+                .expect("body");
+            assert_eq!(body, b"export default 1;\n");
+            handle.join().expect("server");
         }
-        handle.join().expect("server");
-        assert_eq!(
-            accepted.load(Ordering::SeqCst),
-            2,
-            "two consumed responses must open two connections with pooling disabled"
-        );
-    }
 
-    #[test]
-    fn enabling_idle_pooling_breaks_the_connection_count() {
-        let (cert_der, key_der) = certificate();
-        let (port, accepted, _handle) = spawn_counting_tls_server(cert_der.clone(), key_der, 2);
-        let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js")).expect("url");
-        // Deliberately mutate the shared production builder to allow pooling.
-        let agent = super::UreqTransport::agent_builder()
-            .timeout(Duration::from_millis(500))
-            .max_idle_connections(1)
-            .max_idle_connections_per_host(1)
-            .tls_config(trusted_tls_config(&cert_der))
-            .build();
-        let transport = super::UreqTransport::with_agent(agent);
-        let first = transport
-            .get(&super::RemoteRequest {
+        #[test]
+        fn production_transport_does_not_hide_pooled_retries() {
+            let (cert_der, key_der) = certificate();
+            let (port, accepted, handle) = spawn_counting_tls_server(cert_der.clone(), key_der, 2);
+            let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js")).expect("url");
+            let transport = UreqTransport::with_agent(trusted_agent(&cert_der));
+            for _ in 0..2 {
+                let response = transport
+                    .get(&RemoteRequest {
+                        url: &url,
+                        timeout: Duration::from_secs(5),
+                        if_none_match: None,
+                        if_modified_since: None,
+                    })
+                    .expect("TLS response");
+                assert_eq!(response.status, 200);
+                let mut body = Vec::new();
+                response
+                    .body
+                    .take(1024)
+                    .read_to_end(&mut body)
+                    .expect("consume body");
+            }
+            handle.join().expect("server");
+            assert_eq!(
+                accepted.load(Ordering::SeqCst),
+                2,
+                "two consumed responses must open two connections with pooling disabled"
+            );
+        }
+
+        #[test]
+        fn enabling_idle_pooling_breaks_the_connection_count() {
+            let (cert_der, key_der) = certificate();
+            let (port, accepted, _handle) = spawn_counting_tls_server(cert_der.clone(), key_der, 2);
+            let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js")).expect("url");
+            // Deliberately mutate the shared production builder to allow pooling.
+            let agent = UreqTransport::agent_builder()
+                .timeout(Duration::from_millis(500))
+                .max_idle_connections(1)
+                .max_idle_connections_per_host(1)
+                .tls_config(trusted_tls_config(&cert_der))
+                .build();
+            let transport = UreqTransport::with_agent(agent);
+            let first = transport
+                .get(&RemoteRequest {
+                    url: &url,
+                    timeout: Duration::from_millis(500),
+                    if_none_match: None,
+                    if_modified_since: None,
+                })
+                .expect("first response");
+            let mut body = Vec::new();
+            first
+                .body
+                .take(1024)
+                .read_to_end(&mut body)
+                .expect("consume first body");
+            let second = transport.get(&RemoteRequest {
                 url: &url,
                 timeout: Duration::from_millis(500),
                 if_none_match: None,
                 if_modified_since: None,
-            })
-            .expect("first response");
-        let mut body = Vec::new();
-        first
-            .body
-            .take(1024)
-            .read_to_end(&mut body)
-            .expect("consume first body");
-        let second = transport.get(&super::RemoteRequest {
-            url: &url,
-            timeout: Duration::from_millis(500),
-            if_none_match: None,
-            if_modified_since: None,
-        });
-        assert!(
-            second.is_err(),
-            "with pooling enabled the second request reuses the held connection"
-        );
-        assert_eq!(
-            accepted.load(Ordering::SeqCst),
-            1,
-            "pooling hides the second request from the connection count"
-        );
-    }
-
-    /// Child half of [`production_transport_does_not_use_an_ambient_proxy`].
-    #[test]
-    fn ambient_proxy_child() {
-        let Some(destination) = std::env::var_os("NEOJS_DIRECT_DEST") else {
-            return;
-        };
-        let Some(marker) = std::env::var_os("NEOJS_PROXY_MARKER") else {
-            return;
-        };
-        let url = Url::parse(&format!(
-            "https://127.0.0.1:{}/mod.js?token=sentinel",
-            destination.to_string_lossy()
-        ))
-        .expect("url");
-        let transport = super::UreqTransport::new();
-        let _ = transport.get(&super::RemoteRequest {
-            url: &url,
-            timeout: Duration::from_secs(2),
-            if_none_match: None,
-            if_modified_since: None,
-        });
-        std::fs::write(marker, "completed").expect("completion marker");
-    }
-
-    #[test]
-    fn production_transport_does_not_use_an_ambient_proxy() {
-        if std::env::var_os("NEOJS_PROXY_CHILD").is_some() {
-            return;
+            });
+            assert!(
+                second.is_err(),
+                "with pooling enabled the second request reuses the held connection"
+            );
+            assert_eq!(
+                accepted.load(Ordering::SeqCst),
+                1,
+                "pooling hides the second request from the connection count"
+            );
         }
-        let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind proxy observer");
-        proxy_listener
-            .set_nonblocking(true)
-            .expect("nonblocking proxy listener");
-        let proxy_port = proxy_listener.local_addr().expect("proxy addr").port();
-        let direct_listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind direct observer");
-        direct_listener
-            .set_nonblocking(true)
-            .expect("nonblocking direct listener");
-        let direct_port = direct_listener.local_addr().expect("direct addr").port();
-        let dir = tempfile::tempdir().expect("marker dir");
-        let marker = dir.path().join("completed");
-        let proxy = format!("http://user:secret@127.0.0.1:{proxy_port}");
-        let mut child = Command::new(std::env::current_exe().expect("test binary"))
-            .args([
-                "remote::tests::ambient_proxy_child",
-                "--exact",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env("HTTPS_PROXY", &proxy)
-            .env("HTTP_PROXY", &proxy)
-            .env("ALL_PROXY", &proxy)
-            .env("NEOJS_PROXY_CHILD", "1")
-            .env("NEOJS_DIRECT_DEST", direct_port.to_string())
-            .env("NEOJS_PROXY_MARKER", &marker)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn child test");
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let mut direct_reached = false;
-        loop {
-            if let Ok((_stream, _)) = proxy_listener.accept() {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("production transport contacted an ambient proxy");
-            }
-            if let Ok((_stream, _)) = direct_listener.accept() {
-                direct_reached = true;
-            }
-            if marker.exists() {
-                assert!(
-                    direct_reached,
-                    "the direct synthetic destination was not reached"
-                );
-                let status = child.wait().expect("child status");
-                assert!(status.success(), "child test failed: {status}");
+
+        /// Child half of [`production_transport_does_not_use_an_ambient_proxy`].
+        #[test]
+        fn ambient_proxy_child() {
+            let Some(destination) = std::env::var_os("NEOJS_DIRECT_DEST") else {
+                return;
+            };
+            let Some(marker) = std::env::var_os("NEOJS_PROXY_MARKER") else {
+                return;
+            };
+            let url = Url::parse(&format!(
+                "https://127.0.0.1:{}/mod.js?token=sentinel",
+                destination.to_string_lossy()
+            ))
+            .expect("url");
+            let transport = UreqTransport::new();
+            let _ = transport.get(&RemoteRequest {
+                url: &url,
+                timeout: Duration::from_secs(2),
+                if_none_match: None,
+                if_modified_since: None,
+            });
+            std::fs::write(marker, "completed").expect("completion marker");
+        }
+
+        #[test]
+        fn production_transport_does_not_use_an_ambient_proxy() {
+            if std::env::var_os("NEOJS_PROXY_CHILD").is_some() {
                 return;
             }
-            if let Some(status) = child.try_wait().expect("child status") {
-                if !direct_reached {
-                    direct_reached = direct_listener.accept().is_ok();
+            let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind proxy observer");
+            proxy_listener
+                .set_nonblocking(true)
+                .expect("nonblocking proxy listener");
+            let proxy_port = proxy_listener.local_addr().expect("proxy addr").port();
+            let direct_listener =
+                TcpListener::bind(("127.0.0.1", 0)).expect("bind direct observer");
+            direct_listener
+                .set_nonblocking(true)
+                .expect("nonblocking direct listener");
+            let direct_port = direct_listener.local_addr().expect("direct addr").port();
+            let dir = tempfile::tempdir().expect("marker dir");
+            let marker = dir.path().join("completed");
+            let proxy = format!("http://user:secret@127.0.0.1:{proxy_port}");
+            let mut child = Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "remote::tests::network_tests::ambient_proxy_child",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("HTTPS_PROXY", &proxy)
+                .env("HTTP_PROXY", &proxy)
+                .env("ALL_PROXY", &proxy)
+                .env("NEOJS_PROXY_CHILD", "1")
+                .env("NEOJS_DIRECT_DEST", direct_port.to_string())
+                .env("NEOJS_PROXY_MARKER", &marker)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn child test");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut direct_reached = false;
+            loop {
+                if let Ok((_stream, _)) = proxy_listener.accept() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("production transport contacted an ambient proxy");
                 }
-                assert!(status.success(), "child test failed: {status}");
-                assert!(
-                    direct_reached,
-                    "the direct synthetic destination was not reached"
-                );
-                assert!(
-                    marker.exists(),
-                    "the child did not write its completion marker"
-                );
-                return;
+                if let Ok((_stream, _)) = direct_listener.accept() {
+                    direct_reached = true;
+                }
+                if marker.exists() {
+                    assert!(
+                        direct_reached,
+                        "the direct synthetic destination was not reached"
+                    );
+                    let status = child.wait().expect("child status");
+                    assert!(status.success(), "child test failed: {status}");
+                    return;
+                }
+                if let Some(status) = child.try_wait().expect("child status") {
+                    if !direct_reached {
+                        direct_reached = direct_listener.accept().is_ok();
+                    }
+                    assert!(status.success(), "child test failed: {status}");
+                    assert!(
+                        direct_reached,
+                        "the direct synthetic destination was not reached"
+                    );
+                    assert!(
+                        marker.exists(),
+                        "the child did not write its completion marker"
+                    );
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("child test did not finish");
+                }
+                std::thread::sleep(Duration::from_millis(10));
             }
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("child test did not finish");
-            }
-            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -4716,5 +4865,347 @@ mod tests {
         };
         assert!(!entry.metadata().contains("https://"));
         assert!(!entry.metadata().contains("example"));
+    }
+
+    #[test]
+    fn load_offline_reads_stale_verified_entries_without_locks_and_honors_tombstones() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/stale.js?v=1").expect("url");
+
+        // Store a stale entry (`max-age=0`) and hold a `.lock` file simultaneously.
+        let stale = super::CachedModule {
+            body: b"export const offline = 42;\n".to_vec(),
+            stored_at: 1,
+            initial_age: 999,
+            max_age: Some(0),
+            etag: Some("\"v1\"".to_string()),
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: "test".to_string(),
+        };
+        cache.store(&url, &stale).expect("store");
+        assert!(!stale.is_fresh(super::unix_now()));
+
+        // Holding a write lock must NOT block or fail `load_offline`.
+        let _held_lock = cache
+            .lock(&url, Instant::now() + Duration::from_secs(5))
+            .expect("held lock");
+
+        let hit = cache
+            .load_offline(&url)
+            .expect("load_offline succeeds")
+            .expect("stale entry must be returned offline");
+        assert_eq!(hit.body, b"export const offline = 42;\n");
+        assert_eq!(hit.final_url, url);
+
+        // Tampering with the body fails SHA-256 verification and returns Ok(None).
+        let path = cache.path(&url);
+        let original = std::fs::read(&path).expect("read");
+        let mut tampered = original.clone();
+        let last = tampered.len() - 2;
+        tampered[last] ^= 0xff;
+        std::fs::write(&path, &tampered).expect("write tampered");
+        assert!(cache.load_offline(&url).expect("ok").is_none());
+
+        // Restore valid entry, then apply a tombstone -> load_offline returns Ok(None).
+        std::fs::write(&path, &original).expect("restore");
+        assert!(cache.load_offline(&url).expect("ok").is_some());
+        drop(_held_lock);
+        assert!(
+            cache
+                .tombstone_if_newer(&url, "0002", test_deadline())
+                .expect("tombstone")
+        );
+        assert!(
+            cache.load_offline(&url).expect("ok").is_none(),
+            "tombstone must hide entry offline"
+        );
+    }
+
+    #[test]
+    fn live_redirect_publishes_pointer_resolved_by_load_offline() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transport = ScriptedTransport::new(vec![
+            response(302, Some("https://cdn.example.test/v2/mod.ts"), ""),
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: Some("\"v2\"".to_string()),
+                last_modified: None,
+                cache_control: Some("max-age=0".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"export const v = 2;\n".to_vec())),
+            },
+        ]);
+        let options = RemoteOptions::new().with_cache_dir(dir.path());
+        let requested = Url::parse("https://example.test/latest.ts?ref=main#frag").expect("url");
+        let expected_final = Url::parse("https://cdn.example.test/v2/mod.ts").expect("final");
+
+        let fetched = client(options, transport)
+            .fetch(&requested)
+            .expect("live redirect fetch");
+        assert_eq!(fetched.final_url, expected_final);
+        assert_eq!(fetched.body, b"export const v = 2;\n");
+
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let offline = cache
+            .load_offline(&requested)
+            .expect("offline redirect resolution")
+            .expect("offline cache hit");
+        assert_eq!(offline.final_url, expected_final);
+        assert_eq!(offline.body, b"export const v = 2;\n");
+
+        // Redirect pointer filenames must not expose the URL or query.
+        for entry in std::fs::read_dir(dir.path()).expect("cache dir") {
+            let name = entry.expect("entry").file_name();
+            let name = name.to_string_lossy();
+            assert!(!name.contains("example"), "{name}");
+            assert!(!name.contains("latest"), "{name}");
+            assert!(!name.contains("main"), "{name}");
+        }
+    }
+
+    #[test]
+    fn live_redirect_to_no_store_does_not_publish_redirect_pointer() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transport = ScriptedTransport::new(vec![
+            response(302, Some("https://cdn.example.test/secret.js"), ""),
+            response(200, None, "export const secret = 1;\n"),
+        ]);
+        let options = RemoteOptions::new().with_cache_dir(dir.path());
+        let requested = Url::parse("https://example.test/start.js").expect("url");
+        client(options, transport)
+            .fetch(&requested)
+            .expect("live fetch");
+
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        assert!(cache.read_redirect(&requested).is_none());
+        assert!(cache.load_offline(&requested).expect("ok").is_none());
+    }
+
+    #[test]
+    fn load_offline_rejects_redirect_loops_and_excess_hops() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+
+        // Self-loop: a -> a
+        let a = Url::parse("https://example.test/a.js").expect("url");
+        cache
+            .store_redirect_if_newer(&a, &a, "0001", test_deadline())
+            .expect("store self loop");
+        let err = cache
+            .load_offline(&a)
+            .expect_err("self-loop must be rejected");
+        assert!(matches!(err, RemoteError::RedirectLoop { .. }), "{err}");
+
+        // 2-cycle: b -> c -> b
+        let b = Url::parse("https://example.test/b.js").expect("url");
+        let c = Url::parse("https://example.test/c.js").expect("url");
+        cache
+            .store_redirect_if_newer(&b, &c, "0001", test_deadline())
+            .expect("b->c");
+        cache
+            .store_redirect_if_newer(&c, &b, "0001", test_deadline())
+            .expect("c->b");
+        let err = cache
+            .load_offline(&b)
+            .expect_err("2-cycle must be rejected");
+        assert!(matches!(err, RemoteError::RedirectLoop { .. }), "{err}");
+
+        // Bounded chain: exactly DEFAULT_MAX_REDIRECTS (5) hops succeeds, 6 fails.
+        let urls: Vec<Url> = (0..=6)
+            .map(|i| Url::parse(&format!("https://example.test/hop{i}.js")).expect("url"))
+            .collect();
+        for i in 0..6 {
+            cache
+                .store_redirect_if_newer(&urls[i], &urls[i + 1], "0001", test_deadline())
+                .expect("store hop");
+        }
+        let target_entry = super::CachedModule {
+            body: b"export default 5;\n".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: "test".to_string(),
+        };
+        cache.store(&urls[6], &target_entry).expect("store target");
+
+        // Starting at urls[1] takes 5 hops (1->2->3->4->5->6) -> succeeds.
+        let five_hops = cache
+            .load_offline(&urls[1])
+            .expect("5 hops allowed")
+            .expect("target reached");
+        assert_eq!(five_hops.final_url, urls[6]);
+        assert_eq!(five_hops.body, b"export default 5;\n");
+
+        // Starting at urls[0] takes 6 hops (0->1->2->3->4->5->6) -> rejected.
+        let err = cache
+            .load_offline(&urls[0])
+            .expect_err("6 hops exceeds DEFAULT_MAX_REDIRECTS");
+        assert!(
+            matches!(err, RemoteError::TooManyRedirects { limit: 5, .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn load_offline_ignores_tampered_redirect_records_and_tombstoned_targets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(dir.path()).expect("cache dir");
+
+        // Tampered `.redir` pointing to `http:` or `file:` must be ignored.
+        let src = Url::parse("https://example.test/tampered.js").expect("url");
+        for bad_target in [
+            "http://example.test/insecure.js",
+            "file:///etc/passwd",
+            "https://user:secret@example.test/x.js",
+        ] {
+            let meta = format!(
+                "generation=0001\ntarget={}\n",
+                hex_encode(bad_target.as_bytes())
+            );
+            let payload = format!("{}\n{}\n{meta}", super::REDIRECT_MAGIC, meta.len());
+            std::fs::write(cache.redirect_path(&src), payload).expect("write bad redir");
+            assert!(
+                cache.load_offline(&src).expect("ok").is_none(),
+                "tampered redirect to {bad_target} must miss"
+            );
+        }
+
+        // Valid redirect whose target is tombstoned returns Ok(None).
+        let target = Url::parse("https://example.test/tombstoned.js").expect("target");
+        cache
+            .store_redirect_if_newer(&src, &target, "0002", test_deadline())
+            .expect("store redir");
+        cache
+            .tombstone_if_newer(&target, "0001", test_deadline())
+            .expect("tombstone target");
+        assert!(cache.load_offline(&src).expect("ok").is_none());
+    }
+
+    #[test]
+    fn redirect_and_direct_publications_supersede_each_other_by_generation() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let src = Url::parse("https://example.test/entry.js").expect("src");
+        let dst = Url::parse("https://cdn.example.test/final.js").expect("dst");
+
+        let direct = super::CachedModule {
+            body: b"export default 'direct';\n".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: "direct".to_string(),
+        };
+        let target_body = super::CachedModule {
+            body: b"export default 'redirected';\n".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: "dst".to_string(),
+        };
+        cache
+            .store_if_newer(&src, &direct, test_deadline())
+            .expect("direct");
+        cache
+            .store_if_newer(&dst, &target_body, test_deadline())
+            .expect("dst");
+
+        // Newer redirect supersedes direct entry.
+        assert!(
+            cache
+                .store_redirect_if_newer(&src, &dst, "0002", test_deadline())
+                .expect("redir")
+        );
+        let hit = cache.load_offline(&src).expect("ok").expect("hit");
+        assert_eq!(hit.final_url, dst);
+        assert_eq!(hit.body, b"export default 'redirected';\n");
+
+        // Even newer direct entry supersedes redirect.
+        let mut newer_direct = direct;
+        newer_direct.body = b"export default 'direct2';\n".to_vec();
+        newer_direct.generation = "0003".to_string();
+        assert!(
+            cache
+                .store_if_newer(&src, &newer_direct, test_deadline())
+                .expect("newer direct")
+        );
+        let hit = cache.load_offline(&src).expect("ok").expect("hit");
+        assert_eq!(hit.final_url, src);
+        assert_eq!(hit.body, b"export default 'direct2';\n");
+    }
+
+    #[test]
+    fn live_redirect_to_fresh_cached_target_and_304_publish_redirect_pointer() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let requested = Url::parse("https://example.test/alias.js").expect("requested");
+        let target = Url::parse("https://cdn.example.test/target.js").expect("target");
+
+        // Prime target with stale cacheable body (etag + max-age=0).
+        let transport = ScriptedTransport::new(vec![
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: Some("\"t1\"".to_string()),
+                last_modified: None,
+                cache_control: Some("max-age=0".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"export const t = 1;\n".to_vec())),
+            },
+            // Now request `requested` -> 302 to `target`, `target` -> 304 (max-age=60).
+            response(302, Some("https://cdn.example.test/target.js"), ""),
+            RemoteResponse {
+                status: 304,
+                location: None,
+                declared_length: None,
+                etag: Some("\"t1\"".to_string()),
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: Some(httpdate::fmt_http_date(SystemTime::now())),
+                age: Some("0".to_string()),
+                body: Box::new(std::io::Cursor::new(Vec::new())),
+            },
+        ]);
+        let options = RemoteOptions::new().with_cache_dir(dir.path());
+        let c = client(options.clone(), transport);
+        c.fetch(&target).expect("prime target");
+        let via_304 = c.fetch(&requested).expect("redirect to 304");
+        assert_eq!(via_304.final_url, target);
+        assert_eq!(via_304.body, b"export const t = 1;\n");
+
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let offline = cache.load_offline(&requested).expect("ok").expect("hit");
+        assert_eq!(offline.final_url, target);
+        assert_eq!(offline.body, b"export const t = 1;\n");
+
+        // Now a second alias redirects to `target`, which is now a fresh cache hit.
+        let alias2 = Url::parse("https://example.test/alias2.js").expect("alias2");
+        let transport2 = ScriptedTransport::new(vec![response(
+            302,
+            Some("https://cdn.example.test/target.js"),
+            "",
+        )]);
+        let fetched2 = client(options, transport2)
+            .fetch(&alias2)
+            .expect("redirect to fresh cache hit");
+        assert_eq!(fetched2.final_url, target);
+        let offline2 = cache.load_offline(&alias2).expect("ok").expect("hit2");
+        assert_eq!(offline2.final_url, target);
+        assert_eq!(offline2.body, b"export const t = 1;\n");
     }
 }

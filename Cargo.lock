@@ -2064,23 +2064,17 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hmac",
- "httpdate",
  "neojs-builtins",
- "neojs-manifest",
  "neojs-module-policy",
+ "neojs-remote",
  "neotales-age",
  "neotales-ssh",
  "pbkdf2",
- "rcgen",
- "rustls",
- "semver",
- "serde",
  "serde_json",
  "sha2 0.11.1",
  "tempfile",
  "thiserror",
  "tokio",
- "ureq",
  "uuid",
  "zeroize",
 ]
@@ -2131,6 +2125,24 @@ dependencies = [
 [[package]]
 name = "neojs-module-policy"
 version = "0.1.0"
+
+[[package]]
+name = "neojs-remote"
+version = "0.1.0"
+dependencies = [
+ "httpdate",
+ "neojs-manifest",
+ "rcgen",
+ "rustls",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror",
+ "ureq",
+ "url",
+]
 
 [[package]]
 name = "neotales-age"

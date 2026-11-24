@@ -369,18 +369,14 @@ mod crypto_cipher;
 mod crypto_hash;
 mod crypto_shamir;
 mod error;
-mod github;
-// Private groundwork and resolver for native `jsr:` imports. The loader is
-// installed only by `Runtime::with_remote`; a default runtime still rejects
-// every `jsr:` import. See `src/jsr.rs` for the deterministic core and
-// `src/jsr_loader.rs` for the transport integration.
-mod jsr;
 // The transport-backed loader for the private JSR resolver. `Runtime::new` does
 // not install it, so a public `jsr:` import requires the remote-loading opt-in.
+// The engine-neutral JSR core, remote transport, cache, and GitHub parser live
+// in `neojs-remote`.
 mod jsr_loader;
 mod loader;
 mod path;
-mod remote;
+mod remote_redact;
 mod runtime;
 mod ssh;
 mod stdio;
@@ -390,7 +386,7 @@ mod typescript;
 mod uuid;
 
 pub use error::Error;
-pub use remote::RemoteOptions;
+pub use neojs_remote::RemoteOptions;
 pub use runtime::Runtime;
 pub use runtime::TestReport;
 
@@ -403,7 +399,7 @@ pub mod test_support {
     ///
     /// Pass this type to [`crate::Runtime::with_remote_transport`] to drive
     /// remote loading without a network. It is not part of the stable API.
-    pub use crate::remote::TestRemoteResponse;
+    pub use neojs_remote::TestRemoteResponse;
 
     /// Make the next required CLOSE reply fail as a transport error.
     ///

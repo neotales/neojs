@@ -6,7 +6,7 @@
 //! command-line form.
 //!
 //! A `jsr:@scope/name[@constraint][/subpath]` import is parsed by
-//! [`crate::jsr`], resolved against the public registry's package metadata and
+//! [`neojs_remote::jsr`], resolved against the public registry's package metadata and
 //! the selected version's metadata, and loaded as the canonical
 //! `https://jsr.io/@scope/name/<version>/<file>` module. Every file's declared
 //! length and SHA-256 checksum are verified before the TypeScript stripper or
@@ -20,7 +20,7 @@
 //!
 //! [`RemoteRegistry`] maps the three registry documents (`meta.json`,
 //! `<version>_meta.json`, and one manifest file) to ordinary HTTPS GETs through
-//! [`crate::remote::RemoteClient`]. Redirects, TLS, deadlines, request and byte
+//! [`neojs_remote::RemoteClient`]. Redirects, TLS, deadlines, request and byte
 //! budgets, and the user-profile cache are the remote client's policy; the
 //! loader never follows a redirect itself and treats a
 //! [`RegistryError::Redirect`] from another registry as a contract violation.
@@ -107,202 +107,29 @@ use deno_core::ModuleType;
 use deno_core::ResolutionKind;
 use deno_core::url::Url;
 use deno_error::JsErrorBox;
-use semver::Version;
 
-use crate::jsr;
-use crate::jsr::PackageId;
-use crate::jsr::PackageMetadata;
-use crate::jsr::PackageVersion;
-use crate::jsr::ResolvedModule;
-use crate::jsr::Specifier;
-use crate::jsr::VersionMetadata;
 use crate::loader::FileModuleLoader;
 use crate::loader::ModuleFormat;
 use crate::loader::module_format;
 use crate::loader::unsupported_module_type;
-use crate::remote::RemoteClient;
-use crate::remote::display_url;
 use crate::typescript;
+use neojs_remote::display_url;
+use neojs_remote::jsr::PackageId;
+use neojs_remote::jsr::PackageMetadata;
+use neojs_remote::jsr::PackageVersion;
+use neojs_remote::jsr::REGISTRY_HOST;
+use neojs_remote::jsr::Specifier;
+use neojs_remote::jsr::VersionMetadata;
+use neojs_remote::jsr::canonical_module_url;
+use neojs_remote::jsr::canonical_url_for;
+use neojs_remote::jsr::is_relative_reference;
+use neojs_remote::jsr::local_file_reason;
+use neojs_remote::jsr::parse_module_url;
+use neojs_remote::jsr::registry_identities;
+use neojs_remote::jsr::registry_identities_if_registry;
+use neojs_remote::jsr::resolve_module;
 
-/// The public registry origin used in canonical module URLs.
-const REGISTRY_ORIGIN: &str = "https://jsr.io";
-
-/// The public registry host.
-const REGISTRY_HOST: &str = "jsr.io";
-
-/// Resource bounds for one runtime's JSR module graph.
-///
-/// The defaults are deliberately modest. They bound one runtime's work; they
-/// are not a network deadline, a CPU budget, or a sandbox.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Limits {
-    /// Maximum declared and downloaded bytes in one file.
-    pub(crate) max_file_bytes: usize,
-    /// Maximum distinct files in one module graph.
-    pub(crate) max_graph_files: usize,
-    /// Maximum declared and downloaded bytes across one module graph.
-    pub(crate) max_graph_bytes: usize,
-    /// Maximum distinct package and version metadata documents fetched.
-    pub(crate) max_metadata_documents: usize,
-}
-
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            max_file_bytes: 8 * 1024 * 1024,
-            max_graph_files: 256,
-            max_graph_bytes: 32 * 1024 * 1024,
-            max_metadata_documents: 128,
-        }
-    }
-}
-
-/// A failure a registry transport reports to the loader.
-///
-/// The loader adds the package, file, and importer context. A transport must
-/// follow redirects itself and must not put credentials or other secrets in a
-/// [`Self::Redirect`] location or an [`Self::Unavailable`] reason; both are
-/// shown to the program and the user.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RegistryError {
-    /// The registry has no such package, version, or file.
-    NotFound,
-    /// The transport returned a redirect without following it.
-    ///
-    /// [`RemoteRegistry`] lets the remote client follow checked redirects and
-    /// never returns this. It remains part of the [`Registry`] contract so
-    /// another registry can report a redirect the loader must not follow.
-    #[cfg_attr(not(test), allow(dead_code))]
-    Redirect(String),
-    /// The transport could not complete the request for another reason.
-    Unavailable(String),
-}
-
-/// A synchronous source of JSR registry metadata and file bytes.
-///
-/// Implementations are called from [`deno_core::ModuleLoader::resolve`] and
-/// [`deno_core::ModuleLoader::load`]. They must not block on a network or a
-/// long-running job: the calls run on the isolate thread. A real HTTPS
-/// transport belongs behind a prefetch or an asynchronous resolution stage, not
-/// behind a hidden blocking call here.
-pub(crate) trait Registry {
-    /// Returns the `meta.json` document for a package.
-    fn package_metadata(&self, package: &PackageId) -> Result<String, RegistryError>;
-
-    /// Returns the `<version>_meta.json` document for an exact package version.
-    fn version_metadata(&self, package: &PackageVersion) -> Result<String, RegistryError>;
-
-    /// Returns one manifest file's bytes.
-    fn file(&self, package: &PackageVersion, path: &str) -> Result<Vec<u8>, RegistryError>;
-}
-
-/// A [`Registry`] backed by the opt-in HTTPS transport and cache.
-///
-/// The registry builds every URL from a validated [`PackageId`],
-/// [`PackageVersion`], or manifest path. It never accepts a URL or a path from
-/// JavaScript, so a `jsr:` specifier's subpath cannot select another origin or
-/// another package version. The remote client owns redirects, TLS, deadlines,
-/// credentials policy, and the cache.
-pub(crate) struct RemoteRegistry {
-    remote: RemoteClient,
-}
-
-impl RemoteRegistry {
-    /// Creates a registry over an existing remote client.
-    ///
-    /// The client carries the runtime's request, module, byte, redirect, and
-    /// deadline limits and its user-profile cache.
-    pub(crate) fn new(remote: RemoteClient) -> Self {
-        Self { remote }
-    }
-
-    /// Fetches one registry document and returns its body.
-    fn fetch(&self, url: Url) -> Result<Vec<u8>, RegistryError> {
-        match self.remote.fetch(&url) {
-            Ok(fetched) => Ok(fetched.body),
-            Err(reason) if is_missing(&reason) => Err(RegistryError::NotFound),
-            Err(reason) => Err(RegistryError::Unavailable(reason)),
-        }
-    }
-}
-
-impl Registry for RemoteRegistry {
-    fn package_metadata(&self, package: &PackageId) -> Result<String, RegistryError> {
-        let subject = package.to_string();
-        let url = package_metadata_url(package)?;
-        let bytes = self.fetch(url)?;
-        decode_text(bytes, "package metadata", &subject)
-    }
-
-    fn version_metadata(&self, package: &PackageVersion) -> Result<String, RegistryError> {
-        let subject = package.to_string();
-        let url = version_metadata_url(package)?;
-        let bytes = self.fetch(url)?;
-        decode_text(bytes, "version metadata", &subject)
-    }
-
-    fn file(&self, package: &PackageVersion, path: &str) -> Result<Vec<u8>, RegistryError> {
-        let url = file_url(package, path)?;
-        self.fetch(url)
-    }
-}
-
-/// Returns whether a remote error means the registry has no such document.
-///
-/// [`crate::remote::RemoteClient`] reports an HTTP error status as
-/// `HTTP <status> from <url>`. Only a 404 or 410 is a missing document; every
-/// other failure stays an unavailable transport so the loader does not turn a
-/// server fault into "not found".
-fn is_missing(reason: &str) -> bool {
-    reason.starts_with("HTTP 404 from ") || reason.starts_with("HTTP 410 from ")
-}
-
-fn package_metadata_url(package: &PackageId) -> Result<Url, RegistryError> {
-    registry_url(
-        format!("{REGISTRY_ORIGIN}/{}/meta.json", package),
-        "package metadata",
-        &package.to_string(),
-    )
-}
-
-fn version_metadata_url(package: &PackageVersion) -> Result<Url, RegistryError> {
-    registry_url(
-        format!(
-            "{REGISTRY_ORIGIN}/{}/{}_meta.json",
-            package.package, package.version
-        ),
-        "version metadata",
-        &package.to_string(),
-    )
-}
-
-fn file_url(package: &PackageVersion, path: &str) -> Result<Url, RegistryError> {
-    jsr::validate_manifest_path(path).map_err(RegistryError::Unavailable)?;
-    registry_url(
-        format!(
-            "{REGISTRY_ORIGIN}/{}/{}{}",
-            package.package,
-            package.version,
-            encode_path(path)
-        ),
-        "file",
-        &format!("{package}:{path}"),
-    )
-}
-
-fn registry_url(text: String, action: &str, subject: &str) -> Result<Url, RegistryError> {
-    Url::parse(&text).map_err(|error| {
-        RegistryError::Unavailable(format!(
-            "cannot build the {action} URL for `{subject}`: {error}"
-        ))
-    })
-}
-
-fn decode_text(bytes: Vec<u8>, action: &str, subject: &str) -> Result<String, RegistryError> {
-    String::from_utf8(bytes).map_err(|_| {
-        RegistryError::Unavailable(format!("the {action} for `{subject}` is not valid UTF-8"))
-    })
-}
+pub(crate) use neojs_remote::jsr::{Limits, Registry, RegistryError, RemoteRegistry};
 
 #[derive(Default)]
 struct GraphState {
@@ -430,7 +257,7 @@ impl JsrModuleLoader {
             let version = self
                 .version_metadata(&package_version)
                 .map_err(|reason| reason.to_string())?;
-            let resolved = jsr::resolve_module(&specifier, &package, &version)
+            let resolved = resolve_module(&specifier, &package, &version)
                 .map_err(|error| error.to_string())?;
             let url = canonical_module_url(&resolved)?;
             if self.is_ordinary_loaded(&url) {
@@ -796,13 +623,6 @@ impl ModuleLoader for JsrModuleLoader {
     }
 }
 
-/// One resolved module identity plus its manifest path.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ModuleKey {
-    id: PackageVersion,
-    path: String,
-}
-
 /// One loader failure, with the import location added where known.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LoadFailure {
@@ -866,217 +686,6 @@ fn registry_failure(action: &str, subject: &str, error: RegistryError) -> LoadFa
     LoadFailure::new(reason)
 }
 
-/// Returns whether a specifier is a relative URL reference.
-fn is_relative_reference(specifier: &str) -> bool {
-    specifier == "."
-        || specifier == ".."
-        || specifier.starts_with("./")
-        || specifier.starts_with("../")
-        || specifier.starts_with('/')
-        || specifier.starts_with('\\')
-        || specifier.starts_with(".\\")
-        || specifier.starts_with("..\\")
-}
-
-/// Returns why a registry module cannot import a local-file URL.
-///
-/// A JSR module may import another registry module or a neojs built-in. It may
-/// not reach the local filesystem through `file:`; that keeps the module graph
-/// on the registry and avoids turning a registry package into a reader for the
-/// user's files. This is a module-graph boundary, not a sandbox.
-fn local_file_reason(specifier: &str) -> Option<&'static str> {
-    let Ok(url) = Url::parse(specifier) else {
-        return None;
-    };
-    if url.scheme() == "file" {
-        return Some(
-            "a JSR module cannot import a local file; only registry modules and built-in modules are allowed",
-        );
-    }
-    None
-}
-
-/// Builds the canonical URL for one resolved module.
-fn canonical_module_url(resolved: &ResolvedModule) -> Result<Url, String> {
-    let file = resolved
-        .target
-        .path
-        .strip_prefix('/')
-        .ok_or_else(|| "the manifest path has no leading `/`".to_owned())?;
-    let text = format!(
-        "{REGISTRY_ORIGIN}/{}/{}/{}",
-        resolved.package,
-        resolved.version,
-        encode_path(file)
-    );
-    let url = Url::parse(&text)
-        .map_err(|error| format!("cannot build the module URL for `{resolved}`: {error}"))?;
-    let key = canonical_url_for(&ModuleKey {
-        id: PackageVersion {
-            package: resolved.package.clone(),
-            version: resolved.version.clone(),
-        },
-        path: resolved.target.path.clone(),
-    })?;
-    if key != url {
-        return Err(format!(
-            "the module URL for `{resolved}` did not round-trip through its identity"
-        ));
-    }
-    Ok(url)
-}
-
-/// Builds the canonical URL for a parsed module identity.
-fn canonical_url_for(module: &ModuleKey) -> Result<Url, String> {
-    let file = module
-        .path
-        .strip_prefix('/')
-        .ok_or_else(|| "the manifest path has no leading `/`".to_owned())?;
-    Url::parse(&format!(
-        "{REGISTRY_ORIGIN}/{}/{}/{}",
-        module.id.package,
-        module.id.version,
-        encode_path(file)
-    ))
-    .map_err(|error| format!("cannot build the canonical module URL: {error}"))
-}
-
-/// Returns the identities a registry URL can be registered under.
-///
-/// A canonical module URL is represented by its parsed string and its
-/// re-encoded canonical form. Checking both prevents an ordinary redirect and a
-/// `jsr:` resolution from disagreeing only because they encoded the path
-/// differently.
-fn registry_identities(url: &Url) -> Vec<String> {
-    let mut identities = vec![url.to_string()];
-    if let Ok(Some(module)) = parse_module_url(url)
-        && let Ok(canonical) = canonical_url_for(&module)
-    {
-        let canonical = canonical.to_string();
-        if canonical != identities[0] {
-            identities.push(canonical);
-        }
-    }
-    identities
-}
-
-/// Returns registry identities for a URL only when it is on the public origin.
-fn registry_identities_if_registry(url: &Url) -> Vec<String> {
-    if url.scheme() == "https" && url.host_str() == Some(REGISTRY_HOST) {
-        registry_identities(url)
-    } else {
-        Vec::new()
-    }
-}
-
-/// Parses and validates one canonical registry URL.
-///
-/// Returns `None` when the URL is not on the registry origin, so the caller can
-/// delegate it. A malformed module path on the registry origin is an error,
-/// never a silent fallthrough.
-fn parse_module_url(url: &Url) -> Result<Option<ModuleKey>, String> {
-    if url.scheme() != "https"
-        || url.host_str() != Some(REGISTRY_HOST)
-        || url.port().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Ok(None);
-    }
-    let Some(rest) = url.path().strip_prefix('/') else {
-        return Ok(None);
-    };
-    let mut segments = rest.split('/');
-    let Some(scope_segment) = segments.next() else {
-        return Ok(None);
-    };
-    let Some(scope) = scope_segment.strip_prefix('@') else {
-        return Ok(None);
-    };
-    let Some(name) = segments.next() else {
-        return Ok(None);
-    };
-    let Some(version_text) = segments.next() else {
-        return Ok(None);
-    };
-    let encoded_file = segments.collect::<Vec<_>>().join("/");
-    if encoded_file.is_empty() {
-        return Err("the module URL names no file".to_owned());
-    }
-    let package = PackageId::new(scope, name)?;
-    let version = Version::parse(version_text)
-        .map_err(|_| format!("`{version_text}` is not a valid version"))?;
-    if version.to_string() != version_text {
-        return Err(format!("`{version_text}` is not canonical SemVer"));
-    }
-    let file = decode_path(&encoded_file)?;
-    let path = format!("/{file}");
-    jsr::validate_manifest_path(&path)?;
-    Ok(Some(ModuleKey {
-        id: PackageVersion { package, version },
-        path,
-    }))
-}
-
-/// Encodes a registry path for a URL, preserving `/` as a separator.
-///
-/// The encoder is deliberately small and paired with [`decode_path`]. It does
-/// not decode arbitrary percent escapes from user input: a `%` in a specifier
-/// or a relative import is rejected before this point.
-fn encode_path(value: &str) -> String {
-    use std::fmt::Write as _;
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
-                encoded.push(char::from(byte))
-            }
-            _ => {
-                let _ = write!(encoded, "%{byte:02X}");
-            }
-        }
-    }
-    encoded
-}
-
-/// Decodes the encoder's output back to a UTF-8 registry path.
-fn decode_path(value: &str) -> Result<String, String> {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            let Some(high) = bytes.get(index + 1).and_then(|byte| hex_value(*byte)) else {
-                return Err("the module path has a malformed percent escape".to_owned());
-            };
-            let Some(low) = bytes.get(index + 2).and_then(|byte| hex_value(*byte)) else {
-                return Err("the module path has a malformed percent escape".to_owned());
-            };
-            let value = high << 4 | low;
-            if matches!(value, b'/' | b'\\') {
-                return Err("the module path percent-encodes a path separator".to_owned());
-            }
-            decoded.push(value);
-            index += 3;
-        } else {
-            decoded.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(decoded).map_err(|_| "the module path is not valid UTF-8".to_owned())
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1092,8 +701,8 @@ mod tests {
     use super::RegistryError;
     use crate::Error;
     use crate::Runtime;
-    use crate::jsr::PackageId;
-    use crate::jsr::PackageVersion;
+    use neojs_remote::jsr::PackageId;
+    use neojs_remote::jsr::PackageVersion;
 
     const ZERO_CHECKSUM: &str =
         "sha256-0000000000000000000000000000000000000000000000000000000000000000";
