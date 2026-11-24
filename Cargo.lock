@@ -2092,6 +2092,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "neojs-fs-core"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "neojs-lite"
 version = "0.1.0"
 dependencies = [
