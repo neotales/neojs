@@ -44,6 +44,7 @@ const LITE_SPECIFIERS: &[&str] = &[
     "neo:chars",
     "neo:fs",
     "neo:os",
+    "neo:ssh",
     "neo:strings",
     "neo:test",
     "neo:uuid",
@@ -58,7 +59,6 @@ const V8_ONLY_SPECIFIERS: &[&str] = &[
     "neo:crypto",
     "neo:path",
     "neo:slices",
-    "neo:ssh",
     "neo:stdio",
 ];
 

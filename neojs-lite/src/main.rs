@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use neojs_dts::Profile;
 use neojs_lite_core::{Error, ImportResolver, Runtime, TestReport};
 use neojs_manifest::{
     DiscoveredManifest, MAX_DISCOVERY_DEPTH, Manifest, Workspace, discover_manifest,
@@ -31,6 +32,11 @@ fn main() -> ExitCode {
         }
         Command::Run { path, config } => run(&path, &config),
         Command::Test { patterns, config } => run_tests(&patterns, &config),
+        Command::Types { profile, out_dir } => run_types(profile, out_dir.as_deref()),
+        Command::TypesHelp => {
+            print!("{}", types_help());
+            ExitCode::SUCCESS
+        }
     }
 }
 
@@ -50,6 +56,11 @@ enum Command {
         patterns: Vec<String>,
         config: ConfigChoice,
     },
+    Types {
+        profile: Profile,
+        out_dir: Option<PathBuf>,
+    },
+    TypesHelp,
     Help,
     Version,
 }
@@ -139,6 +150,12 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
                 });
             }
             "test" => return parse_test_args(&rest[1..], config),
+            "types" => {
+                if config != ConfigChoice::Auto {
+                    return Err("`types` does not accept `--config` or `--no-config`".to_string());
+                }
+                return parse_types_args(&rest[1..]);
+            }
             _ => {}
         }
     }
@@ -210,6 +227,89 @@ fn parse_test_args(args: &[OsString], mut config: ConfigChoice) -> Result<Comman
         return Err("no test files or globs given".to_string());
     }
     Ok(Command::Test { patterns, config })
+}
+
+/// Parses `neojs-lite types [--profile <lite|v8>] [--out-dir <dir>]`.
+fn parse_types_args(args: &[OsString]) -> Result<Command, String> {
+    if args.len() == 1 && matches!(args[0].to_str(), Some("-h" | "--help")) {
+        return Ok(Command::TypesHelp);
+    }
+
+    let mut profile: Option<Profile> = None;
+    let mut out_dir: Option<PathBuf> = None;
+    let mut index = 0;
+
+    while let Some(arg) = args.get(index) {
+        let Some(value) = arg.to_str() else {
+            return Err("`types` options must be valid UTF-8".to_string());
+        };
+        if value == "--profile" {
+            if profile.is_some() {
+                return Err("`--profile` cannot be specified more than once".to_string());
+            }
+            let raw = args
+                .get(index + 1)
+                .ok_or_else(|| "`--profile` requires a value (`lite` or `v8`)".to_string())?;
+            let text = raw
+                .to_str()
+                .ok_or_else(|| "`--profile` must be valid UTF-8".to_string())?;
+            profile = Some(parse_profile(text)?);
+            index += 2;
+            continue;
+        }
+        if let Some(text) = value.strip_prefix("--profile=") {
+            if profile.is_some() {
+                return Err("`--profile` cannot be specified more than once".to_string());
+            }
+            profile = Some(parse_profile(text)?);
+            index += 1;
+            continue;
+        }
+        if value == "--out-dir" {
+            if out_dir.is_some() {
+                return Err("`--out-dir` cannot be specified more than once".to_string());
+            }
+            let dir = args
+                .get(index + 1)
+                .ok_or_else(|| "`--out-dir` requires a directory".to_string())?;
+            if dir.is_empty() {
+                return Err("`--out-dir` requires a non-empty directory".to_string());
+            }
+            out_dir = Some(PathBuf::from(dir));
+            index += 2;
+            continue;
+        }
+        if let Some(dir) = value.strip_prefix("--out-dir=") {
+            if out_dir.is_some() {
+                return Err("`--out-dir` cannot be specified more than once".to_string());
+            }
+            if dir.is_empty() {
+                return Err("`--out-dir` requires a non-empty directory".to_string());
+            }
+            out_dir = Some(PathBuf::from(dir));
+            index += 1;
+            continue;
+        }
+        if value.starts_with('-') {
+            return Err(format!("unknown option `{value}`"));
+        }
+        return Err(format!("unexpected argument `{value}`"));
+    }
+
+    Ok(Command::Types {
+        profile: profile.unwrap_or(Profile::Lite),
+        out_dir,
+    })
+}
+
+fn parse_profile(value: &str) -> Result<Profile, String> {
+    match value {
+        "lite" => Ok(Profile::Lite),
+        "v8" => Ok(Profile::V8),
+        _ => Err(format!(
+            "invalid profile `{value}`: expected `lite` or `v8`"
+        )),
+    }
 }
 
 enum LoadedConfig {
@@ -532,6 +632,60 @@ fn exit_code(error: &Error) -> u8 {
     }
 }
 
+fn run_types(profile: Profile, out_dir: Option<&Path>) -> ExitCode {
+    match out_dir {
+        Some(dir) => match neojs_dts::write_types_dir(profile, dir) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!(
+                    "neojs-lite: cannot write types to `{}`: {error}",
+                    dir.display()
+                );
+                ExitCode::from(EXIT_STARTUP_FAILURE)
+            }
+        },
+        None => {
+            use std::io::{ErrorKind, Write};
+            let bundle = neojs_dts::render_bundle(profile);
+            let mut stdout = std::io::stdout().lock();
+            match stdout
+                .write_all(bundle.as_bytes())
+                .and_then(|()| stdout.flush())
+            {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) if error.kind() == ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("neojs-lite: cannot write types to stdout: {error}");
+                    ExitCode::from(EXIT_STARTUP_FAILURE)
+                }
+            }
+        }
+    }
+}
+
+fn types_help() -> String {
+    format!(
+        "\
+neojs-lite {}
+Emit TypeScript declarations (.d.ts) for NeoJS globals and `neo:*` built-in modules.
+
+Usage:
+  neojs-lite types [options]
+
+Options:
+  --profile <lite|v8>  runtime profile to emit (`lite` or `v8`, default `lite`)
+  --out-dir <dir>      write the types/ directory layout instead of stdout
+  -h, --help           show this help
+
+Examples:
+  neojs-lite types > neojs-lite.d.ts
+  neojs-lite types --profile v8 > neojs.d.ts
+  neojs-lite types --out-dir ./types
+",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 fn help() -> String {
     format!(
         "\
@@ -544,6 +698,8 @@ Usage:
   neojs-lite --no-config <file>
   neojs-lite -- <file>
   neojs-lite test <file-or-glob>...    run test files
+  neojs-lite types [--profile <lite|v8>] [--out-dir <dir>]
+                                       emit TypeScript declarations (.d.ts)
 
 Options:
   --config <path>  Use an explicit neo.jsonc manifest instead of discovery
@@ -553,7 +709,7 @@ Options:
   --               End option parsing, for a file or pattern beginning with `-`
 
 Built-in modules:
-  neo:assert, neo:chars, neo:fs, neo:os, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7
+  neo:assert, neo:chars, neo:fs, neo:os, neo:ssh, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7
 
 Modules are ECMAScript modules, and relative imports resolve from the importing
 file. .js, .mjs, .ts, and .mts run. TypeScript is stripped, not type checked:
@@ -583,6 +739,7 @@ Exit codes:
 #[cfg(test)]
 mod tests {
     use super::{Command, ConfigChoice, parse_args};
+    use neojs_dts::Profile;
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -648,6 +805,55 @@ mod tests {
         assert_eq!(
             parse_args(args(&["--config"])),
             Err("`--config` requires a path".to_string())
+        );
+    }
+
+    #[test]
+    fn types_command_parses_defaults_profiles_out_dir_and_help() {
+        assert_eq!(
+            parse_args(args(&["types"])),
+            Ok(Command::Types {
+                profile: Profile::Lite,
+                out_dir: None,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["types", "--profile", "v8"])),
+            Ok(Command::Types {
+                profile: Profile::V8,
+                out_dir: None,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["types", "--profile=lite", "--out-dir", "types"])),
+            Ok(Command::Types {
+                profile: Profile::Lite,
+                out_dir: Some(PathBuf::from("types")),
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["types", "--out-dir=./out", "--profile=v8"])),
+            Ok(Command::Types {
+                profile: Profile::V8,
+                out_dir: Some(PathBuf::from("./out")),
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["types", "--help"])),
+            Ok(Command::TypesHelp)
+        );
+        assert_eq!(parse_args(args(&["types", "-h"])), Ok(Command::TypesHelp));
+        assert_eq!(
+            parse_args(args(&["types", "--profile", "unknown"])),
+            Err("invalid profile `unknown`: expected `lite` or `v8`".to_string())
+        );
+        assert_eq!(
+            parse_args(args(&["types", "--out-dir="])),
+            Err("`--out-dir` requires a non-empty directory".to_string())
+        );
+        assert_eq!(
+            parse_args(args(&["--no-config", "types"])),
+            Err("`types` does not accept `--config` or `--no-config`".to_string())
         );
     }
 }

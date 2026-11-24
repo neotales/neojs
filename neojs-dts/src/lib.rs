@@ -13,7 +13,7 @@
 //!   `console.{log,debug,info,warn,error}`, and all 17 `neo:*` built-in
 //!   modules).
 //! * [`Profile::Lite`] targets the `neojs-lite` binary
-//!   (`Neo.engine === "neo-lite"`, `console.{log,error}` only, and the 9 Lite
+//!   (`Neo.engine === "neo-lite"`, `console.{log,error}` only, and the 10 Lite
 //!   `neo:*` built-in modules).
 //!
 //! # Example
@@ -47,7 +47,7 @@ pub enum Profile {
     /// and all 17 `neo:*` built-ins).
     V8,
     /// QuickJS-backed `neojs-lite` runtime (`engine: "neo-lite"`,
-    /// `console.{log,error}` only, and the 9 Lite `neo:*` built-ins).
+    /// `console.{log,error}` only, and the 10 Lite `neo:*` built-ins).
     Lite,
 }
 
@@ -331,6 +331,11 @@ const LITE_FILES: &[DtsFile] = &[
         content: NEO_OS_DTS,
     },
     DtsFile {
+        path: "neo/ssh.d.ts",
+        specifier: Some("neo:ssh"),
+        content: NEO_SSH_DTS,
+    },
+    DtsFile {
         path: "neo/strings.d.ts",
         specifier: Some("neo:strings"),
         content: NEO_STRINGS_DTS,
@@ -595,6 +600,7 @@ const LITE_EXPECTED_EXPORTS: &[ModuleExports] = &[
     CHARS_EXPORTS,
     FS_EXPORTS,
     OS_EXPORTS,
+    SSH_EXPORTS,
     STRINGS_EXPORTS,
     TEST_EXPORTS,
     UUID_EXPORTS,

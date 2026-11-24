@@ -5,7 +5,6 @@
 //! exports in [`neojs_fs_core::EXPORTS`] and shares those exact function objects
 //! across `Neo.getBuiltInModule("neo:fs")` and `import ... from "neo:fs"`.
 
-use std::mem::MaybeUninit;
 use std::path::PathBuf;
 
 use neojs_fs_core::{
@@ -14,26 +13,12 @@ use neojs_fs_core::{
 };
 use rquickjs::{
     Array, Ctx, Exception, Function, Object, Result, String as JsString, TypedArray, Value,
-    function::Rest, module::ModuleDef, object::Property, qjs,
+    function::Rest, module::ModuleDef, object::Property,
 };
 
+use crate::native::{freeze_native, parse_options, throw_coded_error, with_uint8_array_bytes};
+
 const MAX_SAFE_INTEGER_F64: f64 = 9_007_199_254_740_991.0;
-
-struct PropertyEnumGuard {
-    raw: *mut qjs::JSContext,
-    tab: *mut qjs::JSPropertyEnum,
-    len: u32,
-}
-
-impl Drop for PropertyEnumGuard {
-    fn drop(&mut self) {
-        if !self.tab.is_null() {
-            // SAFETY: `tab` and `len` were returned by `JS_GetOwnPropertyNames`
-            // on the active `JSContext`.
-            unsafe { qjs::JS_FreePropertyEnum(self.raw, self.tab, self.len) };
-        }
-    }
-}
 
 /// Creates the frozen public registry object for `neo:fs`.
 pub(super) fn object<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
@@ -126,47 +111,8 @@ pub(super) fn object<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
     Ok(object)
 }
 
-fn freeze_native<'js>(ctx: &Ctx<'js>, object: &Object<'js>) -> Result<()> {
-    let rc = unsafe { qjs::JS_FreezeObject(ctx.as_raw().as_ptr(), object.as_raw()) };
-    if rc < 0 {
-        return Err(if ctx.has_exception() {
-            rquickjs::Error::Exception
-        } else {
-            rquickjs::Error::Unknown
-        });
-    }
-    Ok(())
-}
-
 fn throw_fs_error<'js>(ctx: &Ctx<'js>, error: FsError) -> rquickjs::Error {
-    let raw = unsafe { qjs::JS_NewError(ctx.as_raw().as_ptr()) };
-    if raw.tag == i64::from(qjs::JS_TAG_EXCEPTION) {
-        return if ctx.has_exception() {
-            rquickjs::Error::Exception
-        } else {
-            rquickjs::Error::Unknown
-        };
-    }
-    let value = unsafe { Value::from_raw(ctx.clone(), raw) };
-    let Some(object) = value.into_object() else {
-        return rquickjs::Error::Unknown;
-    };
-    if let Err(err) = object.prop(
-        "message",
-        Property::from(error.to_string()).writable().configurable(),
-    ) {
-        return err;
-    }
-    if let Err(err) = object.prop(
-        "code",
-        Property::from(error.code().as_str())
-            .writable()
-            .enumerable()
-            .configurable(),
-    ) {
-        return err;
-    }
-    ctx.throw(object.into_value())
+    throw_coded_error(ctx, None, error.code().as_str(), &error.to_string())
 }
 
 fn read_strict_string<'js>(
@@ -203,215 +149,28 @@ fn read_text<'js>(ctx: &Ctx<'js>, value: &Value<'js>, type_msg: &str) -> Result<
 }
 
 fn read_uint8_array<'js>(ctx: &Ctx<'js>, value: &Value<'js>, type_msg: &str) -> Result<Vec<u8>> {
-    let Ok(ta) = TypedArray::<u8>::from_value(value.clone()) else {
-        return Err(Exception::throw_type(ctx, type_msg));
-    };
-    let raw_ctx = ctx.as_raw().as_ptr();
-    let mut byte_offset: qjs::size_t = 0;
-    let buf_raw = unsafe {
-        qjs::JS_GetTypedArrayBuffer(
-            raw_ctx,
-            ta.as_value().as_raw(),
-            &mut byte_offset,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    if buf_raw.tag == i64::from(qjs::JS_TAG_EXCEPTION) {
-        if ctx.has_exception() {
-            let _ = ctx.catch();
-        }
-        return Err(Exception::throw_type(
-            ctx,
-            "Uint8Array buffer is detached or out of bounds",
-        ));
-    }
-    let buf = unsafe { Value::from_raw(ctx.clone(), buf_raw) };
-
-    let byte_length_getter = {
-        let state = ctx
-            .userdata::<super::neo::NeoState>()
-            .ok_or(rquickjs::Error::Unknown)?;
-        state
-            .typed_array_byte_length
-            .as_ref()
-            .ok_or(rquickjs::Error::Unknown)?
-            .clone()
-            .restore(ctx)?
-    };
-    let live_len_val: Value<'js> =
-        byte_length_getter.call((rquickjs::function::This(ta.clone()),))?;
-    let live_len = live_len_val
-        .as_number()
-        .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0)
-        .map(|n| n as usize)
-        .ok_or_else(|| {
-            Exception::throw_type(ctx, "Uint8Array buffer is detached or out of bounds")
+    with_uint8_array_bytes(ctx, value, type_msg, |slice| {
+        let mut out = Vec::new();
+        out.try_reserve_exact(slice.len()).map_err(|_| {
+            throw_fs_error(
+                ctx,
+                FsError::Io {
+                    reason: "failed to allocate byte buffer".to_owned(),
+                    source: None,
+                },
+            )
         })?;
-
-    let offset = byte_offset as usize;
-    let end = offset.checked_add(live_len).ok_or_else(|| {
-        Exception::throw_type(ctx, "Uint8Array buffer is detached or out of bounds")
-    })?;
-    let mut buf_size: qjs::size_t = 0;
-    let buf_ptr = unsafe { qjs::JS_GetArrayBuffer(raw_ctx, &mut buf_size, buf.as_raw()) };
-    if buf_ptr.is_null() {
-        if ctx.has_exception() {
-            let _ = ctx.catch();
-        }
-        return Err(Exception::throw_type(
-            ctx,
-            "Uint8Array buffer is detached or out of bounds",
-        ));
-    }
-    if end > buf_size as usize {
-        return Err(Exception::throw_type(
-            ctx,
-            "Uint8Array buffer is detached or out of bounds",
-        ));
-    }
-    // SAFETY: `buf_ptr` is valid for `buf_size` bytes, `end <= buf_size`, and no
-    // JavaScript executes while `slice` is alive.
-    let slice = unsafe { &std::slice::from_raw_parts(buf_ptr, buf_size as usize)[offset..end] };
-    let mut out = Vec::new();
-    out.try_reserve_exact(slice.len()).map_err(|_| {
-        throw_fs_error(
-            ctx,
-            FsError::Io {
-                reason: "failed to allocate byte buffer".to_owned(),
-                source: None,
-            },
-        )
-    })?;
-    out.extend_from_slice(slice);
-    Ok(out)
+        out.extend_from_slice(slice);
+        Ok(out)
+    })
 }
 
-pub(super) fn get_prototype<'js>(ctx: &Ctx<'js>, val: qjs::JSValue) -> Result<Value<'js>> {
-    let proto_raw = unsafe { qjs::JS_GetPrototype(ctx.as_raw().as_ptr(), val) };
-    if proto_raw.tag == i64::from(qjs::JS_TAG_EXCEPTION) {
-        return Err(if ctx.has_exception() {
-            rquickjs::Error::Exception
-        } else {
-            rquickjs::Error::Unknown
-        });
-    }
-    Ok(unsafe { Value::from_raw(ctx.clone(), proto_raw) })
-}
-
-pub(super) fn own_getter<'js>(
-    ctx: &Ctx<'js>,
-    object: qjs::JSValue,
-    name: &std::ffi::CStr,
-) -> Result<Function<'js>> {
-    let raw = ctx.as_raw().as_ptr();
-    let atom = unsafe { qjs::JS_NewAtom(raw, name.as_ptr()) };
-    if atom == qjs::JS_ATOM_NULL {
-        return Err(rquickjs::Error::Unknown);
-    }
-    let mut desc = MaybeUninit::<qjs::JSPropertyDescriptor>::uninit();
-    let found = unsafe { qjs::JS_GetOwnProperty(raw, desc.as_mut_ptr(), object, atom) };
-    unsafe { qjs::JS_FreeAtom(raw, atom) };
-    if found <= 0 {
-        if ctx.has_exception() {
-            let _ = ctx.catch();
-        }
-        return Err(rquickjs::Error::Unknown);
-    }
-    let desc = unsafe { desc.assume_init() };
-    let _value = unsafe { Value::from_raw(ctx.clone(), desc.value) };
-    let getter = unsafe { Value::from_raw(ctx.clone(), desc.getter) };
-    let _setter = unsafe { Value::from_raw(ctx.clone(), desc.setter) };
-    if (desc.flags as u32 & qjs::JS_PROP_GETSET) == 0 {
-        return Err(rquickjs::Error::Unknown);
-    }
-    getter.into_function().ok_or(rquickjs::Error::Unknown)
-}
-
-fn parse_options<'js>(
+fn parse_fs_options<'js>(
     ctx: &Ctx<'js>,
     value: Option<&Value<'js>>,
-    mut on_field: impl FnMut(&Ctx<'js>, &str, &Value<'js>) -> Result<()>,
+    on_field: impl FnMut(&Ctx<'js>, &str, &Value<'js>) -> Result<()>,
 ) -> Result<()> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    if value.is_undefined() {
-        return Ok(());
-    }
-    let raw = ctx.as_raw().as_ptr();
-    if !value.is_object()
-        || value.is_proxy()
-        || unsafe { qjs::JS_IsArray(value.as_raw()) }
-        || unsafe { qjs::JS_IsFunction(raw, value.as_raw()) }
-    {
-        return Err(Exception::throw_type(ctx, "options must be a plain object"));
-    }
-
-    let proto = get_prototype(ctx, value.as_raw())?;
-    let plain = Object::new(ctx.clone())?;
-    let plain_proto = get_prototype(ctx, plain.as_raw())?;
-    if !proto.is_null() && proto != plain_proto {
-        return Err(Exception::throw_type(ctx, "options must be a plain object"));
-    }
-
-    let mut tab: *mut qjs::JSPropertyEnum = std::ptr::null_mut();
-    let mut len: u32 = 0;
-    let flags = (qjs::JS_GPN_STRING_MASK | qjs::JS_GPN_SYMBOL_MASK) as std::ffi::c_int;
-    let rc = unsafe { qjs::JS_GetOwnPropertyNames(raw, &mut tab, &mut len, value.as_raw(), flags) };
-    let _guard = PropertyEnumGuard { raw, tab, len };
-    if rc < 0 {
-        if ctx.has_exception() {
-            let _ = ctx.catch();
-        }
-        return Err(Exception::throw_type(ctx, "options must be a plain object"));
-    }
-
-    for i in 0..len {
-        let atom = unsafe { (*tab.add(i as usize)).atom };
-        let atom_val = unsafe { Value::from_raw(ctx.clone(), qjs::JS_AtomToValue(raw, atom)) };
-        if atom_val.is_symbol() {
-            return Err(Exception::throw_type(
-                ctx,
-                "options must not contain symbol properties",
-            ));
-        }
-
-        let mut desc = MaybeUninit::<qjs::JSPropertyDescriptor>::uninit();
-        let found = unsafe { qjs::JS_GetOwnProperty(raw, desc.as_mut_ptr(), value.as_raw(), atom) };
-        if found < 0 {
-            if ctx.has_exception() {
-                let _ = ctx.catch();
-            }
-            return Err(Exception::throw_type(ctx, "options must be a plain object"));
-        }
-        if found == 0 {
-            return Err(Exception::throw_type(ctx, "options must be a plain object"));
-        }
-        let desc = unsafe { desc.assume_init() };
-        // Own the descriptor JSValues so they are freed on every exit path.
-        let field_val = unsafe { Value::from_raw(ctx.clone(), desc.value) };
-        let _getter = unsafe { Value::from_raw(ctx.clone(), desc.getter) };
-        let _setter = unsafe { Value::from_raw(ctx.clone(), desc.setter) };
-
-        if (desc.flags as u32 & qjs::JS_PROP_ENUMERABLE) == 0 {
-            return Err(Exception::throw_type(
-                ctx,
-                "options must not contain non-enumerable properties",
-            ));
-        }
-        if (desc.flags as u32 & qjs::JS_PROP_GETSET) != 0 {
-            return Err(Exception::throw_type(
-                ctx,
-                "options must not contain accessor properties",
-            ));
-        }
-        let key = JsString::from_value(atom_val)
-            .and_then(|s| s.to_string())
-            .map_err(|_| Exception::throw_type(ctx, "options must be a plain object"))?;
-        on_field(ctx, &key, &field_val)?;
-    }
-    Ok(())
+    parse_options(ctx, value, "options must be a plain object", on_field)
 }
 
 fn opt_bool<'js>(ctx: &Ctx<'js>, val: &Value<'js>, target: &mut bool, msg: &str) -> Result<()> {
@@ -427,7 +186,7 @@ fn opt_bool<'js>(ctx: &Ctx<'js>, val: &Value<'js>, target: &mut bool, msg: &str)
 
 fn read_options<'js>(ctx: &Ctx<'js>, value: Option<&Value<'js>>) -> Result<ReadOptions> {
     let mut opts = ReadOptions::default();
-    parse_options(ctx, value, |ctx, key, val| match key {
+    parse_fs_options(ctx, value, |ctx, key, val| match key {
         "maxBytes" => {
             if val.is_undefined() {
                 return Ok(());
@@ -460,7 +219,7 @@ fn read_options<'js>(ctx: &Ctx<'js>, value: Option<&Value<'js>>) -> Result<ReadO
 
 fn write_options<'js>(ctx: &Ctx<'js>, value: Option<&Value<'js>>) -> Result<WriteOptions> {
     let mut opts = WriteOptions::default();
-    parse_options(ctx, value, |ctx, key, val| match key {
+    parse_fs_options(ctx, value, |ctx, key, val| match key {
         "create" => opt_bool(
             ctx,
             val,
@@ -489,7 +248,7 @@ fn atomic_write_options<'js>(
     value: Option<&Value<'js>>,
 ) -> Result<AtomicWriteOptions> {
     let mut opts = AtomicWriteOptions::default();
-    parse_options(ctx, value, |ctx, key, val| match key {
+    parse_fs_options(ctx, value, |ctx, key, val| match key {
         "sync" => opt_bool(ctx, val, &mut opts.sync, "options.sync must be a boolean"),
         "overwrite" => opt_bool(
             ctx,
@@ -504,7 +263,7 @@ fn atomic_write_options<'js>(
 
 fn recursive_option<'js>(ctx: &Ctx<'js>, value: Option<&Value<'js>>) -> Result<bool> {
     let mut recursive = false;
-    parse_options(ctx, value, |ctx, key, val| match key {
+    parse_fs_options(ctx, value, |ctx, key, val| match key {
         "recursive" => opt_bool(
             ctx,
             val,
@@ -518,7 +277,7 @@ fn recursive_option<'js>(ctx: &Ctx<'js>, value: Option<&Value<'js>>) -> Result<b
 
 fn copy_options<'js>(ctx: &Ctx<'js>, value: Option<&Value<'js>>) -> Result<CopyOptions> {
     let mut opts = CopyOptions::default();
-    parse_options(ctx, value, |ctx, key, val| match key {
+    parse_fs_options(ctx, value, |ctx, key, val| match key {
         "overwrite" => opt_bool(
             ctx,
             val,

@@ -51,10 +51,10 @@
 //!   `String`.
 //! * `console.log` and `console.error` write to the process streams.
 //! * A minimal `Neo` global reports `engine` `"neo-lite"`. With the default
-//!   `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`, `neo-strings`, `neo-test`,
-//!   and `neo-uuid` features the registry contains the canonical shared modules
-//!   `neo:assert`, `neo:chars`, `neo:fs`, `neo:os`, `neo:strings`, `neo:test`,
-//!   `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`.
+//!   `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`, `neo-ssh`, `neo-strings`,
+//!   `neo-test`, and `neo-uuid` features the registry contains the canonical
+//!   shared modules `neo:assert`, `neo:chars`, `neo:fs`, `neo:os`, `neo:ssh`,
+//!   `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`.
 //!   `Neo.getBuiltInModulesList()` returns one frozen array of canonical
 //!   specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
 //!   registry object whose named exports share identity with the module
@@ -64,8 +64,9 @@
 //!   empty and no module source is compiled in. The implementations come from
 //!   `neojs-builtins` (`chars`, `os`, `strings`, and `uuid` bound as native
 //!   QuickJS modules, `assert` and `test` evaluated from the shared ECMAScript
-//!   factories with native QuickJS Promise and queue hooks) and `neojs-fs-core`
-//!   (`fs` bound as a native QuickJS module).
+//!   factories with native QuickJS Promise and queue hooks), `neojs-fs-core`
+//!   (`fs` bound as a native QuickJS module), and `neojs-ssh-core` (`ssh` bound
+//!   as a native QuickJS module).
 //!
 //! # What is not implemented yet
 //!
@@ -82,9 +83,9 @@
 //!   `test(..., { timeout })` is rejected explicitly.
 //! * **Most built-in `neo:` modules are absent.** With their features enabled
 //!   this crate implements the shared `neo:assert`, `neo:chars`, `neo:fs`,
-//!   `neo:os`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and
-//!   `neo:uuid/v7` modules only. Other V8 modules are not importable here, and
-//!   the `Neo` list does not claim them.
+//!   `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`,
+//!   and `neo:uuid/v7` modules only. Other V8 modules are not importable here,
+//!   and the `Neo` list does not claim them.
 //! * **No sandbox.** Permissions, host capabilities, and isolation are not
 //!   implemented.
 //!
@@ -98,11 +99,15 @@ mod runtime;
 mod chars;
 #[cfg(feature = "neo-fs")]
 mod fs;
+#[cfg(any(feature = "neo-fs", feature = "neo-ssh"))]
+mod native;
 mod neo;
 #[cfg(feature = "neo-os")]
 mod os;
 #[cfg(any(feature = "neo-assert", feature = "neo-test"))]
 mod promise;
+#[cfg(feature = "neo-ssh")]
+mod ssh;
 #[cfg(feature = "neo-strings")]
 mod strings;
 #[cfg(feature = "neo-uuid")]

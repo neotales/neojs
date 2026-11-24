@@ -26,6 +26,9 @@ fn expected_list() -> String {
     if cfg!(feature = "neo-os") {
         entries.push(r#""neo:os""#);
     }
+    if cfg!(feature = "neo-ssh") {
+        entries.push(r#""neo:ssh""#);
+    }
     if cfg!(feature = "neo-strings") {
         entries.push(r#""neo:strings""#);
     }
@@ -433,6 +436,67 @@ for (const specifier of ["neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]) {
 }
 "#)
     .expect("uuid absent");
+}
+
+#[test]
+#[cfg(feature = "neo-ssh")]
+fn ssh_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:ssh")) {
+    throw new Error(`ssh is missing from the list: ${JSON.stringify(list)}`);
+}
+if (list.includes("ssh")) {
+    throw new Error(`a bare ssh name is listed: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:ssh");
+if (registry === undefined || typeof registry !== "object" || !Object.isFrozen(registry)) {
+    throw new Error("the ssh registry object is missing or unfrozen");
+}
+if (Neo.getBuiltInModule("ssh") !== undefined) {
+    throw new Error("the registry accepted a bare ssh name");
+}
+const namespace = await import("neo:ssh");
+if (namespace === registry) {
+    throw new Error("the ES module namespace must be distinct from the registry object");
+}
+if (
+    namespace.connect !== registry.connect ||
+    namespace.MAX_COMMAND_BYTES !== registry.MAX_COMMAND_BYTES ||
+    namespace.MAX_OUTPUT_BYTES !== registry.MAX_OUTPUT_BYTES ||
+    namespace.DEFAULT_CONNECT_TIMEOUT_MS !== registry.DEFAULT_CONNECT_TIMEOUT_MS ||
+    namespace.DEFAULT_EXEC_TIMEOUT_MS !== registry.DEFAULT_EXEC_TIMEOUT_MS
+) {
+    throw new Error("the namespace exports do not match the registry");
+}
+"#)
+    .expect("ssh feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-ssh"))]
+fn ssh_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:ssh") || list.includes("ssh")) {
+    throw new Error(`ssh is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:ssh") !== undefined) {
+    throw new Error("the canonical ssh registry object is still present");
+}
+if (Neo.getBuiltInModule("ssh") !== undefined) {
+    throw new Error("a bare ssh name returned a module");
+}
+let imported = false;
+try {
+    await import("neo:ssh");
+    imported = true;
+} catch {
+    // Expected: the loader has no ssh entry.
+}
+if (imported) throw new Error("neo:ssh was importable while disabled");
+"#)
+    .expect("ssh absent");
 }
 
 #[test]

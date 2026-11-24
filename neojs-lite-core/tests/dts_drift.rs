@@ -3,6 +3,7 @@
     feature = "neo-chars",
     feature = "neo-fs",
     feature = "neo-os",
+    feature = "neo-ssh",
     feature = "neo-strings",
     feature = "neo-test",
     feature = "neo-uuid"

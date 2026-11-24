@@ -53,6 +53,7 @@ console.log(typeof Neo.getBuiltInModule("age"));
 console.log(typeof Neo.getBuiltInModule("neo:chars"));
 console.log(typeof Neo.getBuiltInModule("neo:fs"));
 console.log(typeof Neo.getBuiltInModule("neo:os"));
+console.log(typeof Neo.getBuiltInModule("neo:ssh"));
 console.log(typeof Neo.getBuiltInModule("neo:strings"));
 console.log(typeof Neo.getBuiltInModule("neo:uuid"));
 "#,
@@ -63,7 +64,7 @@ console.log(typeof Neo.getBuiltInModule("neo:uuid"));
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        "neo-lite\n9\ntrue\nundefined\nundefined\nobject\nobject\nobject\nobject\nobject\n"
+        "neo-lite\n10\ntrue\nundefined\nundefined\nobject\nobject\nobject\nobject\nobject\nobject\n"
     );
     assert_eq!(stderr(&output), "");
 }
@@ -738,4 +739,93 @@ test("typed test passes", () => {
         out.contains("# 1 selected file(s): 1 test(s): 1 passed, 0 failed"),
         "{out}"
     );
+}
+
+#[test]
+fn types_subcommand_defaults_to_lite_and_supports_v8_out_dir_and_help() {
+    let default_out = run(&[std::ffi::OsStr::new("types")]);
+    assert_eq!(
+        default_out.status.code(),
+        Some(0),
+        "{}",
+        stderr(&default_out)
+    );
+    assert_eq!(stderr(&default_out), "");
+    assert_eq!(
+        stdout(&default_out),
+        neojs_dts::render_bundle(neojs_dts::Profile::Lite)
+    );
+
+    for args in [
+        ["types", "--profile", "lite"].as_slice(),
+        ["types", "--profile=lite"].as_slice(),
+    ] {
+        let out = run(&args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>());
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+        assert_eq!(stderr(&out), "");
+        assert_eq!(
+            stdout(&out),
+            neojs_dts::render_bundle(neojs_dts::Profile::Lite)
+        );
+    }
+
+    for args in [
+        ["types", "--profile", "v8"].as_slice(),
+        ["types", "--profile=v8"].as_slice(),
+    ] {
+        let out = run(&args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>());
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+        assert_eq!(stderr(&out), "");
+        assert_eq!(
+            stdout(&out),
+            neojs_dts::render_bundle(neojs_dts::Profile::V8)
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let lite_dir = dir.path().join("types-lite");
+    let out_lite = run(&[
+        std::ffi::OsStr::new("types"),
+        std::ffi::OsStr::new("--out-dir"),
+        lite_dir.as_os_str(),
+    ]);
+    assert_eq!(out_lite.status.code(), Some(0), "{}", stderr(&out_lite));
+    assert_eq!(stdout(&out_lite), "");
+    assert_eq!(stderr(&out_lite), "");
+    for file in neojs_dts::files(neojs_dts::Profile::Lite) {
+        let written = fs::read_to_string(lite_dir.join(file.path))
+            .unwrap_or_else(|err| panic!("missing {}: {err}", file.path));
+        assert_eq!(written, file.content, "mismatch for {}", file.path);
+    }
+    assert!(lite_dir.join("neo/ssh.d.ts").is_file());
+    assert!(!lite_dir.join("neo/age.d.ts").exists());
+
+    for flag in ["--help", "-h"] {
+        let help = run(&[std::ffi::OsStr::new("types"), std::ffi::OsStr::new(flag)]);
+        assert_eq!(help.status.code(), Some(0), "{flag}: {}", stderr(&help));
+        assert_eq!(stderr(&help), "");
+        let text = stdout(&help);
+        assert!(text.contains("neojs-lite types"), "{text}");
+        assert!(text.contains("--profile <lite|v8>"), "{text}");
+        assert!(text.contains("--out-dir <dir>"), "{text}");
+    }
+
+    let bad_profile = run(&[
+        std::ffi::OsStr::new("types"),
+        std::ffi::OsStr::new("--profile"),
+        std::ffi::OsStr::new("deno"),
+    ]);
+    assert_eq!(bad_profile.status.code(), Some(2));
+    assert!(stderr(&bad_profile).contains("invalid profile `deno`"));
+
+    let unknown = run(&[
+        std::ffi::OsStr::new("types"),
+        std::ffi::OsStr::new("--unknown"),
+    ]);
+    assert_eq!(unknown.status.code(), Some(2));
+    assert!(stderr(&unknown).contains("unknown option `--unknown`"));
+
+    let extra = run(&[std::ffi::OsStr::new("types"), std::ffi::OsStr::new("extra")]);
+    assert_eq!(extra.status.code(), Some(2));
+    assert!(stderr(&extra).contains("unexpected argument `extra`"));
 }

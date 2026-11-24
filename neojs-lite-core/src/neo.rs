@@ -1,12 +1,12 @@
 //! Native `Neo` introspection object for the QuickJS runtime.
 //!
 //! The registry, the module list, and the native `neo:chars`, `neo:fs`,
-//! `neo:os`, `neo:strings`, and `neo:uuid` (`neo:uuid`, `neo:uuid/v4`,
-//! `neo:uuid/v7`) objects are Rust values. Shared ECMAScript modules
-//! (`neo:assert` and `neo:test`) are constructed once per context from their
-//! shared factories in `neojs-builtins` with native QuickJS host hooks.
+//! `neo:os`, `neo:ssh`, `neo:strings`, and `neo:uuid` (`neo:uuid`,
+//! `neo:uuid/v4`, `neo:uuid/v7`) objects are Rust values. Shared ECMAScript
+//! modules (`neo:assert` and `neo:test`) are constructed once per context from
+//! their shared factories in `neojs-builtins` with native QuickJS host hooks.
 
-#[cfg(feature = "neo-test")]
+#[cfg(any(feature = "neo-test", feature = "neo-ssh"))]
 use std::cell::RefCell;
 #[cfg(feature = "neo-test")]
 use std::rc::Rc;
@@ -33,14 +33,21 @@ pub(super) struct NeoState {
     pub(super) fs: Option<Persistent<Object<'static>>>,
     /// The captured `%TypedArray%.prototype.byteLength` native getter.
     ///
-    /// Used by `neo:fs` to read the live byte length of length-tracking
-    /// resizable-`ArrayBuffer` `Uint8Array` views without consulting mutable
-    /// prototype properties.
-    #[cfg(feature = "neo-fs")]
+    /// Used by `neo:fs` and `neo:ssh` to read the live byte length of
+    /// length-tracking resizable-`ArrayBuffer` `Uint8Array` views without
+    /// consulting mutable prototype properties.
+    #[cfg(any(feature = "neo-fs", feature = "neo-ssh"))]
     pub(super) typed_array_byte_length: Option<Persistent<Function<'static>>>,
     /// The frozen public `neo:os` object, when the feature is selected.
     #[cfg(feature = "neo-os")]
     pub(super) os: Option<Persistent<Object<'static>>>,
+    /// The frozen public `neo:ssh` object, when the feature is selected.
+    #[cfg(feature = "neo-ssh")]
+    pub(super) ssh: Option<Persistent<Object<'static>>>,
+    /// Per-context handle table of open SSH connections, dropped when the
+    /// QuickJS context drops.
+    #[cfg(feature = "neo-ssh")]
+    pub(super) ssh_state: RefCell<neojs_ssh_core::SshState>,
     /// The frozen public `neo:strings` object, when the feature is selected.
     #[cfg(feature = "neo-strings")]
     pub(super) strings: Option<Persistent<Object<'static>>>,
@@ -94,16 +101,18 @@ pub(super) fn install<'js>(
     let chars: Option<Object<'js>> = Some(super::chars::object(ctx)?);
     #[cfg(feature = "neo-fs")]
     let fs: Option<Object<'js>> = Some(super::fs::object(ctx)?);
-    #[cfg(feature = "neo-fs")]
+    #[cfg(any(feature = "neo-fs", feature = "neo-ssh"))]
     let typed_array_byte_length: Persistent<Function<'static>> = {
         let uint8_ctor: Object<'js> = ctx.globals().get("Uint8Array")?;
         let uint8_proto: Object<'js> = uint8_ctor.get("prototype")?;
-        let ta_proto = super::fs::get_prototype(ctx, uint8_proto.as_raw())?;
-        let getter = super::fs::own_getter(ctx, ta_proto.as_raw(), c"byteLength")?;
+        let ta_proto = super::native::get_prototype(ctx, uint8_proto.as_raw())?;
+        let getter = super::native::own_getter(ctx, ta_proto.as_raw(), c"byteLength")?;
         Persistent::save(ctx, getter)
     };
     #[cfg(feature = "neo-os")]
     let os: Option<Object<'js>> = Some(super::os::object(ctx)?);
+    #[cfg(feature = "neo-ssh")]
+    let ssh: Option<Object<'js>> = Some(super::ssh::object(ctx)?);
     #[cfg(feature = "neo-strings")]
     let strings: Option<Object<'js>> = Some(super::strings::object(ctx)?);
     #[cfg(feature = "neo-strings")]
@@ -125,6 +134,7 @@ pub(super) fn install<'js>(
             feature = "neo-chars",
             feature = "neo-fs",
             feature = "neo-os",
+            feature = "neo-ssh",
             feature = "neo-strings",
             feature = "neo-test",
             feature = "neo-uuid"
@@ -150,6 +160,11 @@ pub(super) fn install<'js>(
     #[cfg(feature = "neo-os")]
     if os.is_some() {
         list.set(index, neojs_builtins::os::SPECIFIER)?;
+        index += 1;
+    }
+    #[cfg(feature = "neo-ssh")]
+    if ssh.is_some() {
+        list.set(index, neojs_ssh_core::SPECIFIER)?;
         index += 1;
     }
     #[cfg(feature = "neo-strings")]
@@ -181,10 +196,14 @@ pub(super) fn install<'js>(
         chars: chars.map(|chars| Persistent::save(ctx, chars)),
         #[cfg(feature = "neo-fs")]
         fs: fs.map(|fs| Persistent::save(ctx, fs)),
-        #[cfg(feature = "neo-fs")]
+        #[cfg(any(feature = "neo-fs", feature = "neo-ssh"))]
         typed_array_byte_length: Some(typed_array_byte_length),
         #[cfg(feature = "neo-os")]
         os: os.map(|os| Persistent::save(ctx, os)),
+        #[cfg(feature = "neo-ssh")]
+        ssh: ssh.map(|ssh| Persistent::save(ctx, ssh)),
+        #[cfg(feature = "neo-ssh")]
+        ssh_state: RefCell::new(neojs_ssh_core::SshState::new()),
         #[cfg(feature = "neo-strings")]
         strings: strings.map(|strings| Persistent::save(ctx, strings)),
         #[cfg(feature = "neo-strings")]
@@ -340,6 +359,13 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
         };
         return Ok(os.clone().restore(&ctx)?.into_value());
     }
+    #[cfg(feature = "neo-ssh")]
+    if name == neojs_ssh_core::SPECIFIER {
+        let Some(ssh) = state.ssh.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(ssh.clone().restore(&ctx)?.into_value());
+    }
     #[cfg(feature = "neo-strings")]
     if name == neojs_builtins::strings::SPECIFIER {
         let Some(strings) = state.strings.as_ref() else {
@@ -390,6 +416,7 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
         feature = "neo-chars",
         feature = "neo-fs",
         feature = "neo-os",
+        feature = "neo-ssh",
         feature = "neo-strings",
         feature = "neo-test",
         feature = "neo-uuid"

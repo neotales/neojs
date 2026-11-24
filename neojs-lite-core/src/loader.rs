@@ -148,6 +148,10 @@ impl Resolver for FileResolver {
         if name == neojs_fs_core::SPECIFIER {
             return Ok(neojs_fs_core::SPECIFIER.to_owned());
         }
+        #[cfg(feature = "neo-ssh")]
+        if name == neojs_ssh_core::SPECIFIER {
+            return Ok(neojs_ssh_core::SPECIFIER.to_owned());
+        }
         #[cfg(any(
             feature = "neo-assert",
             feature = "neo-chars",
@@ -260,7 +264,7 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
-        // `neo:chars`, `neo:fs`, `neo:os`, `neo:strings`, `neo:uuid`,
+        // `neo:chars`, `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, `neo:uuid`,
         // `neo:uuid/v4`, and `neo:uuid/v7` are native QuickJS modules
         // (`declare_def`) with no ECMAScript source; `neo:assert` and
         // `neo:test` declare the shared `.esm.js` re-export wrappers from
@@ -268,6 +272,10 @@ impl Loader for FileLoader {
         #[cfg(feature = "neo-fs")]
         if name == neojs_fs_core::SPECIFIER {
             return Module::declare_def::<crate::fs::FsModule, _>(ctx.clone(), name);
+        }
+        #[cfg(feature = "neo-ssh")]
+        if name == neojs_ssh_core::SPECIFIER {
+            return Module::declare_def::<crate::ssh::SshModule, _>(ctx.clone(), name);
         }
         #[cfg(any(
             feature = "neo-assert",

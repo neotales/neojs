@@ -2113,6 +2113,7 @@ dependencies = [
 name = "neojs-lite"
 version = "0.1.0"
 dependencies = [
+ "neojs-dts",
  "neojs-lite-core",
  "neojs-manifest",
  "neojs-module-policy",
@@ -2128,6 +2129,8 @@ dependencies = [
  "neojs-fs-core",
  "neojs-manifest",
  "neojs-module-policy",
+ "neojs-ssh-core",
+ "neotales-ssh",
  "rquickjs",
  "tempfile",
  "thiserror",

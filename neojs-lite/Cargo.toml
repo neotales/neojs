@@ -23,11 +23,13 @@ neojs-lite-core = { version = "0.1.0", path = "../neojs-lite-core", default-feat
     "neo-chars",
     "neo-fs",
     "neo-os",
+    "neo-ssh",
     "neo-strings",
     "neo-test",
     "neo-uuid",
     "typescript",
 ] }
+neojs-dts.workspace = true
 neojs-manifest.workspace = true
 # Deterministic shell-style expansion for `neojs-lite test`.
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy", features = ["test-glob"] }
