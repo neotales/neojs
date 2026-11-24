@@ -1,19 +1,22 @@
 # `neo.jsonc`: manifest foundation
 
-**Status:** parsing, field validation, and import-specifier normalization are implemented in the
-`neojs-manifest` crate. Runtime manifest integration is **not** implemented. No function in this
-crate fetches a package, installs an import map, expands a workspace, matches `include`/`exclude`,
-or runs a Node compatibility transform.
+**Status:** parsing, field validation, import-specifier normalization, bounded upward discovery
+(`discover_manifest`), deterministic workspace expansion (`Workspace::load`), and pure
+import-map/workspace resolution (`ImportResolver`) are implemented in the `neojs-manifest` crate.
+Runtime manifest integration is **not** implemented. No function in this crate fetches a package,
+installs an import map into a JS engine, matches `include`/`exclude`, or runs a Node compatibility
+transform.
 
 The shape is inspired by Deno's `deno.json`, not compatible with it. Unknown keys are rejected
 rather than ignored.
 
 ## File and discovery
 
-The conventional name is `neo.jsonc`. The crate exposes the name as `MANIFEST_FILE_NAME`, but it
-never searches for the file. A caller passes an explicit path to `Manifest::from_path`, or passes
-the text to `Manifest::parse`. `from_path` reads at most `MAX_MANIFEST_BYTES + 1` bytes, so an
-oversized file is rejected without being loaded whole.
+The conventional name is `neo.jsonc`. The crate exposes the name as `MANIFEST_FILE_NAME` and
+provides bounded upward discovery via `discover_manifest` (bounded by `MAX_DISCOVERY_DEPTH = 64`,
+canonicalized visited directories, and an optional `stop_dir`). Callers can also pass an explicit
+path to `Manifest::from_path`, or pass the text to `Manifest::parse`. `from_path` reads at most
+`MAX_MANIFEST_BYTES + 1` bytes, so an oversized file is rejected without being loaded whole.
 
 No command-line flag reads `neo.jsonc` yet. `neojs` loads `jsr:` imports, and direct
 `gh:`/`github:` specifiers, when remote loading is enabled (`--allow-remote` or
@@ -233,8 +236,10 @@ implemented.
 ### `workspaces`
 
 Optional array of relative directory patterns, at most 256 entries. Same spelling rules as
-`include`/`exclude`; `packages/*` is valid. The array is not expanded, no workspace manifest is
-read, and paths are not resolved.
+`include`/`exclude`; `packages/*` is valid. `Workspace::load` expands member globs
+deterministically (sorted by canonical path, bounded by `MAX_WORKSPACE_MEMBERS = 256`), enforces
+canonical workspace-root containment, rejects missing member manifests, duplicate `@scope/name`
+names, and nested workspaces, and indexes members for `ImportResolver`.
 
 Deno calls this key `workspace` (singular). This foundation uses `workspaces`; `workspace` is
 rejected with a message naming the accepted key. That is a deliberate incompatibility, not an
@@ -262,10 +267,9 @@ instead of a generic unknown field:
 
 ## What is deliberately not implemented
 
-- Reading `neo.jsonc` automatically, or from a parent directory.
-- Installing `imports` into a runtime loader.
-- Match or expansion for `include`, `exclude`, or `workspaces`.
-- Reading or publishing a workspace package.
+- Wiring `discover_manifest`, `Workspace`, or `ImportResolver` into the CLI or JS runtimes.
+- Match or expansion for `include` or `exclude`.
+- Publishing a workspace package.
 - npm registry resolution, semver-range selection, tarballs, `package.json` fields, CommonJS,
   lifecycle scripts, or native addons.
 - JSR metadata, checksums, module graphs, or cache policy.

@@ -5,8 +5,10 @@
 //! fields listed on [`Manifest`] and rejects every other key.
 //!
 //! Parsing is pure except for [`Manifest::from_path`], which reads the one path
-//! it is given. Nothing here discovers a manifest, resolves a workspace, applies
-//! `include` or `exclude`, installs an import map, or fetches a package.
+//! it is given. Bounded upward discovery lives in [`crate::discover_manifest`],
+//! workspace expansion in [`crate::Workspace`], and import resolution in
+//! [`crate::ImportResolver`]. Nothing here applies `include` or `exclude`,
+//! installs an import map into a runtime, or fetches a package.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -24,6 +26,7 @@ use crate::specifier::NormalizedSpecifier;
 use crate::specifier::SpecifierKind;
 use crate::specifier::Support;
 use crate::specifier::is_windows_drive_path;
+use crate::specifier::normalize_prefix_specifier;
 use crate::specifier::normalize_specifier;
 
 /// The conventional manifest file name.
@@ -750,7 +753,11 @@ fn parse_imports(value: &Value) -> Result<ImportMap, Error> {
     for (key, value) in object {
         validate_import_key(key)?;
         let raw = string(value, "imports")?;
-        let specifier = normalize_specifier(raw)?;
+        let specifier = if key.ends_with('/') {
+            normalize_prefix_specifier(raw)?
+        } else {
+            normalize_specifier(raw)?
+        };
         if matches!(specifier.kind(), SpecifierKind::Bare) {
             return Err(invalid_field(
                 "imports",
