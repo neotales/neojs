@@ -392,19 +392,19 @@ impl Runtime {
     /// Creates a QuickJS runtime, installs the file loader, and installs
     /// `console` and the native `Neo` introspection global.
     ///
-    /// `Neo.engine` is `"neo-lite"`. With the default `neo-chars` and
-    /// `neo-strings` features the registry contains the canonical native
-    /// modules `neo:chars` and `neo:strings`. `Neo.getBuiltInModulesList()`
-    /// returns one frozen array of canonical specifiers, and
-    /// `Neo.getBuiltInModule(specifier)` returns the frozen registry object
-    /// whose named functions are the same function objects the namespace
-    /// exports. The namespace itself is a distinct object. A bare name, another
+    /// `Neo.engine` is `"neo-lite"`. With the default `neo-assert`, `neo-chars`,
+    /// `neo-strings`, and `neo-test` features the registry contains the canonical
+    /// modules `neo:assert`, `neo:chars`, `neo:strings`, and `neo:test`.
+    /// `Neo.getBuiltInModulesList()` returns one frozen array of canonical
+    /// specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
+    /// registry object whose named exports share identity with the module
+    /// namespace. The namespace itself is a distinct object. A bare name, another
     /// scheme, or a non-string argument does not return a module; a non-string
-    /// name throws `TypeError`. With default features off
-    /// the registry and list are empty. It does not claim the V8 runtime's full
-    /// built-in surface. This performs no filesystem access. An error means
-    /// QuickJS could not allocate its runtime or context, or the native surface
-    /// could not be installed.
+    /// name throws `TypeError`. With default features off the registry and list
+    /// are empty. It does not claim the V8 runtime's full built-in surface.
+    /// This performs no filesystem access. An error means QuickJS could not
+    /// allocate its runtime or context, or the native surface could not be
+    /// installed.
     pub fn new() -> Result<Self, Error> {
         let runtime = rquickjs::Runtime::new().map_err(|error| Error::Init {
             message: error.to_string(),
@@ -554,7 +554,13 @@ impl Runtime {
                         message: caught_message(&ctx, error),
                     }
                 })?;
-            drive_promise::<()>(&ctx, &name, &promise)?;
+            drive_promise::<()>(
+                &ctx,
+                &name,
+                &promise,
+                "top-level await could not settle; host asynchronous work is not implemented in neojs-lite yet",
+                true,
+            )?;
             #[cfg(feature = "neo-test")]
             flush_unhandled_rejections(&ctx, &self.rejections).map_err(|error| Error::Module {
                 module: name.clone(),
@@ -597,26 +603,27 @@ impl Runtime {
                 let promise = value.into_promise().ok_or_else(|| {
                     Error::TestRunner("the test runner did not return a Promise".to_string())
                 })?;
-                let report_value = drive_promise::<Value<'_>>(&ctx, "<neojs:test>", &promise)
-                    .map_err(|error| match error {
-                        Error::Module { message, .. } => Error::TestRunner(message),
-                        other => other,
-                    })?;
+                // Stop driving as soon as `run()` settles so a bounded-unsettled
+                // verdict (`unsettled: 1` after 100 rounds) is returned in
+                // `TestReport` rather than turned into `NonConvergingJobs`.
+                let report_value = drive_promise::<Value<'_>>(
+                    &ctx,
+                    "<neojs:test>",
+                    &promise,
+                    "test runner did not settle; a test returned a Promise that never resolved",
+                    false,
+                )
+                .map_err(|error| match error {
+                    Error::Module { message, .. } => Error::TestRunner(message),
+                    other => other,
+                })?;
                 if let Err(error) = flush_unhandled_rejections(&ctx, &self.rejections) {
                     return Err(Error::TestRunner(caught_message(&ctx, error)));
                 }
-                read_test_report(report_value)
+                read_test_report(&ctx, report_value)
             });
-            match result {
-                Ok(report) => {
-                    self.report_unhandled_rejections("<neojs:test>".to_string())?;
-                    Ok(report)
-                }
-                Err(error) => {
-                    self.clear_rejection_roots();
-                    Err(error)
-                }
-            }
+            self.clear_rejection_roots();
+            result
         }
     }
 
@@ -718,7 +725,7 @@ pub(super) fn flush_unhandled_rejections<'js>(
 
 /// Validates and reads the summary object returned by `neo:test`'s `run()`.
 #[cfg(feature = "neo-test")]
-fn read_test_report(value: Value<'_>) -> Result<TestReport, Error> {
+fn read_test_report(ctx: &Ctx<'_>, value: Value<'_>) -> Result<TestReport, Error> {
     let Some(object) = value.into_object() else {
         return Err(Error::TestRunner(
             "the test report is not an object".to_string(),
@@ -780,13 +787,13 @@ fn read_test_report(value: Value<'_>) -> Result<TestReport, Error> {
         let entry: Value<'_> = failures
             .get(index)
             .map_err(|_| Error::TestRunner("a test failure entry is missing".to_string()))?;
-        let Some(text) = entry.into_string() else {
+        if !entry.is_string() {
             return Err(Error::TestRunner(
                 "a test failure entry is not a string".to_string(),
             ));
-        };
-        let text = text.to_string().map_err(|_| {
-            Error::TestRunner("a test failure entry is not valid UTF-8".to_string())
+        }
+        let text = string_primitive(ctx, entry.as_raw()).ok_or_else(|| {
+            Error::TestRunner("a test failure entry could not be read".to_string())
         })?;
         lines.push(text);
     }
@@ -861,21 +868,46 @@ fn execute_job(ctx: &Ctx<'_>) -> JobStep {
     JobStep::Threw(rejection_message(ctx, &reason))
 }
 
-/// Drives the entry promise and then the jobs it left behind.
+fn step_job(ctx: &Ctx<'_>, module: &str, jobs: &mut usize) -> Result<(), Error> {
+    if *jobs >= JOB_BUDGET {
+        return Err(Error::NonConvergingJobs {
+            module: module.to_owned(),
+            jobs: *jobs,
+        });
+    }
+    match execute_job(ctx) {
+        JobStep::Ran => {
+            *jobs += 1;
+            Ok(())
+        }
+        JobStep::Threw(message) => Err(Error::Module {
+            module: module.to_owned(),
+            message: format!("uncaught exception in queued job: {message}"),
+        }),
+        JobStep::Empty => Err(Error::Module {
+            module: module.to_owned(),
+            message: "job queue reported pending work but no job ran".to_string(),
+        }),
+    }
+}
+
+/// Drives `promise` to settlement, optionally draining trailing queued jobs.
 ///
-/// QuickJS's `Promise::finish` stops as soon as the entry promise settles. A
-/// `.then` callback, a dynamic import, or a module side effect queued just
-/// before settlement would then be silently dropped. This loop continues until
-/// the queue is empty, which is the only completion point QuickJS exposes
-/// without host asynchrony.
+/// QuickJS's `Promise::finish` stops as soon as the entry promise settles. For
+/// module entries (`drain_trailing == true`), a `.then` callback, dynamic import,
+/// or module side effect queued just before settlement would then be dropped,
+/// so the loop continues until the queue is empty. For `run_tests`
+/// (`drain_trailing == false`), the test runner has its own bounded settle
+/// window (`TEST_SETTLE_ROUNDS`), so driving stops once the runner promise
+/// resolves with its `TestReport`.
 ///
-/// The same budget bounds both phases. If the queue still produces a job after
-/// the budget is exhausted, the call fails closed instead of spinning. The
-/// runtime is single-entry, so the caller cannot meaningfully continue it.
+/// The same budget bounds both phases so a nonconverging queue fails closed.
 fn drive_promise<'js, T: rquickjs::FromJs<'js>>(
     ctx: &Ctx<'js>,
     module: &str,
     promise: &rquickjs::Promise<'js>,
+    unsettled_message: &str,
+    drain_trailing: bool,
 ) -> Result<T, Error> {
     let mut jobs = 0usize;
     let output;
@@ -890,56 +922,15 @@ fn drive_promise<'js, T: rquickjs::FromJs<'js>>(
         if !is_job_pending(ctx) {
             return Err(Error::Module {
                 module: module.to_owned(),
-                message: "top-level await could not settle; host asynchronous work is not implemented in neojs-lite yet".to_string(),
+                message: unsettled_message.to_owned(),
             });
         }
-        if jobs >= JOB_BUDGET {
-            return Err(Error::NonConvergingJobs {
-                module: module.to_owned(),
-                jobs,
-            });
-        }
-        match execute_job(ctx) {
-            JobStep::Ran => jobs += 1,
-            JobStep::Threw(message) => {
-                return Err(Error::Module {
-                    module: module.to_owned(),
-                    message: format!("uncaught exception in queued job: {message}"),
-                });
-            }
-            JobStep::Empty => {
-                return Err(Error::Module {
-                    module: module.to_owned(),
-                    message: "job queue reported pending work but no job ran".to_string(),
-                });
-            }
-        }
+        step_job(ctx, module, &mut jobs)?;
     }
 
-    loop {
-        if !is_job_pending(ctx) {
-            break;
-        }
-        if jobs >= JOB_BUDGET {
-            return Err(Error::NonConvergingJobs {
-                module: module.to_owned(),
-                jobs,
-            });
-        }
-        match execute_job(ctx) {
-            JobStep::Ran => jobs += 1,
-            JobStep::Threw(message) => {
-                return Err(Error::Module {
-                    module: module.to_owned(),
-                    message: format!("uncaught exception in queued job: {message}"),
-                });
-            }
-            JobStep::Empty => {
-                return Err(Error::Module {
-                    module: module.to_owned(),
-                    message: "job queue reported pending work but no job ran".to_string(),
-                });
-            }
+    if drain_trailing {
+        while is_job_pending(ctx) {
+            step_job(ctx, module, &mut jobs)?;
         }
     }
     Ok(output)

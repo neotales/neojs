@@ -144,6 +144,10 @@ test("throws and doesNotThrow validate synchronous callbacks and reject native P
     const spoofed = Object.create(Promise.prototype);
     strictEquals(doesNotThrow(() => spoofed), spoofed);
     throws(() => throws(() => spoofed), AssertionError);
+
+    // A Proxy around a Promise also lacks the internal Promise slot.
+    const proxied = new Proxy(Promise.resolve(1), {});
+    throws(() => throws(() => proxied), AssertionError);
 });
 
 test("rejects and doesNotReject handle async callbacks, thenables, and Promise subclasses", async () => {
@@ -179,6 +183,36 @@ test("rejects and doesNotReject handle async callbacks, thenables, and Promise s
     }), AssertionError);
     await rejects(() => rejects(async () => 123), AssertionError);
     await rejects(() => rejects(() => 123), AssertionError);
+    await rejects(() => new Proxy(Promise.resolve(1), {}), TypeError);
+
+    // Polluted Object.prototype.then must not turn a non-thenable into a pass
+    // or interfere with native Promise observation.
+    const hadOwnThen = Object.prototype.hasOwnProperty.call(Object.prototype, "then");
+    const originalThen = Object.prototype.then;
+    Object.prototype.then = function () {
+        throw new Error("polluted then");
+    };
+    try {
+        let pollutedRejectsError;
+        try {
+            await rejects(() => 42);
+        } catch (caught) {
+            pollutedRejectsError = caught;
+        }
+        assert.ok(pollutedRejectsError instanceof AssertionError);
+        let pollutedDoesNotRejectError;
+        try {
+            await doesNotReject(() => 42);
+        } catch (caught) {
+            pollutedDoesNotRejectError = caught;
+        }
+        assert.ok(pollutedDoesNotRejectError instanceof AssertionError);
+        strictEquals(await doesNotReject(() => Promise.resolve(7)), 7);
+        strictEquals(await rejects(() => Promise.reject("raw")), "raw");
+    } finally {
+        if (hadOwnThen) Object.prototype.then = originalThen;
+        else delete Object.prototype.then;
+    }
 
     // Native Promise subclass observation must ignore overridden `then` and `Symbol.species`.
     let touched = 0;

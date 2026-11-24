@@ -542,3 +542,212 @@ if (touched !== 0) {
         )
         .expect("native promise observation");
 }
+
+#[cfg(feature = "neo-test")]
+#[test]
+fn run_tests_reports_unsettled_for_long_microtask_chain() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "memory.js",
+            r#"
+import test from "neo:test";
+
+test("long microtask chain", () => {
+    let remaining = 150;
+    function step() {
+        if (remaining > 0) {
+            remaining -= 1;
+            Promise.resolve().then(step);
+        }
+    }
+    Promise.resolve().then(step);
+});
+"#,
+        )
+        .expect("run source");
+    let report = runtime.run_tests().expect("run tests");
+    assert_eq!(report.total, 1);
+    assert_eq!(report.passed, 1);
+    assert_eq!(report.unsettled, 1);
+    assert!(!report.all_passed());
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|line| line.contains("unsettled work")),
+        "{:?}",
+        report.failures
+    );
+}
+
+#[cfg(feature = "neo-test")]
+#[test]
+fn run_tests_reports_unsettled_for_non_converging_microtask_loop() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "memory.js",
+            r#"
+import test from "neo:test";
+
+test("infinite microtask loop", () => {
+    function spin() {
+        Promise.resolve().then(spin);
+    }
+    Promise.resolve().then(spin);
+});
+"#,
+        )
+        .expect("run source");
+    let report = runtime.run_tests().expect("run tests");
+    assert_eq!(report.total, 1);
+    assert_eq!(report.passed, 1);
+    assert_eq!(report.unsettled, 1);
+    assert!(!report.all_passed());
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|line| line.contains("unsettled work")),
+        "{:?}",
+        report.failures
+    );
+}
+
+#[cfg(feature = "neo-test")]
+#[test]
+fn run_tests_handles_lone_surrogates_in_failure_lines() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "memory.js",
+            r#"
+import test from "neo:test";
+
+test("lone \ud800 name", () => {
+    throw new Error("lone \ud800 message");
+});
+"#,
+        )
+        .expect("run source");
+    let report = runtime.run_tests().expect("run tests");
+    assert_eq!(report.total, 1);
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.failures.len(), 1);
+    assert!(
+        report.failures[0].contains("lone "),
+        "{:?}",
+        report.failures
+    );
+    assert!(
+        report.failures[0].contains("message"),
+        "{:?}",
+        report.failures
+    );
+}
+
+#[cfg(feature = "neo-test")]
+#[test]
+fn run_tests_fails_clearly_for_unresolved_promise() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "memory.js",
+            r#"
+import test from "neo:test";
+
+test("unresolved", () => new Promise(() => {}));
+"#,
+        )
+        .expect("run source");
+    let error = runtime
+        .run_tests()
+        .expect_err("unresolved promise must fail run_tests");
+    let Error::TestRunner(message) = error else {
+        panic!("expected Error::TestRunner, got {error:?}");
+    };
+    assert!(message.contains("test runner did not settle"), "{message}");
+    assert!(!message.contains("top-level await"), "{message}");
+}
+
+#[cfg(feature = "neo-test")]
+#[test]
+fn run_tests_handles_hostile_promises_thenables_cycles_and_chains() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "memory.js",
+            r#"
+import test from "neo:test";
+
+class EvilPromise extends Promise {}
+Object.defineProperty(EvilPromise, Symbol.species, {
+    get() { throw new Error("species touched"); },
+});
+Object.defineProperty(EvilPromise.prototype, "constructor", {
+    get() { throw new Error("constructor touched"); },
+});
+Object.defineProperty(EvilPromise.prototype, "then", {
+    get() { throw new Error("then touched"); },
+});
+
+Promise.prototype.then = function (fulfilled) {
+    if (typeof fulfilled === "function") fulfilled("fake");
+    return this;
+};
+
+test("fulfilled subclass", () => new EvilPromise((resolve) => resolve("ok")));
+test("rejected subclass", () => new EvilPromise((_, reject) => {
+    reject(new Error("real subclass rejection"));
+}));
+
+const cycle = { then(resolve) { resolve(cycle); } };
+test("cyclic thenable", () => cycle);
+
+test("deep thenable chain", () => {
+    let value = 1;
+    for (let i = 0; i < 1001; i += 1) {
+        const next = value;
+        value = { then(resolve) { resolve(next); } };
+    }
+    return value;
+});
+"#,
+        )
+        .expect("run source");
+    let report = runtime.run_tests().expect("run tests");
+    assert_eq!(report.total, 4);
+    assert_eq!(report.passed, 1);
+    assert_eq!(report.failed, 3);
+    assert!(!report.all_passed());
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|line| line.contains("real subclass rejection")),
+        "{:?}",
+        report.failures
+    );
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|line| line.contains("NEO_TEST_CYCLE")),
+        "{:?}",
+        report.failures
+    );
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|line| line.contains("NEO_TEST_CHAIN")),
+        "{:?}",
+        report.failures
+    );
+    assert!(
+        !report.failures.iter().any(|line| line.contains("touched")),
+        "{:?}",
+        report.failures
+    );
+}

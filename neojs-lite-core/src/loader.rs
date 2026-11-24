@@ -169,9 +169,9 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
-        // A shared canonical module is a native QuickJS module. The module
-        // declaration is the only interface; its evaluation exports the function
-        // objects created by the matching binding. No ECMAScript source is read.
+        // `neo:chars` and `neo:strings` are native QuickJS modules (`declare_def`)
+        // with no ECMAScript source; `neo:assert` and `neo:test` declare the
+        // shared `.esm.js` re-export wrappers from `neojs-builtins`.
         #[cfg(any(
             feature = "neo-assert",
             feature = "neo-chars",

@@ -8,15 +8,16 @@
 //! default `cargo build` in this workspace does not compile it and does not put
 //! QuickJS or `rquickjs` in the V8 graph. Both runtimes share the engine-neutral
 //! module policy in `neojs-module-policy`, so extension handling and failure
-//! reasons agree, and the shared `neo:chars` and `neo:strings` Rust logic in
-//! `neojs-builtins`, so module behavior and imports agree where the modules are
-//! implemented.
+//! reasons agree, and the shared built-ins in `neojs-builtins`, so module
+//! behavior and imports agree where the modules are implemented.
 //!
 //! # What works
 //!
 //! * [`Runtime::run_file`] reads an entry module and evaluates it.
 //! * [`Runtime::run_source`] evaluates an in-memory module; its name is the
 //!   identity and base for relative imports.
+//! * [`Runtime::run_tests`] runs tests registered with `neo:test` and returns a
+//!   [`TestReport`] with pass/fail/pending/unhandled/unsettled counts.
 //! * Relative imports, absolute paths, and `file:` URLs are resolved from the
 //!   importing module. Static imports and dynamic `import()` use the same loader.
 //! * Top-level `await` works when it settles from the QuickJS job queue, for
@@ -25,22 +26,25 @@
 //!   an unawaited dynamic import still runs. The drain is bounded and fails
 //!   closed on a nonconverging chain. A queued job that throws is an error.
 //! * A promise that is still rejected without a handler when the queue empties
-//!   is an error. A rejection handled later in the queue is not an error.
-//!   Entry and rejection diagnostics never invoke getters, proxy traps,
-//!   `toString`, or `String`.
+//!   is an error (or recorded in [`TestReport::unhandled`] when `neo:test` is
+//!   active). A rejection handled later in the queue is not an error. Entry and
+//!   rejection diagnostics never invoke getters, proxy traps, `toString`, or
+//!   `String`.
 //! * `console.log` and `console.error` write to the process streams.
 //! * A minimal `Neo` global reports `engine` `"neo-lite"`. With the default
-//!   `neo-chars` and `neo-strings` features the registry contains the canonical
-//!   shared modules `neo:chars` and `neo:strings`.
+//!   `neo-assert`, `neo-chars`, `neo-strings`, and `neo-test` features the
+//!   registry contains the canonical shared modules `neo:assert`, `neo:chars`,
+//!   `neo:strings`, and `neo:test`.
 //!   `Neo.getBuiltInModulesList()` returns one frozen array of canonical
 //!   specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
-//!   registry object whose named functions are the same function objects the
-//!   module namespace exports; the namespace itself is a distinct object. A
-//!   bare name or another scheme returns `undefined`; a non-string name throws
+//!   registry object whose named exports share identity with the module
+//!   namespace exports; the namespace itself is a distinct object. A bare name
+//!   or another scheme returns `undefined`; a non-string name throws
 //!   `TypeError`. With `default-features = false` the registry and list are
 //!   empty and no module source is compiled in. The implementations come from
-//!   the engine-neutral `neojs-builtins` crate, bound as native QuickJS
-//!   modules; the V8 runtime uses the same Rust logic.
+//!   the engine-neutral `neojs-builtins` crate (`chars` and `strings` bound as
+//!   native QuickJS modules, `assert` and `test` evaluated from the shared
+//!   ECMAScript factories with native QuickJS Promise and queue hooks).
 //!
 //! # What is not implemented yet
 //!
@@ -49,13 +53,14 @@
 //!
 //! * **No TypeScript.** `.ts` and `.mts` entry or imported files are rejected
 //!   with a clear reason. There is no type stripping in this crate.
-//! * **No host asynchrony.** There are no timers, no host promise integration,
-//!   and no event loop beyond QuickJS's own job queue. A top-level `await` that
-//!   depends on an external event fails with an error instead of hanging.
+//! * **No host timers or external asynchrony.** There are no timers and no event
+//!   loop beyond QuickJS's own job queue. A top-level `await` that depends on
+//!   an external event fails with an error instead of hanging, and
+//!   `test(..., { timeout })` is rejected explicitly.
 //! * **Most built-in `neo:` modules are absent.** With their features enabled
-//!   this crate implements the shared `neo:chars` and `neo:strings` modules
-//!   only. Other V8 modules are not importable here, and the `Neo` list does
-//!   not claim them.
+//!   this crate implements the shared `neo:assert`, `neo:chars`, `neo:strings`,
+//!   and `neo:test` modules only. Other V8 modules are not importable here, and
+//!   the `Neo` list does not claim them.
 //! * **No sandbox.** Permissions, host capabilities, and isolation are not
 //!   implemented.
 //!

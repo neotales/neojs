@@ -285,9 +285,9 @@ pub(crate) const ASSERT_SPECIFIER: &str = "neo:assert";
 ///
 /// It re-exports the callable `assert` function and its named assertions from
 /// the public `assert` module object, and also exposes that function as the
-/// default export. The implementations are in [`neo_shim`]; the only host op
-/// called observes a genuine native Promise and is registered by
-/// [`crate::assert`].
+/// default export. The factory implementation and this ESM wrapper live in
+/// `neojs_builtins::assert`; [`neo_shim`] supplies the V8 Promise hooks, and the
+/// only host op called observes a genuine native Promise via [`crate::assert`].
 const ASSERT_MODULE: &str = neojs_builtins::assert::ESM_SOURCE;
 
 /// The canonical module specifier for the `chars` built-in.
@@ -456,8 +456,10 @@ pub(crate) const TEST_SPECIFIER: &str = "neo:test";
 ///
 /// It re-exports the callable `test` function and the runner helpers from the
 /// public `test` module object, so the module and
-/// `Neo.getBuiltInModule("neo:test")` share identity. The implementation is in
-/// [`neo_shim`]; it calls no host op.
+/// `Neo.getBuiltInModule("neo:test")` share identity. The factory
+/// implementation and this ESM wrapper live in `neojs_builtins::test`;
+/// [`neo_shim`] supplies V8's print, timer, rejection-handler, and event-loop
+/// hooks.
 const TEST_MODULE: &str = neojs_builtins::test::ESM_SOURCE;
 
 /// The canonical module specifier for the `uuid` built-in.

@@ -254,3 +254,16 @@ if (imported) throw new Error("neo:test was importable while disabled");
 "#)
     .expect("test absent");
 }
+
+#[test]
+#[cfg(not(feature = "neo-test"))]
+fn run_tests_returns_error_when_test_feature_is_disabled() {
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime
+        .run_tests()
+        .expect_err("run_tests must fail when neo-test is disabled");
+    assert!(
+        matches!(error, neojs_lite_core::Error::TestRunner(ref message) if message.contains("neo-test")),
+        "{error:?}"
+    );
+}

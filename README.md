@@ -1719,17 +1719,22 @@ promise still rejected without a handler when the queue empties is an error; rej
 primitive values and an Error's own data without invoking getters, proxies, `toString`, or `String`.
 It does **not** implement TypeScript, host asynchrony or timers, most `neo:` built-in modules,
 permissions, or a sandbox, and it does not claim parity with the V8 runtime. It installs a minimal
-`Neo` global whose engine is `"neo-lite"`; with the default `neo-chars` and `neo-strings` features
-its built-in module list is the canonical `["neo:chars", "neo:strings"]`.
-`Neo.getBuiltInModule(specifier)` returns the frozen registry object whose named functions are the
-same function objects the namespace exports; the namespace itself is a distinct object. With
+`Neo` global whose engine is `"neo-lite"`; with the default `neo-assert`, `neo-chars`, `neo-strings`, and
+`neo-test` features its built-in module list is the canonical
+`["neo:assert", "neo:chars", "neo:strings", "neo:test"]`.
+`Neo.getBuiltInModule(specifier)` returns the frozen registry object whose named exports share
+identity with the module namespace exports; the namespace itself is a distinct object. With
 `default-features = false` the list is empty. A bare name, another scheme, or any other specifier
-returns `undefined`, and a non-string name throws `TypeError`. The `chars` and `strings` Rust logic
-comes from the engine-neutral `neojs-builtins` crate and is bound as native QuickJS modules; there
-is no JavaScript wrapper. The crate has no V8 or QuickJS dependency. Both runtimes
-share `neojs-module-policy` for executable-extension decisions and rejection reasons, so `.cjs`,
-JSX/TSX, declaration files, JSON, WebAssembly, and native addons fail with the same explanation in
-either.
+returns `undefined`, and a non-string name throws `TypeError`. All four modules come from the
+engine-neutral `neojs-builtins` crate (`chars` and `strings` bound as native QuickJS modules;
+`assert` and `test` evaluated from shared ECMAScript factories with native QuickJS Promise and
+queue hooks). `neojs-lite-core::Runtime::run_tests` and `neojs-lite test <file-or-glob>...` run
+`neo:test` suites on QuickJS using the same `TestReport` contract and deterministic glob expansion
+(`neojs-module-policy`) as `neojs test`, rejecting `test(..., { timeout })` explicitly because
+QuickJS has no host timers. The `neojs-builtins` crate has no V8 or QuickJS dependency. Both
+runtimes share `neojs-module-policy` for executable-extension decisions and rejection reasons, so
+`.cjs`, JSX/TSX, declaration files, JSON, WebAssembly, and native addons fail with the same
+explanation in either.
 
 ### Binary size tracking
 
@@ -1752,7 +1757,7 @@ specifier loading, opt-in `jsr:` resolution
 through the public JSR registry with manifest length and SHA-256 verification, imports of the
 `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
 `strings`, `test`, and `uuid` built-ins by their canonical `neo:` specifiers, console output,
-`neojs test` over
+`neojs test` and `neojs-lite test` over
 multiple files and globs, bounded in-memory byte streams, live mutable and read-only array and
 typed-array views, mutable and read-only Unicode code point buffers, UTC five-field cron parsing and
 in-process scheduling, writes to the process's stdout and stderr, lexical POSIX and Windows path
@@ -1760,10 +1765,11 @@ operations, SHA-2 hashing and HMAC (synchronous incremental and Promise-based on
 SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
 authentication, the built-in module registry and its `Neo.engine` and `Neo.getBuiltInModulesList`
-introspection, and the embedding API above. The QuickJS runtime installs only the `Neo` introspection
-surface, not the built-in modules: `Neo.engine` is `"neo-lite"`, its built-in module list is empty,
-`Neo.getBuiltInModule` returns `undefined` for every string name, and a non-string name throws
-`TypeError`. Features outside this list are not implemented.
+introspection, and the embedding API above. The QuickJS runtime (`neojs-lite-core` / `neojs-lite`)
+reports `Neo.engine` `"neo-lite"` and implements the shared `neo:assert`, `neo:chars`,
+`neo:strings`, and `neo:test` modules by default (or an empty list with
+`default-features = false`); other V8 modules and TypeScript remain absent there. Features outside
+this list are not implemented.
 
 - TypeScript has no type checking and no transpilation. Only syntax that can be erased is accepted:
   `enum`, `namespace`, parameter properties, `import =`, `export =`, decorators, and angle-bracket
