@@ -10,6 +10,8 @@ use neojs_module_policy::{ModuleFormat, module_format};
 use rquickjs::{
     CatchResultExt, CaughtError, Context, Ctx, Function, Module, Persistent, Value, qjs,
 };
+#[cfg(feature = "typescript")]
+use url::Url;
 
 use crate::loader::{FileLoader, FileResolver};
 
@@ -266,6 +268,26 @@ pub enum Error {
         reason: String,
     },
 
+    /// The entry file is TypeScript that cannot be reduced to ECMAScript.
+    ///
+    /// The erasable subset is supported when the `typescript` feature is
+    /// enabled. Invalid TypeScript, and valid TypeScript that needs a transform
+    /// (for example an `enum`, a `namespace`, or a parameter property), is
+    /// rejected with the stripper's reason. This is not a type error: type
+    /// stripping does not type check.
+    ///
+    /// The failure happens before QuickJS loads the module, so the runtime
+    /// remains unused and can run another entry module. An imported `.ts` file
+    /// that fails to strip returns [`Error::Module`] instead, and that load
+    /// consumes the runtime.
+    #[error("cannot compile `{}`: {reason}", path.display())]
+    TypeScript {
+        /// The path the caller passed to [`Runtime::run_file`].
+        path: PathBuf,
+        /// Why the file could not be reduced to ECMAScript.
+        reason: String,
+    },
+
     /// The module could not be resolved, loaded, linked, or evaluated.
     ///
     /// This covers a failed import, a syntax error, an uncaught exception, a
@@ -500,7 +522,8 @@ impl Runtime {
     ///
     /// The runtime checks the name against the shared module policy before
     /// reading anything. `.js`, `.mjs`, and extensionless names run; `.ts` and
-    /// `.mts` are rejected because this runtime has no type stripper, with the
+    /// `.mts` also run when the `typescript` feature is enabled (and are
+    /// rejected with [`Error::UnsupportedEntry`] when it is disabled), with the
     /// same extension policy the V8 runtime uses. The path is canonicalized
     /// before use so imports and error messages refer to one identity.
     ///
@@ -520,10 +543,11 @@ impl Runtime {
     /// reported. An entry or queued job that throws uses the same formatter;
     /// native loader and engine errors keep their own messages.
     ///
-    /// A failure before evaluation (unsupported format, unreadable file) leaves
-    /// the runtime unused. Once evaluation starts the runtime is consumed even
-    /// if the module throws. A top-level `await` that needs an external event
-    /// fails with [`Error::Module`] because this runtime has no host asynchrony.
+    /// A failure before evaluation (unsupported format, unreadable file, or
+    /// TypeScript strip failure) leaves the runtime unused. Once evaluation
+    /// starts the runtime is consumed even if the module throws. A top-level
+    /// `await` that needs an external event fails with [`Error::Module`]
+    /// because this runtime has no host asynchrony.
     pub fn run_file(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
         if self.consumed {
             return Err(Error::RuntimeConsumed);
@@ -533,18 +557,15 @@ impl Runtime {
             path: path.to_path_buf(),
             reason,
         })?;
+        #[cfg(not(feature = "typescript"))]
         if format == ModuleFormat::TypeScript {
             return Err(Error::UnsupportedEntry {
                 path: path.to_path_buf(),
-                reason: "TypeScript is not implemented in neojs-lite yet; use a .js or .mjs file"
+                reason: "TypeScript is not enabled in this build; enable the `typescript` feature or use a .js or .mjs file"
                     .to_string(),
             });
         }
         let canonical = std::fs::canonicalize(path).map_err(|source| Error::Entry {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let source = std::fs::read(&canonical).map_err(|source| Error::Entry {
             path: path.to_path_buf(),
             source,
         })?;
@@ -555,6 +576,39 @@ impl Runtime {
                 reason: "the canonical path is not valid UTF-8".to_string(),
             })?
             .to_owned();
+        let source = match format {
+            ModuleFormat::JavaScript => {
+                std::fs::read(&canonical).map_err(|source| Error::Entry {
+                    path: path.to_path_buf(),
+                    source,
+                })?
+            }
+            ModuleFormat::TypeScript => {
+                #[cfg(feature = "typescript")]
+                {
+                    let specifier =
+                        Url::from_file_path(&canonical).map_err(|()| Error::UnsupportedEntry {
+                            path: path.to_path_buf(),
+                            reason:
+                                "the path cannot be represented as a file URL; use a UTF-8 path"
+                                    .to_string(),
+                        })?;
+                    let text =
+                        std::fs::read_to_string(&canonical).map_err(|source| Error::Entry {
+                            path: path.to_path_buf(),
+                            source,
+                        })?;
+                    neojs_module_policy::typescript::strip(&specifier, text)
+                        .map_err(|reason| Error::TypeScript {
+                            path: path.to_path_buf(),
+                            reason,
+                        })?
+                        .into_bytes()
+                }
+                #[cfg(not(feature = "typescript"))]
+                unreachable!("rejected before canonicalization when typescript is disabled")
+            }
+        };
 
         self.consumed = true;
         self.evaluate(module, source)

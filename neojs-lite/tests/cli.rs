@@ -645,3 +645,97 @@ test("workspace test in neojs-lite", () => {
         stderr(&disabled)
     );
 }
+
+#[test]
+fn runs_erasable_typescript_and_mts_with_imports() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(
+        &dir,
+        "lib/greeter.mts",
+        r#"
+export interface Greeting {
+    text: string;
+}
+export function greet(name: string): Greeting {
+    return { text: `hello, ${name}` };
+}
+"#,
+    );
+    write(
+        &dir,
+        "main.ts",
+        r#"
+import type { Greeting } from "./lib/greeter.mts";
+import { greet } from "./lib/greeter.mts";
+const g: Greeting = greet("ts-lite" as string satisfies string);
+console.log(g.text);
+"#,
+    );
+    let entry = dir.path().join("main.ts");
+
+    let output = run(&[entry.as_os_str()]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "hello, ts-lite\n");
+}
+
+#[test]
+fn rejects_non_erasable_typescript_with_exit_one_and_tsx_with_exit_two() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(&dir, "bad.ts", "enum Color { Red }\n");
+    let bad_ts = dir.path().join("bad.ts");
+    let ts_out = run(&[bad_ts.as_os_str()]);
+    assert_eq!(ts_out.status.code(), Some(1), "stderr: {}", stderr(&ts_out));
+    assert!(
+        stderr(&ts_out).contains("enum is not supported in strip-only mode"),
+        "{}",
+        stderr(&ts_out)
+    );
+
+    write(&dir, "view.tsx", "export const x = <div />;\n");
+    let tsx = dir.path().join("view.tsx");
+    let tsx_out = run(&[tsx.as_os_str()]);
+    assert_eq!(
+        tsx_out.status.code(),
+        Some(2),
+        "stderr: {}",
+        stderr(&tsx_out)
+    );
+    assert!(
+        stderr(&tsx_out).contains("JSX and TSX"),
+        "{}",
+        stderr(&tsx_out)
+    );
+}
+
+#[test]
+fn test_subcommand_runs_typescript_test_files() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(
+        &dir,
+        "math.test.ts",
+        r#"
+import test from "neo:test";
+import assert from "neo:assert";
+
+type Pair = [number, number];
+const add = (pair: Pair): number => pair[0] + pair[1];
+
+test("typed test passes", () => {
+    assert.strictEquals(add([20, 22]), 42);
+});
+"#,
+    );
+    let glob_arg = format!("{}/*.test.ts", dir.path().display());
+
+    let output = run(&[
+        std::ffi::OsStr::new("test"),
+        std::ffi::OsStr::new(&glob_arg),
+    ]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("ok 1 - typed test passes"), "{out}");
+    assert!(
+        out.contains("# 1 selected file(s): 1 test(s): 1 passed, 0 failed"),
+        "{out}"
+    );
+}

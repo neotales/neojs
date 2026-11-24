@@ -520,6 +520,7 @@ fn run_tests(patterns: &[String], config: &ConfigChoice) -> ExitCode {
 fn exit_code(error: &Error) -> u8 {
     match error {
         Error::Module { .. }
+        | Error::TypeScript { .. }
         | Error::UnhandledRejection { .. }
         | Error::NonConvergingJobs { .. }
         | Error::TestRunner(_) => EXIT_RUNTIME_FAILURE,
@@ -535,7 +536,7 @@ fn help() -> String {
     format!(
         "\
 neojs-lite {}
-Run an ECMAScript module on QuickJS, or run test files.
+Run an ECMAScript module or erasable TypeScript file on QuickJS, or run test files.
 
 Usage:
   neojs-lite <file>                    run one module
@@ -552,7 +553,12 @@ Options:
   --               End option parsing, for a file or pattern beginning with `-`
 
 Built-in modules:
-  neo:assert, neo:chars, neo:os, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7
+  neo:assert, neo:chars, neo:fs, neo:os, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7
+
+Modules are ECMAScript modules, and relative imports resolve from the importing
+file. .js, .mjs, .ts, and .mts run. TypeScript is stripped, not type checked:
+only erasable syntax is accepted (no enum, namespace, or other transforms), and
+.tsx, .jsx, .cts, and declaration files are rejected.
 
 Local modules discover `neo.jsonc` upward for `imports` and `workspaces`
 unless `--config` or `--no-config` is passed. Remote (`https:`, `gh:`, `jsr:`,
@@ -561,8 +567,7 @@ unless `--config` or `--no-config` is passed. Remote (`https:`, `gh:`, `jsr:`,
 `neojs-lite test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
 runtime. There is no default discovery, and a file that registers no tests fails.
-TypeScript and host timers are not implemented; `test(..., {{ timeout }})` is
-rejected.
+Host timers are not implemented; `test(..., {{ timeout }})` is rejected.
 
 Exit codes:
   0  the module finished, or every test file passed

@@ -224,16 +224,28 @@ fn rejects_remote_targets_and_typescript_and_preserves_builtins() {
         );
     }
 
-    // TypeScript target is still rejected by FileLoader.
-    let ts_entry = write(dir.path(), "ts.js", "import 'ts-dep';\n");
-    let ts_err = Runtime::with_import_resolver(resolver)
+    // TypeScript target runs when `typescript` feature is enabled, and fails clearly when disabled.
+    let ts_entry = write(
+        dir.path(),
+        "ts.js",
+        "import { x } from 'ts-dep';\nif (x !== 1) throw new Error('bad ts-dep');\n",
+    );
+    #[cfg(feature = "typescript")]
+    Runtime::with_import_resolver(resolver)
         .expect("runtime")
         .run_file(&ts_entry)
-        .expect_err(".ts target must fail in neojs-lite");
-    assert!(
-        ts_err
-            .to_string()
-            .contains("TypeScript is not implemented in neojs-lite"),
-        "{ts_err}"
-    );
+        .expect(".ts target succeeds when typescript feature is enabled");
+    #[cfg(not(feature = "typescript"))]
+    {
+        let ts_err = Runtime::with_import_resolver(resolver)
+            .expect("runtime")
+            .run_file(&ts_entry)
+            .expect_err(".ts target must fail when typescript feature is disabled");
+        assert!(
+            ts_err
+                .to_string()
+                .contains("TypeScript is not enabled in this build"),
+            "{ts_err}"
+        );
+    }
 }

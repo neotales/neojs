@@ -3,23 +3,36 @@
 //! This is the primary NeoJS Lite interface: embed [`Runtime`] and run a module
 //! file. The `neojs-lite` executable is a secondary command-line wrapper.
 //!
-//! `neojs-lite-core` executes ECMAScript module files with [rquickjs] and
-//! QuickJS-NG. It is a separate crate from the V8-based `neojs-core`; the
-//! default `cargo build` in this workspace does not compile it and does not put
-//! QuickJS or `rquickjs` in the V8 graph. Both runtimes share the engine-neutral
-//! module policy in `neojs-module-policy`, so extension handling and failure
-//! reasons agree, and the shared built-ins in `neojs-builtins`, so module
-//! behavior and imports agree where the modules are implemented.
+//! `neojs-lite-core` executes ECMAScript and erasable TypeScript module files
+//! with [rquickjs] and QuickJS-NG. It is a separate crate from the V8-based
+//! `neojs-core`; the default `cargo build` in this workspace does not compile it
+//! and does not put QuickJS or `rquickjs` in the V8 graph. Both runtimes share
+//! the engine-neutral module policy and erasable TypeScript stripper in
+//! `neojs-module-policy`, so extension handling, TypeScript diagnostics, and
+//! failure reasons agree, and the shared built-ins in `neojs-builtins`, so
+//! module behavior and imports agree where the modules are implemented.
 //!
 //! # What works
 //!
-//! * [`Runtime::run_file`] reads an entry module and evaluates it.
+//! * [`Runtime::run_file`] reads an entry module (`.js`, `.mjs`, extensionless,
+//!   and `.ts`/`.mts` when the `typescript` feature is enabled) and evaluates it.
 //! * [`Runtime::run_source`] evaluates an in-memory module; its name is the
 //!   identity and base for relative imports.
 //! * [`Runtime::run_tests`] runs tests registered with `neo:test` and returns a
 //!   [`TestReport`] with pass/fail/pending/unhandled/unsettled counts.
 //! * Relative imports, absolute paths, and `file:` URLs are resolved from the
 //!   importing module. Static imports and dynamic `import()` use the same loader.
+//! * Erasable TypeScript (`.ts` and `.mts`), enabled by default via the
+//!   `typescript` feature (and opt-outable with `--no-default-features`), strips
+//!   type annotations, interfaces, type aliases, generics, `as`/`satisfies`, and
+//!   `import type` via `neojs-module-policy` while preserving line and column
+//!   numbers for QuickJS stack traces. No type checking happens, and constructs
+//!   that need a transform (`enum`, `namespace`, parameter properties) are
+//!   rejected. `.tsx`, `.jsx`, `.cts`, and declaration files are rejected by
+//!   extension. When the `typescript` feature is disabled, `.ts` and `.mts` are
+//!   rejected with [`Error::UnsupportedEntry`] / a loader error stating
+//!   TypeScript is not enabled in the build, and `deno_ast` is absent from the
+//!   dependency graph.
 //! * With the opt-in `manifest` Cargo feature enabled, embedders can also
 //!   depend on `neojs-manifest`, build an `ImportResolver` via
 //!   `neojs_manifest::discover_manifest` (`ImportResolver::from_manifest` or
@@ -59,8 +72,10 @@
 //! The runtime is deliberately focused and does **not** claim parity with
 //! `neojs` (V8):
 //!
-//! * **No TypeScript.** `.ts` and `.mts` entry or imported files are rejected
-//!   with a clear reason. There is no type stripping in this crate.
+//! * **No non-erasable TypeScript, JSX, or type checking.** Only erasable `.ts`
+//!   and `.mts` syntax is supported (and only when the `typescript` feature is
+//!   enabled). Transforms (`enum`, `namespace`, parameter properties), `.tsx`,
+//!   `.jsx`, `.cts`, and declaration files are rejected.
 //! * **No host timers or external asynchrony.** There are no timers and no event
 //!   loop beyond QuickJS's own job queue. A top-level `await` that depends on
 //!   an external event fails with an error instead of hanging, and

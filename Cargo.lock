@@ -2061,7 +2061,6 @@ dependencies = [
  "aes-gcm 0.10.3",
  "bcrypt",
  "cbc",
- "deno_ast",
  "deno_core",
  "deno_error",
  "ed25519-dalek",
@@ -2148,7 +2147,9 @@ dependencies = [
 name = "neojs-module-policy"
 version = "0.1.0"
 dependencies = [
+ "deno_ast",
  "glob",
+ "url",
 ]
 
 [[package]]

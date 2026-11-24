@@ -12,13 +12,14 @@ readme = "README.md"
 [features]
 # A default Lite build keeps the shared `neo:assert`, `neo:chars`, `neo:fs`,
 # `neo:os`, `neo:strings`, `neo:test`, and `neo:uuid` (`neo:uuid`, `neo:uuid/v4`,
-# `neo:uuid/v7`) modules. A consumer that wants the smallest QuickJS runtime
-# can disable default features; the CLI below selects the modules explicitly so
-# a change to these defaults cannot silently change what the command
-# advertises. Cargo features are additive and unify across the dependency graph:
-# a module is present whenever any dependent enables it. Selection is
-# compile-time surface selection, not a sandbox.
-default = ["neo-assert", "neo-chars", "neo-fs", "neo-os", "neo-strings", "neo-test", "neo-uuid"]
+# `neo:uuid/v7`) modules plus erasable TypeScript stripping (`typescript`). A
+# consumer that wants the smallest QuickJS runtime can disable default
+# features; the CLI below selects the features explicitly so a change to these
+# defaults cannot silently change what the command advertises. Cargo features
+# are additive and unify across the dependency graph: a feature is present
+# whenever any dependent enables it. Selection is compile-time surface
+# selection, not a sandbox.
+default = ["neo-assert", "neo-chars", "neo-fs", "neo-os", "neo-strings", "neo-test", "neo-uuid", "typescript"]
 # The shared `assert` module and its Promise observation host hooks. This
 # enables the optional `neojs-builtins` dependency and its `assert` module.
 neo-assert = ["dep:neojs-builtins", "neojs-builtins/assert"]
@@ -49,6 +50,10 @@ neo-uuid = ["dep:neojs-builtins", "neojs-builtins/uuid"]
 # `neo.jsonc` `ImportResolver` integration for local `imports` and workspace
 # packages. Opt-in so `--no-default-features` stays free of manifest/glob deps.
 manifest = ["dep:neojs-manifest"]
+# Erasable TypeScript (`.ts` and `.mts`) stripping shared with `neojs-core`
+# through `neojs-module-policy/typescript` (`deno_ast`). `--no-default-features`
+# keeps `deno_ast` and its parser dependencies out of minimal builds.
+typescript = ["neojs-module-policy/typescript"]
 # Test-only streaming-read counters for the bounded text access tests. Never
 # enabled by a normal build.
 test-support = []

@@ -1,8 +1,8 @@
 # neojs-lite-core
 
 The primary NeoJS Lite interface: an embeddable QuickJS runtime for ECMAScript
-module files. `neojs-lite` is a separate, secondary command-line wrapper around
-this crate.
+and erasable TypeScript module files. `neojs-lite` is a separate, secondary
+command-line wrapper around this crate.
 
 `neojs-lite-core` is built with `rquickjs`/QuickJS-NG. It is a separate crate
 from the V8-based `neojs-core`; the workspace's default build does not compile
@@ -149,7 +149,14 @@ Diagnostics do not execute script code: primitive values and an Error's own
 
 This crate does **not** claim parity with the V8-based `neojs`:
 
-* **No TypeScript.** `.ts` and `.mts` are rejected with a clear reason.
+* **No non-erasable TypeScript, JSX, or type checking.** With the default
+  `typescript` feature, `.ts` and `.mts` files run via `neojs-module-policy`'s
+  erasable TypeScript stripper (`deno_ast`), preserving line and column numbers
+  for QuickJS stack traces. Type errors are not reported, and constructs that
+  require a transform (`enum`, `namespace`, parameter properties) are rejected.
+  With `default-features = false` (or `typescript` disabled), `.ts` and `.mts`
+  are rejected with `Error::UnsupportedEntry` / a loader error and `deno_ast`
+  is omitted from the build.
 * **No host timers or external asynchrony.** There are no timers and no event
   loop beyond QuickJS's own job queue. A top-level `await` works only when
   QuickJS's own job queue can settle it, and `test(..., { timeout })` is
@@ -161,21 +168,24 @@ This crate does **not** claim parity with the V8-based `neojs`:
   claim them. With default features off, no built-in module is implemented.
 * **No permissions or sandbox.** None are implemented.
 
-Both runtimes share `neojs-module-policy` for executable-extension decisions, so
-`.js`/`.mjs`/extensionless names and the rejection reasons for `.cjs`, JSX/TSX,
-declaration files, JSON, WebAssembly, and native addons are the same.
+Both runtimes share `neojs-module-policy` for executable-extension decisions and
+erasable TypeScript stripping, so `.js`/`.mjs`/`.ts`/`.mts`/extensionless names
+and the rejection reasons for `.cjs`, `.cts`, JSX/TSX, declaration files, JSON,
+WebAssembly, and native addons are the same.
 
 ## Build features
 
 A default build enables `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`,
-`neo-strings`, `neo-test`, and `neo-uuid`, their canonical registry, loader, and
-introspection-list entries, and `Runtime::run_tests`. The opt-in `manifest`
-feature enables `neojs-manifest` and `Runtime::with_import_resolver`. Each
-feature controls the optional dependency (`neojs-builtins`, `neojs-fs-core`, or
-`neojs-manifest`); with `default-features = false` those dependencies (along
-with `getrandom`, `uuid`, `glob`, `semver`, and `serde_json`), the
-implementation source, the registry objects, the loader entries, and the list
-entries are all absent. The list is then the frozen empty array.
+`neo-strings`, `neo-test`, `neo-uuid`, and `typescript`, along with the canonical
+registry, loader, introspection-list entries, and `Runtime::run_tests`. The
+opt-in `manifest` feature enables `neojs-manifest` and
+`Runtime::with_import_resolver`. Each feature controls its optional dependency
+(`neojs-builtins`, `neojs-fs-core`, `neojs-manifest`, or
+`neojs-module-policy/typescript`); with `default-features = false` those
+dependencies (along with `deno_ast`, `getrandom`, `uuid`, `glob`, `semver`, and
+`serde_json`), the implementation source, the registry objects, the loader
+entries, and the list entries are all absent. The list is then the frozen empty
+array.
 
 ```sh
 # Default: all shared modules present
@@ -195,11 +205,11 @@ cargo test -p neojs-lite-core --no-default-features --features neo-uuid --test f
 ```
 
 Cargo features are additive and unify across the dependency graph. A build that
-another dependent enables a module feature for contains the module even if this
-crate was requested without it. Feature selection is compile-time surface
+another dependent enables a module or TypeScript feature for contains it even if
+this crate was requested without it. Feature selection is compile-time surface
 selection, not a security boundary or sandbox; code that runs keeps the
 process's authority. `neojs-lite` explicitly selects `neo-assert`, `neo-chars`,
-`neo-fs`, `neo-os`, `neo-strings`, `neo-test`, and `neo-uuid` with
+`neo-fs`, `neo-os`, `neo-strings`, `neo-test`, `neo-uuid`, and `typescript` with
 `default-features = false`, so a change to this crate's defaults cannot silently
 change what the command advertises.
 

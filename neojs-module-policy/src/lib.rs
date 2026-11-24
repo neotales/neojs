@@ -7,18 +7,23 @@
 //! the QuickJS runtime (`neojs-lite-core`) depend on it, so an extension that one
 //! engine rejects is rejected with the same reason by the other.
 //!
-//! The crate has no dependencies and performs no I/O. Engine-specific work —
-//! reading files, type stripping, loading modules, and reporting JavaScript
-//! errors — stays in each runtime.
+//! With default features, the crate has no dependencies and performs no I/O.
+//! Opt-in features expose deterministic test-glob expansion (`test-glob`) and
+//! erasable TypeScript stripping (`typescript`). Engine-specific work — reading
+//! files, loading modules, and reporting JavaScript errors — stays in each
+//! runtime.
 //!
 //! This is deliberately a small shared surface. It does not claim that the two
-//! runtimes implement the same JavaScript surface: the QuickJS runtime currently
-//! executes ECMAScript modules without TypeScript or host asynchrony.
+//! runtimes implement the same JavaScript surface: the QuickJS runtime executes
+//! ECMAScript and erasable TypeScript modules without host asynchrony or remote
+//! loading.
 
 use std::path::Path;
 
 #[cfg(feature = "test-glob")]
 pub mod test_glob;
+#[cfg(feature = "typescript")]
+pub mod typescript;
 
 /// How a file would be executed, decided by its name alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

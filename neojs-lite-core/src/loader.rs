@@ -243,11 +243,14 @@ fn is_windows_drive_path(specifier: &str) -> bool {
         && matches!(bytes[2], b'\\' | b'/')
 }
 
-/// Reads and declares an ECMAScript module for QuickJS.
+/// Reads and declares an ECMAScript or erasable TypeScript module for QuickJS.
 ///
-/// TypeScript is classified by the shared policy and rejected here because this
-/// runtime has no type stripper. Every unsupported extension carries the shared
-/// policy's reason. Read errors name the resolved module.
+/// The format decision comes from `neojs-module-policy`. When the `typescript`
+/// feature is enabled, `.ts` and `.mts` sources are stripped to ECMAScript with
+/// preserved line/column positions before `Module::declare`. When `typescript`
+/// is disabled, TypeScript modules are rejected with a clear message. Every
+/// unsupported extension carries the shared policy's reason. Read errors name
+/// the resolved module.
 pub(super) struct FileLoader;
 
 impl Loader for FileLoader {
@@ -320,20 +323,37 @@ impl Loader for FileLoader {
             }
         }
         let path = Path::new(name);
-        match module_format(path) {
-            Ok(ModuleFormat::JavaScript) => {}
-            Ok(ModuleFormat::TypeScript) => {
-                return Err(Error::new_loading_message(
-                    name,
-                    "TypeScript is not implemented in neojs-lite yet; use a .js or .mjs file",
-                ));
+        let format =
+            module_format(path).map_err(|reason| Error::new_loading_message(name, reason))?;
+        let source = match format {
+            ModuleFormat::JavaScript => std::fs::read(path).map_err(|error| {
+                Error::new_loading_message(name, format!("cannot read file: {error}"))
+            })?,
+            ModuleFormat::TypeScript => {
+                #[cfg(not(feature = "typescript"))]
+                {
+                    return Err(Error::new_loading_message(
+                        name,
+                        "TypeScript is not enabled in this build; enable the `typescript` feature or use a .js or .mjs file",
+                    ));
+                }
+                #[cfg(feature = "typescript")]
+                {
+                    let specifier = Url::from_file_path(path).map_err(|()| {
+                        Error::new_loading_message(
+                            name,
+                            "the path cannot be represented as a file URL; use a UTF-8 path",
+                        )
+                    })?;
+                    let text = std::fs::read_to_string(path).map_err(|error| {
+                        Error::new_loading_message(name, format!("cannot read file: {error}"))
+                    })?;
+                    neojs_module_policy::typescript::strip(&specifier, text)
+                        .map_err(|reason| Error::new_loading_message(name, reason))?
+                        .into_bytes()
+                }
             }
-            Err(reason) => return Err(Error::new_loading_message(name, reason)),
-        }
-
-        let source = std::fs::read(path).map_err(|error| {
-            Error::new_loading_message(name, format!("cannot read file: {error}"))
-        })?;
+        };
         Module::declare(ctx.clone(), name, source)
     }
 }

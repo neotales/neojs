@@ -10,13 +10,20 @@ the runtime lifecycle, and the complete limitations.
 ## Run a module
 
 ```sh
-cargo run -p neojs-lite -- hello.js
+cargo run -p neojs-lite -- hello.ts
 ```
 
-```js
-const name = "neojs-lite";
+```ts
+const name: string = "neojs-lite";
 console.log(`hello from ${name}`);
 ```
+
+`.js`, `.mjs`, `.ts`, `.mts`, and extensionless files run. TypeScript is stripped
+using the same erasable TypeScript stripper as `neojs` (annotations, interfaces,
+type aliases, generics, `as`/`satisfies`, `import type`), without type checking;
+line and column numbers are preserved in stack traces. Non-erasable constructs
+(`enum`, `namespace`, parameter properties) and `.tsx`/`.jsx`/`.cts`/declaration
+files are rejected.
 
 Relative imports, absolute paths, and `file:` URLs resolve from the importing
 module. Static imports and dynamic `import()` use the same loader. Local modules
@@ -34,7 +41,7 @@ classes.
 ## Run tests
 
 ```sh
-cargo run -p neojs-lite -- test 'tests/js/shared/*.test.js'
+cargo run -p neojs-lite -- test 'tests/js/shared/*.test.js' 'tests/js/shared/*.test.ts'
 ```
 
 `neojs-lite test <file-or-glob>...` expands each argument using the same
@@ -46,8 +53,9 @@ failure or when a file registers no tests, and `2` on startup or glob errors.
 
 This command does **not** claim parity with `neojs` (V8):
 
-* **No TypeScript.** `.ts` and `.mts` are rejected with a clear reason. Use
-  `.js` or `.mjs`.
+* **No non-erasable TypeScript, JSX, or type checking.** Only erasable `.ts`
+  and `.mts` syntax is supported. Transforms (`enum`, `namespace`, parameter
+  properties), `.tsx`, `.jsx`, `.cts`, and declaration files are rejected.
 * **No host timers or external asynchrony.** There are no timers and no event
   loop beyond QuickJS's own job queue. A top-level `await` works only when
   QuickJS's own job queue can settle it, and `test(..., { timeout })` is
@@ -58,20 +66,23 @@ This command does **not** claim parity with `neojs` (V8):
   are not importable, and the `Neo` list does not claim them.
 * **No permissions or sandbox.** None are implemented.
 
-Both runtimes share `neojs-module-policy` for executable-extension decisions, so
-`.js`/`.mjs`/extensionless names and the rejection reasons for `.cjs`, JSX/TSX,
-declaration files, JSON, WebAssembly, and native addons are the same.
+Both runtimes share `neojs-module-policy` for executable-extension decisions and
+erasable TypeScript stripping, so `.js`/`.mjs`/`.ts`/`.mts`/extensionless names
+and the rejection reasons for `.cjs`, `.cts`, JSX/TSX, declaration files, JSON,
+WebAssembly, and native addons are the same.
 
 ## Build features
 
 The command selects `manifest`, `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`,
-`neo-strings`, `neo-test`, and `neo-uuid` explicitly from `neojs-lite-core` with
-`default-features = false`, so its advertised surface is a command decision and
-does not drift with the library defaults. The library default enables the seven
-built-in modules (`manifest` is opt-in), and a library consumer can opt out
-completely with `default-features = false`. Cargo features are additive and
-unify across the dependency graph: a build that any dependent enables the module
-for contains it. Selection is not a sandbox.
+`neo-strings`, `neo-test`, `neo-uuid`, and `typescript` explicitly from
+`neojs-lite-core` with `default-features = false`, so its advertised surface is
+a command decision and does not drift with the library defaults. The library
+default enables the seven built-in modules and `typescript` (`manifest` is
+opt-in), and a library consumer can opt out completely with
+`default-features = false` (which removes `deno_ast` as well as the built-in
+module dependencies). Cargo features are additive and unify across the dependency
+graph: a build that any dependent enables the feature for contains it. Selection
+is not a sandbox.
 
 ## Build isolation
 

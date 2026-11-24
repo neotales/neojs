@@ -373,8 +373,9 @@ fn commonjs_entries_are_rejected_with_the_shared_reason() {
     );
 }
 
+#[cfg(not(feature = "typescript"))]
 #[test]
-fn typescript_entries_are_rejected_as_not_implemented() {
+fn typescript_entries_are_rejected_when_feature_is_disabled() {
     let dir = tempfile::tempdir().expect("temp dir");
     let file = write(&dir, "main.ts", "const value: number = 1;\n");
 
@@ -383,11 +384,15 @@ fn typescript_entries_are_rejected_as_not_implemented() {
     let Error::UnsupportedEntry { reason, .. } = error else {
         panic!("expected an unsupported entry, got {error:?}");
     };
-    assert!(reason.contains("TypeScript is not implemented"), "{reason}");
+    assert!(
+        reason.contains("TypeScript is not enabled in this build"),
+        "{reason}"
+    );
 }
 
+#[cfg(not(feature = "typescript"))]
 #[test]
-fn imported_typescript_is_rejected_as_not_implemented() {
+fn imported_typescript_is_rejected_when_feature_is_disabled() {
     let dir = tempfile::tempdir().expect("temp dir");
     write(&dir, "value.ts", "export default 1;\n");
     let main = write(&dir, "main.js", "import value from './value.ts';\n");
@@ -398,9 +403,330 @@ fn imported_typescript_is_rejected_as_not_implemented() {
         panic!("expected a module error, got {error:?}");
     };
     assert!(
-        message.contains("TypeScript is not implemented"),
+        message.contains("TypeScript is not enabled in this build"),
         "{message}"
     );
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn runs_erasable_typescript() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write(
+        &dir,
+        "main.ts",
+        r#"
+interface Point {
+    x: number;
+    y: number;
+}
+
+type Pair<T> = [T, T];
+
+class Counter {
+    #count: number = 0;
+    step(by: number): number {
+        this.#count += by;
+        return this.#count;
+    }
+}
+
+function sum(values: number[]): number {
+    return values.reduce((total, value) => total + value, 0);
+}
+
+function pick(value: number): number;
+function pick(value: string): string;
+function pick(value: unknown): unknown {
+    return value;
+}
+
+const identity = <T,>(value: T): T => value;
+const point: Point = { x: 1, y: 2 };
+const pair: Pair<number> = [point.x, point.y];
+const upper = ("value" as string satisfies string).toUpperCase();
+const maybe: number | undefined = pair[0];
+const definite: number = maybe! + sum(pair);
+const optional = (value?: string): string => value ?? "none";
+
+if (upper !== "VALUE") throw new Error("as/satisfies failed");
+if (definite !== 4) throw new Error(`non-null or sum failed: ${definite}`);
+if (optional() !== "none") throw new Error("optional parameter failed");
+if (identity(7) !== 7) throw new Error("generic arrow failed");
+if (pick("x") !== "x") throw new Error("overload failed");
+if (new Counter().step(2) !== 2) throw new Error("class field types failed");
+const loaded = await Promise.resolve(identity("done"));
+if (loaded !== "done") throw new Error("top-level await failed");
+"#,
+    );
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime.run_file(&file).expect("erasable TypeScript");
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn typescript_is_not_type_checked() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write(
+        &dir,
+        "unchecked.ts",
+        r#"
+const value: number = "text";
+const missing = undefined as unknown as string;
+if (typeof value !== "string") throw new Error("the value changed");
+if (missing !== undefined) throw new Error("the cast added a value");
+"#,
+    );
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_file(&file)
+        .expect("a type error must not stop the program");
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn rejects_typescript_that_needs_a_transform() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let cases = [
+        (
+            "enum.ts",
+            "enum Color { Red }\n",
+            "enum is not supported in strip-only mode",
+        ),
+        (
+            "namespace.ts",
+            "namespace N { export const x = 1; }\n",
+            "namespace declaration is not supported",
+        ),
+        (
+            "parameter.ts",
+            "class A { constructor(private x: number) {} }\n",
+            "parameter property is not supported",
+        ),
+        (
+            "equals.ts",
+            "import value = require(\"./value.js\");\n",
+            "import equals declaration is not supported",
+        ),
+        (
+            "assignment.ts",
+            "export = 1;\n",
+            "export assignment is not supported",
+        ),
+        (
+            "angle.ts",
+            "const value = <number>1;\n",
+            "angle-bracket syntax",
+        ),
+        (
+            "decorator.ts",
+            "function dec() {}\n@dec class A {}\n",
+            "valid TypeScript",
+        ),
+    ];
+
+    for (name, source, expected) in cases {
+        let file = write(&dir, name, source);
+        let mut runtime = Runtime::new().expect("runtime");
+        let error = runtime
+            .run_file(&file)
+            .expect_err("construct must be refused");
+        match error {
+            Error::TypeScript {
+                path: error_path,
+                reason,
+            } => {
+                assert_eq!(error_path, file);
+                assert!(reason.contains(expected), "{name}: {reason}");
+            }
+            other => panic!("{name}: unexpected error: {other:?}"),
+        }
+    }
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn reports_invalid_typescript_with_a_position() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write(&dir, "invalid.ts", "const value: = 1;\n");
+
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime
+        .run_file(&file)
+        .expect_err("invalid syntax must fail");
+
+    match error {
+        Error::TypeScript { path, reason } => {
+            assert_eq!(path, file);
+            assert!(reason.contains("SyntaxError"), "{reason}");
+            assert!(reason.contains("invalid.ts:1:"), "{reason}");
+            assert!(reason.contains("const value: = 1;"), "{reason}");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn a_typescript_strip_error_leaves_the_runtime_unused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let broken = write(&dir, "broken.ts", "enum E { A }\n");
+    let valid = write(&dir, "valid.js", "console.log(\"valid\");\n");
+
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime
+        .run_file(&broken)
+        .expect_err("unsupported TypeScript must fail");
+    assert!(matches!(error, Error::TypeScript { .. }), "{error:?}");
+
+    runtime
+        .run_file(&valid)
+        .expect("the runtime is usable after a strip failure");
+}
+
+#[test]
+fn rejects_jsx_commonjs_typescript_and_declarations() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let cases = [
+        ("view.tsx", "export const x = <div />;\n", "JSX and TSX"),
+        ("view.jsx", "export const x = <div />;\n", "JSX and TSX"),
+        (
+            "old.cts",
+            "export = 1;\n",
+            "CommonJS TypeScript (.cts) is not supported",
+        ),
+        (
+            "types.d.ts",
+            "export declare const x: number;\n",
+            "declaration files",
+        ),
+        (
+            "types.d.mts",
+            "export declare const x: number;\n",
+            "declaration files",
+        ),
+        (
+            "types.d.cts",
+            "export declare const x: number;\n",
+            "declaration files",
+        ),
+    ];
+
+    for (name, source, expected) in cases {
+        let path = write(&dir, name, source);
+        let mut runtime = Runtime::new().expect("runtime");
+        let error = runtime.run_file(&path).expect_err("file must be refused");
+        match error {
+            Error::UnsupportedEntry { reason, .. } => {
+                assert!(reason.contains(expected), "{name}: {reason}");
+            }
+            other => panic!("{name}: unexpected error: {other:?}"),
+        }
+    }
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn imports_mix_typescript_and_javascript() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(
+        &dir,
+        "lib/shapes.ts",
+        r#"
+export interface Circle {
+    radius: number;
+}
+export function area(radius: number): number {
+    return radius * radius;
+}
+"#,
+    );
+    write(
+        &dir,
+        "lib/dynamic.mts",
+        r#"
+export const twice = (n: number): number => n * 2;
+export const label: string = "mts";
+"#,
+    );
+    let main = write(
+        &dir,
+        "main.ts",
+        r#"
+import type { Circle } from "./lib/shapes.ts";
+import type { NeverLoaded } from "./missing.d.ts";
+import { area } from "./lib/shapes.ts";
+const dynamic = await import("./lib/dynamic.mts");
+const c: Circle = { radius: 3 };
+const check = area(c.radius) + dynamic.twice(21);
+if (check !== 51 || dynamic.label !== "mts") {
+    throw new Error(`unexpected result: ${check} ${dynamic.label}`);
+}
+"#,
+    );
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime.run_file(&main).expect("mixed TS/JS imports");
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn an_imported_typescript_error_names_the_module() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(&dir, "bad.ts", "export enum Color { Red }\n");
+    let main = write(&dir, "main.js", "import { Color } from './bad.ts';\n");
+
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime
+        .run_file(&main)
+        .expect_err("an import that cannot be stripped must fail");
+    let Error::Module { message, .. } = error else {
+        panic!("expected Error::Module, got {error:?}");
+    };
+    assert!(
+        message.contains("enum is not supported in strip-only mode"),
+        "{message}"
+    );
+    assert!(message.contains("bad.ts"), "{message}");
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn typescript_stack_traces_preserve_line_and_column_numbers() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ts_file = write(
+        &dir,
+        "trace.ts",
+        concat!(
+            "interface Ignored {\n",
+            "    id: string;\n",
+            "}\n",
+            "function fail(input: Ignored): never {\n",
+            "    const tag: string = input.id; throw new Error(`boom:${tag}`);\n",
+            "}\n",
+            "const item: Ignored = { id: 'x' };\n",
+            "try {\n",
+            "    fail(item);\n",
+            "} catch (error: unknown) {\n",
+            "    const stack = (error as Error).stack ?? '';\n",
+            "    if (!stack.includes('trace.ts:5:') || !stack.includes('trace.ts:9:')) {\n",
+            "        throw new Error(`unexpected stack: ${stack}`);\n",
+            "    }\n",
+            "    // `: string` before `throw new Error(...)` must remain spaces so the column stays >= 40.\n",
+            "    const match = /trace\\.ts:5:(\\d+)/.exec(stack);\n",
+            "    if (!match || Number(match[1]) < 40) {\n",
+            "        throw new Error(`column shifted in stack: ${stack}`);\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_file(&ts_file)
+        .expect("stack trace line and column numbers must be preserved");
 }
 
 #[test]
