@@ -2,6 +2,7 @@
 name = "neojs-npm"
 description = "Engine-independent npm specifier, SemVer, package.json, exports, CAS tarball, and virtual graph resolver for neojs"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -20,8 +21,8 @@ network = ["neojs-remote/network"]
 base64.workspace = true
 flate2.workspace = true
 indexmap.workspace = true
-neojs-manifest = { version = "0.1.0", path = "../neojs-manifest" }
-neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
+neojs-manifest = { version = "0.0.0-alpha.0", path = "../neojs-manifest" }
+neojs-module-policy = { version = "0.0.0-alpha.0", path = "../neojs-module-policy" }
 neojs-remote = { workspace = true, default-features = false }
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }

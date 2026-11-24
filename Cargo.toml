@@ -40,7 +40,8 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.0-alpha.0"
+publish = false
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/neotales/neojs"
@@ -78,23 +79,23 @@ deno_error = "0.7"
 # Engine-neutral Neo built-in source and metadata. Shared by the V8 and QuickJS
 # runtimes; it has no engine dependency. Each dependent selects modules through
 # its features.
-neojs-builtins = { version = "0.1.0", path = "neojs-builtins" }
+neojs-builtins = { version = "0.0.0-alpha.0", path = "neojs-builtins" }
 # Engine-neutral synchronous cryptographic core for `neo:crypto`. Has no JS
 # engine or Tokio dependency.
-neojs-crypto-core = { version = "0.1.0", path = "neojs-crypto-core" }
+neojs-crypto-core = { version = "0.0.0-alpha.0", path = "neojs-crypto-core" }
 # Engine-neutral TypeScript declaration (.d.ts) bundles for V8 and QuickJS.
-neojs-dts = { version = "0.1.0", path = "neojs-dts" }
+neojs-dts = { version = "0.0.0-alpha.0", path = "neojs-dts" }
 # Engine-neutral core filesystem operations for `neo:fs`.
-neojs-fs-core = { version = "0.1.0", path = "neojs-fs-core" }
+neojs-fs-core = { version = "0.0.0-alpha.0", path = "neojs-fs-core" }
 # `neo.jsonc` JSONC parsing, bounded upward discovery, workspace expansion, and
 # pure import-map/workspace resolution.
-neojs-manifest = { version = "0.1.0", path = "neojs-manifest" }
+neojs-manifest = { version = "0.0.0-alpha.0", path = "neojs-manifest" }
 # Engine-neutral HTTPS transport, global cache, GitHub normalization, and JSR
 # resolution. Has no JS engine dependency; `network` enables `ureq` + `rustls`.
-neojs-remote = { version = "0.1.0", path = "neojs-remote" }
+neojs-remote = { version = "0.0.0-alpha.0", path = "neojs-remote" }
 # Engine-neutral synchronous SSH core for `neo:ssh`. Has no JS engine or Tokio
 # dependency; wraps `neotales-ssh` with mandatory host trust and bounded execution.
-neojs-ssh-core = { version = "0.1.0", path = "neojs-ssh-core" }
+neojs-ssh-core = { version = "0.0.0-alpha.0", path = "neojs-ssh-core" }
 base64 = "0.22.1"
 flate2 = "1.1.11"
 indexmap = { version = "2.14.2", features = ["serde"] }

@@ -2,6 +2,7 @@
 name = "neojs"
 description = "Command-line ECMAScript and erasable TypeScript runtime built on neojs-core"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,16 +10,16 @@ rust-version.workspace = true
 authors.workspace = true
 
 [dependencies]
-neojs-core = { version = "0.1.0", path = "../neojs-core" }
+neojs-core = { version = "0.0.0-alpha.0", path = "../neojs-core" }
 neojs-dts.workspace = true
 neojs-manifest.workspace = true
 # Deterministic shell-style expansion for `neojs test`.
-neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy", features = ["test-glob"] }
+neojs-module-policy = { version = "0.0.0-alpha.0", path = "../neojs-module-policy", features = ["test-glob"] }
 
 [dev-dependencies]
 # The duplicate dependency enables the test-only fault injection for this
 # package's tests. A normal `cargo build -p neojs` does not include dev-deps.
-neojs-core = { version = "0.1.0", path = "../neojs-core", features = ["test-support"] }
+neojs-core = { version = "0.0.0-alpha.0", path = "../neojs-core", features = ["test-support"] }
 neotales-ssh.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

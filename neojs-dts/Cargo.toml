@@ -2,6 +2,7 @@
 name = "neojs-dts"
 description = "Engine-neutral TypeScript declaration (.d.ts) bundles for neojs and neojs-lite runtime profiles"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
