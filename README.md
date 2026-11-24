@@ -37,6 +37,8 @@ Usage:
   neojs test --allow-remote <file-or-glob>...
   neojs test --no-allow-remote <file-or-glob>...
   neojs --allow-remote test <file-or-glob>...
+  neojs types [--profile <v8|lite>] [--out-dir <dir>]
+                                  emit TypeScript declarations (.d.ts)
 
 Options:
   --allow-remote   allow https:, gh:, and github: entry and imports, and
@@ -59,7 +61,10 @@ With no arguments, `neojs` exits 2 and points at `--help`. `--allow-remote` is o
 may appear before the module, or before or after `test`; `--no-allow-remote` forces it off even when
 `NEOJS_ALLOW_REMOTE` enables it. Local modules discover `neo.jsonc` upward for `imports` and
 `workspaces` (including enclosing workspace roots when running inside a workspace member directory)
-unless `--config <path>` or `--no-config` is passed. The module sections below document each
+unless `--config <path>` or `--no-config` is passed. `neojs types` emits `.d.ts` declarations for
+`Neo`, `console`, and enabled `neo:*` modules (`--profile v8` by default or `--profile lite` for
+`neojs-lite`; pass `--out-dir <dir>` to write the multi-file `types/` layout instead of stdout;
+see `neojs types --help`). The module sections below document each
 built-in; [Limits](#limits) lists the unsupported features and the exit codes.
 
 ## What you can do ⚡

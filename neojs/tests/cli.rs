@@ -1660,6 +1660,8 @@ Usage:
   neojs test --allow-remote <file-or-glob>...
   neojs test --no-allow-remote <file-or-glob>...
   neojs --allow-remote test <file-or-glob>...
+  neojs types [--profile <v8|lite>] [--out-dir <dir>]
+                                  emit TypeScript declarations (.d.ts)
 
 Options:
   --allow-remote   allow https:, gh:, and github: entry and imports, and
@@ -4331,5 +4333,111 @@ test("workspace import in neojs test", () => {
         stderr(&disabled).contains("bare module specifiers"),
         "{}",
         stderr(&disabled)
+    );
+}
+
+#[test]
+fn types_subcommand_emits_bundles_and_writes_out_dir() {
+    let default_out = run_args(&["types"]);
+    assert_eq!(
+        default_out.status.code(),
+        Some(0),
+        "{}",
+        stderr(&default_out)
+    );
+    assert_eq!(stderr(&default_out), "");
+    assert_eq!(
+        stdout(&default_out),
+        neojs_dts::render_bundle(neojs_dts::Profile::V8)
+    );
+
+    for args in [
+        ["types", "--profile", "v8"].as_slice(),
+        ["types", "--profile=v8"].as_slice(),
+    ] {
+        let out = run_args(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+        assert_eq!(stderr(&out), "");
+        assert_eq!(
+            stdout(&out),
+            neojs_dts::render_bundle(neojs_dts::Profile::V8)
+        );
+    }
+
+    for args in [
+        ["types", "--profile", "lite"].as_slice(),
+        ["types", "--profile=lite"].as_slice(),
+    ] {
+        let out = run_args(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+        assert_eq!(stderr(&out), "");
+        assert_eq!(
+            stdout(&out),
+            neojs_dts::render_bundle(neojs_dts::Profile::Lite)
+        );
+    }
+
+    let project = Project::new();
+    let v8_dir = project.path("types-v8");
+    let v8_dir_str = v8_dir.to_str().expect("UTF-8 path");
+    let out_v8 = run_args(&["types", "--out-dir", v8_dir_str]);
+    assert_eq!(out_v8.status.code(), Some(0), "{}", stderr(&out_v8));
+    assert_eq!(stdout(&out_v8), "");
+    assert_eq!(stderr(&out_v8), "");
+    for file in neojs_dts::files(neojs_dts::Profile::V8) {
+        let written = fs::read_to_string(v8_dir.join(file.path))
+            .unwrap_or_else(|err| panic!("missing {}: {err}", file.path));
+        assert_eq!(written, file.content, "mismatch for {}", file.path);
+    }
+
+    let lite_dir = project.path("types-lite");
+    let lite_flag = format!("--out-dir={}", lite_dir.to_str().expect("UTF-8 path"));
+    let out_lite = run_args(&["types", "--profile", "lite", &lite_flag]);
+    assert_eq!(out_lite.status.code(), Some(0), "{}", stderr(&out_lite));
+    assert_eq!(stdout(&out_lite), "");
+    assert_eq!(stderr(&out_lite), "");
+    for file in neojs_dts::files(neojs_dts::Profile::Lite) {
+        let written = fs::read_to_string(lite_dir.join(file.path))
+            .unwrap_or_else(|err| panic!("missing {}: {err}", file.path));
+        assert_eq!(written, file.content, "mismatch for {}", file.path);
+    }
+    assert!(!lite_dir.join("neo/age.d.ts").exists());
+}
+
+#[test]
+fn types_subcommand_help_and_error_cases() {
+    for flag in ["--help", "-h"] {
+        let help = run_args(&["types", flag]);
+        assert_eq!(help.status.code(), Some(0), "{flag}: {}", stderr(&help));
+        assert_eq!(stderr(&help), "");
+        let text = stdout(&help);
+        assert!(text.contains("neojs types"), "{text}");
+        assert!(text.contains("--profile <v8|lite>"), "{text}");
+        assert!(text.contains("--out-dir <dir>"), "{text}");
+    }
+
+    let bad_profile = run_args(&["types", "--profile", "deno"]);
+    assert_eq!(bad_profile.status.code(), Some(2));
+    assert_eq!(stdout(&bad_profile), "");
+    assert!(
+        stderr(&bad_profile).contains("invalid profile `deno`"),
+        "{}",
+        stderr(&bad_profile)
+    );
+
+    let unknown = run_args(&["types", "--unknown"]);
+    assert_eq!(unknown.status.code(), Some(2));
+    assert!(
+        stderr(&unknown).contains("unknown option `--unknown`"),
+        "{}",
+        stderr(&unknown)
+    );
+
+    let extra = run_args(&["types", "extra"]);
+    assert_eq!(extra.status.code(), Some(2));
+    assert!(
+        stderr(&extra).contains("unexpected argument `extra`"),
+        "{}",
+        stderr(&extra)
     );
 }

@@ -60,6 +60,7 @@ zeroize.workspace = true
 # test. Normal builds do not enable this feature.
 deno_core = { workspace = true, features = ["native_module_testing"] }
 ed25519-dalek = { version = "3.0.0", features = ["pkcs8"] }
+neojs-dts.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros"] }
