@@ -103,6 +103,13 @@ pub enum Error {
         /// The maximum number of workspace members accepted.
         limit: usize,
     },
+    /// Workspace glob traversal visited more filesystem entries than the
+    /// accepted limit.
+    #[error("workspace glob traversal visited more than {limit} filesystem entries")]
+    WorkspaceGlobLimitExceeded {
+        /// The maximum number of filesystem entries inspected across workspace globs.
+        limit: usize,
+    },
     /// A workspace member directory or manifest resolves outside the workspace
     /// root, or points back to the workspace root itself.
     #[error("a workspace member path escapes or points back to the workspace root")]

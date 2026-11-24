@@ -27,8 +27,11 @@ pub struct DiscoveredManifest {
 /// Searches upward from `start` for [`MANIFEST_FILE_NAME`].
 ///
 /// At most [`MAX_DISCOVERY_DEPTH`] directories are inspected (starting with
-/// `start`). When `stop_dir` is provided, discovery inspects directories up to
-/// and including `stop_dir` and never walks above it; if `start` is outside
+/// `start`). Both `start` and `stop_dir` (when provided) are canonicalized
+/// before walking, so containment and the stop boundary compare resolved real
+/// directories rather than symlink aliases. When `stop_dir` is provided,
+/// discovery inspects directories up to and including the canonicalized
+/// `stop_dir` and never walks above it; if `start` resolves outside
 /// `stop_dir`, discovery returns `Ok(None)` without reading any parent.
 ///
 /// Tracks canonicalized visited directories to avoid symlink loops.

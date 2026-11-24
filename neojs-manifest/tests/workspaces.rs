@@ -6,8 +6,8 @@ use std::path::Path;
 
 use neojs_manifest::{
     Error, ImportResolver, MANIFEST_FILE_NAME, MAX_DISCOVERY_DEPTH, MAX_MANIFEST_BYTES,
-    MAX_WORKSPACE_MEMBERS, Manifest, PackageName, ResolvedImport, SpecifierKind, Support,
-    Workspace, discover_manifest,
+    MAX_WORKSPACE_GLOB_ENTRIES, MAX_WORKSPACE_MEMBERS, Manifest, PackageName, ResolvedImport,
+    SpecifierKind, Support, Workspace, discover_manifest,
 };
 
 fn write_manifest(dir: &Path, body: &str) -> std::path::PathBuf {
@@ -713,4 +713,204 @@ fn prefix_import_keys_require_trailing_slash_targets() {
     let err = Manifest::parse(r#"{"name":"@a/b","imports":{"@lib/":"./src/lib"}}"#)
         .expect_err("prefix key without trailing slash target must fail");
     assert!(matches!(err, Error::InvalidSpecifier { .. }), "{err}");
+}
+
+#[test]
+fn resolver_never_intercepts_case_insensitive_builtin_schemes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("pkg");
+    write_manifest(
+        &root,
+        r#"{
+            "name": "@acme/builtins",
+            "imports": {
+                "NEO:crypto": "./hijack-neo.ts",
+                "NODE:fs/promises": "./hijack-node.ts",
+                "Neo:": "./hijack-neo-exact.ts",
+                "nOdE:": "./hijack-node-exact.ts"
+            }
+        }"#,
+    );
+
+    let discovered = discover_manifest(&root, None)
+        .expect("discover")
+        .expect("found");
+    let resolver = ImportResolver::from_manifest(&discovered);
+
+    for builtin in [
+        "NEO:crypto",
+        "Neo:uuid",
+        "NODE:fs/promises",
+        "NoDe:path",
+        "NEO: uuid\n",
+        "Node:\tfs",
+    ] {
+        assert_eq!(
+            resolver.resolve(builtin).expect(builtin),
+            ResolvedImport::Builtin(builtin.to_owned())
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_globstar_handles_symlink_loops_escapes_and_non_utf8_safely() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(outside.join("pkg")).expect("create outside/pkg");
+    write_manifest(&outside.join("pkg"), r#"{"name":"@evil/outside-pkg"}"#);
+
+    // 1. Internal directory symlink loop (`packages/a/loop -> ..`) under
+    // `packages/**/pkg` terminates cleanly and still discovers real members.
+    let ws_loop = temp.path().join("ws-globstar-loop");
+    write_manifest(
+        &ws_loop,
+        r#"{"name":"@acme/root","workspaces":["packages/**/pkg"]}"#,
+    );
+    write_manifest(
+        &ws_loop.join("packages").join("pkg"),
+        r#"{"name":"@acme/direct-pkg"}"#,
+    );
+    write_manifest(
+        &ws_loop.join("packages").join("a").join("b").join("pkg"),
+        r#"{"name":"@acme/nested-pkg"}"#,
+    );
+    symlink(
+        ws_loop.join("packages"),
+        ws_loop.join("packages").join("a").join("loop"),
+    )
+    .expect("create internal loop symlink");
+    // Non-UTF-8 entry inside `packages` must be skipped without panicking.
+    let non_utf8_name = OsStr::from_bytes(b"bad-\xff-entry");
+    fs::write(ws_loop.join("packages").join(non_utf8_name), b"x").expect("write non-utf8 file");
+
+    let ws = Workspace::load(ws_loop.join(MANIFEST_FILE_NAME)).expect("load globstar workspace");
+    let names: Vec<_> = ws.members().map(|m| m.name().as_str()).collect();
+    assert_eq!(names, ["@acme/nested-pkg", "@acme/direct-pkg"]);
+
+    // 2. Escaping directory symlink (`packages/sub/escape -> outside`) under
+    // `packages/**/pkg` fails closed with WorkspaceEscape without descending.
+    let ws_escape = temp.path().join("ws-globstar-escape");
+    write_manifest(
+        &ws_escape,
+        r#"{"name":"@acme/root","workspaces":["packages/**/pkg"]}"#,
+    );
+    fs::create_dir_all(ws_escape.join("packages").join("sub")).expect("create sub");
+    symlink(
+        &outside,
+        ws_escape.join("packages").join("sub").join("escape"),
+    )
+    .expect("create escaping symlink");
+    let err = Workspace::load(ws_escape.join(MANIFEST_FILE_NAME))
+        .expect_err("escaping directory symlink must fail closed");
+    assert!(matches!(err, Error::WorkspaceEscape), "{err}");
+}
+
+#[test]
+fn workspace_rejects_brace_patterns_and_visit_budget_exceeded() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    // Brace patterns are rejected explicitly rather than silently misparsed.
+    let brace_ws = temp.path().join("brace-ws");
+    write_manifest(
+        &brace_ws,
+        r#"{"name":"@acme/root","workspaces":["packages/{a,b}"]}"#,
+    );
+    let err = Workspace::load(brace_ws.join(MANIFEST_FILE_NAME)).expect_err("brace pattern");
+    assert!(
+        matches!(
+            err,
+            Error::UnsupportedField {
+                field: "workspaces",
+                ..
+            }
+        ),
+        "{err}"
+    );
+
+    // Exceeding MAX_WORKSPACE_GLOB_ENTRIES with non-directory files returns
+    // WorkspaceGlobLimitExceeded (not WorkspaceTooManyMembers).
+    let noisy_ws = temp.path().join("noisy-ws");
+    write_manifest(
+        &noisy_ws,
+        r#"{"name":"@acme/root","workspaces":["packages/*"]}"#,
+    );
+    let pkgs = noisy_ws.join("packages");
+    fs::create_dir_all(&pkgs).expect("create packages");
+    for idx in 0..=MAX_WORKSPACE_GLOB_ENTRIES {
+        fs::write(pkgs.join(format!("file-{idx:04}.txt")), "x").expect("write noise file");
+    }
+    let err = Workspace::load(noisy_ws.join(MANIFEST_FILE_NAME)).expect_err("visit budget");
+    assert!(
+        matches!(
+            err,
+            Error::WorkspaceGlobLimitExceeded { limit } if limit == MAX_WORKSPACE_GLOB_ENTRIES
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn rejects_windows_drive_path_injection_in_exports_and_imports() {
+    for target in [
+        "./C:/evil.ts",
+        "./C:evil.ts",
+        "./c:/Windows/System32/evil.ts",
+    ] {
+        let export_err = Manifest::parse(&format!(r#"{{"name":"@a/b","exports":"{target}"}}"#))
+            .expect_err(target);
+        assert!(
+            matches!(
+                export_err,
+                Error::InvalidField {
+                    field: "exports",
+                    ..
+                }
+            ),
+            "{target}: {export_err}"
+        );
+
+        let import_err = Manifest::parse(&format!(
+            r#"{{"name":"@a/b","imports":{{"x":"{target}"}}}}"#
+        ))
+        .expect_err(target);
+        assert!(
+            matches!(import_err, Error::InvalidSpecifier { .. }),
+            "{target}: {import_err}"
+        );
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("drive-check");
+    write_manifest(
+        &root,
+        r#"{
+            "name": "@a/b",
+            "imports": {
+                "@/": "./",
+                "@src/": "./src/"
+            }
+        }"#,
+    );
+    let discovered = discover_manifest(&root, None)
+        .expect("discover")
+        .expect("found");
+    let resolver = ImportResolver::from_manifest(&discovered);
+
+    for bad in [
+        "@/C:/evil.ts",
+        "@/C:evil.ts",
+        "@src/C:/evil.ts",
+        "@src/C:evil.ts",
+    ] {
+        let err = resolver.resolve(bad).expect_err(bad);
+        assert!(
+            matches!(err, Error::InvalidSpecifier { .. }),
+            "{bad}: {err}"
+        );
+    }
 }

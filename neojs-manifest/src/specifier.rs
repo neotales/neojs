@@ -707,6 +707,11 @@ fn parse_relative_path(raw: &str, allow_prefix_slash: bool) -> Result<Normalized
         return Ok(NormalizedSpecifier::Path("./".to_owned()));
     }
     let path = raw.strip_prefix("./").unwrap_or(raw);
+    if is_windows_drive_path(path) {
+        return Err(invalid(
+            "a relative path may not begin with a Windows drive prefix",
+        ));
+    }
     let path = if allow_prefix_slash {
         path.strip_suffix('/').unwrap_or(path)
     } else {

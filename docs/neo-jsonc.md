@@ -153,9 +153,14 @@ bytes.
 Optional object mapping a non-empty specifier key to a target string. Keys may not contain
 whitespace, control characters, or `\`. At most 1024 entries; a key is at most 1024 bytes.
 
-Targets are normalized by the same public function, `normalize_specifier`. Bare targets such as
-`"react"` are rejected because the import map does not have a resolution stage yet. `http:`,
-`data:`, and `blob:` targets are rejected as unsupported transports.
+Exact-key targets are normalized by `normalize_specifier`. Prefix keys ending in `/` must map to a
+target ending in `/` (`./.../`, `https://.../` without query or fragment, `file:///.../`,
+`gh:owner/repo@ref/[sub/]`, `jsr:@scope/name@version/[sub/]`, `npm:name@version/[sub/]`, or
+`node:module/`). Bare targets such as `"react"` and `http:`, `data:`, and `blob:` targets are
+rejected. `ImportResolver` resolves `imports` and workspace `@scope/pkg` references purely (never
+intercepting `neo:*` or `node:*` schemes, matched ASCII-case-insensitively on the scheme), while
+preserving `Support` metadata so the runtime continues to enforce remote and unsupported-transport
+gates.
 
 | Target | Canonical form | Load status |
 | --- | --- | --- |
@@ -237,9 +242,12 @@ implemented.
 
 Optional array of relative directory patterns, at most 256 entries. Same spelling rules as
 `include`/`exclude`; `packages/*` is valid. `Workspace::load` expands member globs
-deterministically (sorted by canonical path, bounded by `MAX_WORKSPACE_MEMBERS = 256`), enforces
-canonical workspace-root containment, rejects missing member manifests, duplicate `@scope/name`
-names, and nested workspaces, and indexes members for `ImportResolver`.
+deterministically using an explicit bounded traversal (`*`, `?`, `[...]`, and `**`, rejecting
+`{...}` brace patterns explicitly; sorted by canonical path; bounded by
+`MAX_WORKSPACE_MEMBERS = 256` and `MAX_WORKSPACE_GLOB_ENTRIES = 4096`), enforces canonical
+workspace-root containment on symlinks before descending, skips non-directory and non-UTF-8
+entries, rejects missing member manifests, duplicate `@scope/name` names, and nested workspaces, and
+indexes members for `ImportResolver`.
 
 Deno calls this key `workspace` (singular). This foundation uses `workspaces`; `workspace` is
 rejected with a message naming the accepted key. That is a deliberate incompatibility, not an

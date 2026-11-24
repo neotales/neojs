@@ -89,6 +89,7 @@ pub use specifier::NpmSpecifier;
 pub use specifier::SpecifierKind;
 pub use specifier::Support;
 pub use specifier::normalize_specifier;
+pub use workspace::MAX_WORKSPACE_GLOB_ENTRIES;
 pub use workspace::MAX_WORKSPACE_MEMBERS;
 pub use workspace::Workspace;
 pub use workspace::WorkspaceMember;

@@ -7,25 +7,23 @@
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use crate::specifier::{MAX_SUBPATH_BYTES, validate_module_path};
+use crate::specifier::{MAX_SUBPATH_BYTES, is_windows_drive_path, validate_module_path};
 use crate::{
     DiscoveredManifest, Error, ExportKey, Exports, ImportMap, NormalizedSpecifier, PackageName,
     Workspace, normalize_specifier,
 };
 
-/// Canonical built-in module schemes that are never intercepted by manifest
-/// `imports` or workspace package names.
-const BUILTIN_SCHEMES: &[&str] = &["neo:", "node:"];
-
 /// Outcome of resolving an import specifier through [`ImportResolver`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedImport {
-    /// A canonical built-in specifier (`neo:*` or `node:*`) that is never
-    /// intercepted by `imports` or workspace packages.
+    /// A built-in scheme specifier (`neo:*` or `node:*`, matched
+    /// ASCII-case-insensitively on the scheme) that is never intercepted by
+    /// `imports` or workspace packages.
     ///
-    /// The caller's runtime loader enforces built-in availability and policy.
+    /// The specifier text is returned unmangled so the caller's runtime loader
+    /// enforces built-in availability, policy, and syntax validation.
     Builtin(String),
     /// A local module path resolved against the declaring manifest's directory.
     Local(PathBuf),
@@ -53,8 +51,8 @@ struct MemberPackage {
 ///
 /// Resolution follows a single documented precedence order:
 ///
-/// 1. Canonical built-in schemes (`neo:*`, `node:*`) are never intercepted and
-///    return [`ResolvedImport::Builtin`].
+/// 1. Built-in schemes (`neo:*`, `node:*`, matched ASCII-case-insensitively on
+///    the scheme) are never intercepted and return [`ResolvedImport::Builtin`].
 /// 2. Exact match in the active member's `imports`, then the root's `imports`.
 /// 3. Longest trailing-`/` prefix match in the active member's `imports`, then
 ///    the root's `imports` (rejecting path traversal `..` escaping the mapped
@@ -145,7 +143,7 @@ impl ImportResolver {
     /// or if resolving a local target encounters a filesystem error (such as a
     /// symlink loop or dangling symlink).
     pub fn resolve(&self, specifier: &str) -> Result<ResolvedImport, Error> {
-        if is_canonical_builtin(specifier) {
+        if is_builtin_specifier(specifier) {
             return Ok(ResolvedImport::Builtin(specifier.to_owned()));
         }
 
@@ -218,10 +216,11 @@ impl ImportResolver {
     }
 }
 
-fn is_canonical_builtin(specifier: &str) -> bool {
-    BUILTIN_SCHEMES
-        .iter()
-        .any(|scheme| specifier.starts_with(scheme))
+fn is_builtin_specifier(specifier: &str) -> bool {
+    let Some((scheme, _)) = specifier.split_once(':') else {
+        return false;
+    };
+    scheme.eq_ignore_ascii_case("neo") || scheme.eq_ignore_ascii_case("node")
 }
 
 fn longest_prefix_match<'a>(
@@ -292,6 +291,12 @@ fn resolve_prefix_target(
 
     match target {
         NormalizedSpecifier::Path(prefix_path) => {
+            if is_windows_drive_path(suffix) {
+                return Err(Error::InvalidSpecifier {
+                    reason: "a relative import subpath may not begin with a Windows drive prefix"
+                        .to_owned(),
+                });
+            }
             let combined = format!("{prefix_path}{suffix}");
             let _ = normalize_specifier(&combined)?;
             resolve_local_path(declaring_dir, &combined).map(ResolvedImport::Local)
@@ -354,6 +359,20 @@ fn validate_https_prefix_suffix(suffix: &str) -> Result<(), Error> {
 
 fn resolve_local_path(declaring_dir: &Path, relative: &str) -> Result<PathBuf, Error> {
     let rel = relative.strip_prefix("./").unwrap_or(relative);
+    if is_windows_drive_path(rel) {
+        return Err(Error::InvalidSpecifier {
+            reason: "a local path may not begin with a Windows drive prefix".to_owned(),
+        });
+    }
+    if !rel.is_empty()
+        && !Path::new(rel)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(Error::InvalidSpecifier {
+            reason: "a local path may contain only normal relative path components".to_owned(),
+        });
+    }
     let joined = if rel.is_empty() {
         declaring_dir.to_path_buf()
     } else {
