@@ -21,6 +21,7 @@ use rquickjs::Array;
 use rquickjs::Ctx;
 use rquickjs::Exception;
 use rquickjs::Function;
+use rquickjs::IntoJs;
 use rquickjs::Module;
 use rquickjs::Object;
 use rquickjs::Result;
@@ -29,6 +30,7 @@ use rquickjs::module::Declarations;
 use rquickjs::module::Declared;
 use rquickjs::module::Exports;
 use rquickjs::module::ModuleDef;
+use rquickjs::object::Property;
 use rquickjs::prelude::Rest;
 
 use neojs_node_builtins::run_sync;
@@ -846,40 +848,71 @@ fn read_u64<'js>(ctx: &Ctx<'js>, value: &Value<'js>, what: &str, positive: bool)
     Ok(number as u64)
 }
 
+/// Defines an own writable/configurable/enumerable data property through
+/// QuickJS's `JS_DefineProperty` path. Unlike `Object::set`/`JS_SetProperty`,
+/// this does not walk the prototype chain and cannot invoke an inherited
+/// setter on `Object.prototype`, `Error.prototype`, or `Array.prototype`.
+fn define_own<'js, V: IntoJs<'js>>(object: &Object<'js>, key: &str, value: V) -> Result<()> {
+    object.prop(
+        key,
+        Property::from(value).writable().configurable().enumerable(),
+    )
+}
+
+/// Same as [`define_own`] for an array index. Defining the index with
+/// `JS_DefineProperty` updates the array length without consulting an
+/// inherited `Array.prototype` setter.
+fn define_own_index<'js, V: IntoJs<'js>>(array: &Array<'js>, index: u32, value: V) -> Result<()> {
+    array.as_object().prop(
+        index,
+        Property::from(value).writable().configurable().enumerable(),
+    )
+}
+
 fn spawn_result<'js>(ctx: &Ctx<'js>, result: SyncResult) -> Result<Value<'js>> {
     let object = Object::new(ctx.clone())?;
-    object.set("pid", Value::new_float(ctx.clone(), f64::from(result.pid)))?;
-    object.set(
+    define_own(
+        &object,
+        "pid",
+        Value::new_float(ctx.clone(), f64::from(result.pid)),
+    )?;
+    define_own(
+        &object,
         "stdout",
         js_string(ctx, &String::from_utf8_lossy(&result.stdout))?,
     )?;
-    object.set(
+    define_own(
+        &object,
         "stderr",
         js_string(ctx, &String::from_utf8_lossy(&result.stderr))?,
     )?;
-    object.set("output", output_array(ctx, &result)?)?;
-    object.set("status", option_int(ctx, result.status)?)?;
-    object.set("signal", option_string(ctx, result.signal_name)?)?;
+    define_own(&object, "output", output_array(ctx, &result)?)?;
+    define_own(&object, "status", option_int(ctx, result.status)?)?;
+    define_own(&object, "signal", option_string(ctx, result.signal_name)?)?;
     if let Some(error) = result_error_object(ctx, &result)? {
-        object.set("error", error)?;
+        define_own(&object, "error", error)?;
     }
     Ok(object.into_value())
 }
 
 fn spawn_error_result<'js>(ctx: &Ctx<'js>, error: &ChildProcessError) -> Result<Value<'js>> {
     let object = Object::new(ctx.clone())?;
-    object.set("pid", Value::new_int(ctx.clone(), 0))?;
+    define_own(&object, "pid", Value::new_int(ctx.clone(), 0))?;
     let empty = js_string(ctx, "")?;
-    object.set("stdout", empty.clone())?;
-    object.set("stderr", empty)?;
+    define_own(&object, "stdout", empty.clone())?;
+    define_own(&object, "stderr", empty)?;
     let output = Array::new(ctx.clone())?;
-    output.set(0, Value::new_null(ctx.clone()))?;
-    output.set(1, js_string(ctx, "")?)?;
-    output.set(2, js_string(ctx, "")?)?;
-    object.set("output", output)?;
-    object.set("status", Value::new_null(ctx.clone()))?;
-    object.set("signal", Value::new_null(ctx.clone()))?;
-    object.set("error", error_object(ctx, error.code(), error.message())?)?;
+    define_own_index(&output, 0, Value::new_null(ctx.clone()))?;
+    define_own_index(&output, 1, js_string(ctx, "")?)?;
+    define_own_index(&output, 2, js_string(ctx, "")?)?;
+    define_own(&object, "output", output)?;
+    define_own(&object, "status", Value::new_null(ctx.clone()))?;
+    define_own(&object, "signal", Value::new_null(ctx.clone()))?;
+    define_own(
+        &object,
+        "error",
+        error_object(ctx, error.code(), error.message())?,
+    )?;
     Ok(object.into_value())
 }
 
@@ -940,19 +973,25 @@ fn fill_result_error<'js>(
     code: &str,
     result: &SyncResult,
 ) -> Result<()> {
-    object.set("code", code)?;
-    object.set("pid", Value::new_float(ctx.clone(), f64::from(result.pid)))?;
-    object.set("status", option_int(ctx, result.status)?)?;
-    object.set("signal", option_string(ctx, result.signal_name)?)?;
-    object.set(
+    define_own(object, "code", code)?;
+    define_own(
+        object,
+        "pid",
+        Value::new_float(ctx.clone(), f64::from(result.pid)),
+    )?;
+    define_own(object, "status", option_int(ctx, result.status)?)?;
+    define_own(object, "signal", option_string(ctx, result.signal_name)?)?;
+    define_own(
+        object,
         "stdout",
         js_string(ctx, &String::from_utf8_lossy(&result.stdout))?,
     )?;
-    object.set(
+    define_own(
+        object,
         "stderr",
         js_string(ctx, &String::from_utf8_lossy(&result.stderr))?,
     )?;
-    object.set("output", output_array(ctx, result)?)?;
+    define_own(object, "output", output_array(ctx, result)?)?;
     Ok(())
 }
 
@@ -974,9 +1013,17 @@ fn result_error_with<'js>(
 
 fn output_array<'js>(ctx: &Ctx<'js>, result: &SyncResult) -> Result<Array<'js>> {
     let output = Array::new(ctx.clone())?;
-    output.set(0, Value::new_null(ctx.clone()))?;
-    output.set(1, js_string(ctx, &String::from_utf8_lossy(&result.stdout))?)?;
-    output.set(2, js_string(ctx, &String::from_utf8_lossy(&result.stderr))?)?;
+    define_own_index(&output, 0, Value::new_null(ctx.clone()))?;
+    define_own_index(
+        &output,
+        1,
+        js_string(ctx, &String::from_utf8_lossy(&result.stdout))?,
+    )?;
+    define_own_index(
+        &output,
+        2,
+        js_string(ctx, &String::from_utf8_lossy(&result.stderr))?,
+    )?;
     Ok(output)
 }
 
@@ -997,7 +1044,7 @@ fn option_string<'js>(ctx: &Ctx<'js>, value: Option<&str>) -> Result<Value<'js>>
 fn error_object<'js>(ctx: &Ctx<'js>, code: &str, message: &str) -> Result<Object<'js>> {
     let exception = Exception::from_message(ctx.clone(), message)?;
     let object = exception.into_object();
-    object.set("code", code)?;
+    define_own(&object, "code", code)?;
     Ok(object)
 }
 

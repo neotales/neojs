@@ -189,6 +189,80 @@ if (undefinedSpawn.status !== 0 || undefinedSpawn.stdout !== "\n") {
 }
 
 #[test]
+fn hostile_prototype_setters_do_not_break_native_results_or_errors() {
+    require("/bin/echo");
+    require("/bin/sh");
+    run(
+        policy(&["/bin/echo", "/bin/sh"]),
+        r#"
+import { execFileSync, spawnSync } from "node:child_process";
+const boom = new Error("prototype setter ran");
+for (const name of ["pid", "stdout", "stderr", "status", "output", "signal", "error"]) {
+    Object.defineProperty(Object.prototype, name, {
+        configurable: true,
+        set() { throw boom; },
+    });
+}
+for (const name of ["code", "stderr"]) {
+    Object.defineProperty(Error.prototype, name, {
+        configurable: true,
+        set() { throw boom; },
+    });
+}
+for (const name of ["0", "1", "2"]) {
+    Object.defineProperty(Array.prototype, name, {
+        configurable: true,
+        set() { throw boom; },
+    });
+}
+try {
+    const result = spawnSync("/bin/echo", ["ok"], { encoding: "utf8" });
+    if (result.status !== 0 || result.stdout !== "ok\n" || result.output[1] !== "ok\n") {
+        throw new Error("spawn result changed");
+    }
+    if (!Array.isArray(result.output) || result.output.length !== 3) {
+        throw new Error("output array shape changed");
+    }
+    for (const name of ["pid", "stdout", "stderr", "status", "output", "signal"]) {
+        if (!Object.prototype.hasOwnProperty.call(result, name)) {
+            throw new Error(`${name} is not own`);
+        }
+    }
+    for (const index of [0, 1, 2]) {
+        if (!Object.prototype.hasOwnProperty.call(result.output, index)) {
+            throw new Error(`output[${index}] is not own`);
+        }
+    }
+    let failed = null;
+    try {
+        execFileSync("/bin/sh", ["-c", "printf out; printf err >&2; exit 3"], {
+            encoding: "utf8",
+        });
+    } catch (error) {
+        failed = error;
+    }
+    if (!failed || failed.code !== "ERR_NODE_CHILD_PROCESS_EXIT" || failed.status !== 3) {
+        throw new Error(`exec error: ${failed && failed.code}`);
+    }
+    if (!Object.prototype.hasOwnProperty.call(failed, "code")) {
+        throw new Error("code is not own");
+    }
+    if (failed.stdout !== "out" || failed.stderr !== "err") {
+        throw new Error("exec failure fields changed");
+    }
+} finally {
+    for (const name of ["pid", "stdout", "stderr", "status", "output", "signal", "error"]) {
+        delete Object.prototype[name];
+    }
+    for (const name of ["code", "stderr"]) delete Error.prototype[name];
+    for (const name of ["0", "1", "2"]) delete Array.prototype[name];
+}
+"#,
+    )
+    .expect("hostile prototype setters");
+}
+
+#[test]
 fn timeout_and_max_buffer_are_reported_through_the_node_wrapper() {
     require("/bin/sh");
     require("/bin/sleep");
