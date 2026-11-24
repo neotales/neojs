@@ -1,0 +1,36 @@
+[package]
+name = "neojs-npm"
+description = "Engine-independent npm specifier, SemVer, package.json, exports, CAS tarball, and virtual graph resolver for neojs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[features]
+# Offline by default: zero HTTP/TLS dependencies while preserving specifier
+# parsing, SemVer matching, package.json/exports resolution, CAS verification,
+# tarball ingestion, and offline/mock graph resolution.
+default = []
+network = ["neojs-remote/network"]
+
+[dependencies]
+base64.workspace = true
+flate2.workspace = true
+indexmap.workspace = true
+neojs-manifest = { version = "0.1.0", path = "../neojs-manifest" }
+neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
+neojs-remote = { workspace = true, default-features = false }
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+sha2.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

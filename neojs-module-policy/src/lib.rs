@@ -29,12 +29,28 @@ pub enum ModuleFormat {
     TypeScript,
 }
 
+/// The module type declared by the nearest `package.json` `"type"` field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackageType {
+    /// `"type": "module"` — `.js` and `.ts` files are treated as ECMAScript/TypeScript modules.
+    Module,
+    /// `"type": "commonjs"` — `.js` files are CommonJS and rejected.
+    CommonJs,
+    /// `"type"` is omitted — `.js` defaults to CommonJS in npm packages and is rejected.
+    Unspecified,
+}
+
 const JSX_REASON: &str =
     "JSX and TSX are not implemented; use .ts or .mts, or transpile the JSX first";
 const CTS_REASON: &str = "CommonJS TypeScript (.cts) is not supported; use .ts or .mts instead";
 const DECLARATION_REASON: &str =
     "declaration files (.d.ts, .d.mts, and .d.cts) describe types and contain no runnable code";
 const COMMONJS_REASON: &str = "the .cjs extension is not supported; neojs runs ECMAScript modules";
+const PACKAGE_COMMONJS_REASON: &str = "CommonJS modules (.js without \"type\": \"module\") are not supported; neojs runs ECMAScript modules";
+const PACKAGE_EXPLICIT_COMMONJS_REASON: &str = "CommonJS modules (.js under \"type\": \"commonjs\") are not supported; neojs runs ECMAScript modules";
+const PACKAGE_TS_TYPE_REASON: &str =
+    "TypeScript (.ts) inside a package requires \"type\": \"module\" in the nearest package.json";
+const PACKAGE_EXTENSIONLESS_REASON: &str = "extensionless files inside a package are not supported; use .mjs, .mts, or .js/.ts under \"type\": \"module\"";
 const JSON_REASON: &str = "JSON modules are not implemented; only ECMAScript modules are loaded";
 const WASM_REASON: &str =
     "WebAssembly modules are not implemented; only ECMAScript modules are loaded";
@@ -75,6 +91,61 @@ pub fn module_format(path: &Path) -> Result<ModuleFormat, String> {
         other => {
             return Err(format!(
                 "unknown module extension `.{other}`; neojs loads ECMAScript modules (.js or .mjs) and erasable TypeScript (.ts or .mts)"
+            ));
+        }
+    };
+    Err(reason.to_string())
+}
+
+/// Returns the format of a file inside a package whose nearest `package.json`
+/// declares `nearest_type`, or why it is not an executable module.
+///
+/// Unlike [`module_format`], this applies strict package-boundary rules:
+/// - `.mjs` is always [`ModuleFormat::JavaScript`].
+/// - `.mts` is always [`ModuleFormat::TypeScript`].
+/// - `.js` is [`ModuleFormat::JavaScript`] only when `nearest_type` is
+///   [`PackageType::Module`]; [`PackageType::CommonJs`] and
+///   [`PackageType::Unspecified`] fail closed as unsupported CommonJS.
+/// - `.ts` is [`ModuleFormat::TypeScript`] only when `nearest_type` is
+///   [`PackageType::Module`].
+/// - `.cjs`, `.cts`, `.d.ts`, `.d.mts`, `.d.cts`, `.tsx`, `.jsx`, `.json`,
+///   `.wasm`, `.node`, extensionless files, and unknown extensions fail closed.
+pub fn package_module_format(
+    path: &Path,
+    nearest_type: PackageType,
+) -> Result<ModuleFormat, String> {
+    if is_declaration_file(path) {
+        return Err(DECLARATION_REASON.to_string());
+    }
+    let Some(extension) = path.extension() else {
+        return Err(PACKAGE_EXTENSIONLESS_REASON.to_string());
+    };
+    let extension = match extension.to_str() {
+        Some(extension) => extension.to_ascii_lowercase(),
+        None => return Err("the file extension is not valid UTF-8".to_string()),
+    };
+
+    let reason = match extension.as_str() {
+        "mjs" => return Ok(ModuleFormat::JavaScript),
+        "mts" => return Ok(ModuleFormat::TypeScript),
+        "js" => match nearest_type {
+            PackageType::Module => return Ok(ModuleFormat::JavaScript),
+            PackageType::CommonJs => PACKAGE_EXPLICIT_COMMONJS_REASON,
+            PackageType::Unspecified => PACKAGE_COMMONJS_REASON,
+        },
+        "ts" => match nearest_type {
+            PackageType::Module => return Ok(ModuleFormat::TypeScript),
+            PackageType::CommonJs | PackageType::Unspecified => PACKAGE_TS_TYPE_REASON,
+        },
+        "tsx" | "jsx" => JSX_REASON,
+        "cts" => CTS_REASON,
+        "cjs" => COMMONJS_REASON,
+        "json" => JSON_REASON,
+        "wasm" => WASM_REASON,
+        "node" => NATIVE_REASON,
+        other => {
+            return Err(format!(
+                "unknown module extension `.{other}`; neojs loads ECMAScript modules (.mjs, or .js under \"type\": \"module\") and erasable TypeScript (.mts, or .ts under \"type\": \"module\")"
             ));
         }
     };
@@ -184,6 +255,69 @@ mod tests {
             "https://example.com/main.js",
         ] {
             assert!(!is_path_specifier(specifier), "{specifier}");
+        }
+    }
+
+    #[test]
+    fn package_module_format_enforces_nearest_package_type() {
+        for pkg_type in [
+            PackageType::Module,
+            PackageType::CommonJs,
+            PackageType::Unspecified,
+        ] {
+            assert_eq!(
+                package_module_format(Path::new("index.mjs"), pkg_type),
+                Ok(ModuleFormat::JavaScript)
+            );
+            assert_eq!(
+                package_module_format(Path::new("INDEX.MTS"), pkg_type),
+                Ok(ModuleFormat::TypeScript)
+            );
+        }
+
+        assert_eq!(
+            package_module_format(Path::new("index.js"), PackageType::Module),
+            Ok(ModuleFormat::JavaScript)
+        );
+        assert_eq!(
+            package_module_format(Path::new("index.ts"), PackageType::Module),
+            Ok(ModuleFormat::TypeScript)
+        );
+
+        for pkg_type in [PackageType::CommonJs, PackageType::Unspecified] {
+            let js_err = package_module_format(Path::new("index.js"), pkg_type)
+                .expect_err("non-module .js must fail closed");
+            assert!(js_err.contains("CommonJS"), "{js_err}");
+
+            let ts_err = package_module_format(Path::new("index.ts"), pkg_type)
+                .expect_err("non-module .ts must fail closed");
+            assert!(ts_err.contains("type"), "{ts_err}");
+        }
+
+        for rejected in [
+            "mod.cjs",
+            "mod.cts",
+            "types.d.ts",
+            "types.d.mts",
+            "types.d.cts",
+            "view.tsx",
+            "view.jsx",
+            "data.json",
+            "mod.wasm",
+            "native.node",
+            "noext",
+            "readme.md",
+        ] {
+            for pkg_type in [
+                PackageType::Module,
+                PackageType::CommonJs,
+                PackageType::Unspecified,
+            ] {
+                assert!(
+                    package_module_format(Path::new(rejected), pkg_type).is_err(),
+                    "`{rejected}` should be rejected under {pkg_type:?}"
+                );
+            }
         }
     }
 }
