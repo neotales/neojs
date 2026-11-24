@@ -51,8 +51,7 @@
 //! escapes is not tracked. The optional JSON protocol used by the shared tests
 //! has a hard serialized-size cap before parsing; neither engine adapter uses
 //! it. Unix pipe polling and process-group kill are implemented; another
-//! platform rejects before spawning. The blocking final reap is not a sandbox
-//! boundary.
+//! platform rejects before spawning.
 //!
 //! This is **not a sandbox**. An allowed executable runs with the authority of
 //! the neojs process. It can read and write files, use the network, and start
