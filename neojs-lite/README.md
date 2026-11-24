@@ -19,11 +19,17 @@ console.log(`hello from ${name}`);
 ```
 
 Relative imports, absolute paths, and `file:` URLs resolve from the importing
-module. Static imports and dynamic `import()` use the same loader. `console.log`
-writes to standard output and `console.error` to standard error.
+module. Static imports and dynamic `import()` use the same loader. Local modules
+discover `neo.jsonc` upward for `imports` and `workspaces` (including
+enclosing workspace roots when running inside a member directory) unless
+`--config <path>` or `--no-config` is passed; remote `https:`, `gh:`, `jsr:`,
+and `npm:` targets are rejected because remote loading is not supported in
+`neojs-lite`. `console.log` writes to standard output and `console.error` to
+standard error.
 
-The command maps module and job failures to exit 1 and preflight failures to
-exit 2, matching the V8 `neojs` command's classes.
+The command maps module and job failures to exit 1 and preflight, argument, or
+invalid/missing manifest failures to exit 2, matching the V8 `neojs` command's
+classes.
 
 ## Run tests
 
@@ -58,13 +64,14 @@ declaration files, JSON, WebAssembly, and native addons are the same.
 
 ## Build features
 
-The command selects `neo-assert`, `neo-chars`, `neo-os`, `neo-strings`,
-`neo-test`, and `neo-uuid` explicitly from `neojs-lite-core` with
+The command selects `manifest`, `neo-assert`, `neo-chars`, `neo-os`,
+`neo-strings`, `neo-test`, and `neo-uuid` explicitly from `neojs-lite-core` with
 `default-features = false`, so its advertised surface is a command decision and
-does not drift with the library defaults. The library default also enables all
-six, but a library consumer can opt out with `default-features = false`. Cargo
-features are additive and unify across the dependency graph: a build that any
-dependent enables the module for contains it. Selection is not a sandbox.
+does not drift with the library defaults. The library default enables the six
+built-in modules (`manifest` is opt-in), and a library consumer can opt out
+completely with `default-features = false`. Cargo features are additive and
+unify across the dependency graph: a build that any dependent enables the module
+for contains it. Selection is not a sandbox.
 
 ## Build isolation
 

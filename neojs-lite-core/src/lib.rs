@@ -85,6 +85,8 @@ mod strings;
 #[cfg(feature = "neo-uuid")]
 mod uuid;
 
+#[cfg(feature = "manifest")]
+pub use neojs_manifest::ImportResolver;
 pub use runtime::{Error, Runtime, TestReport};
 
 /// Test-only hooks. Compiled only with the off-by-default `test-support`

@@ -41,6 +41,9 @@ neo-test = ["dep:neojs-builtins", "neojs-builtins/test"]
 # entries. This enables `neojs-builtins/uuid` (and its fallible `getrandom` +
 # `uuid::Builder` dependencies); `--no-default-features` keeps all of them out.
 neo-uuid = ["dep:neojs-builtins", "neojs-builtins/uuid"]
+# `neo.jsonc` `ImportResolver` integration for local `imports` and workspace
+# packages. Opt-in so `--no-default-features` stays free of manifest/glob deps.
+manifest = ["dep:neojs-manifest"]
 # Test-only streaming-read counters for the bounded text access tests. Never
 # enabled by a normal build.
 test-support = []
@@ -48,6 +51,7 @@ test-support = []
 [dependencies]
 # The shared `neo:chars` Rust logic is enabled by the `neo-chars` feature.
 neojs-builtins = { workspace = true, optional = true }
+neojs-manifest = { workspace = true, optional = true }
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
 # Pinned: the C API and Rust API change between minor releases. 0.14.0 is the
 # version reviewed for this crate; `loader` supplies the module resolver and

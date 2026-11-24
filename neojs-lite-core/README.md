@@ -26,8 +26,12 @@ cargo run -p neojs-lite-core --example embed -- examples/hello.js
 ```
 
 Relative imports, absolute paths, and `file:` URLs resolve from the importing
-module. Static imports and dynamic `import()` use the same loader. `console.log`
-writes to standard output and `console.error` to standard error.
+module. Static imports and dynamic `import()` use the same loader. With the
+opt-in `manifest` feature enabled, `Runtime::with_import_resolver(resolver)`
+resolves `neo.jsonc` `imports` and workspace `@scope/pkg` references to local
+`.js`/`.mjs` modules (and rejects remote `https:`, `gh:`, `jsr:`, and `npm:`
+targets); `Runtime::new()` performs zero implicit manifest discovery.
+`console.log` writes to standard output and `console.error` to standard error.
 
 ## Run an in-memory module
 
@@ -141,9 +145,11 @@ declaration files, JSON, WebAssembly, and native addons are the same.
 
 A default build enables `neo-assert`, `neo-chars`, `neo-os`, `neo-strings`,
 `neo-test`, and `neo-uuid`, their canonical registry, loader, and
-introspection-list entries, and `Runtime::run_tests`. Each feature controls the
-optional `neojs-builtins` dependency; with `default-features = false` the
-dependency (along with `getrandom` and `uuid`), the implementation source, the
+introspection-list entries, and `Runtime::run_tests`. The opt-in `manifest`
+feature enables `neojs-manifest` and `Runtime::with_import_resolver`. Each
+feature controls the optional dependency (`neojs-builtins` or `neojs-manifest`);
+with `default-features = false` those dependencies (along with `getrandom`,
+`uuid`, `glob`, `semver`, and `serde_json`), the implementation source, the
 registry objects, the loader entries, and the list entries are all absent. The
 list is then the frozen empty array.
 

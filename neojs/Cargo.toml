@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 neojs-core = { version = "0.1.0", path = "../neojs-core" }
+neojs-manifest.workspace = true
 # Deterministic shell-style expansion for `neojs test`.
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy", features = ["test-glob"] }
 

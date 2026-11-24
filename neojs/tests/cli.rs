@@ -1663,6 +1663,8 @@ Options:
                    jsr: imports; off by default
   --no-allow-remote
                    force remote loading off, overriding NEOJS_ALLOW_REMOTE
+  --config <path>  use an explicit neo.jsonc manifest instead of discovery
+  --no-config      disable automatic neo.jsonc manifest discovery
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
   -V, --version    show the version; alone, or after `--allow-remote`
   --               end option parsing, for a file or pattern beginning with `-`
@@ -1691,8 +1693,9 @@ jsr:@scope/name[@version][/subpath] imports from the public JSR registry;
 before or after `test`. A gh:/github: specifier becomes a
 raw.githubusercontent.com https: URL. It is not SSRF protection, not a host
 allowlist, and not a sandbox. Downloads are cached under `neojs/packages` in the
-user cache. JSR metadata and files use the same HTTPS limits and cache. npm:,
-node:, and import maps are not implemented.
+user cache. JSR metadata and files use the same HTTPS limits and cache. npm:
+and node: are not implemented. Local modules discover `neo.jsonc` upward for
+`imports` and `workspaces` unless `--config` or `--no-config` is passed.
 
 `neojs test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
@@ -3969,4 +3972,360 @@ test("nested native", () => ({
         "{printed}"
     );
     assert!(!printed.contains("throwing cycle reread"), "{printed}");
+}
+
+#[test]
+fn discovers_manifest_upward_and_supports_imports_and_prefix_mappings() {
+    let project = Project::new();
+    project.write(
+        "neo.jsonc",
+        r#"{
+            // JSONC comment and trailing comma
+            "name": "@demo/app",
+            "imports": {
+                "greet": "./lib/greet.ts",
+                "utils/": "./lib/utils/",
+            },
+        }"#,
+    );
+    project.write(
+        "lib/greet.ts",
+        "export const greet = (name: string): string => `hi ${name}`;\n",
+    );
+    project.write(
+        "lib/utils/math.ts",
+        "export const double = (n: number): number => n * 2;\n",
+    );
+    let entry = project.write(
+        "src/nested/main.ts",
+        r#"
+import { greet } from "greet";
+import { double } from "utils/math.ts";
+console.log(`${greet("neo")}:${double(21)}`);
+"#,
+    );
+
+    let output = run_file(&entry);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "hi neo:42\n");
+}
+
+#[test]
+fn discovers_enclosing_workspace_when_running_from_member_directory() {
+    let project = Project::new();
+    project.write(
+        "neo.jsonc",
+        r#"{
+            "name": "@ws/root",
+            "workspaces": ["packages/*"],
+            "imports": {
+                "root-helper": "./shared/helper.ts"
+            }
+        }"#,
+    );
+    project.write("shared/helper.ts", "export const shared = 'from-root';\n");
+    project.write(
+        "packages/a/neo.jsonc",
+        r#"{
+            "name": "@ws/a",
+            "exports": "./mod.ts",
+            "imports": {
+                "member-local": "./local.ts"
+            }
+        }"#,
+    );
+    project.write("packages/a/local.ts", "export const local = 'from-a';\n");
+    project.write(
+        "packages/b/neo.jsonc",
+        r#"{
+            "name": "@ws/b",
+            "exports": {
+                ".": "./index.ts",
+                "./extra": "./extra.ts"
+            }
+        }"#,
+    );
+    project.write("packages/b/index.ts", "export const bMain = 'from-b';\n");
+    project.write("packages/b/extra.ts", "export const bExtra = 'extra-b';\n");
+    project.write("packages/b/private.ts", "export const priv = 'hidden';\n");
+
+    let entry = project.write(
+        "packages/a/mod.ts",
+        r#"
+import { shared } from "root-helper";
+import { local } from "member-local";
+import { bMain } from "@ws/b";
+import { bExtra } from "@ws/b/extra";
+console.log([shared, local, bMain, bExtra].join("|"));
+"#,
+    );
+
+    let output = run_file(&entry);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "from-root|from-a|from-b|extra-b\n");
+
+    // Unexported subpath must fail with runtime exit code 1.
+    let bad = project.write(
+        "packages/a/bad.ts",
+        r#"import { priv } from "@ws/b/private"; console.log(priv);"#,
+    );
+    let bad_output = run_file(&bad);
+    assert_eq!(bad_output.status.code(), Some(1));
+    assert!(
+        stderr(&bad_output).contains("not exported"),
+        "{}",
+        stderr(&bad_output)
+    );
+}
+
+#[test]
+fn unrelated_nested_standalone_manifest_does_not_get_overridden_by_parent_workspace() {
+    let project = Project::new();
+    project.write(
+        "neo.jsonc",
+        r#"{
+            "name": "@ws/root",
+            "workspaces": ["packages/*"],
+            "imports": { "alias": "./root.ts" }
+        }"#,
+    );
+    project.write("root.ts", "export const who = 'root';\n");
+    project.write(
+        "packages/a/neo.jsonc",
+        r#"{ "name": "@ws/a", "exports": "./mod.ts" }"#,
+    );
+    project.write("packages/a/mod.ts", "export const a = 1;\n");
+    project.write(
+        "examples/standalone/neo.jsonc",
+        r#"{
+            "name": "@example/standalone",
+            "imports": { "alias": "./local.ts" }
+        }"#,
+    );
+    project.write(
+        "examples/standalone/local.ts",
+        "export const who = 'standalone';\n",
+    );
+    let entry = project.write(
+        "examples/standalone/main.ts",
+        "import { who } from 'alias';\nconsole.log(who);\n",
+    );
+
+    let output = run_file(&entry);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "standalone\n");
+}
+
+#[test]
+fn malformed_manifest_fails_closed_with_exit_code_2() {
+    let project = Project::new();
+    project.write("neo.jsonc", "{ invalid jsonc");
+    let entry = project.write("main.ts", "console.log('never');\n");
+    let path = entry.to_str().expect("utf-8 path");
+
+    let run_out = run_args(&[path]);
+    assert_eq!(
+        run_out.status.code(),
+        Some(2),
+        "stderr: {}",
+        stderr(&run_out)
+    );
+    assert_eq!(stdout(&run_out), "");
+    assert!(
+        stderr(&run_out).contains("cannot load manifest"),
+        "{}",
+        stderr(&run_out)
+    );
+
+    let test_file = project.write(
+        "sample.test.js",
+        "import test from 'neo:test'; test('never', () => {});\n",
+    );
+    let test_path = test_file.to_str().expect("utf-8 path");
+    let test_out = run_args(&["test", test_path]);
+    assert_eq!(
+        test_out.status.code(),
+        Some(2),
+        "stderr: {}",
+        stderr(&test_out)
+    );
+    assert_eq!(stdout(&test_out), "");
+}
+
+#[test]
+fn config_and_no_config_flags_control_manifest_loading_and_reject_conflicts() {
+    let project = Project::new();
+    project.write("neo.jsonc", "{ malformed");
+    project.write(
+        "alt/custom.jsonc",
+        r#"{
+            "name": "@custom/app",
+            "imports": { "dep": "./dep.ts" }
+        }"#,
+    );
+    project.write("alt/dep.ts", "export const val = 'from-explicit-config';\n");
+    let entry = project.write("main.ts", "import { val } from 'dep';\nconsole.log(val);\n");
+    let entry_path = entry.to_str().expect("utf-8 path");
+    let custom_cfg = project.path("alt/custom.jsonc");
+    let custom_cfg_path = custom_cfg.to_str().expect("utf-8 path");
+
+    // `--config <path>` overrides discovery (bypassing the malformed root `neo.jsonc`).
+    let ok = run_args(&["--config", custom_cfg_path, entry_path]);
+    assert_eq!(ok.status.code(), Some(0), "stderr: {}", stderr(&ok));
+    assert_eq!(stdout(&ok), "from-explicit-config\n");
+
+    // `--no-config` ignores the malformed `neo.jsonc` and runs without import map -> fails at runtime (1).
+    let no_cfg = run_args(&["--no-config", entry_path]);
+    assert_eq!(no_cfg.status.code(), Some(1), "stderr: {}", stderr(&no_cfg));
+    assert!(
+        stderr(&no_cfg).contains("bare module specifiers"),
+        "{}",
+        stderr(&no_cfg)
+    );
+
+    // Missing explicit `--config` fails closed with exit code 2.
+    let missing = project.path("missing.jsonc");
+    let missing_out = run_args(&["--config", missing.to_str().expect("utf-8"), entry_path]);
+    assert_eq!(missing_out.status.code(), Some(2));
+    assert!(
+        stderr(&missing_out).contains("cannot load manifest"),
+        "{}",
+        stderr(&missing_out)
+    );
+
+    // Conflicting `--config` + `--no-config` fails with exit code 2.
+    let conflict = run_args(&["--config", custom_cfg_path, "--no-config", entry_path]);
+    assert_eq!(conflict.status.code(), Some(2));
+    assert!(
+        stderr(&conflict).contains("cannot be used together"),
+        "{}",
+        stderr(&conflict)
+    );
+
+    let test_conflict = run_args(&[
+        "--config",
+        custom_cfg_path,
+        "test",
+        "--no-config",
+        "a.test.js",
+    ]);
+    assert_eq!(test_conflict.status.code(), Some(2));
+    assert!(
+        stderr(&test_conflict).contains("cannot be used together"),
+        "{}",
+        stderr(&test_conflict)
+    );
+}
+
+#[test]
+fn manifest_https_target_respects_allow_remote_gate() {
+    let project = Project::new();
+    let cache_home = project.path("cache-home");
+    let loopback = HeldLoopback::new();
+    seed_remote_cache(&cache_home, loopback.url());
+
+    project.write(
+        "neo.jsonc",
+        &format!(
+            r#"{{
+                "name": "@demo/remote",
+                "imports": {{
+                    "remote-mod": "{}"
+                }}
+            }}"#,
+            loopback.url()
+        ),
+    );
+    let entry = project.write(
+        "main.ts",
+        "import { value } from 'remote-mod';\nconsole.log(value);\n",
+    );
+    let path = entry.to_str().expect("utf-8 path");
+
+    // Without `--allow-remote`: fails closed even though cache is seeded.
+    let denied = run_args_with_cache_home(&[path], &cache_home, Duration::from_secs(10));
+    assert_eq!(denied.status.code(), Some(1), "stderr: {}", stderr(&denied));
+    assert!(
+        stderr(&denied).contains("remote module loading is disabled"),
+        "{}",
+        stderr(&denied)
+    );
+
+    // With `--allow-remote`: resolves `remote-mod` through manifest and loads cached HTTPS module.
+    let allowed = run_args_with_cache_home(
+        &["--allow-remote", path],
+        &cache_home,
+        Duration::from_secs(10),
+    );
+    assert_eq!(
+        allowed.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&allowed)
+    );
+    assert_eq!(stdout(&allowed), "1\n");
+}
+
+#[test]
+fn test_subcommand_resolves_workspace_imports_and_respects_config_flags() {
+    let project = Project::new();
+    project.write(
+        "neo.jsonc",
+        r#"{
+            "name": "@ws/tests",
+            "workspaces": ["packages/*"]
+        }"#,
+    );
+    project.write(
+        "packages/math/neo.jsonc",
+        r#"{
+            "name": "@ws/math",
+            "exports": "./mod.ts"
+        }"#,
+    );
+    project.write(
+        "packages/math/mod.ts",
+        "export const mul = (a: number, b: number): number => a * b;\n",
+    );
+    project.write(
+        "packages/app/neo.jsonc",
+        r#"{
+            "name": "@ws/app",
+            "exports": "./mod.ts",
+            "imports": { "app-const": "./const.ts" }
+        }"#,
+    );
+    project.write("packages/app/const.ts", "export const FACTOR = 6;\n");
+    project.write("packages/app/mod.ts", "export const ok = true;\n");
+    let test_file = project.write(
+        "packages/app/tests/app.test.ts",
+        r#"
+import test from "neo:test";
+import assert from "neo:assert";
+import { mul } from "@ws/math";
+import { FACTOR } from "app-const";
+
+test("workspace import in neojs test", () => {
+    assert.strictEquals(mul(FACTOR, 7), 42);
+});
+"#,
+    );
+    let test_path = test_file.to_str().expect("utf-8 path");
+
+    let pass = run_args(&["test", test_path]);
+    assert_eq!(pass.status.code(), Some(0), "stderr: {}", stderr(&pass));
+    assert!(stdout(&pass).contains("ok 1 - workspace import in neojs test"));
+
+    let disabled = run_args(&["test", "--no-config", test_path]);
+    assert_eq!(
+        disabled.status.code(),
+        Some(1),
+        "stderr: {}",
+        stderr(&disabled)
+    );
+    assert!(
+        stderr(&disabled).contains("bare module specifiers"),
+        "{}",
+        stderr(&disabled)
+    );
 }

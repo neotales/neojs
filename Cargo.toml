@@ -69,6 +69,9 @@ deno_error = "0.7"
 # runtimes; it has no engine dependency. Each dependent selects modules through
 # its features.
 neojs-builtins = { version = "0.1.0", path = "neojs-builtins" }
+# `neo.jsonc` JSONC parsing, bounded upward discovery, workspace expansion, and
+# pure import-map/workspace resolution.
+neojs-manifest = { version = "0.1.0", path = "neojs-manifest" }
 # Engine-neutral HTTPS transport, global cache, GitHub normalization, and JSR
 # resolution. Has no JS engine dependency; `network` enables `ureq` + `rustls`.
 neojs-remote = { version = "0.1.0", path = "neojs-remote" }

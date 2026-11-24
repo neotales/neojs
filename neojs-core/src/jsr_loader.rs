@@ -233,7 +233,7 @@ impl JsrModuleLoader {
     /// so a prepared remote entry and the remote client are the same objects.
     #[cfg(test)]
     pub(crate) fn with_limits(registry: Rc<dyn Registry>, limits: Limits) -> Self {
-        Self::new(registry, Rc::new(FileModuleLoader::new(None)), limits)
+        Self::new(registry, Rc::new(FileModuleLoader::new(None, None)), limits)
     }
 
     /// Resolves one `jsr:` specifier against the registry.
@@ -589,6 +589,12 @@ impl ModuleLoader for JsrModuleLoader {
             }
             if let Some(response) = self.resolve_registry_https(specifier, referrer) {
                 return response;
+            }
+        } else {
+            match self.files.resolve_jsr_from_manifest(specifier, referrer) {
+                Ok(Some(jsr_specifier)) => return self.resolve_jsr(&jsr_specifier, referrer),
+                Ok(None) => {}
+                Err(error) => return Err(error),
             }
         }
         self.files.resolve(specifier, referrer, kind)

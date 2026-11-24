@@ -1,13 +1,18 @@
 //! Command-line entry point for neojs.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use neojs_core::Error;
+use neojs_core::ImportResolver;
 use neojs_core::RemoteOptions;
 use neojs_core::Runtime;
+use neojs_core::RuntimeOptions;
 use neojs_core::TestReport;
+use neojs_manifest::{
+    DiscoveredManifest, MAX_DISCOVERY_DEPTH, Manifest, Workspace, discover_manifest,
+};
 
 /// Exit code for a module that failed while loading or running.
 const EXIT_RUNTIME_FAILURE: u8 = 1;
@@ -39,15 +44,17 @@ fn main() -> ExitCode {
         Command::Run {
             input,
             allow_remote,
+            config,
         } => match resolve_allow_remote(allow_remote) {
-            Ok(allow_remote) => run(input, allow_remote),
+            Ok(allow_remote) => run(input, allow_remote, &config),
             Err(message) => startup_failure(&message),
         },
         Command::Test {
             patterns,
             allow_remote,
+            config,
         } => match resolve_allow_remote(allow_remote) {
-            Ok(allow_remote) => run_tests(&patterns, allow_remote),
+            Ok(allow_remote) => run_tests(&patterns, allow_remote, &config),
             Err(message) => startup_failure(&message),
         },
     }
@@ -64,13 +71,50 @@ enum Command {
     Run {
         input: Input,
         allow_remote: AllowRemote,
+        config: ConfigChoice,
     },
     Test {
         patterns: Vec<String>,
         allow_remote: AllowRemote,
+        config: ConfigChoice,
     },
     Help,
     Version,
+}
+
+/// The `neo.jsonc` manifest selection made on the command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConfigChoice {
+    Auto,
+    Disabled,
+    Explicit(PathBuf),
+}
+
+impl ConfigChoice {
+    fn set_explicit(&mut self, path: PathBuf) -> Result<(), String> {
+        match self {
+            Self::Auto => {
+                *self = Self::Explicit(path);
+                Ok(())
+            }
+            Self::Disabled => {
+                Err("`--config` and `--no-config` cannot be used together".to_string())
+            }
+            Self::Explicit(_) => Err("`--config` cannot be specified more than once".to_string()),
+        }
+    }
+
+    fn set_disabled(&mut self) -> Result<(), String> {
+        match self {
+            Self::Auto | Self::Disabled => {
+                *self = Self::Disabled;
+                Ok(())
+            }
+            Self::Explicit(_) => {
+                Err("`--config` and `--no-config` cannot be used together".to_string())
+            }
+        }
+    }
 }
 
 /// The remote-loading choice made on the command line.
@@ -146,6 +190,7 @@ enum Input {
 
 fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
     let mut allow_remote = AllowRemote::Unspecified;
+    let mut config = ConfigChoice::Auto;
     let mut index = 0;
     while let Some(argument) = args.get(index) {
         match argument.to_str() {
@@ -155,6 +200,28 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
             }
             Some("--no-allow-remote") => {
                 allow_remote.choose(AllowRemote::Disabled)?;
+                index += 1;
+            }
+            Some("--no-config") => {
+                config.set_disabled()?;
+                index += 1;
+            }
+            Some("--config") => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "`--config` requires a path".to_string())?;
+                if value.is_empty() {
+                    return Err("`--config` requires a non-empty path".to_string());
+                }
+                config.set_explicit(PathBuf::from(value))?;
+                index += 2;
+            }
+            Some(value) if value.starts_with("--config=") => {
+                let path = &value["--config=".len()..];
+                if path.is_empty() {
+                    return Err("`--config` requires a non-empty path".to_string());
+                }
+                config.set_explicit(PathBuf::from(path))?;
                 index += 1;
             }
             _ => break,
@@ -176,9 +243,10 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
                 return Ok(Command::Run {
                     input: classify_input(&rest[1]),
                     allow_remote,
+                    config,
                 });
             }
-            "test" => return parse_test_args(&rest[1..], allow_remote),
+            "test" => return parse_test_args(&rest[1..], allow_remote, config),
             _ => {}
         }
     }
@@ -192,42 +260,77 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
     Ok(Command::Run {
         input: classify_input(first),
         allow_remote,
+        config,
     })
 }
 
 /// Parses `neojs test <file-or-glob>...`.
 ///
-/// Every argument is a pattern. `--allow-remote` and `--no-allow-remote` may
-/// appear before or after `test` and select remote loading for each selected
-/// file's fresh runtime. `--` ends option parsing so a pattern beginning with
-/// `-`, including one named `--allow-remote`, can still be named. The command
-/// requires at least one pattern; discovery defaults are deliberately absent.
-fn parse_test_args(args: &[OsString], mut allow_remote: AllowRemote) -> Result<Command, String> {
+/// Every argument is a pattern. `--allow-remote`, `--no-allow-remote`,
+/// `--config <path>`, and `--no-config` may appear before or after `test` and
+/// apply to each selected file's fresh runtime. `--` ends option parsing so a
+/// pattern beginning with `-`, including one named `--allow-remote`, can still
+/// be named. The command requires at least one pattern; discovery defaults are
+/// deliberately absent.
+fn parse_test_args(
+    args: &[OsString],
+    mut allow_remote: AllowRemote,
+    mut config: ConfigChoice,
+) -> Result<Command, String> {
     if args.len() == 1 && matches!(args[0].to_str(), Some("-h" | "--help")) {
         return Ok(Command::Help);
     }
     let mut patterns = Vec::new();
     let mut after_double_dash = false;
-    for arg in args {
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
         let Some(value) = arg.to_str() else {
             return Err("test file or glob names must be valid UTF-8".to_string());
         };
         if !after_double_dash && value == "--" {
             after_double_dash = true;
+            index += 1;
             continue;
         }
         if !after_double_dash && value == "--allow-remote" {
             allow_remote.choose(AllowRemote::Enabled)?;
+            index += 1;
             continue;
         }
         if !after_double_dash && value == "--no-allow-remote" {
             allow_remote.choose(AllowRemote::Disabled)?;
+            index += 1;
+            continue;
+        }
+        if !after_double_dash && value == "--no-config" {
+            config.set_disabled()?;
+            index += 1;
+            continue;
+        }
+        if !after_double_dash && value == "--config" {
+            let path = args
+                .get(index + 1)
+                .ok_or_else(|| "`--config` requires a path".to_string())?;
+            if path.is_empty() {
+                return Err("`--config` requires a non-empty path".to_string());
+            }
+            config.set_explicit(PathBuf::from(path))?;
+            index += 2;
+            continue;
+        }
+        if !after_double_dash && let Some(path) = value.strip_prefix("--config=") {
+            if path.is_empty() {
+                return Err("`--config` requires a non-empty path".to_string());
+            }
+            config.set_explicit(PathBuf::from(path))?;
+            index += 1;
             continue;
         }
         if !after_double_dash && value.starts_with('-') {
             return Err(format!("unknown option `{value}`"));
         }
         patterns.push(value.to_string());
+        index += 1;
     }
     if patterns.is_empty() {
         return Err("no test files or globs given".to_string());
@@ -235,6 +338,7 @@ fn parse_test_args(args: &[OsString], mut allow_remote: AllowRemote) -> Result<C
     Ok(Command::Test {
         patterns,
         allow_remote,
+        config,
     })
 }
 
@@ -266,8 +370,172 @@ fn classify_input(input: &OsString) -> Input {
     Input::Path(PathBuf::from(input))
 }
 
-fn run(input: Input, allow_remote: bool) -> ExitCode {
-    let mut runtime = match create_runtime(allow_remote) {
+enum LoadedConfig {
+    None,
+    Standalone(ImportResolver),
+    Workspace(Box<Workspace>),
+}
+
+impl LoadedConfig {
+    fn from_choice(choice: &ConfigChoice) -> Result<Option<Self>, String> {
+        match choice {
+            ConfigChoice::Disabled => Ok(Some(Self::None)),
+            ConfigChoice::Explicit(path) => load_explicit_config(path).map(Some),
+            ConfigChoice::Auto => Ok(None),
+        }
+    }
+
+    fn resolver_for_entry(
+        &self,
+        entry_path: Option<&Path>,
+    ) -> Result<Option<ImportResolver>, String> {
+        match self {
+            Self::None => Ok(None),
+            Self::Standalone(resolver) => Ok(Some(resolver.clone())),
+            Self::Workspace(workspace) => {
+                let active = match entry_path {
+                    Some(path) if std::fs::symlink_metadata(path).is_ok() => {
+                        workspace.member_for_path(path).map_err(|err| {
+                            format!("cannot resolve `{}` in workspace: {err}", path.display())
+                        })?
+                    }
+                    _ => None,
+                };
+                let resolver =
+                    ImportResolver::from_workspace(workspace, active.map(|member| member.name()))
+                        .map_err(|err| format!("cannot build workspace import resolver: {err}"))?;
+                Ok(Some(resolver))
+            }
+        }
+    }
+}
+
+fn load_explicit_config(path: &Path) -> Result<LoadedConfig, String> {
+    let manifest = Manifest::from_path(path)
+        .map_err(|err| format!("cannot load manifest `{}`: {err}", path.display()))?;
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|err| format!("cannot resolve manifest `{}`: {err}", path.display()))?;
+    if !manifest.workspaces.is_empty() {
+        let workspace = Workspace::load(&canonical)
+            .map_err(|err| format!("cannot load workspace `{}`: {err}", path.display()))?;
+        return Ok(LoadedConfig::Workspace(Box::new(workspace)));
+    }
+    let dir = canonical
+        .parent()
+        .ok_or_else(|| format!("manifest `{}` has no parent directory", path.display()))?
+        .to_path_buf();
+    let discovered = DiscoveredManifest {
+        path: canonical,
+        dir,
+        manifest,
+    };
+    Ok(LoadedConfig::Standalone(ImportResolver::from_manifest(
+        &discovered,
+    )))
+}
+
+fn discover_resolver_for_entry(entry_path: &Path) -> Result<Option<ImportResolver>, String> {
+    let abs_entry = std::path::absolute(entry_path)
+        .map_err(|err| format!("cannot resolve `{}`: {err}", entry_path.display()))?;
+    let Some(entry_dir) = abs_entry.parent() else {
+        return Ok(None);
+    };
+    if !entry_dir.is_dir() {
+        return Ok(None);
+    }
+    let Some(discovered) = discover_manifest(entry_dir, None)
+        .map_err(|err| format!("cannot load manifest for `{}`: {err}", entry_path.display()))?
+    else {
+        return Ok(None);
+    };
+    if !discovered.manifest.workspaces.is_empty() {
+        let workspace = Workspace::load(&discovered.path).map_err(|err| {
+            format!(
+                "cannot load workspace `{}`: {err}",
+                discovered.path.display()
+            )
+        })?;
+        let active = if std::fs::symlink_metadata(&abs_entry).is_ok() {
+            workspace.member_for_path(&abs_entry).map_err(|err| {
+                format!(
+                    "cannot resolve `{}` in workspace: {err}",
+                    entry_path.display()
+                )
+            })?
+        } else {
+            None
+        };
+        let resolver = ImportResolver::from_workspace(&workspace, active.map(|m| m.name()))
+            .map_err(|err| {
+                format!(
+                    "cannot build workspace import resolver for `{}`: {err}",
+                    entry_path.display()
+                )
+            })?;
+        return Ok(Some(resolver));
+    }
+
+    let mut probe = discovered.dir.parent().map(Path::to_path_buf);
+    for _ in 0..MAX_DISCOVERY_DEPTH {
+        let Some(parent_dir) = probe else {
+            break;
+        };
+        let Some(parent_discovered) = discover_manifest(&parent_dir, None)
+            .map_err(|err| format!("cannot load manifest for `{}`: {err}", entry_path.display()))?
+        else {
+            break;
+        };
+        if !parent_discovered.manifest.workspaces.is_empty() {
+            let workspace = Workspace::load(&parent_discovered.path).map_err(|err| {
+                format!(
+                    "cannot load workspace `{}`: {err}",
+                    parent_discovered.path.display()
+                )
+            })?;
+            if let Some(member) = workspace
+                .members()
+                .find(|member| member.manifest_path == discovered.path)
+            {
+                let resolver = ImportResolver::from_workspace(&workspace, Some(member.name()))
+                    .map_err(|err| {
+                        format!(
+                            "cannot build workspace import resolver for `{}`: {err}",
+                            entry_path.display()
+                        )
+                    })?;
+                return Ok(Some(resolver));
+            }
+            break;
+        }
+        probe = parent_discovered.dir.parent().map(Path::to_path_buf);
+    }
+
+    Ok(Some(ImportResolver::from_manifest(&discovered)))
+}
+
+fn run(input: Input, allow_remote: bool, config: &ConfigChoice) -> ExitCode {
+    let loaded = match LoadedConfig::from_choice(config) {
+        Ok(loaded) => loaded,
+        Err(message) => {
+            eprintln!("neojs: {message}");
+            return ExitCode::from(EXIT_STARTUP_FAILURE);
+        }
+    };
+    let resolver = match (&loaded, &input) {
+        (Some(loaded), Input::Path(path)) => loaded.resolver_for_entry(Some(path)),
+        (Some(loaded), Input::Url(_)) => loaded.resolver_for_entry(None),
+        (None, Input::Path(path)) => discover_resolver_for_entry(path),
+        (None, Input::Url(_)) => Ok(None),
+    };
+    let resolver = match resolver {
+        Ok(resolver) => resolver,
+        Err(message) => {
+            eprintln!("neojs: {message}");
+            return ExitCode::from(EXIT_STARTUP_FAILURE);
+        }
+    };
+
+    let mut runtime = match create_runtime(allow_remote, resolver) {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("neojs: {error}");
@@ -288,18 +556,25 @@ fn run(input: Input, allow_remote: bool) -> ExitCode {
     }
 }
 
-/// Creates a runtime, with remote and JSR loading only when explicitly enabled.
+/// Creates a runtime, with remote and JSR loading only when explicitly enabled
+/// and an optional `neo.jsonc` [`ImportResolver`].
 ///
 /// Each call gets its own default [`RemoteOptions`], so a fresh runtime also
 /// gets a fresh remote request, module, and byte budget. The default package
 /// cache is shared per user profile, as for a normal run. The JSR loader uses
 /// the same client, limits, and cache for `jsr:` metadata and files.
-fn create_runtime(allow_remote: bool) -> Result<Runtime, Error> {
+fn create_runtime(
+    allow_remote: bool,
+    import_resolver: Option<ImportResolver>,
+) -> Result<Runtime, Error> {
+    let mut options = RuntimeOptions::new();
     if allow_remote {
-        Runtime::with_remote(RemoteOptions::new())
-    } else {
-        Runtime::new()
+        options = options.with_remote(RemoteOptions::new());
     }
+    if let Some(resolver) = import_resolver {
+        options = options.with_import_resolver(resolver);
+    }
+    Runtime::with_options(options)
 }
 
 fn exit_code(error: &Error) -> u8 {
@@ -348,7 +623,15 @@ impl TestTotals {
 /// and the test queue cannot leak between files. With `allow_remote`, every
 /// fresh runtime can also load `https:` modules, with its own default remote
 /// limits and the shared user-profile package cache.
-fn run_tests(patterns: &[String], allow_remote: bool) -> ExitCode {
+fn run_tests(patterns: &[String], allow_remote: bool, config: &ConfigChoice) -> ExitCode {
+    let loaded = match LoadedConfig::from_choice(config) {
+        Ok(loaded) => loaded,
+        Err(message) => {
+            eprintln!("neojs: {message}");
+            return ExitCode::from(EXIT_STARTUP_FAILURE);
+        }
+    };
+
     let files = match neojs_module_policy::test_glob::expand(patterns) {
         Ok(files) => files,
         Err(message) => {
@@ -358,11 +641,26 @@ fn run_tests(patterns: &[String], allow_remote: bool) -> ExitCode {
         }
     };
 
+    let mut resolvers = Vec::with_capacity(files.len());
+    for file in &files {
+        let resolver = match &loaded {
+            Some(loaded) => loaded.resolver_for_entry(Some(file)),
+            None => discover_resolver_for_entry(file),
+        };
+        match resolver {
+            Ok(resolver) => resolvers.push(resolver),
+            Err(message) => {
+                eprintln!("neojs: {message}");
+                return ExitCode::from(EXIT_STARTUP_FAILURE);
+            }
+        }
+    }
+
     let mut totals = TestTotals::default();
     let mut failed_files = 0usize;
-    for file in &files {
+    for (file, resolver) in files.iter().zip(resolvers) {
         println!("test {}:", file.display());
-        let mut runtime = match create_runtime(allow_remote) {
+        let mut runtime = match create_runtime(allow_remote, resolver) {
             Ok(runtime) => runtime,
             Err(error) => {
                 eprintln!("neojs: {error}");
@@ -436,6 +734,8 @@ Options:
                    jsr: imports; off by default
   --no-allow-remote
                    force remote loading off, overriding NEOJS_ALLOW_REMOTE
+  --config <path>  use an explicit neo.jsonc manifest instead of discovery
+  --no-config      disable automatic neo.jsonc manifest discovery
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
   -V, --version    show the version; alone, or after `--allow-remote`
   --               end option parsing, for a file or pattern beginning with `-`
@@ -464,8 +764,9 @@ jsr:@scope/name[@version][/subpath] imports from the public JSR registry;
 before or after `test`. A gh:/github: specifier becomes a
 raw.githubusercontent.com https: URL. It is not SSRF protection, not a host
 allowlist, and not a sandbox. Downloads are cached under `neojs/packages` in the
-user cache. JSR metadata and files use the same HTTPS limits and cache. npm:,
-node:, and import maps are not implemented.
+user cache. JSR metadata and files use the same HTTPS limits and cache. npm:
+and node: are not implemented. Local modules discover `neo.jsonc` upward for
+`imports` and `workspaces` unless `--config` or `--no-config` is passed.
 
 `neojs test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
@@ -490,10 +791,12 @@ mod tests {
     use super::ALLOW_REMOTE_ENV;
     use super::AllowRemote;
     use super::Command;
+    use super::ConfigChoice;
     use super::parse_args;
     use super::parse_boolean_env;
     use std::ffi::OsStr;
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
@@ -506,6 +809,7 @@ mod tests {
             Ok(Command::Test {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Enabled,
+                config: ConfigChoice::Auto,
             })
         );
     }
@@ -517,6 +821,7 @@ mod tests {
             Ok(Command::Test {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Enabled,
+                config: ConfigChoice::Auto,
             })
         );
     }
@@ -532,6 +837,7 @@ mod tests {
                 Ok(Command::Test {
                     patterns: vec!["a.test.js".to_string()],
                     allow_remote: AllowRemote::Disabled,
+                    config: ConfigChoice::Auto,
                 })
             );
         }
@@ -544,6 +850,7 @@ mod tests {
             Ok(Command::Test {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Unspecified,
+                config: ConfigChoice::Auto,
             })
         );
     }
@@ -558,6 +865,7 @@ mod tests {
                     "--no-allow-remote".to_string()
                 ],
                 allow_remote: AllowRemote::Unspecified,
+                config: ConfigChoice::Auto,
             })
         );
     }
@@ -590,7 +898,58 @@ mod tests {
             Ok(Command::Run {
                 input: super::Input::Path("main.js".into()),
                 allow_remote: AllowRemote::Disabled,
+                config: ConfigChoice::Auto,
             })
+        );
+    }
+
+    #[test]
+    fn config_flags_parse_and_reject_conflicts() {
+        assert_eq!(
+            parse_args(args(&["--config", "custom.jsonc", "main.js"])),
+            Ok(Command::Run {
+                input: super::Input::Path("main.js".into()),
+                allow_remote: AllowRemote::Unspecified,
+                config: ConfigChoice::Explicit(PathBuf::from("custom.jsonc")),
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["--config=custom.jsonc", "test", "a.test.js"])),
+            Ok(Command::Test {
+                patterns: vec!["a.test.js".to_string()],
+                allow_remote: AllowRemote::Unspecified,
+                config: ConfigChoice::Explicit(PathBuf::from("custom.jsonc")),
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["test", "--no-config", "a.test.js"])),
+            Ok(Command::Test {
+                patterns: vec!["a.test.js".to_string()],
+                allow_remote: AllowRemote::Unspecified,
+                config: ConfigChoice::Disabled,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["--config", "a.jsonc", "--no-config", "main.js"])),
+            Err("`--config` and `--no-config` cannot be used together".to_string())
+        );
+        assert_eq!(
+            parse_args(args(&[
+                "--no-config",
+                "test",
+                "--config",
+                "a.jsonc",
+                "a.test.js"
+            ])),
+            Err("`--config` and `--no-config` cannot be used together".to_string())
+        );
+        assert_eq!(
+            parse_args(args(&["--config"])),
+            Err("`--config` requires a path".to_string())
+        );
+        assert_eq!(
+            parse_args(args(&["--config=", "main.js"])),
+            Err("`--config` requires a non-empty path".to_string())
         );
     }
 

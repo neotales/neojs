@@ -4,8 +4,12 @@
 //! and drains V8's event loop. A runtime is single-use; a second entry module
 //! returns [`Error::RuntimeConsumed`].
 //!
-//! [`Runtime::new`] is local-only. [`Runtime::with_remote`] adds an explicit
-//! opt-in for HTTPS modules: it accepts an HTTPS entry through
+//! [`Runtime::new`] is local-only with zero implicit `neo.jsonc` discovery.
+//! [`Runtime::with_import_resolver`] and [`Runtime::with_options`] (via
+//! [`RuntimeOptions`]) opt in to an explicit `neojs_manifest::ImportResolver`
+//! for `imports` and `workspaces` resolution from local `file:` modules.
+//! [`Runtime::with_remote`] (or [`RuntimeOptions::with_remote`]) adds an
+//! explicit opt-in for HTTPS modules: it accepts an HTTPS entry through
 //! [`Runtime::run_url`] and lets any module import an absolute `https:` URL.
 //! Remote modules keep the requested URL as their identity, resolve their
 //! relative imports against it, and cannot import `file:`. Only `https:` is a
@@ -386,8 +390,10 @@ mod typescript;
 mod uuid;
 
 pub use error::Error;
+pub use neojs_manifest::ImportResolver;
 pub use neojs_remote::RemoteOptions;
 pub use runtime::Runtime;
+pub use runtime::RuntimeOptions;
 pub use runtime::TestReport;
 
 /// Test-only hooks. Compiled only with the off-by-default `test-support`

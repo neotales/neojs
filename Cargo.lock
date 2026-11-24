@@ -2035,6 +2035,7 @@ name = "neojs"
 version = "0.1.0"
 dependencies = [
  "neojs-core",
+ "neojs-manifest",
  "neojs-module-policy",
  "neotales-ssh",
  "tempfile",
@@ -2067,6 +2068,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "neojs-builtins",
+ "neojs-manifest",
  "neojs-module-policy",
  "neojs-remote",
  "neotales-age",
@@ -2096,6 +2098,7 @@ name = "neojs-lite"
 version = "0.1.0"
 dependencies = [
  "neojs-lite-core",
+ "neojs-manifest",
  "neojs-module-policy",
  "tempfile",
 ]
@@ -2105,6 +2108,7 @@ name = "neojs-lite-core"
 version = "0.1.0"
 dependencies = [
  "neojs-builtins",
+ "neojs-manifest",
  "neojs-module-policy",
  "rquickjs",
  "tempfile",

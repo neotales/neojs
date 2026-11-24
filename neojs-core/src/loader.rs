@@ -68,6 +68,7 @@ use std::rc::Rc;
 
 use crate::builtins;
 use crate::typescript;
+use neojs_manifest::{ImportResolver, NormalizedSpecifier, ResolvedImport};
 use neojs_remote::RemoteClient;
 use neojs_remote::diagnostic_url;
 use neojs_remote::display_url;
@@ -118,6 +119,7 @@ pub(crate) type FinalUrlObserver = Rc<dyn Fn(&Url, &Url) -> Result<(), String>>;
 /// rejected instead of silently reading the local filesystem.
 pub(crate) struct FileModuleLoader {
     remote: Option<RemoteClient>,
+    import_resolver: Option<ImportResolver>,
     /// A remote entry module prepared before loading starts.
     ///
     /// The runtime fetches and type-strips an entry before consuming itself, so
@@ -147,11 +149,162 @@ pub(crate) struct PreparedEntry {
 
 impl FileModuleLoader {
     /// Creates a loader. `remote` is `None` when remote loading is disabled.
-    pub(crate) fn new(remote: Option<RemoteClient>) -> Self {
+    pub(crate) fn new(
+        remote: Option<RemoteClient>,
+        import_resolver: Option<ImportResolver>,
+    ) -> Self {
         Self {
             remote,
+            import_resolver,
             entry: RefCell::new(None),
             final_url_observer: RefCell::new(None),
+        }
+    }
+
+    /// Resolves a `jsr:` specifier mapped by the project's `ImportResolver`
+    /// when `referrer` is a local `file:` module.
+    ///
+    /// Returns `Ok(None)` when there is no resolver, the referrer is not a
+    /// `file:` URL, or the mapping did not produce a `jsr:` target.
+    pub(crate) fn resolve_jsr_from_manifest(
+        &self,
+        specifier: &str,
+        referrer: &str,
+    ) -> Result<Option<String>, JsErrorBox> {
+        let Some(resolver) = &self.import_resolver else {
+            return Ok(None);
+        };
+        if !is_file_referrer(referrer) {
+            return Ok(None);
+        }
+        if builtins::resolve(specifier).is_some() || case_insensitive_builtin(specifier).is_some() {
+            return Ok(None);
+        }
+        match resolver.resolve(specifier) {
+            Ok(ResolvedImport::Specifier(NormalizedSpecifier::Jsr(jsr))) => {
+                Ok(Some(jsr.canonical()))
+            }
+            Ok(_) => Ok(None),
+            Err(error) => Err(JsErrorBox::generic(with_referrer(
+                format!("cannot resolve `{}`: {error}", display_specifier(specifier)),
+                referrer,
+            ))),
+        }
+    }
+
+    /// Consults `import_resolver` for a local `file:` referrer.
+    ///
+    /// Remote (`https:`) and non-`file:` referrers never consult the project's
+    /// `ImportResolver`, so remote code cannot escape into local `file:` paths
+    /// through `neo.jsonc` mappings or workspace packages.
+    fn resolve_with_import_resolver(
+        &self,
+        specifier: &str,
+        referrer: &str,
+    ) -> Option<ModuleResolveResponse> {
+        let resolver = self.import_resolver.as_ref()?;
+        if !is_file_referrer(referrer) {
+            return None;
+        }
+        let resolved = match resolver.resolve(specifier) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return Some(Err(JsErrorBox::generic(with_referrer(
+                    format!("cannot resolve `{}`: {error}", display_specifier(specifier)),
+                    referrer,
+                ))));
+            }
+        };
+        match resolved {
+            ResolvedImport::Builtin(_) | ResolvedImport::Unmapped => None,
+            ResolvedImport::Local(path) => Some(Url::from_file_path(&path).map_err(|()| {
+                JsErrorBox::generic(with_referrer(
+                    format!(
+                        "cannot resolve `{}`: resolved local path is not a valid file: URL",
+                        display_specifier(specifier)
+                    ),
+                    referrer,
+                ))
+            })),
+            ResolvedImport::Specifier(normalized) => match normalized {
+                NormalizedSpecifier::Path(_) => unreachable!("local paths map to Local"),
+                NormalizedSpecifier::FileUrl(file_url) => {
+                    let parsed = match Url::parse(&file_url) {
+                        Ok(url) if url.scheme() == "file" && url.to_file_path().is_ok() => Ok(url),
+                        _ => Err(JsErrorBox::generic(with_referrer(
+                            format!(
+                                "cannot resolve `{}`: invalid file: URL target",
+                                display_specifier(specifier)
+                            ),
+                            referrer,
+                        ))),
+                    };
+                    Some(parsed)
+                }
+                NormalizedSpecifier::Https(https_url) => match Url::parse(&https_url) {
+                    Ok(url) => Some(self.resolve_https(url)),
+                    Err(error) => Some(Err(JsErrorBox::generic(with_referrer(
+                        format!("cannot resolve `{}`: {error}", display_specifier(specifier)),
+                        referrer,
+                    )))),
+                },
+                NormalizedSpecifier::Gh(gh) => match Url::parse(&gh.canonical()) {
+                    Ok(url) => Some(self.resolve_https(url)),
+                    Err(error) => Some(Err(JsErrorBox::generic(with_referrer(
+                        format!("cannot resolve `{}`: {error}", display_specifier(specifier)),
+                        referrer,
+                    )))),
+                },
+                NormalizedSpecifier::Jsr(jsr) => {
+                    let reason = unsupported_specifier(&jsr.canonical(), referrer)
+                        .unwrap_or_else(|| {
+                            with_referrer(
+                                format!(
+                                    "cannot resolve `{}`: jsr: modules require remote module loading",
+                                    jsr.canonical()
+                                ),
+                                referrer,
+                            )
+                        });
+                    Some(Err(JsErrorBox::generic(reason)))
+                }
+                NormalizedSpecifier::Npm(npm) => {
+                    let reason =
+                        unsupported_specifier(&npm.canonical(), referrer).unwrap_or_else(|| {
+                            with_referrer(
+                                format!(
+                                    "cannot resolve `{}`: npm: modules are not implemented",
+                                    npm.canonical()
+                                ),
+                                referrer,
+                            )
+                        });
+                    Some(Err(JsErrorBox::generic(reason)))
+                }
+                NormalizedSpecifier::Node(node) => {
+                    let reason = unsupported_specifier(&node, referrer).unwrap_or_else(|| {
+                        with_referrer(
+                            format!(
+                                "cannot resolve `{node}`: Node.js built-in modules are not implemented"
+                            ),
+                            referrer,
+                        )
+                    });
+                    Some(Err(JsErrorBox::generic(reason)))
+                }
+                NormalizedSpecifier::Bare(bare) => {
+                    let reason = unsupported_specifier(&bare, referrer).unwrap_or_else(|| {
+                        with_referrer(
+                            format!(
+                                "cannot resolve `{}`: bare import-map targets are not implemented",
+                                display_specifier(&bare)
+                            ),
+                            referrer,
+                        )
+                    });
+                    Some(Err(JsErrorBox::generic(reason)))
+                }
+            },
         }
     }
 
@@ -271,6 +424,10 @@ impl ModuleLoader for FileModuleLoader {
         // tab/newline characters, which would make `neo:ch\nars` resolve.
         if let Some(canonical) = case_insensitive_builtin(specifier) {
             return builtin_url(canonical);
+        }
+
+        if let Some(resolved) = self.resolve_with_import_resolver(specifier, referrer) {
+            return resolved;
         }
 
         // `gh:` and `github:` are not a transport of their own: they name one
@@ -591,6 +748,11 @@ fn unsupported_scheme(url: &Url) -> String {
         }
     };
     format!("cannot resolve `{specifier}`: {reason}")
+}
+
+/// Returns whether `referrer` is a local `file:` URL.
+fn is_file_referrer(referrer: &str) -> bool {
+    Url::parse(referrer).is_ok_and(|url| url.scheme() == "file")
 }
 
 /// Returns whether a specifier is a URL path that resolves against a remote

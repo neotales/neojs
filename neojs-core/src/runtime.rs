@@ -21,9 +21,10 @@ use std::rc::Rc;
 
 use deno_core::JsRuntime;
 use deno_core::PollEventLoopOptions;
-use deno_core::RuntimeOptions;
+use deno_core::RuntimeOptions as DenoRuntimeOptions;
 use deno_core::url::Url;
 use deno_core::v8;
+use neojs_manifest::ImportResolver;
 
 use crate::Error;
 use crate::age::neojs_age;
@@ -177,6 +178,40 @@ impl TestReport {
     /// and no event-loop work was left unsettled.
     pub fn all_passed(&self) -> bool {
         self.failed == 0 && self.pending == 0 && self.unhandled == 0 && self.unsettled == 0
+    }
+}
+
+/// Configuration for constructing a [`Runtime`].
+///
+/// Defaults to local-only module loading with no import-map or workspace
+/// resolver and no implicit `neo.jsonc` discovery.
+#[derive(Clone, Debug, Default)]
+pub struct RuntimeOptions {
+    remote: Option<RemoteOptions>,
+    import_resolver: Option<ImportResolver>,
+}
+
+impl RuntimeOptions {
+    /// Creates default options: local-only loading with no import resolver.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enables remote `https:`, `gh:`/`github:`, and `jsr:` module loading
+    /// with the given limits and cache settings.
+    pub fn with_remote(mut self, options: RemoteOptions) -> Self {
+        self.remote = Some(options);
+        self
+    }
+
+    /// Installs a `neo.jsonc` [`ImportResolver`] for local `file:` modules.
+    ///
+    /// Remote (`https:` and `jsr:`) referrers never consult the project import
+    /// resolver, and remote targets in `imports` still require
+    /// [`RuntimeOptions::with_remote`].
+    pub fn with_import_resolver(mut self, resolver: ImportResolver) -> Self {
+        self.import_resolver = Some(resolver);
+        self
     }
 }
 
@@ -340,7 +375,27 @@ impl Runtime {
     /// interrupted, and cancelling after loading starts leaves the runtime
     /// consumed.
     pub fn with_remote(options: RemoteOptions) -> Result<Self, Error> {
-        Self::build(CONSOLE_SHIM, neo_shim(), Some(RemoteClient::new(options)))
+        Self::with_options(RuntimeOptions::new().with_remote(options))
+    }
+
+    /// Creates a local-only runtime with an explicit `neo.jsonc`
+    /// [`ImportResolver`].
+    ///
+    /// [`Runtime::new`] performs zero implicit manifest discovery. Embedders
+    /// opt in by passing a resolved [`ImportResolver`] here or via
+    /// [`Runtime::with_options`]. Remote targets in `imports` (`https:`, `gh:`,
+    /// `jsr:`) still fail closed because remote loading is disabled.
+    pub fn with_import_resolver(resolver: ImportResolver) -> Result<Self, Error> {
+        Self::with_options(RuntimeOptions::new().with_import_resolver(resolver))
+    }
+
+    /// Creates a runtime configured by [`RuntimeOptions`].
+    ///
+    /// Combines optional remote loading and an optional `neo.jsonc`
+    /// [`ImportResolver`] without implicit filesystem manifest discovery.
+    pub fn with_options(options: RuntimeOptions) -> Result<Self, Error> {
+        let remote = options.remote.map(RemoteClient::new);
+        Self::build(CONSOLE_SHIM, neo_shim(), remote, options.import_resolver)
     }
 
     /// Creates a runtime over an injected remote transport.
@@ -367,6 +422,39 @@ impl Runtime {
             CONSOLE_SHIM,
             neo_shim(),
             Some(RemoteClient::with_transport(options, transport)),
+            None,
+        )
+    }
+
+    /// Creates a runtime over an injected remote transport and an
+    /// [`ImportResolver`].
+    ///
+    /// Compiled only with `test-support` for testing manifest `imports` that
+    /// target `https:`, `gh:`, or `jsr:` without a real network.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn with_remote_transport_and_resolver<F>(
+        options: RemoteOptions,
+        resolver: ImportResolver,
+        fetch: F,
+    ) -> Result<Self, Error>
+    where
+        F: Fn(
+                &str,
+                std::time::Duration,
+                Option<&str>,
+                Option<&str>,
+            ) -> Result<neojs_remote::TestRemoteResponse, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let transport = neojs_remote::test_transport(fetch);
+        Self::build(
+            CONSOLE_SHIM,
+            neo_shim(),
+            Some(RemoteClient::with_transport(options, transport)),
+            Some(resolver),
         )
     }
 
@@ -382,7 +470,11 @@ impl Runtime {
     /// [`Runtime`]'s `Drop`, which does not block. Building the runtimes is the
     /// only failure before a `Runtime` exists.
     fn with_shims(console: &'static str, builtins: String) -> Result<Self, Error> {
-        Self::with_module_loader(console, builtins, Rc::new(FileModuleLoader::new(None)))
+        Self::with_module_loader(
+            console,
+            builtins,
+            Rc::new(FileModuleLoader::new(None, None)),
+        )
     }
 
     /// Creates a runtime with an explicit module loader.
@@ -399,7 +491,8 @@ impl Runtime {
         Self::assemble(console, builtins, module_loader, None, None)
     }
 
-    /// Creates a runtime with an optional remote client.
+    /// Creates a runtime with an optional remote client and optional import
+    /// resolver.
     ///
     /// The remote client's file loader is kept separately so a prepared remote
     /// entry can be handed to it before loading starts. When remote loading is
@@ -409,8 +502,9 @@ impl Runtime {
         console: &'static str,
         builtins: String,
         remote: Option<RemoteClient>,
+        import_resolver: Option<ImportResolver>,
     ) -> Result<Self, Error> {
-        let files = Rc::new(FileModuleLoader::new(remote.clone()));
+        let files = Rc::new(FileModuleLoader::new(remote.clone(), import_resolver));
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match remote.clone() {
             Some(remote_client) => Rc::new(JsrModuleLoader::new(
                 Rc::new(RemoteRegistry::new(remote_client)),
@@ -476,7 +570,7 @@ impl Runtime {
         let redactions = remote.as_ref().map(RemoteClient::redactions);
         let js = {
             let _guard = driver.enter();
-            JsRuntime::new(RuntimeOptions {
+            JsRuntime::new(DenoRuntimeOptions {
                 module_loader: Some(module_loader),
                 extensions,
                 ..Default::default()

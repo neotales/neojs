@@ -389,3 +389,258 @@ fn test_subcommand_fails_empty_files_and_unmatched_globs() {
         stderr(&no_args)
     );
 }
+
+#[test]
+fn resolves_local_imports_prefix_imports_and_workspace_packages() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(
+        &dir,
+        "neo.jsonc",
+        r#"{
+            "name": "@lite/ws",
+            "workspaces": ["packages/*"],
+            "imports": {
+                "root-greet": "./shared/greet.js",
+                "utils/": "./shared/utils/"
+            }
+        }"#,
+    );
+    write(
+        &dir,
+        "shared/greet.js",
+        "export const greet = (name) => `hi ${name}`;\n",
+    );
+    write(
+        &dir,
+        "shared/utils/num.mjs",
+        "export const double = (n) => n * 2;\n",
+    );
+    write(
+        &dir,
+        "packages/a/neo.jsonc",
+        r#"{
+            "name": "@lite/a",
+            "exports": "./mod.js",
+            "imports": { "local-a": "./local.js" }
+        }"#,
+    );
+    write(&dir, "packages/a/local.js", "export const tag = 'A';\n");
+    write(
+        &dir,
+        "packages/b/neo.jsonc",
+        r#"{
+            "name": "@lite/b",
+            "exports": {
+                ".": "./index.js",
+                "./sub": "./sub.js"
+            }
+        }"#,
+    );
+    write(&dir, "packages/b/index.js", "export const b = 'B';\n");
+    write(&dir, "packages/b/sub.js", "export const sub = 'SUB';\n");
+    write(&dir, "packages/b/secret.js", "export const secret = 1;\n");
+
+    let entry = dir.path().join("packages/a/mod.js");
+    write(
+        &dir,
+        "packages/a/mod.js",
+        r#"
+import { greet } from "root-greet";
+import { double } from "utils/num.mjs";
+import { tag } from "local-a";
+import { b } from "@lite/b";
+import { sub } from "@lite/b/sub";
+console.log(`${greet("lite")}:${double(5)}:${tag}:${b}:${sub}`);
+"#,
+    );
+
+    let output = run(&[entry.as_os_str()]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "hi lite:10:A:B:SUB\n");
+
+    // Unexported subpath must fail with exit code 1.
+    let bad = dir.path().join("packages/a/bad.js");
+    write(
+        &dir,
+        "packages/a/bad.js",
+        "import { secret } from '@lite/b/secret'; console.log(secret);\n",
+    );
+    let bad_out = run(&[bad.as_os_str()]);
+    assert_eq!(bad_out.status.code(), Some(1));
+    assert!(
+        stderr(&bad_out).contains("not exported"),
+        "{}",
+        stderr(&bad_out)
+    );
+}
+
+#[test]
+fn rejects_remote_import_map_targets_clearly() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(
+        &dir,
+        "neo.jsonc",
+        r#"{
+            "name": "@lite/remote",
+            "imports": {
+                "remote": "https://example.test/mod.js",
+                "jsr-lib": "jsr:@scope/pkg@1.0.0"
+            }
+        }"#,
+    );
+    let file1 = dir.path().join("r1.js");
+    write(&dir, "r1.js", "import 'remote';\n");
+    let out1 = run(&[file1.as_os_str()]);
+    assert_eq!(out1.status.code(), Some(1));
+    assert!(
+        stderr(&out1).contains("remote module loading is not supported in neojs-lite"),
+        "{}",
+        stderr(&out1)
+    );
+
+    let file2 = dir.path().join("r2.js");
+    write(&dir, "r2.js", "import 'jsr-lib';\n");
+    let out2 = run(&[file2.as_os_str()]);
+    assert_eq!(out2.status.code(), Some(1));
+    assert!(
+        stderr(&out2).contains("remote module loading is not supported in neojs-lite"),
+        "{}",
+        stderr(&out2)
+    );
+}
+
+#[test]
+fn config_and_no_config_flags_and_malformed_manifest_exit_codes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(&dir, "neo.jsonc", "{ malformed");
+    write(
+        &dir,
+        "alt/custom.jsonc",
+        r#"{ "name": "@lite/alt", "imports": { "dep": "./dep.js" } }"#,
+    );
+    write(&dir, "alt/dep.js", "export const msg = 'explicit';\n");
+    let main = dir.path().join("main.js");
+    write(
+        &dir,
+        "main.js",
+        "import { msg } from 'dep'; console.log(msg);\n",
+    );
+
+    // Auto discovery fails closed with exit code 2 on malformed neo.jsonc.
+    let malformed = run(&[main.as_os_str()]);
+    assert_eq!(malformed.status.code(), Some(2));
+    assert!(
+        stderr(&malformed).contains("cannot load manifest"),
+        "{}",
+        stderr(&malformed)
+    );
+
+    // `--config <path>` uses explicit manifest and exits 0.
+    let custom = dir.path().join("alt/custom.jsonc");
+    let explicit = run(&[
+        std::ffi::OsStr::new("--config"),
+        custom.as_os_str(),
+        main.as_os_str(),
+    ]);
+    assert_eq!(
+        explicit.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&explicit)
+    );
+    assert_eq!(stdout(&explicit), "explicit\n");
+
+    // `--no-config` skips discovery -> bare specifier fails with exit code 1.
+    let no_cfg = run(&[std::ffi::OsStr::new("--no-config"), main.as_os_str()]);
+    assert_eq!(no_cfg.status.code(), Some(1));
+    assert!(
+        stderr(&no_cfg).contains("bare module specifiers"),
+        "{}",
+        stderr(&no_cfg)
+    );
+
+    // Missing `--config` -> exit code 2.
+    let missing = dir.path().join("missing.jsonc");
+    let missing_out = run(&[
+        std::ffi::OsStr::new("--config"),
+        missing.as_os_str(),
+        main.as_os_str(),
+    ]);
+    assert_eq!(missing_out.status.code(), Some(2));
+
+    // Conflicting `--config` + `--no-config` -> exit code 2.
+    let conflict = run(&[
+        std::ffi::OsStr::new("--config"),
+        custom.as_os_str(),
+        std::ffi::OsStr::new("--no-config"),
+        main.as_os_str(),
+    ]);
+    assert_eq!(conflict.status.code(), Some(2));
+    assert!(
+        stderr(&conflict).contains("cannot be used together"),
+        "{}",
+        stderr(&conflict)
+    );
+}
+
+#[test]
+fn test_subcommand_runs_workspace_tests() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(
+        &dir,
+        "neo.jsonc",
+        r#"{ "name": "@lite/ws-test", "workspaces": ["packages/*"] }"#,
+    );
+    write(
+        &dir,
+        "packages/math/neo.jsonc",
+        r#"{ "name": "@lite/math", "exports": "./mod.js" }"#,
+    );
+    write(
+        &dir,
+        "packages/math/mod.js",
+        "export const add = (a, b) => a + b;\n",
+    );
+    write(
+        &dir,
+        "packages/app/neo.jsonc",
+        r#"{
+            "name": "@lite/app",
+            "exports": "./mod.js",
+            "imports": { "base": "./base.js" }
+        }"#,
+    );
+    write(&dir, "packages/app/base.js", "export const BASE = 10;\n");
+    write(&dir, "packages/app/mod.js", "export const ok = true;\n");
+    let test_file = dir.path().join("packages/app/tests/ws.test.js");
+    write(
+        &dir,
+        "packages/app/tests/ws.test.js",
+        r#"
+import test from "neo:test";
+import assert from "neo:assert";
+import { add } from "@lite/math";
+import { BASE } from "base";
+
+test("workspace test in neojs-lite", () => {
+    assert.strictEquals(add(BASE, 5), 15);
+});
+"#,
+    );
+
+    let pass = run(&[std::ffi::OsStr::new("test"), test_file.as_os_str()]);
+    assert_eq!(pass.status.code(), Some(0), "stderr: {}", stderr(&pass));
+    assert!(stdout(&pass).contains("ok 1 - workspace test in neojs-lite"));
+
+    let disabled = run(&[
+        std::ffi::OsStr::new("test"),
+        std::ffi::OsStr::new("--no-config"),
+        test_file.as_os_str(),
+    ]);
+    assert_eq!(disabled.status.code(), Some(1));
+    assert!(
+        stderr(&disabled).contains("bare module specifiers"),
+        "{}",
+        stderr(&disabled)
+    );
+}

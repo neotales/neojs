@@ -11,6 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "manifest")]
+use neojs_manifest::{ImportResolver, NormalizedSpecifier, ResolvedImport};
 use neojs_module_policy::{ModuleFormat, is_path_specifier, module_format};
 use rquickjs::{
     Ctx, Error, Module, Result,
@@ -46,15 +48,87 @@ fn reject_attributes(
     Ok(())
 }
 
-/// Resolves relative paths, absolute paths, `file:` URLs, and shared `neo:`
-/// built-ins to one canonical identity.
+/// Resolves relative paths, absolute paths, `file:` URLs, optional `neo.jsonc`
+/// import-map/workspace entries, and shared `neo:` built-ins to one canonical
+/// identity.
 ///
 /// A canonical path is the module identity, so the same file reached by two
 /// spellings is evaluated once. A shared built-in resolves to its canonical
 /// `neo:` specifier, so static and dynamic imports also reach one instance.
 /// Bare specifiers and every other URL scheme are rejected with a reason. The
 /// returned name is always valid UTF-8 because QuickJS module names are strings.
-pub(super) struct FileResolver;
+pub(super) struct FileResolver {
+    #[cfg(feature = "manifest")]
+    import_resolver: Option<ImportResolver>,
+}
+
+impl FileResolver {
+    pub(super) fn new() -> Self {
+        Self {
+            #[cfg(feature = "manifest")]
+            import_resolver: None,
+        }
+    }
+
+    #[cfg(feature = "manifest")]
+    pub(super) fn with_import_resolver(resolver: ImportResolver) -> Self {
+        Self {
+            import_resolver: Some(resolver),
+        }
+    }
+
+    #[cfg(feature = "manifest")]
+    fn resolve_with_import_resolver(&self, base: &str, name: &str) -> Result<Option<String>> {
+        let Some(resolver) = &self.import_resolver else {
+            return Ok(None);
+        };
+        let resolved = resolver
+            .resolve(name)
+            .map_err(|error| Error::new_resolving_message(base, name, error.to_string()))?;
+        match resolved {
+            ResolvedImport::Builtin(_) | ResolvedImport::Unmapped => Ok(None),
+            ResolvedImport::Local(path) => canonicalize_module_path(base, name, &path).map(Some),
+            ResolvedImport::Specifier(normalized) => match normalized {
+                NormalizedSpecifier::Path(_) => unreachable!("local paths map to Local"),
+                NormalizedSpecifier::FileUrl(file_url) => {
+                    let parsed = Url::parse(&file_url).map_err(|_| {
+                        Error::new_resolving_message(base, name, "invalid file: URL target")
+                    })?;
+                    let path = parsed.to_file_path().map_err(|()| {
+                        Error::new_resolving_message(
+                            base,
+                            name,
+                            "file: URL does not name a local filesystem path",
+                        )
+                    })?;
+                    canonicalize_module_path(base, name, &path).map(Some)
+                }
+                NormalizedSpecifier::Https(_)
+                | NormalizedSpecifier::Gh(_)
+                | NormalizedSpecifier::Jsr(_) => Err(Error::new_resolving_message(
+                    base,
+                    name,
+                    "remote module loading is not supported in neojs-lite",
+                )),
+                NormalizedSpecifier::Npm(_) => Err(Error::new_resolving_message(
+                    base,
+                    name,
+                    "npm: modules are not supported; remote module loading is not supported in neojs-lite",
+                )),
+                NormalizedSpecifier::Node(_) => Err(Error::new_resolving_message(
+                    base,
+                    name,
+                    "the `node:` scheme is not implemented in neojs-lite; use a relative path, an absolute path, or a file: URL",
+                )),
+                NormalizedSpecifier::Bare(_) => Err(Error::new_resolving_message(
+                    base,
+                    name,
+                    BARE_SPECIFIER_REASON,
+                )),
+            },
+        }
+    }
+}
 
 impl Resolver for FileResolver {
     fn resolve<'js>(
@@ -81,22 +155,30 @@ impl Resolver for FileResolver {
         if let Some(builtin) = neojs_builtins::module(name) {
             return Ok(builtin.specifier.to_owned());
         }
+        #[cfg(feature = "manifest")]
+        if let Some(resolved) = self.resolve_with_import_resolver(base, name)? {
+            return Ok(resolved);
+        }
         let path = candidate_path(base, name)?;
-        let canonical = std::fs::canonicalize(&path).map_err(|error| {
-            Error::new_resolving_message(
-                base,
-                name,
-                format!("cannot resolve `{}`: {error}", path.display()),
-            )
-        })?;
-        canonical.to_str().map(str::to_owned).ok_or_else(|| {
-            Error::new_resolving_message(
-                base,
-                name,
-                format!("resolved path `{}` is not valid UTF-8", canonical.display()),
-            )
-        })
+        canonicalize_module_path(base, name, &path)
     }
+}
+
+fn canonicalize_module_path(base: &str, name: &str, path: &Path) -> Result<String> {
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        Error::new_resolving_message(
+            base,
+            name,
+            format!("cannot resolve `{}`: {error}", path.display()),
+        )
+    })?;
+    canonical.to_str().map(str::to_owned).ok_or_else(|| {
+        Error::new_resolving_message(
+            base,
+            name,
+            format!("resolved path `{}` is not valid UTF-8", canonical.display()),
+        )
+    })
 }
 
 /// Returns the path a specifier names before canonicalization.

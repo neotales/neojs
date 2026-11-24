@@ -408,6 +408,23 @@ impl Runtime {
     /// allocate its runtime or context, or the native surface could not be
     /// installed.
     pub fn new() -> Result<Self, Error> {
+        Self::build(FileResolver::new())
+    }
+
+    /// Creates a QuickJS runtime with an explicit `neo.jsonc`
+    /// [`neojs_manifest::ImportResolver`].
+    ///
+    /// [`Runtime::new`] performs zero implicit manifest discovery. Embedders
+    /// opt in by passing a resolved `ImportResolver` here. Local `imports` and
+    /// workspace `@scope/pkg` references resolve to local `.js`/`.mjs` modules;
+    /// remote targets (`https:`, `gh:`, `jsr:`, `npm:`) are rejected because
+    /// remote loading is not supported in `neojs-lite-core`.
+    #[cfg(feature = "manifest")]
+    pub fn with_import_resolver(resolver: neojs_manifest::ImportResolver) -> Result<Self, Error> {
+        Self::build(FileResolver::with_import_resolver(resolver))
+    }
+
+    fn build(resolver: FileResolver) -> Result<Self, Error> {
         let runtime = rquickjs::Runtime::new().map_err(|error| Error::Init {
             message: error.to_string(),
         })?;
@@ -420,7 +437,7 @@ impl Runtime {
                     .record(&ctx, promise, reason, handled);
             },
         )));
-        runtime.set_loader(FileResolver, FileLoader);
+        runtime.set_loader(resolver, FileLoader);
         let context = Context::full(&runtime).map_err(|error| Error::Init {
             message: error.to_string(),
         })?;

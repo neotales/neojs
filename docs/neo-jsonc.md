@@ -1,11 +1,11 @@
 # `neo.jsonc`: manifest foundation
 
 **Status:** parsing, field validation, import-specifier normalization, bounded upward discovery
-(`discover_manifest`), deterministic workspace expansion (`Workspace::load`), and pure
-import-map/workspace resolution (`ImportResolver`) are implemented in the `neojs-manifest` crate.
-Runtime manifest integration is **not** implemented. No function in this crate fetches a package,
-installs an import map into a JS engine, matches `include`/`exclude`, or runs a Node compatibility
-transform.
+(`discover_manifest`), deterministic workspace expansion (`Workspace::load`), and
+import-map/workspace resolution (`ImportResolver`) are implemented in `neojs-manifest` and wired
+into `neojs-core`/`neojs` (V8) and `neojs-lite-core`/`neojs-lite` (QuickJS, behind the `manifest`
+feature). No function in `neojs-manifest` fetches a package, matches `include`/`exclude`, or runs
+a Node compatibility transform.
 
 The shape is inspired by Deno's `deno.json`, not compatible with it. Unknown keys are rejected
 rather than ignored.
@@ -18,11 +18,23 @@ canonicalized visited directories, and an optional `stop_dir`). Callers can also
 path to `Manifest::from_path`, or pass the text to `Manifest::parse`. `from_path` reads at most
 `MAX_MANIFEST_BYTES + 1` bytes, so an oversized file is rejected without being loaded whole.
 
-No command-line flag reads `neo.jsonc` yet. `neojs` loads `jsr:` imports, and direct
-`gh:`/`github:` specifiers, when remote loading is enabled (`--allow-remote` or
-`NEOJS_ALLOW_REMOTE=1`), but this crate still does not install an import map. A `gh:`/`github:`
-target is normalized here; the runtime loads a direct specifier of that form. `npm:` and `node:`
-imports remain rejected at module resolution.
+Both `neojs` and `neojs-lite` discover `neo.jsonc` upward from the entry file's directory by
+default (when running inside a workspace member directory, parent directories are checked for an
+enclosing workspace root containing that member). Pass `--config <path>` to load an explicit
+manifest (failing closed with exit code `2` if missing or invalid) or `--no-config` to disable
+discovery (`--config` and `--no-config` cannot be combined). Embedders calling `Runtime::new()` in
+`neojs-core` or `neojs-lite-core` get zero implicit manifest discovery unless they explicitly opt
+in via `Runtime::with_import_resolver(...)` or `RuntimeOptions::with_import_resolver(...)`.
+
+When an `ImportResolver` is installed:
+- Only local `file:` referrers consult the project `ImportResolver`; remote (`https:`/`jsr:`)
+  referrers cannot use `imports` or `workspaces` to escape into local `file:` paths.
+- In `neojs` (V8), `https:`, `gh:`/`github:`, and `jsr:` targets in `imports` still fail closed
+  unless `--allow-remote` (or `NEOJS_ALLOW_REMOTE=1` / `RuntimeOptions::with_remote`) is enabled.
+- In `neojs-lite` (QuickJS), local `imports` and workspace `@scope/pkg` targets resolve to `.js` /
+  `.mjs` files, while `https:`, `gh:`, `jsr:`, and `npm:` targets fail with a clear error stating
+  remote loading is not supported in `neojs-lite`.
+- `npm:` and `node:` imports remain rejected at module resolution.
 
 ## JSONC dialect
 
@@ -81,14 +93,15 @@ Only `name` is required. An absent optional field is omitted or empty, not `null
     "include": ["src/**/*.ts"],
     "exclude": ["**/*.test.ts"],
 
-    // Normalized only. Not installed in a runtime.
+    // Mapped into local `file:` referrers by `neojs` and `neojs-lite`.
+    // Remote targets remain gated by `--allow-remote` in `neojs` and rejected in `neojs-lite`.
     "imports": {
         "std": "jsr:@scope/std@1.2.3",
         "local": "./vendor/mod.ts",
         "remote": "https://example.com/mod.ts",
     },
 
-    // Syntax-checked only. Not expanded.
+    // Expanded deterministically by `Workspace::load` and resolved via `ImportResolver`.
     "workspaces": ["packages/*"],
 }
 ```
@@ -275,7 +288,6 @@ instead of a generic unknown field:
 
 ## What is deliberately not implemented
 
-- Wiring `discover_manifest`, `Workspace`, or `ImportResolver` into the CLI or JS runtimes.
 - Match or expansion for `include` or `exclude`.
 - Publishing a workspace package.
 - npm registry resolution, semver-range selection, tarballs, `package.json` fields, CommonJS,
