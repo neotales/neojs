@@ -653,6 +653,9 @@ fn path_join<'s>(
         for index in 0..count {
             paths.push(path_arg(scope, &args, index as i32, "path")?);
         }
+        if paths.iter().map(String::len).sum::<usize>() > MAX_PATH_AGGREGATE_BYTES {
+            return Err(Failure::path_too_large());
+        }
         let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
         Ok(neojs_node_builtins::join(flavor, &refs))
     })();
@@ -674,6 +677,9 @@ fn path_resolve<'s>(
         let mut paths = Vec::with_capacity(count);
         for index in 0..count {
             paths.push(path_arg(scope, &args, index as i32, "path")?);
+        }
+        if paths.iter().map(String::len).sum::<usize>() > MAX_PATH_AGGREGATE_BYTES {
+            return Err(Failure::path_too_large());
         }
         let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
         let needs_cwd = !paths
@@ -702,6 +708,9 @@ fn path_relative<'s>(
         preflight_path_args(&args, 2)?;
         let from = path_arg(scope, &args, 0, "from")?;
         let to = path_arg(scope, &args, 1, "to")?;
+        if from.len().saturating_add(to.len()) > MAX_PATH_AGGREGATE_BYTES {
+            return Err(Failure::path_too_large());
+        }
         let needs_cwd = !(neojs_node_builtins::is_absolute(flavor, &from)
             && neojs_node_builtins::is_absolute(flavor, &to));
         let cwd = if needs_cwd {

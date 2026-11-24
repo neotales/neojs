@@ -312,6 +312,9 @@ fn path_function<'js>(
                     for index in 0..args.len() {
                         paths.push(path_arg(&ctx, &args, index, "path")?);
                     }
+                    if paths.iter().map(String::len).sum::<usize>() > MAX_PATH_AGGREGATE_BYTES {
+                        return Err(path_too_large(&ctx));
+                    }
                     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
                     Ok(js_string(&ctx, &neojs_node_builtins::join(flavor, &refs))?.into_value())
                 }
@@ -320,6 +323,9 @@ fn path_function<'js>(
                     let mut paths = Vec::with_capacity(args.len());
                     for index in 0..args.len() {
                         paths.push(path_arg(&ctx, &args, index, "path")?);
+                    }
+                    if paths.iter().map(String::len).sum::<usize>() > MAX_PATH_AGGREGATE_BYTES {
+                        return Err(path_too_large(&ctx));
                     }
                     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
                     let needs_cwd = !paths
@@ -339,6 +345,9 @@ fn path_function<'js>(
                     preflight_path_args(&ctx, &args, 2)?;
                     let from = path_arg(&ctx, &args, 0, "from")?;
                     let to = path_arg(&ctx, &args, 1, "to")?;
+                    if from.len().saturating_add(to.len()) > MAX_PATH_AGGREGATE_BYTES {
+                        return Err(path_too_large(&ctx));
+                    }
                     let needs_cwd = !(neojs_node_builtins::is_absolute(flavor, &from)
                         && neojs_node_builtins::is_absolute(flavor, &to));
                     let cwd = if needs_cwd {

@@ -225,6 +225,7 @@ fn node_path_limits_are_path_specific() {
 import { posix } from "node:path";
 const oneMiB = "a".repeat(1_048_576);
 const tooLarge = "a".repeat(1_048_577);
+const halfMiBUnits = "é".repeat(500_000);
 
 if (posix.normalize(oneMiB).length !== 1_048_576) {
     throw new Error("the exact single-path bound was rejected");
@@ -253,6 +254,14 @@ try {
     code = error && error.code;
 }
 if (code !== "ERR_NODE_PATH_TOO_LARGE") throw new Error(`resolve aggregate: ${code}`);
+
+code = null;
+try {
+    posix.join(halfMiBUnits, halfMiBUnits);
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_PATH_TOO_LARGE") throw new Error(`aggregate bytes: ${code}`);
 
 code = null;
 try {
