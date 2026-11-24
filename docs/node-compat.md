@@ -241,8 +241,12 @@ and independent of the host. `path.resolve` and
 
 Inputs are capped at 1,048,576 UTF-8 bytes per string. `join` and `resolve`
 also cap the argument count at 256 and the aggregate input at 1,048,576 UTF-8
-bytes. A larger path request throws `ERR_NODE_PATH_TOO_LARGE`; a non-string
-argument throws `ERR_INVALID_ARG_TYPE`. Lone surrogates are rejected with
+bytes. V8 preflights exact UTF-8 length. QuickJS does not expose an exact UTF-8
+length without conversion, so the Lite adapter preflights count and UTF-16
+units, bounding the temporary conversion to at most 3x the cap, then enforces
+the exact UTF-8 aggregate before path processing. A larger path request throws
+`ERR_NODE_PATH_TOO_LARGE`; a non-string argument throws
+`ERR_INVALID_ARG_TYPE`. Lone surrogates are rejected with
 `ERR_INVALID_ARG_VALUE` in both adapters rather than being silently replaced.
 `format` requires string fields or `undefined`; unlike Node's coercing formatter
 it does not call `ToString` on arbitrary field values. A host working-directory

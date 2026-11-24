@@ -614,6 +614,7 @@ fn path_is_absolute<'s>(
 }
 
 fn preflight_path_args<'s>(
+    scope: &v8::PinScope<'s, '_>,
     args: &v8::FunctionCallbackArguments<'s>,
     count: usize,
 ) -> Result<(), Failure> {
@@ -628,7 +629,7 @@ fn preflight_path_args<'s>(
         }
         let string = v8::Local::<v8::String>::try_from(value)
             .map_err(|_| Failure::invalid_type("path must be a string"))?;
-        total = total.saturating_add(string.length());
+        total = total.saturating_add(string.utf8_length(scope));
         if total > MAX_PATH_AGGREGATE_BYTES {
             return Err(Failure::path_too_large());
         }
@@ -648,7 +649,7 @@ fn path_join<'s>(
     let result = (|| {
         let flavor = path_flavor(scope, &args)?;
         let count = args.length().max(0) as usize;
-        preflight_path_args(&args, count)?;
+        preflight_path_args(scope, &args, count)?;
         let mut paths = Vec::with_capacity(count);
         for index in 0..count {
             paths.push(path_arg(scope, &args, index as i32, "path")?);
@@ -673,7 +674,7 @@ fn path_resolve<'s>(
     let result = (|| {
         let flavor = path_flavor(scope, &args)?;
         let count = args.length().max(0) as usize;
-        preflight_path_args(&args, count)?;
+        preflight_path_args(scope, &args, count)?;
         let mut paths = Vec::with_capacity(count);
         for index in 0..count {
             paths.push(path_arg(scope, &args, index as i32, "path")?);
@@ -705,7 +706,7 @@ fn path_relative<'s>(
 ) {
     let result = (|| {
         let flavor = path_flavor(scope, &args)?;
-        preflight_path_args(&args, 2)?;
+        preflight_path_args(scope, &args, 2)?;
         let from = path_arg(scope, &args, 0, "from")?;
         let to = path_arg(scope, &args, 1, "to")?;
         if from.len().saturating_add(to.len()) > MAX_PATH_AGGREGATE_BYTES {
