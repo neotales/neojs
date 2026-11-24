@@ -317,6 +317,22 @@ try {
     code = error && error.code;
 }
 if (code !== "ERR_NODE_PATH_CWD") throw new Error(`cwd failure: ${code}`);
+
+code = null;
+try {
+    win32.resolve("C:foo");
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_PATH_CWD") throw new Error(`drive-relative resolve: ${code}`);
+
+code = null;
+try {
+    win32.toNamespacedPath("C:foo");
+} catch (error) {
+    code = error && error.code;
+}
+if (code !== "ERR_NODE_PATH_CWD") throw new Error(`drive-relative namespaced: ${code}`);
 "#,
     )
     .expect("cwd failure");
