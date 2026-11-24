@@ -20,9 +20,15 @@ It adds an internal `GetOwnEnumerableStringKeysBounded` function and a narrow
 path. Keys are copied to a Rust sink while the V8 handle scope is alive; no V8
 handle crosses the C ABI, so there is no escaped-local lifetime. Empty keys and
 keys with unpaired surrogates are rejected with `kInvalidKey` before UTF-8
-conversion; a null `String::Utf8Value` is reported as `kException`. Test-only
-`neojs_v8_reset_element_scan_probe`/`neojs_v8_element_scan_probe` counters
-prove the element-slot loop is not entered before the scan-budget check.
+conversion. Conversion uses `String::WriteUtf8` directly, without the
+replacement flag, into a bounded buffer; a length/write mismatch is reported as
+`kKeyConversionFailed`, and Rust throws a coded `ERR_INVALID_ARG_VALUE` rather
+than returning `undefined`. Allocation failure is `kMemory`; the C ABI only
+reports `kException` when V8 actually has a pending exception. Test-only
+`neojs_v8_reset_element_scan_probe`/`neojs_v8_element_scan_probe` counters are
+`thread_local`, so parallel isolates cannot race or observe one another. A
+thread-local `neojs_v8_test_set_key_conversion_failure` hook fault-injects the
+conversion-failure path for tests; it is inert unless called.
 
 ## Supported and rejected objects
 
@@ -54,10 +60,10 @@ worktree. From the verified `prepare.sh` inputs:
 | ICU data | `icudtl.dat` sha256 `1cf67874b5a87a8363a86fb3f81e3cbbed54d389062dab8fb52308d5cf8c8612`; `icudtb.dat` sha256 `c58e1567b34e12a672b24ff4a5f21efa4c4481ab64a213dde059309b01aacde2` |
 | Rust toolchain | sha256 `832de79f8d90940f4aaef023f83a00c1e7210c023f4d57f606b7bf9831c889aa`, 274393124 bytes |
 | Chromium clang | sha256 `de584381536aa5ba2403033c4f8b70f3c39c2e5d7fa87c953b7fd8bfbba0ee2a`, 69635068 bytes |
-| Patch file | sha256 `f5933d7169a092eb03f909138a76bad492e65c46da90b70ea50621622c1646ca`, 325 lines |
-| Patched `keys.h` | sha256 `29e3de9dcb8e3c4424a3bc6b3520573cae6c1bdff29104bbbdb20e6a298e1890` |
-| Patched `keys.cc` | sha256 `ca0260e09da2e91cbf979bee393da555fb0d26056b6075d22f4d11a750873561` |
-| Patched `api.cc` | sha256 `be4d4ac17b905bc02cb6a0f9464b24a43df03649ff96c6356c5b9e26bcb344f4` |
+| Patch file | sha256 `addc1c8b41a614911a4f1c8905780c3dffbaa3888ecdb159d8a444bc71ae044c`, 387 lines |
+| Patched `keys.h` | sha256 `5fbf2e84da60df7f0b7b8e35d8dc73d261ab44043e6fe9e3cef6835cfd0d4179` |
+| Patched `keys.cc` | sha256 `262f305d6b7918a594362ea829ce074f51a862272cc1c631da102e5bf765e56a` |
+| Patched `api.cc` | sha256 `a96c9c0c8b575496da039d6abc98f4537a274f33d994946a851744faed5159ce` |
 
 The prepared cache is verified with
 `eng/v8-source/prepare.sh --verify-only`. Local stamps are drift detection, not
@@ -78,22 +84,27 @@ export RUSTY_V8_ARCHIVE=/path/reported/by/build-bounded.sh
 
 The script recreates a fresh source tree, applies the exact patch, uses the
 verified `GN`, Chromium clang, Rust toolchain and build-env, sets
-`V8_FROM_SOURCE=1`, and builds a release `librusty_v8.a` in a unique target
-directory per run. It requires `flock`, rejects `/` and overlapping roots, and
-publishes the archive plus `provenance.txt` under `artifacts/<run-id>/`. The V8
-tree and archive are not committed.
+`V8_FROM_SOURCE=1`, and builds a release `librusty_v8.a` in a unique
+`mktemp -d` run root per invocation. It requires `flock`, rejects `/` and
+overlapping roots, and refuses a dirty procedure worktree before copying any
+source. It publishes the archive plus `provenance.txt` under
+`<run-root>/artifact/`; the provenance records the run root, procedure commit,
+`procedure_status=clean`, patch/file hashes, builder-lock hash, archive hash
+and size. `--run-root-only` is a test-only mode used by
+`eng/v8-source/test-build-bounded.sh` to prove that two runs in the same clock
+second still get distinct roots. The V8 tree and archive are not committed.
 
-Observed local build (Linux x86_64, 12 jobs):
+Observed local build (Linux x86_64, 12 jobs, 31m11s):
 
-- `librusty_v8.a`: 186,838,134 bytes
-- sha256: `cca39ea314e03e1378b59c3a2118e2ffb3e64f40e97e4eb2c8a66fba8807fbbe`
-- The unique-target script build produced this artifact and wrote
-  `artifacts/20261123T152657Z-445194/provenance.txt`; an earlier manual build
-  from the same source produced `12735288…`, and other builds produced
-  `643ddb…`, `67552f…`, `f3a244…`. The differences are the no-bit-
-  reproducibility caveat, not a pin. Rebuilding the archive requires
-  `cargo clean -p v8` in the consumer target because Cargo does not track the
-  archive file content.
+- `librusty_v8.a`: 186,863,610 bytes
+- sha256: `e9d7d15a0b8e85409fbb8d4f592bba3d86fc6ea544a550cc750e50e36f639a8d`
+- The unique-run-root script build produced this artifact and wrote
+  `runs/20261123T235827Z.rEnuzh/artifact/provenance.txt`; an earlier manual
+  build from the same source produced `6daab0e5…`, and other builds produced
+  `12735288…`, `cca39e…`, `643ddb…`, `67552f…`, `f3a244…`. The differences
+  are the no-bit-reproducibility caveat, not a pin. Rebuilding the archive
+  requires `cargo clean -p v8` in the consumer target because Cargo does not
+  track the archive file content.
 - exported symbol: `neojs_v8_get_own_enumerable_string_keys_bounded`
 - ICU and Temporal enabled in the build (`V8_INTL_SUPPORT`,
   `V8_TEMPORAL_SUPPORT`, `icudtl_dat.o` present)

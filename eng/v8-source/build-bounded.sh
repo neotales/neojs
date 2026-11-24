@@ -10,30 +10,32 @@
 # Usage:
 #   NEOTALES_V8_CACHE=/verified/cache \
 #   NEOTALES_V8_PROCEDURE=/read-only/procedure \
-#   eng/v8-source/build-bounded.sh [--prepare-only]
+#   eng/v8-source/build-bounded.sh [--prepare-only | --run-root-only]
 #
 # The build root is recreated from the verified source on every run. It must
-# not overlap the cache, procedure, or repository.
+# not overlap the cache, procedure, or repository. Every run gets a unique
+# `mktemp -d` run root; target and artifact directories are never reused.
 set -euo pipefail
 
 PROCEDURE=${NEOTALES_V8_PROCEDURE:?set NEOTALES_V8_PROCEDURE to the read-only procedure worktree}
 CACHE=${NEOTALES_V8_CACHE:?set NEOTALES_V8_CACHE to the verified prepared cache}
 BUILD=${NEOJS_V8_BUILD_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/neotales/neojs-node-v8-build}
 JOBS=${NUM_JOBS:-12}
-PREPARE_ONLY=0
+MODE=build
 case ${1:-} in
-    --prepare-only) PREPARE_ONLY=1 ;;
+    --prepare-only) MODE=prepare ;;
+    --run-root-only) MODE=run-root ;;
     "") ;;
-    *) echo "usage: $0 [--prepare-only]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--prepare-only | --run-root-only]" >&2; exit 2 ;;
 esac
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$SCRIPT_DIR/../.." && pwd)
 PATCH=$SCRIPT_DIR/patches/0001-bounded-own-enumerable-string-keys.patch
-PATCH_SHA=f5933d7169a092eb03f909138a76bad492e65c46da90b70ea50621622c1646ca
-KEYS_H_SHA=29e3de9dcb8e3c4424a3bc6b3520573cae6c1bdff29104bbbdb20e6a298e1890
-KEYS_CC_SHA=ca0260e09da2e91cbf979bee393da555fb0d26056b6075d22f4d11a750873561
-API_CC_SHA=be4d4ac17b905bc02cb6a0f9464b24a43df03649ff96c6356c5b9e26bcb344f4
+PATCH_SHA=addc1c8b41a614911a4f1c8905780c3dffbaa3888ecdb159d8a444bc71ae044c
+KEYS_H_SHA=5fbf2e84da60df7f0b7b8e35d8dc73d261ab44043e6fe9e3cef6835cfd0d4179
+KEYS_CC_SHA=262f305d6b7918a594362ea829ce074f51a862272cc1c631da102e5bf765e56a
+API_CC_SHA=a96c9c0c8b575496da039d6abc98f4537a274f33d994946a851744faed5159ce
 BUILDER_LOCK=$SCRIPT_DIR/builder.lock
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -50,10 +52,12 @@ overlaps() {
     return 1
 }
 
-[ -x "$PROCEDURE/eng/v8-source/prepare.sh" ] ||
-    die "missing verified prepare.sh in $PROCEDURE"
-[ -f "$PATCH" ] || die "missing $PATCH"
-[ -f "$BUILDER_LOCK" ] || die "missing $BUILDER_LOCK"
+new_run_root() {
+    local runs=$BUILD/runs
+    mkdir -p "$runs" || die "cannot create $runs"
+    mktemp -d "$runs/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX" ||
+        die "cannot create a unique run root under $runs"
+}
 
 BUILD=$(canon "$BUILD")
 CACHE=$(canon "$CACHE")
@@ -71,6 +75,25 @@ command -v flock >/dev/null 2>&1 || die "flock is required to isolate concurrent
 exec 9>"$BUILD/.build.lock"
 flock -n 9 || die "another build holds $BUILD/.build.lock"
 
+if [ "$MODE" = run-root ]; then
+    RUN_ROOT=$(new_run_root)
+    printf 'run_root %s\n' "$RUN_ROOT"
+    exit 0
+fi
+
+[ -x "$PROCEDURE/eng/v8-source/prepare.sh" ] ||
+    die "missing verified prepare.sh in $PROCEDURE"
+[ -f "$PATCH" ] || die "missing $PATCH"
+[ -f "$BUILDER_LOCK" ] || die "missing $BUILDER_LOCK"
+
+# Provenance records a commit, so the tree that supplies the procedure must be
+# clean. This is a drift/identity check, not attacker authentication.
+PROCEDURE_STATUS=$(git -C "$PROCEDURE" status --porcelain --untracked-files=normal)
+if [ -n "$PROCEDURE_STATUS" ]; then
+    printf 'dirty procedure entries:\n%s\n' "$PROCEDURE_STATUS" >&2
+    die "procedure worktree $PROCEDURE must be clean for provenance"
+fi
+
 # Read-only verification of the prepared inputs.
 "$PROCEDURE/eng/v8-source/prepare.sh" --verify-only
 
@@ -86,15 +109,17 @@ check_file "$SRC/v8/src/objects/keys.h" "$KEYS_H_SHA"
 check_file "$SRC/v8/src/objects/keys.cc" "$KEYS_CC_SHA"
 check_file "$SRC/v8/src/api/api.cc" "$API_CC_SHA"
 
-if [ "$PREPARE_ONLY" = 1 ]; then
+if [ "$MODE" = prepare ]; then
     printf 'prepared %s with exact bounded-keys patch\n' "$SRC"
     exit 0
 fi
 
-RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
-TARGET=$BUILD/targets/$RUN_ID
-BUILDER=$BUILD/builders/$RUN_ID
-ARTIFACT=$BUILD/artifacts/$RUN_ID
+RUN_ROOT=$(new_run_root)
+RUN_ID=$(basename "$RUN_ROOT")
+BUILT_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+TARGET=$RUN_ROOT/target
+BUILDER=$RUN_ROOT/builder
+ARTIFACT=$RUN_ROOT/artifact
 mkdir -p "$TARGET" "$BUILDER/src" "$ARTIFACT"
 python3 - "$SRC" > "$BUILDER/Cargo.toml" <<'PY'
 import json, sys
@@ -128,15 +153,15 @@ export CARGO_TARGET_DIR=$TARGET
 export NUM_JOBS=$JOBS
 export V8_FROM_SOURCE=1
 
-cargo +1.100.0 build --release --locked --offline --manifest-path "$BUILDER/Cargo.toml"
-cargo +1.100.0 tree --locked --offline --manifest-path "$BUILDER/Cargo.toml" -e normal,build > "$BUILD/tree.txt"
-grep -q 'v8 v150.4.0' "$BUILD/tree.txt" || die "resolved v8 is not 150.4.0"
-grep -q 'bindgen v0.72.1' "$BUILD/tree.txt" || die "resolved bindgen is not 0.72.1"
+cargo +1.100.0 build -j "$JOBS" --release --locked --offline --manifest-path "$BUILDER/Cargo.toml"
+cargo +1.100.0 tree --locked --offline --manifest-path "$BUILDER/Cargo.toml" -e normal,build > "$RUN_ROOT/tree.txt"
+grep -q 'v8 v150.4.0' "$RUN_ROOT/tree.txt" || die "resolved v8 is not 150.4.0"
+grep -q 'bindgen v0.72.1' "$RUN_ROOT/tree.txt" || die "resolved bindgen is not 0.72.1"
 
 ARCHIVE=$TARGET/release/build/gn_out/obj/librusty_v8.a
 [ -f "$ARCHIVE" ] || die "missing $ARCHIVE"
-nm -g --defined-only "$ARCHIVE" > "$BUILD/symbols.txt"
-grep -q neojs_v8_get_own_enumerable_string_keys_bounded "$BUILD/symbols.txt" ||
+nm -g --defined-only "$ARCHIVE" > "$RUN_ROOT/symbols.txt"
+grep -q neojs_v8_get_own_enumerable_string_keys_bounded "$RUN_ROOT/symbols.txt" ||
     die "bounded symbol missing from $ARCHIVE"
 
 cp "$ARCHIVE" "$ARTIFACT/librusty_v8.a"
@@ -145,7 +170,9 @@ ARCHIVE_SIZE=$(stat -c %s "$ARTIFACT/librusty_v8.a")
 PROCEDURE_REV=$(git -C "$PROCEDURE" rev-parse HEAD)
 LOCK_SHA=$(sha256sum "$BUILDER_LOCK" | cut -d' ' -f1)
 cat > "$ARTIFACT/provenance.txt" <<EOF
-built_utc=$RUN_ID
+built_utc=$BUILT_UTC
+run_id=$RUN_ID
+run_root=$RUN_ROOT
 v8_crate=150.4.0
 v8_version=15.0.245.2
 patch_sha256=$PATCH_SHA
@@ -154,6 +181,7 @@ patched_keys_cc=$KEYS_CC_SHA
 patched_api_cc=$API_CC_SHA
 builder_lock_sha256=$LOCK_SHA
 procedure_commit=$PROCEDURE_REV
+procedure_status=clean
 cache=$CACHE
 archive_sha256=$ARCHIVE_SHA
 archive_size=$ARCHIVE_SIZE

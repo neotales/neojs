@@ -134,10 +134,12 @@ adapter therefore requires a V8 archive built from the pinned
 The patch adds a narrow C ABI used only by `neojs-node`; it is separate from the
 `deno_core` and `rquickjs-sys` patches. `eng/v8-source/build-bounded.sh` verifies
 the prepared inputs, recreates a fresh isolated source tree, checks the exact
-patch and post-patch file hashes, rejects overlapping build roots, locks the
-output root, uses the committed `builder.lock` with `--locked` (pinning
-`bindgen 0.72.1`), builds with `V8_FROM_SOURCE`, and prints the archive path and
-hash. The caller supplies and must trust the prepared cache/procedure roots;
+patch and post-patch file hashes, rejects overlapping build roots, requires a
+clean procedure worktree, locks the output root, uses the committed
+`builder.lock` with `--locked` (pinning `bindgen 0.72.1`), builds with
+`V8_FROM_SOURCE`, and prints the archive path and hash. Every run gets a unique
+`mktemp -d` run root, so target and artifact directories are never reused. The
+caller supplies and must trust the prepared cache/procedure roots;
 `--verify-only` is drift detection, not attacker authentication. Neither the V8
 tree nor the archive is committed.
 
@@ -151,10 +153,13 @@ before output allocation, allocates only after the key and scan bounds pass,
 and preserves index-first/insertion order. Keys are copied to a Rust sink while
 the V8 handle scope is alive; no V8 local handle crosses the C ABI, so there is
 no escaped-handle lifetime to manage. Empty keys and keys with unpaired
-surrogates are rejected before UTF-8 conversion; a null UTF-8 conversion is
-reported as an explicit exception. A GC/handle-churn unit test exercises the
-sink path, and test-only element-scan counters prove the slot loop is not
-entered before the budget check.
+surrogates are rejected before UTF-8 conversion. Conversion writes UTF-8
+directly without the replacement flag; a length/write mismatch is reported as a
+distinct conversion failure and becomes a coded `ERR_INVALID_ARG_VALUE`, never
+an `undefined` return. A GC/handle-churn unit test exercises the sink path.
+Test-only element-scan counters are `thread_local` and prove the slot loop is
+not entered before the budget check, including across parallel isolates. A
+thread-local test hook fault-injects the conversion-failure path.
 
 The adapter applies the same caps as the QuickJS adapter: options 6 keys / 64
 scanned slots, environment 128 keys / 4096 scanned slots, and 4096 UTF-16 units
@@ -211,6 +216,8 @@ implemented`. Resolution never falls through to a `neo:` module.
 | `ERR_NODE_COMMAND_NOT_ABSOLUTE` | The program name was relative; there is no `PATH` lookup. |
 | `ERR_NODE_LIMIT` | A requested timeout, `maxBuffer`, or other size exceeds the policy. |
 | `ERR_NODE_REQUEST_TOO_LARGE` | A native input/argument/environment/path field, or a QuickJS key table, exceeds its hard cap. |
+| `ERR_INVALID_ARG_VALUE` | A value or property name is invalid, including an empty or unpaired-surrogate environment/option key. |
+| `ERR_MEMORY_ALLOCATION_FAILED` | A bounded property-name buffer could not be allocated; the adapter throws a coded error instead of returning `undefined`. |
 | `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` | Bounded child-process completion is not implemented on this platform. |
 | `ETIMEDOUT` | The child was killed at the timeout. |
 | `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` | An output stream exceeded `maxBuffer`. |

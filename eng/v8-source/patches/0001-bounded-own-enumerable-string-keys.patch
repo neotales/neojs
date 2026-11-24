@@ -1,6 +1,6 @@
 --- a/v8/src/objects/keys.h
 +++ b/v8/src/objects/keys.h
-@@ -32,6 +32,32 @@
+@@ -32,6 +32,33 @@
        static_cast<int>(v8::KeyCollectionMode::kIncludePrototypes)
  };
  
@@ -14,6 +14,7 @@
 +  kMemory = 4,
 +  kKeyTooLong = 5,
 +  kInvalidKey = 6,
++  kKeyConversionFailed = 7,
 +  kException = -1,
 +};
 +
@@ -45,14 +46,16 @@
  #include <optional>
  
  #include "src/api/api-arguments-inl.h"
-@@ -1459,6 +1462,216 @@
+@@ -1459,6 +1462,218 @@
    return result;
  }
  
 +
 +namespace {
 +
-+uint64_t g_element_slots_inspected = 0;
++// Test-only instrumentation. `thread_local` keeps parallel isolates from
++// racing on the counter and from observing one another's scans.
++thread_local uint64_t g_element_slots_inspected = 0;
 +
 +uint32_t OwnFastElementKeys(Tagged<FixedArrayBase> elements) {
 +  Tagged<FixedArray> array = Cast<FixedArray>(elements);
@@ -196,7 +199,7 @@
 +
 +  Handle<FixedArray> result =
 +      isolate->factory()->NewFixedArray(static_cast<int>(key_count));
-+  if (result.is_null()) return BoundedOwnKeysStatus::kException;
++  if (result.is_null()) return BoundedOwnKeysStatus::kMemory;
 +
 +  // No JavaScript runs, but allocation can collect. Re-read through handles and
 +  // verify the shape/dictionary/element capacity did not change.
@@ -228,7 +231,7 @@
 +    for (uint32_t i = 0; i < element_scan; i++) {
 +      if (IsTheHole(array->get(i))) continue;
 +      DirectHandle<String> key = isolate->factory()->Uint32ToString(i);
-+      if (key.is_null()) return BoundedOwnKeysStatus::kException;
++      if (key.is_null()) return BoundedOwnKeysStatus::kMemory;
 +      result->set(static_cast<int>(produced++), *key);
 +    }
 +  }
@@ -264,7 +267,15 @@
  }  // namespace v8::internal
 --- a/v8/src/api/api.cc
 +++ b/v8/src/api/api.cc
-@@ -101,6 +101,7 @@
+@@ -7,6 +7,7 @@
+ #include <algorithm>  // For min
+ #include <cmath>      // For isnan.
+ #include <limits>
++#include <new>
+ #include <optional>
+ #include <sstream>
+ #include <string>
+@@ -101,6 +102,7 @@
  #include "src/objects/js-array-inl.h"
  #include "src/objects/js-collection-inl.h"
  #include "src/objects/js-objects.h"
@@ -272,7 +283,7 @@
  #include "src/objects/js-promise-inl.h"
  #include "src/objects/js-regexp-inl.h"
  #include "src/objects/js-weak-refs-inl.h"
-@@ -4991,6 +4992,71 @@
+@@ -4991,6 +4993,101 @@
                            v8::IndexFilter::kIncludeIndices, key_conversion);
  }
  
@@ -282,7 +293,15 @@
 +  static_assert(sizeof(Local<T>) == sizeof(T*));
 +  return *reinterpret_cast<const Local<T>*>(&ptr);
 +}
++
++// Test-only fault injection for the key-conversion failure path. It is
++// thread-local and is consumed by the next conversion attempt on this thread.
++thread_local bool g_force_key_conversion_failure = false;
 +}  // namespace
++
++extern "C" V8_EXPORT void neojs_v8_test_set_key_conversion_failure(int enabled) {
++  g_force_key_conversion_failure = enabled != 0;
++}
 +
 +// Narrow C ABI for the opt-in neojs Node adapter. Keys are copied to the
 +// caller's sink while the V8 handle scope is alive; no V8 handle crosses the
@@ -311,6 +330,10 @@
 +  i::BoundedOwnKeysStatus status = i::GetOwnEnumerableStringKeysBounded(
 +      i_isolate, receiver, max_keys, max_scan, &keys, &scanned);
 +  *out_scanned = scanned;
++  if (status == i::BoundedOwnKeysStatus::kException &&
++      !i_isolate->has_exception()) {
++    status = i::BoundedOwnKeysStatus::kMemory;
++  }
 +  if (status != i::BoundedOwnKeysStatus::kOk) {
 +    return static_cast<int>(status);
 +  }
@@ -328,14 +351,32 @@
 +    if (!i::String::IsWellFormedUnicode(i_isolate, key)) {
 +      return static_cast<int>(i::BoundedOwnKeysStatus::kInvalidKey);
 +    }
++    if (g_force_key_conversion_failure) {
++      g_force_key_conversion_failure = false;
++      return static_cast<int>(i::BoundedOwnKeysStatus::kKeyConversionFailed);
++    }
 +    Local<String> local_key = Utils::ToLocal(key);
 +    Isolate* v8_isolate = reinterpret_cast<Isolate*>(i_isolate);
-+    String::Utf8Value utf8(v8_isolate, local_key);
-+    if (*utf8 == nullptr) {
-+      return static_cast<int>(i::BoundedOwnKeysStatus::kException);
++    const size_t utf8_length = local_key->Utf8Length(v8_isolate);
++    if (utf8_length == 0) {
++      return static_cast<int>(i::BoundedOwnKeysStatus::kInvalidKey);
 +    }
-+    sink(sink_data, reinterpret_cast<const uint8_t*>(*utf8),
-+         static_cast<size_t>(utf8.length()));
++    if (static_cast<uint64_t>(utf8_length) >
++        static_cast<uint64_t>(max_key_units) * 3) {
++      return static_cast<int>(i::BoundedOwnKeysStatus::kKeyTooLong);
++    }
++    char* buffer = new (std::nothrow) char[utf8_length + 1];
++    if (buffer == nullptr) {
++      return static_cast<int>(i::BoundedOwnKeysStatus::kMemory);
++    }
++    const size_t written = local_key->WriteUtf8(
++        v8_isolate, buffer, utf8_length + 1, String::WriteFlags::kNone);
++    if (written != utf8_length) {
++      delete[] buffer;
++      return static_cast<int>(i::BoundedOwnKeysStatus::kKeyConversionFailed);
++    }
++    sink(sink_data, reinterpret_cast<const uint8_t*>(buffer), written);
++    delete[] buffer;
 +  }
 +  *out_len = length;
 +  return static_cast<int>(i::BoundedOwnKeysStatus::kOk);

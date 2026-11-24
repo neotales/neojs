@@ -50,6 +50,7 @@ enum BoundedKeysError {
     TooManyKeys,
     KeyTooLong,
     InvalidKey,
+    KeyConversionFailed,
     ScanLimit,
     Unsupported,
     Memory,
@@ -123,10 +124,11 @@ fn bounded_keys<'js>(
         4 => return Err(BoundedKeysError::Memory),
         5 => return Err(BoundedKeysError::KeyTooLong),
         6 => return Err(BoundedKeysError::InvalidKey),
+        7 => return Err(BoundedKeysError::KeyConversionFailed),
         _ => return Err(BoundedKeysError::Exception),
     }
     if keys.len() != len as usize {
-        return Err(BoundedKeysError::Exception);
+        return Err(BoundedKeysError::KeyConversionFailed);
     }
     Ok(keys)
 }
@@ -337,6 +339,13 @@ impl Failure {
         Self::new(
             "ERR_NODE_REQUEST_TOO_LARGE",
             "the node:child_process request exceeds the hard size limit",
+        )
+    }
+
+    fn out_of_memory() -> Self {
+        Self::new(
+            "ERR_MEMORY_ALLOCATION_FAILED",
+            "a property-name buffer could not be allocated",
         )
     }
 }
@@ -637,7 +646,11 @@ fn reject_unknown_options<'s>(
         | BoundedKeysError::Unsupported => Failure::unsupported("an option is not implemented"),
         BoundedKeysError::KeyTooLong => Failure::too_large(),
         BoundedKeysError::InvalidKey => Failure::unsupported("an option is not implemented"),
-        BoundedKeysError::Memory | BoundedKeysError::Exception => Failure::Pending,
+        BoundedKeysError::KeyConversionFailed => {
+            Failure::invalid_value("an option name could not be converted to UTF-8")
+        }
+        BoundedKeysError::Memory => Failure::out_of_memory(),
+        BoundedKeysError::Exception => Failure::Pending,
     })?;
     for key in keys {
         if !matches!(
@@ -679,7 +692,11 @@ fn read_env<'s>(
         BoundedKeysError::Unsupported => {
             Failure::unsupported("options.env is not supported by the native child_process module")
         }
-        BoundedKeysError::Memory | BoundedKeysError::Exception => Failure::Pending,
+        BoundedKeysError::KeyConversionFailed => {
+            Failure::invalid_value("an environment name could not be converted to UTF-8")
+        }
+        BoundedKeysError::Memory => Failure::out_of_memory(),
+        BoundedKeysError::Exception => Failure::Pending,
     })?;
 
     let mut environment = BTreeMap::new();
@@ -1036,6 +1053,7 @@ mod bounded_keys_gc_tests {
     unsafe extern "C" {
         fn neojs_v8_reset_element_scan_probe();
         fn neojs_v8_element_scan_probe() -> u64;
+        fn neojs_v8_test_set_key_conversion_failure(enabled: i32);
     }
 
     #[allow(unsafe_code)]
@@ -1105,6 +1123,94 @@ mod bounded_keys_gc_tests {
         assert!(
             inspected >= 100,
             "the probe did not count the fast element slots: {inspected}"
+        );
+    }
+
+    #[allow(unsafe_code)]
+    #[test]
+    fn conversion_failure_status_produces_a_coded_error_not_undefined() {
+        let mut js = JsRuntime::new(Default::default());
+        js.execute_script(
+            "<bounded-key-conversion-failure>",
+            "globalThis.options = { env: {} };",
+        )
+        .expect("script");
+
+        let context = js.main_context();
+        v8::scope!(let scope, js.v8_isolate());
+        let context = v8::Local::new(scope, context);
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let global = scope.get_current_context().global(scope);
+        let key = v8::String::new(scope, "options").expect("key");
+        let value = global.get(scope, key.into()).expect("object");
+        let object = v8::Local::<v8::Object>::try_from(value).expect("object");
+
+        unsafe { neojs_v8_test_set_key_conversion_failure(1) };
+        assert_eq!(
+            bounded_keys(scope, &object, 16, 64, 64),
+            Err(BoundedKeysError::KeyConversionFailed)
+        );
+
+        unsafe { neojs_v8_test_set_key_conversion_failure(1) };
+        let failure = super::reject_unknown_options(scope, &object)
+            .expect_err("conversion failure must become a coded error");
+        unsafe { neojs_v8_test_set_key_conversion_failure(0) };
+        match failure {
+            super::Failure::Coded { code, .. } => {
+                assert_eq!(code, "ERR_INVALID_ARG_VALUE");
+            }
+            super::Failure::Pending => {
+                panic!("a conversion failure became Pending and could return undefined");
+            }
+        }
+    }
+
+    #[allow(unsafe_code)]
+    fn element_scan_count(elements: usize, barrier: &std::sync::Barrier) -> u64 {
+        let mut js = JsRuntime::new(Default::default());
+        let source = format!(
+            "globalThis.elementObject = {{}}; for (let i = 0; i < {elements}; i += 1) globalThis.elementObject[i] = i;"
+        );
+        js.execute_script("<bounded-element-thread>", source)
+            .expect("script");
+
+        let context = js.main_context();
+        v8::scope!(let scope, js.v8_isolate());
+        let context = v8::Local::new(scope, context);
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let global = scope.get_current_context().global(scope);
+        let key = v8::String::new(scope, "elementObject").expect("key");
+        let value = global.get(scope, key.into()).expect("object");
+        let object = v8::Local::<v8::Object>::try_from(value).expect("object");
+
+        unsafe { neojs_v8_reset_element_scan_probe() };
+        // Start both scans together so a process-global counter would mix the
+        // two isolates' slots instead of passing sequentially.
+        barrier.wait();
+        let keys = bounded_keys(scope, &object, 512, 2_000, 64).expect("element keys");
+        assert_eq!(keys.len(), elements);
+        unsafe { neojs_v8_element_scan_probe() }
+    }
+
+    #[allow(unsafe_code)]
+    #[test]
+    fn element_scan_probe_is_thread_local_across_parallel_isolates() {
+        let barrier = std::sync::Barrier::new(2);
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| element_scan_count(100, &barrier));
+            let second = scope.spawn(|| element_scan_count(200, &barrier));
+            (
+                first.join().expect("first thread"),
+                second.join().expect("second thread"),
+            )
+        });
+        assert!(
+            (100..200).contains(&first),
+            "first thread observed {first} element slots"
+        );
+        assert!(
+            (200..300).contains(&second),
+            "second thread observed {second} element slots"
         );
     }
 }
