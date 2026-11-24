@@ -13,10 +13,11 @@ use std::sync::mpsc;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
+use std::time::Instant;
 
 use neojs_ssh_core::{
     AuthConfig, ConnectOptions, HostTrust, MAX_COMMAND_BYTES, MAX_OUTPUT_BYTES, SshErrorCode,
-    SshState, Zeroizing, connect,
+    SshState, Zeroizing, connect, validate_host, validate_username,
 };
 use neotales_ssh::ServerAuthPolicy;
 use neotales_ssh::ServerConfig;
@@ -423,9 +424,14 @@ fn peer_close_before_eof_and_output_over_limit() {
     .expect("connect");
     let out = conn.exec(b"close-first").expect("exec");
     assert_eq!(out.stdout, b"close-first\n");
+    let close_start = Instant::now();
     conn.close();
-    assert!(conn.is_closed());
     let (commands, attempts) = fixture.finish();
+    assert!(
+        close_start.elapsed() < Duration::from_secs(5),
+        "conn.close() must close the underlying TCP fd before Connection drops"
+    );
+    assert!(conn.is_closed());
     assert_eq!(commands, vec![b"close-first".to_vec()]);
     assert_eq!(attempts, 1);
 
@@ -497,8 +503,13 @@ fn connect_and_exec_deadlines_expire_with_timeout() {
     .expect("connect");
     let err = conn.exec(b"stall").expect_err("silent exec must time out");
     assert_eq!(err.code(), SshErrorCode::Timeout);
-    assert!(conn.is_closed());
+    let finish_start = Instant::now();
     let (commands, _) = fixture.finish();
+    assert!(
+        finish_start.elapsed() < Duration::from_secs(5),
+        "failed conn.exec() must close the underlying TCP fd before Connection drops"
+    );
+    assert!(conn.is_closed());
     assert_eq!(commands, vec![b"stall".to_vec()]);
 }
 
@@ -582,4 +593,26 @@ fn open_connection_cap_is_enforced_before_dialing() {
     state.close(id);
     assert!(state.is_empty());
     let _ = fixture.finish();
+}
+
+#[test]
+fn host_and_username_validators_enforce_non_empty_and_character_rules() {
+    assert_eq!(
+        validate_host("").unwrap_err().code(),
+        SshErrorCode::Argument
+    );
+    assert_eq!(
+        validate_host("bad host").unwrap_err().code(),
+        SshErrorCode::Argument
+    );
+    assert_eq!(
+        validate_username("").unwrap_err().code(),
+        SshErrorCode::Argument
+    );
+    assert_eq!(
+        validate_username("bad\nuser").unwrap_err().code(),
+        SshErrorCode::Argument
+    );
+    validate_host("127.0.0.1").expect("valid host");
+    validate_username("fixture").expect("valid username");
 }

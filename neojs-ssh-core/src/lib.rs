@@ -51,6 +51,26 @@
 //! .unwrap_err();
 //! assert_eq!(auth_err.code(), SshErrorCode::AuthMethod);
 //! ```
+//!
+//! Connecting to a host with an explicit Ed25519 host-key pin and running one
+//! command:
+//!
+//! ```no_run
+//! use neojs_ssh_core::{AuthConfig, ConnectOptions, HostTrust, Zeroizing, connect};
+//!
+//! # fn main() -> Result<(), neojs_ssh_core::SshError> {
+//! let host_key_blob: &[u8] = &[]; // SSH wire-format "ssh-ed25519" blob
+//! let trust = HostTrust::host_key(host_key_blob)?;
+//! let auth = AuthConfig::Password(Zeroizing::new("password".to_owned()));
+//! let options = ConnectOptions::new("127.0.0.1", 22, "user", auth, trust);
+//!
+//! let mut conn = connect(options)?;
+//! let output = conn.exec(b"uname -a")?;
+//! assert_eq!(output.status, 0);
+//! conn.close();
+//! # Ok(())
+//! # }
+//! ```
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -59,7 +79,7 @@ mod client;
 mod error;
 mod types;
 
-pub use client::{Connection, SshState, connect};
+pub use client::{Connection, SshState, connect, validate_host, validate_username};
 pub use error::{SshError, SshErrorCode};
 pub use types::{
     AuthConfig, ConnectOptions, DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_EXEC_TIMEOUT_MS, ExecOutput,

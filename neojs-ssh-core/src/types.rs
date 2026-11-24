@@ -260,12 +260,13 @@ impl fmt::Debug for AuthConfig {
 /// Options for establishing one synchronous SSH [`crate::Connection`].
 #[derive(Debug)]
 pub struct ConnectOptions {
-    /// Target host name or IP literal (max [`MAX_HOST_BYTES`], no control or
-    /// whitespace characters).
+    /// Target host name or IP literal (non-empty, max [`MAX_HOST_BYTES`], no
+    /// control or whitespace characters).
     pub host: String,
     /// Target TCP port (`1..=65535`).
     pub port: u16,
-    /// SSH user name (max [`MAX_USERNAME_BYTES`], no control characters).
+    /// SSH user name (non-empty, max [`MAX_USERNAME_BYTES`], no control
+    /// characters).
     pub username: String,
     /// Explicit authentication credential source.
     pub auth: AuthConfig,

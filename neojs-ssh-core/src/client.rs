@@ -47,19 +47,24 @@ use crate::types::TrustInner;
 pub(crate) static FAIL_NEXT_PEER_CLOSE_REPLY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+struct ActiveConnection {
+    sessions: ClientSessions<ClientTransport<TcpStream>>,
+    stream: TcpStream,
+}
+
 /// One authenticated SSH connection and the socket handle used to apply
 /// deadlines.
 ///
-/// The stream is a duplicate of the descriptor the transport owns. Socket
-/// timeouts are properties of the underlying socket, so setting one through
-/// either handle applies to the next blocking operation.
+/// Both the transport and the duplicated socket handle used for deadlines live
+/// together so [`Connection::close`] or any fatal [`Connection::exec`] failure
+/// closes the underlying file descriptor immediately without waiting for the
+/// [`Connection`] value to be dropped.
 ///
 /// Dropping a [`Connection`] closes its socket immediately without sending a
 /// graceful SSH disconnect message.
 pub struct Connection {
     /// `None` once the connection has closed or failed after being engaged.
-    sessions: Option<ClientSessions<ClientTransport<TcpStream>>>,
-    stream: TcpStream,
+    active: Option<ActiveConnection>,
     exec_timeout: Duration,
 }
 
@@ -76,23 +81,29 @@ impl Connection {
     /// * Returns [`crate::SshErrorCode::Limit`] before sending anything if
     ///   `command` exceeds [`MAX_COMMAND_BYTES`], leaving the connection open.
     /// * Any failure after the session is engaged drops the underlying
-    ///   transport and marks the connection closed (`self.is_closed() == true`).
+    ///   transport and socket immediately (`self.is_closed() == true`).
     pub fn exec(&mut self, command: &[u8]) -> Result<ExecOutput, SshError> {
-        let Some(mut sessions) = self.sessions.take() else {
+        let Some(mut active) = self.active.take() else {
             return Err(SshError::Closed);
         };
         if command.len() > MAX_COMMAND_BYTES {
-            self.sessions = Some(sessions);
+            self.active = Some(active);
             return Err(SshError::default_limit());
         }
-        match run_exec(&mut sessions, &self.stream, self.exec_timeout, command) {
+        match run_exec(
+            &mut active.sessions,
+            &active.stream,
+            self.exec_timeout,
+            command,
+        ) {
             Ok(output) => {
-                self.sessions = Some(sessions);
+                self.active = Some(active);
                 Ok(output)
             }
             Err(error) => {
-                // `sessions` drops here, closing the transport so partially
-                // read packets cannot corrupt a later command.
+                // `active` (both transport and duplicated TcpStream) drops
+                // here, closing the TCP socket immediately so partially read
+                // packets cannot corrupt a later command and the peer sees EOF.
                 Err(error)
             }
         }
@@ -102,15 +113,16 @@ impl Connection {
     /// fatal `exec` error.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.sessions.is_none()
+        self.active.is_none()
     }
 
     /// Closes this connection immediately. Idempotent.
     ///
-    /// Dropping the underlying transport closes the TCP socket without sending
-    /// a graceful SSH disconnect message.
+    /// Dropping the underlying transport and socket handle closes the TCP
+    /// file descriptor immediately without sending a graceful SSH disconnect
+    /// message.
     pub fn close(&mut self) {
-        self.sessions = None;
+        self.active = None;
     }
 }
 
@@ -358,13 +370,20 @@ fn connect_validated(options: ValidatedConnect) -> Result<Connection, SshError> 
     }
 
     Ok(Connection {
-        sessions: Some(ClientSessions::new(transport)),
-        stream: io,
+        active: Some(ActiveConnection {
+            sessions: ClientSessions::new(transport),
+            stream: io,
+        }),
         exec_timeout: options.exec_timeout,
     })
 }
 
-fn validate_host(host: &str) -> Result<(), SshError> {
+/// Validates a target host name or IP literal.
+///
+/// Fails with [`crate::SshErrorCode::Limit`] if `host` exceeds
+/// [`MAX_HOST_BYTES`] or [`crate::SshErrorCode::Argument`] if `host` is empty
+/// or contains control or whitespace characters.
+pub fn validate_host(host: &str) -> Result<(), SshError> {
     if host.len() > MAX_HOST_BYTES {
         return Err(SshError::default_limit());
     }
@@ -378,7 +397,12 @@ fn validate_host(host: &str) -> Result<(), SshError> {
     Ok(())
 }
 
-fn validate_username(username: &str) -> Result<(), SshError> {
+/// Validates an SSH user name.
+///
+/// Fails with [`crate::SshErrorCode::Limit`] if `username` exceeds
+/// [`MAX_USERNAME_BYTES`] or [`crate::SshErrorCode::Argument`] if `username` is
+/// empty or contains control characters.
+pub fn validate_username(username: &str) -> Result<(), SshError> {
     if username.len() > MAX_USERNAME_BYTES {
         return Err(SshError::default_limit());
     }

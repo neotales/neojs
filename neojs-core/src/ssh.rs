@@ -16,7 +16,8 @@ use neojs_ssh_core::{
     AuthConfig, ConnectOptions, DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_EXEC_TIMEOUT_MS, HostTrust,
     MAX_COMMAND_BYTES, MAX_CONNECT_TIMEOUT_MS, MAX_EXEC_TIMEOUT_MS, MAX_HOST_BYTES,
     MAX_HOST_KEY_BYTES, MAX_KNOWN_HOSTS_BYTES, MAX_PASSPHRASE_BYTES, MAX_PASSWORD_BYTES,
-    MAX_PRIVATE_KEY_BYTES, MAX_USERNAME_BYTES, SshError, SshState, Zeroizing,
+    MAX_PRIVATE_KEY_BYTES, MAX_USERNAME_BYTES, SshError, SshState, Zeroizing, validate_host,
+    validate_username,
 };
 
 /// V8 binding-level or core SSH failure carried back to `neo.js` as data.
@@ -367,8 +368,10 @@ fn op_neo_ssh_connect<'s, 'i>(
 ) -> v8::Local<'s, v8::Value> {
     let parsed: Result<ConnectOptions, BindingError> = (|| {
         let host = required_string(scope, host, MAX_HOST_BYTES)?;
+        validate_host(&host)?;
         let port = optional_port(port)?;
         let username = required_string(scope, username, MAX_USERNAME_BYTES)?;
+        validate_username(&username)?;
 
         let password = optional_secret_string(scope, password, MAX_PASSWORD_BYTES)?;
         let private_key = optional_secret_bytes(scope, private_key, MAX_PRIVATE_KEY_BYTES)?;
