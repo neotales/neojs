@@ -81,8 +81,11 @@ pub use module::{
     unsupported_module_reason,
 };
 pub use path::{
-    MAX_PATH_INPUT_BYTES, ParsedPath, PathFlavor, PathObject, basename, dirname, extname, format,
-    host_cwd, host_flavor, is_absolute, join, normalize, parse, relative, resolve,
-    to_namespaced_path,
+    MAX_PATH_AGGREGATE_BYTES, MAX_PATH_ARGS, MAX_PATH_INPUT_BYTES, PATH_TOO_LARGE_CODE, ParsedPath,
+    PathFlavor, PathObject, basename, dirname, extname, format, host_cwd, host_flavor, is_absolute,
+    join, normalize, parse, relative, resolve, to_namespaced_path,
 };
+
+#[cfg(feature = "test-support")]
+pub use path::set_host_cwd_failure_for_testing;
 pub use protocol::handle_request;

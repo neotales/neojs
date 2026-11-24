@@ -34,7 +34,10 @@ pub use neojs_node_builtins::{
     is_known_node_bare_name, run_sync, unsupported_module_reason,
 };
 
+use neojs_node_builtins::MAX_PATH_AGGREGATE_BYTES;
+use neojs_node_builtins::MAX_PATH_ARGS;
 use neojs_node_builtins::MAX_PATH_INPUT_BYTES;
+use neojs_node_builtins::PATH_TOO_LARGE_CODE;
 use neojs_node_builtins::PathFlavor;
 use neojs_node_builtins::PathObject;
 use neojs_node_builtins::host_cwd;
@@ -509,11 +512,45 @@ fn read_path_string<'s>(
     value: v8::Local<'s, v8::Value>,
     what: &str,
 ) -> Result<String, Failure> {
+    let string = v8::Local::<v8::String>::try_from(value)
+        .map_err(|_| Failure::invalid_type(format!("{what} must be a string")))?;
+    let length = string.length();
+    if length > MAX_PATH_INPUT_BYTES {
+        return Err(Failure::path_too_large());
+    }
+    let mut units = vec![0u16; length];
+    if length > 0 {
+        string.write_v2(scope, 0, &mut units, v8::WriteFlags::default());
+    }
+    if !is_well_formed_utf16(&units) {
+        return Err(Failure::invalid_value(
+            "path strings must be well-formed Unicode",
+        ));
+    }
     let text = read_string(scope, value, what, MAX_PATH_INPUT_BYTES)?;
     if text.len() > MAX_PATH_INPUT_BYTES {
-        return Err(Failure::too_large());
+        return Err(Failure::path_too_large());
     }
     Ok(text)
+}
+
+fn is_well_formed_utf16(units: &[u16]) -> bool {
+    let mut index = 0usize;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xD800..=0xDBFF).contains(&unit) {
+            if index + 1 < units.len() && (0xDC00..=0xDFFF).contains(&units[index + 1]) {
+                index += 2;
+                continue;
+            }
+            return false;
+        }
+        if (0xDC00..=0xDFFF).contains(&unit) {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 fn path_optional_arg<'s>(
@@ -576,6 +613,33 @@ fn path_is_absolute<'s>(
     }
 }
 
+fn preflight_path_args<'s>(
+    args: &v8::FunctionCallbackArguments<'s>,
+    count: usize,
+) -> Result<(), Failure> {
+    if count > MAX_PATH_ARGS {
+        return Err(Failure::path_too_large());
+    }
+    let mut total = 0usize;
+    for index in 0..count {
+        let value = args.get(index as i32);
+        if !value.is_string() {
+            return Err(Failure::invalid_type("path must be a string"));
+        }
+        let string = v8::Local::<v8::String>::try_from(value)
+            .map_err(|_| Failure::invalid_type("path must be a string"))?;
+        total = total.saturating_add(string.length());
+        if total > MAX_PATH_AGGREGATE_BYTES {
+            return Err(Failure::path_too_large());
+        }
+    }
+    Ok(())
+}
+
+fn path_cwd() -> Result<String, Failure> {
+    host_cwd().map_err(|_| Failure::path_cwd())
+}
+
 fn path_join<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
@@ -583,9 +647,11 @@ fn path_join<'s>(
 ) {
     let result = (|| {
         let flavor = path_flavor(scope, &args)?;
-        let mut paths = Vec::with_capacity(args.length() as usize);
-        for index in 0..args.length() {
-            paths.push(path_arg(scope, &args, index, "path")?);
+        let count = args.length().max(0) as usize;
+        preflight_path_args(&args, count)?;
+        let mut paths = Vec::with_capacity(count);
+        for index in 0..count {
+            paths.push(path_arg(scope, &args, index as i32, "path")?);
         }
         let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
         Ok(neojs_node_builtins::join(flavor, &refs))
@@ -603,12 +669,22 @@ fn path_resolve<'s>(
 ) {
     let result = (|| {
         let flavor = path_flavor(scope, &args)?;
-        let mut paths = Vec::with_capacity(args.length() as usize);
-        for index in 0..args.length() {
-            paths.push(path_arg(scope, &args, index, "path")?);
+        let count = args.length().max(0) as usize;
+        preflight_path_args(&args, count)?;
+        let mut paths = Vec::with_capacity(count);
+        for index in 0..count {
+            paths.push(path_arg(scope, &args, index as i32, "path")?);
         }
         let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-        Ok(neojs_node_builtins::resolve(flavor, &host_cwd(), &refs))
+        let needs_cwd = !paths
+            .iter()
+            .any(|path| neojs_node_builtins::is_absolute(flavor, path));
+        let cwd = if needs_cwd {
+            path_cwd()?
+        } else {
+            String::new()
+        };
+        Ok(neojs_node_builtins::resolve(flavor, &cwd, &refs))
     })();
     match result {
         Ok(value) => set_path_string(scope, &mut rv, value),
@@ -623,14 +699,17 @@ fn path_relative<'s>(
 ) {
     let result = (|| {
         let flavor = path_flavor(scope, &args)?;
+        preflight_path_args(&args, 2)?;
         let from = path_arg(scope, &args, 0, "from")?;
         let to = path_arg(scope, &args, 1, "to")?;
-        Ok(neojs_node_builtins::relative(
-            flavor,
-            &host_cwd(),
-            &from,
-            &to,
-        ))
+        let needs_cwd = !(neojs_node_builtins::is_absolute(flavor, &from)
+            && neojs_node_builtins::is_absolute(flavor, &to));
+        let cwd = if needs_cwd {
+            path_cwd()?
+        } else {
+            String::new()
+        };
+        Ok(neojs_node_builtins::relative(flavor, &cwd, &from, &to))
     })();
     match result {
         Ok(value) => set_path_string(scope, &mut rv, value),
@@ -783,11 +862,14 @@ fn path_to_namespaced_path<'s>(
     let result = (|| {
         let flavor = path_flavor(scope, &args)?;
         let path = path_arg(scope, &args, 0, "path")?;
-        Ok(neojs_node_builtins::to_namespaced_path(
-            flavor,
-            &host_cwd(),
-            &path,
-        ))
+        let needs_cwd =
+            flavor == PathFlavor::Win32 && !neojs_node_builtins::is_absolute(flavor, &path);
+        let cwd = if needs_cwd {
+            path_cwd()?
+        } else {
+            String::new()
+        };
+        Ok(neojs_node_builtins::to_namespaced_path(flavor, &cwd, &path))
     })();
     match result {
         Ok(value) => set_path_string(scope, &mut rv, value),
@@ -909,6 +991,20 @@ impl Failure {
         Self::new(
             "ERR_MEMORY_ALLOCATION_FAILED",
             "a property-name buffer could not be allocated",
+        )
+    }
+
+    fn path_too_large() -> Self {
+        Self::new(
+            PATH_TOO_LARGE_CODE,
+            "the node:path request exceeds the hard size limit",
+        )
+    }
+
+    fn path_cwd() -> Self {
+        Self::new(
+            "ERR_NODE_PATH_CWD",
+            "the current working directory could not be read",
         )
     }
 }

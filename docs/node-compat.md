@@ -239,11 +239,15 @@ and independent of the host. `path.resolve` and
 `path.toNamespacedPath` use the host working directory, as Node uses
 `process.cwd()`.
 
-Inputs are capped at 1,048,576 UTF-8 bytes per string. A larger string throws
-`ERR_NODE_REQUEST_TOO_LARGE`; a non-string argument throws
-`ERR_INVALID_ARG_TYPE`. `format` requires string fields or `undefined`; unlike
-Node's coercing formatter it does not call `ToString` on arbitrary field
-values. The algorithms follow Node's common POSIX and Win32 rules for drive
+Inputs are capped at 1,048,576 UTF-8 bytes per string. `join` and `resolve`
+also cap the argument count at 256 and the aggregate input at 1,048,576 UTF-8
+bytes. A larger path request throws `ERR_NODE_PATH_TOO_LARGE`; a non-string
+argument throws `ERR_INVALID_ARG_TYPE`. Lone surrogates are rejected with
+`ERR_INVALID_ARG_VALUE` in both adapters rather than being silently replaced.
+`format` requires string fields or `undefined`; unlike Node's coercing formatter
+it does not call `ToString` on arbitrary field values. A host working-directory
+lookup failure is `ERR_NODE_PATH_CWD`; the adapters only acquire the cwd for
+operations that actually need it. The algorithms follow Node's common POSIX and Win32 rules for drive
 letters, UNC and device roots, reserved device names, `.`/`..`, and trailing
 separators. This is a documented subset, not a claim of full Node path parity.
 
@@ -260,6 +264,8 @@ implemented`. Resolution never falls through to a `neo:` module.
 | `ERR_NODE_COMMAND_NOT_ABSOLUTE` | The program name was relative; there is no `PATH` lookup. |
 | `ERR_NODE_LIMIT` | A requested timeout, `maxBuffer`, or other size exceeds the policy. |
 | `ERR_NODE_REQUEST_TOO_LARGE` | A native input/argument/environment/path field, or a QuickJS key table, exceeds its hard cap. |
+| `ERR_NODE_PATH_TOO_LARGE` | A `node:path` string, aggregate, or argument-count limit was exceeded. |
+| `ERR_NODE_PATH_CWD` | The host working directory could not be read for a path operation that needs it. |
 | `ERR_INVALID_ARG_VALUE` | A value or property name is invalid, including an empty or unpaired-surrogate environment/option key. |
 | `ERR_MEMORY_ALLOCATION_FAILED` | A bounded property-name buffer could not be allocated; the adapter throws a coded error instead of returning `undefined`. |
 | `ERR_NODE_CHILD_PROCESS_UNSUPPORTED` | The Unix child-process runner is not available on this platform. |

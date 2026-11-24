@@ -9,6 +9,10 @@ rust-version.workspace = true
 authors.workspace = true
 readme = "README.md"
 
+[features]
+# Test-only hooks for the Node path adapter tests.
+test-support = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

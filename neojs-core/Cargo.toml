@@ -65,6 +65,8 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Enables the shared host-cwd failure hook for path adapter tests.
+neojs-node-builtins = { version = "0.1.0", path = "../neojs-node-builtins", features = ["test-support"] }
 # Enables the vendored deno_core test-only seam for the lazy-ESM collision
 # test. Normal builds do not enable this feature.
 deno_core = { workspace = true, features = ["native_module_testing"] }

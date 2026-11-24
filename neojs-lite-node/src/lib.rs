@@ -42,7 +42,10 @@ pub use neojs_node_builtins::{
     is_known_node_bare_name, unsupported_module_reason,
 };
 
+use neojs_node_builtins::MAX_PATH_AGGREGATE_BYTES;
+use neojs_node_builtins::MAX_PATH_ARGS;
 use neojs_node_builtins::MAX_PATH_INPUT_BYTES;
+use neojs_node_builtins::PATH_TOO_LARGE_CODE;
 use neojs_node_builtins::PathFlavor;
 use neojs_node_builtins::PathObject;
 use neojs_node_builtins::host_cwd;
@@ -257,6 +260,28 @@ fn path_api<'js>(ctx: &Ctx<'js>, flavor: PathFlavor) -> Result<Object<'js>> {
     Ok(api)
 }
 
+fn preflight_path_args<'js>(ctx: &Ctx<'js>, args: &[Value<'js>], count: usize) -> Result<()> {
+    if count > MAX_PATH_ARGS {
+        return Err(path_too_large(ctx));
+    }
+    let mut total = 0usize;
+    for index in 0..count {
+        let value = args
+            .get(index)
+            .ok_or_else(|| invalid_type(ctx, "path must be a string"))?;
+        if !value.is_string() {
+            return Err(invalid_type(ctx, "path must be a string"));
+        }
+        let units = string_length(ctx, value)
+            .ok_or_else(|| invalid(ctx, "path string length could not be read"))?;
+        total = total.saturating_add(units);
+        if total > MAX_PATH_AGGREGATE_BYTES {
+            return Err(path_too_large(ctx));
+        }
+    }
+    Ok(())
+}
+
 fn path_function<'js>(
     ctx: Ctx<'js>,
     flavor: PathFlavor,
@@ -282,6 +307,7 @@ fn path_function<'js>(
                     ))
                 }
                 "join" => {
+                    preflight_path_args(&ctx, &args, args.len())?;
                     let mut paths = Vec::with_capacity(args.len());
                     for index in 0..args.len() {
                         paths.push(path_arg(&ctx, &args, index, "path")?);
@@ -290,31 +316,54 @@ fn path_function<'js>(
                     Ok(js_string(&ctx, &neojs_node_builtins::join(flavor, &refs))?.into_value())
                 }
                 "resolve" => {
+                    preflight_path_args(&ctx, &args, args.len())?;
                     let mut paths = Vec::with_capacity(args.len());
                     for index in 0..args.len() {
                         paths.push(path_arg(&ctx, &args, index, "path")?);
                     }
                     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-                    Ok(js_string(
-                        &ctx,
-                        &neojs_node_builtins::resolve(flavor, &host_cwd(), &refs),
-                    )?
-                    .into_value())
+                    let needs_cwd = !paths
+                        .iter()
+                        .any(|path| neojs_node_builtins::is_absolute(flavor, path));
+                    let cwd = if needs_cwd {
+                        path_cwd(&ctx)?
+                    } else {
+                        String::new()
+                    };
+                    Ok(
+                        js_string(&ctx, &neojs_node_builtins::resolve(flavor, &cwd, &refs))?
+                            .into_value(),
+                    )
                 }
                 "relative" => {
+                    preflight_path_args(&ctx, &args, 2)?;
                     let from = path_arg(&ctx, &args, 0, "from")?;
                     let to = path_arg(&ctx, &args, 1, "to")?;
+                    let needs_cwd = !(neojs_node_builtins::is_absolute(flavor, &from)
+                        && neojs_node_builtins::is_absolute(flavor, &to));
+                    let cwd = if needs_cwd {
+                        path_cwd(&ctx)?
+                    } else {
+                        String::new()
+                    };
                     Ok(js_string(
                         &ctx,
-                        &neojs_node_builtins::relative(flavor, &host_cwd(), &from, &to),
+                        &neojs_node_builtins::relative(flavor, &cwd, &from, &to),
                     )?
                     .into_value())
                 }
                 "toNamespacedPath" => {
                     let path = path_arg(&ctx, &args, 0, "path")?;
+                    let needs_cwd = flavor == PathFlavor::Win32
+                        && !neojs_node_builtins::is_absolute(flavor, &path);
+                    let cwd = if needs_cwd {
+                        path_cwd(&ctx)?
+                    } else {
+                        String::new()
+                    };
                     Ok(js_string(
                         &ctx,
-                        &neojs_node_builtins::to_namespaced_path(flavor, &host_cwd(), &path),
+                        &neojs_node_builtins::to_namespaced_path(flavor, &cwd, &path),
                     )?
                     .into_value())
                 }
@@ -394,13 +443,29 @@ fn path_matches_glob<'js>(ctx: Ctx<'js>) -> Result<Function<'js>> {
 }
 
 fn path_arg<'js>(ctx: &Ctx<'js>, args: &[Value<'js>], index: usize, what: &str) -> Result<String> {
-    let Some(value) = args.get(index) else {
-        return Err(invalid_type(ctx, &format!("{what} must be a string")));
-    };
+    let value = args
+        .get(index)
+        .ok_or_else(|| invalid_type(ctx, &format!("{what} must be a string")))?;
+    read_path_string(ctx, value, what)
+}
+
+fn read_path_string<'js>(ctx: &Ctx<'js>, value: &Value<'js>, what: &str) -> Result<String> {
     if !value.is_string() {
         return Err(invalid_type(ctx, &format!("{what} must be a string")));
     }
-    read_string(ctx, value, what, MAX_PATH_INPUT_BYTES)
+    let string = value.as_string().expect("checked string");
+    let units = string_length(ctx, value)
+        .ok_or_else(|| invalid(ctx, "path string length could not be read"))?;
+    if units > MAX_PATH_INPUT_BYTES {
+        return Err(path_too_large(ctx));
+    }
+    let text = string
+        .to_string()
+        .map_err(|_| invalid(ctx, "path strings must be well-formed Unicode"))?;
+    if text.len() > MAX_PATH_INPUT_BYTES {
+        return Err(path_too_large(ctx));
+    }
+    Ok(text)
 }
 
 fn path_optional_arg<'js>(
@@ -434,7 +499,7 @@ fn read_optional_path_field<'js>(
             &format!("path.format field `{name}` must be a string"),
         ));
     }
-    read_string(ctx, &value, name, MAX_PATH_INPUT_BYTES).map(Some)
+    read_path_string(ctx, &value, name).map(Some)
 }
 
 /// Declares the native `node:child_process` and `node:path` modules.
@@ -1348,6 +1413,24 @@ fn invalid<'js>(ctx: &Ctx<'js>, message: &str) -> rquickjs::Error {
 
 fn invalid_type<'js>(ctx: &Ctx<'js>, message: &str) -> rquickjs::Error {
     coded_error(ctx, "ERR_INVALID_ARG_TYPE", message)
+}
+
+fn path_too_large(ctx: &Ctx<'_>) -> rquickjs::Error {
+    coded_error(
+        ctx,
+        PATH_TOO_LARGE_CODE,
+        "the node:path request exceeds the hard size limit",
+    )
+}
+
+fn path_cwd(ctx: &Ctx<'_>) -> Result<String> {
+    host_cwd().map_err(|_| {
+        coded_error(
+            ctx,
+            "ERR_NODE_PATH_CWD",
+            "the current working directory could not be read",
+        )
+    })
 }
 
 fn request_too_large(ctx: &Ctx<'_>) -> rquickjs::Error {

@@ -19,11 +19,21 @@
 //! forms, including drive-relative, UNC, device-root, `.`/`..`, trailing
 //! separator, and Windows reserved-device-name handling. They do not claim
 //! full Node parity for every historical device-path spelling. Inputs are
-//! UTF-8 strings; the adapters reject non-string values and strings above the
-//! shared input bound before calling this module.
+//! well-formed UTF-8 strings; the adapters reject non-string values, lone
+//! surrogates, and strings above the shared input bound before calling this
+//! module. `join` and `resolve` also cap argument count and aggregate bytes.
 
 /// Maximum UTF-8 bytes accepted for one path argument.
 pub const MAX_PATH_INPUT_BYTES: usize = 1_048_576;
+
+/// Maximum number of variadic path arguments accepted by `join` or `resolve`.
+pub const MAX_PATH_ARGS: usize = 256;
+
+/// Maximum aggregate UTF-8 bytes accepted across variadic path arguments.
+pub const MAX_PATH_AGGREGATE_BYTES: usize = 1_048_576;
+
+/// Coded error used for path-specific size and argument-count limits.
+pub const PATH_TOO_LARGE_CODE: &str = "ERR_NODE_PATH_TOO_LARGE";
 
 /// The path flavor selected by a Node `path` view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,10 +99,25 @@ pub const fn host_flavor() -> PathFlavor {
 /// `path.resolve` and `toNamespacedPath` use this the way Node uses
 /// `process.cwd()`. The adapters do not read an environment variable or guest
 /// value for it.
-pub fn host_cwd() -> String {
-    std::env::current_dir()
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| ".".to_owned())
+#[cfg(feature = "test-support")]
+static FAIL_HOST_CWD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Injects a host working-directory lookup failure for tests.
+#[cfg(feature = "test-support")]
+pub fn set_host_cwd_failure_for_testing(fail: bool) {
+    FAIL_HOST_CWD.store(fail, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Returns the host working directory, propagating a lookup failure.
+pub fn host_cwd() -> std::io::Result<String> {
+    #[cfg(feature = "test-support")]
+    if FAIL_HOST_CWD.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "injected host cwd failure",
+        ));
+    }
+    std::env::current_dir().map(|path| path.to_string_lossy().into_owned())
 }
 
 /// Normalizes a path.
@@ -170,18 +195,21 @@ pub fn parse(flavor: PathFlavor, path: &str) -> ParsedPath {
 /// Formats a path object.
 pub fn format(flavor: PathFlavor, object: &PathObject<'_>) -> String {
     let sep = flavor.sep();
+    let ext = object.ext.unwrap_or_default();
+    let ext = if !ext.is_empty() && !ext.starts_with('.') {
+        format!(".{ext}")
+    } else {
+        ext.to_owned()
+    };
     let base = object
         .base
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| {
-            format!(
-                "{}{}",
-                object.name.unwrap_or_default(),
-                object.ext.unwrap_or_default()
-            )
-        });
+        .unwrap_or_else(|| format!("{}{ext}", object.name.unwrap_or_default()));
     if let Some(dir) = object.dir.filter(|value| !value.is_empty()) {
+        if object.root == Some(dir) {
+            return format!("{dir}{base}");
+        }
         return format!("{dir}{sep}{base}");
     }
     if let Some(root) = object.root.filter(|value| !value.is_empty()) {
@@ -484,7 +512,7 @@ fn relative_posix(cwd: &str, from: &str, to: &str) -> String {
         }
     }
     let mut output = String::new();
-    let mut position = from_start + last_common_separator.max(0) as usize + 1;
+    let mut position = (from_start as isize + last_common_separator + 1) as usize;
     while position <= from_end {
         if position == from_end || from_value[position] == '/' {
             if output.is_empty() {
@@ -495,7 +523,7 @@ fn relative_posix(cwd: &str, from: &str, to: &str) -> String {
         }
         position += 1;
     }
-    let tail_start = to_start + last_common_separator.max(0) as usize;
+    let tail_start = (to_start as isize + last_common_separator) as usize;
     output.push_str(&string(&to_value[tail_start..to_end]));
     output
 }
@@ -645,19 +673,15 @@ fn normalize_win32(path: &str) -> String {
     if !tail.is_empty() && is_win_sep(value[length - 1]) {
         tail.push('\\');
     }
-    if !absolute && device.is_none() && path.contains(':') {
-        if tail.len() >= 2
-            && is_drive_root(tail.chars().next().unwrap_or('\0'))
-            && tail.chars().nth(1) == Some(':')
-        {
+    if !absolute && device.is_none() && value.contains(&':') {
+        let tail_chars: Vec<char> = tail.chars().collect();
+        if tail_chars.len() >= 2 && is_drive_root(tail_chars[0]) && tail_chars[1] == ':' {
             return format!(".\\{tail}");
         }
-        let mut search = path.find(':');
-        while let Some(index) = search {
-            if index + 1 == path.len() || path.chars().nth(index + 1).is_some_and(is_win_sep) {
+        for (index, &character) in value.iter().enumerate() {
+            if character == ':' && (index + 1 == value.len() || is_win_sep(value[index + 1])) {
                 return format!(".\\{tail}");
             }
-            search = path[index + 1..].find(':').map(|next| index + 1 + next);
         }
     }
     let colon_index = value.iter().position(|&character| character == ':');
@@ -837,10 +861,10 @@ fn resolve_win32(cwd: &str, paths: &[&str]) -> String {
             } else {
                 root_end = 1;
             }
-        } else if length > 2 && is_drive_root(value[0]) && value[1] == ':' {
+        } else if length >= 2 && is_drive_root(value[0]) && value[1] == ':' {
             device = string(&value[..2]);
             root_end = 2;
-            if is_win_sep(value[2]) {
+            if length > 2 && is_win_sep(value[2]) {
                 absolute = true;
                 root_end = 3;
             }
@@ -893,8 +917,8 @@ fn relative_win32(cwd: &str, from: &str, to: &str) -> String {
     if from_original == to_original {
         return String::new();
     }
-    let from_lower = from_original.to_ascii_lowercase();
-    let to_lower = to_original.to_ascii_lowercase();
+    let from_lower = from_original.to_lowercase();
+    let to_lower = to_original.to_lowercase();
     if from_lower == to_lower {
         return String::new();
     }
@@ -913,7 +937,7 @@ fn relative_win32(cwd: &str, from: &str, to: &str) -> String {
         let to_len = to_split.len();
         let length = from_len.min(to_len);
         let mut index = 0usize;
-        while index < length && from_split[index].eq_ignore_ascii_case(&to_split[index]) {
+        while index < length && from_split[index].to_lowercase() == to_split[index].to_lowercase() {
             index += 1;
         }
         if index == 0 {
@@ -956,6 +980,7 @@ fn relative_win32(cwd: &str, from: &str, to: &str) -> String {
     }
     let to_len = to_end - to_start;
     let length = from_len.min(to_len);
+    let to_original_value = chars(&to_original);
     let mut last_common_separator: isize = -1;
     let mut index = 0usize;
     while index < length {
@@ -975,10 +1000,10 @@ fn relative_win32(cwd: &str, from: &str, to: &str) -> String {
     } else {
         if to_len > length {
             if to_value.get(to_start + index) == Some(&'\\') {
-                return string(&to_value[to_start + index + 1..to_end]);
+                return string(&to_original_value[to_start + index + 1..to_end]);
             }
             if index == 2 {
-                return string(&to_value[to_start + index..to_end]);
+                return string(&to_original_value[to_start + index..to_end]);
             }
         }
         if from_len > length {
@@ -1977,5 +2002,103 @@ mod tests {
             parse(PathFlavor::Posix, "foo.tar.gz"),
             parsed("", "", "foo.tar.gz", ".gz", "foo.tar")
         );
+    }
+
+    #[test]
+    fn relative_and_format_edge_vectors_match_node() {
+        assert_eq!(relative(PathFlavor::Posix, "/tmp", "/a", "/b"), "../b");
+        assert_eq!(
+            relative(PathFlavor::Posix, "/tmp", "/a/b", "/x/y"),
+            "../../x/y"
+        );
+        assert_eq!(
+            format(
+                PathFlavor::Posix,
+                &PathObject {
+                    root: Some("/"),
+                    dir: Some("/"),
+                    base: Some("a"),
+                    ..PathObject::default()
+                }
+            ),
+            "/a"
+        );
+        assert_eq!(
+            format(
+                PathFlavor::Posix,
+                &PathObject {
+                    name: Some("foo"),
+                    ext: Some("txt"),
+                    ..PathObject::default()
+                }
+            ),
+            "foo.txt"
+        );
+        assert_eq!(
+            format(
+                PathFlavor::Win32,
+                &PathObject {
+                    root: Some("C:\\"),
+                    dir: Some("C:\\"),
+                    base: Some("a"),
+                    ..PathObject::default()
+                }
+            ),
+            "C:\\a"
+        );
+        assert_eq!(
+            format(
+                PathFlavor::Win32,
+                &PathObject {
+                    name: Some("foo"),
+                    ext: Some("txt"),
+                    ..PathObject::default()
+                }
+            ),
+            "foo.txt"
+        );
+    }
+
+    #[test]
+    fn win32_relative_preserves_original_spelling_and_unicode() {
+        assert_eq!(
+            relative(PathFlavor::Win32, "/tmp", "C:\\a", "C:\\a\\BAR"),
+            "BAR"
+        );
+        assert_eq!(
+            relative(PathFlavor::Win32, "/tmp", "C:\\Ä", "C:\\ä\\B"),
+            "B"
+        );
+        assert_eq!(
+            relative(PathFlavor::Win32, "/tmp", "C:\\a", "C:\\a\\Ä"),
+            "Ä"
+        );
+        assert_eq!(
+            relative(PathFlavor::Win32, "/tmp", "C:\\Ä\\x", "C:\\ä\\y"),
+            "..\\y"
+        );
+        assert_eq!(
+            relative(PathFlavor::Win32, "/tmp", "C:\\İ", "C:\\İ\\x"),
+            "x"
+        );
+    }
+
+    #[test]
+    fn win32_resolve_bare_drive_and_unicode_colon_vectors_match_node() {
+        assert_eq!(resolve(PathFlavor::Win32, "/tmp", &["C:"]), "C:\\tmp");
+        assert_eq!(normalize(PathFlavor::Win32, "é:\\x"), ".\\é:\\x");
+        assert_eq!(
+            normalize(PathFlavor::Win32, "é:\\foo\\..\\bar"),
+            ".\\é:\\bar"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn host_cwd_failure_is_propagated() {
+        set_host_cwd_failure_for_testing(true);
+        let result = host_cwd();
+        set_host_cwd_failure_for_testing(false);
+        assert!(result.is_err());
     }
 }

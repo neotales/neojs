@@ -46,4 +46,6 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+# Enables the shared host-cwd failure hook for path adapter tests.
+neojs-node-builtins = { version = "0.1.0", path = "../neojs-node-builtins", features = ["test-support"] }
 tempfile.workspace = true
