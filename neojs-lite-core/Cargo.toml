@@ -10,16 +10,16 @@ authors.workspace = true
 readme = "README.md"
 
 [features]
-# A default Lite build keeps the shared `neo:assert`, `neo:chars`, `neo:fs`,
-# `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`, and `neo:uuid` (`neo:uuid`,
-# `neo:uuid/v4`, `neo:uuid/v7`) modules plus erasable TypeScript stripping
-# (`typescript`). A consumer that wants the smallest QuickJS runtime can disable
-# default features; the CLI below selects the features explicitly so a change to
-# these defaults cannot silently change what the command advertises. Cargo
-# features are additive and unify across the dependency graph: a feature is
-# present whenever any dependent enables it. Selection is compile-time surface
-# selection, not a sandbox.
-default = ["neo-assert", "neo-chars", "neo-fs", "neo-os", "neo-ssh", "neo-strings", "neo-test", "neo-uuid", "typescript"]
+# A default Lite build keeps the shared `neo:assert`, `neo:chars`, `neo:crypto`,
+# `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`, and `neo:uuid`
+# (`neo:uuid`, `neo:uuid/v4`, `neo:uuid/v7`) modules plus erasable TypeScript
+# stripping (`typescript`). A consumer that wants the smallest QuickJS runtime
+# can disable default features; the CLI below selects the features explicitly
+# so a change to these defaults cannot silently change what the command
+# advertises. Cargo features are additive and unify across the dependency graph:
+# a feature is present whenever any dependent enables it. Selection is
+# compile-time surface selection, not a sandbox.
+default = ["neo-assert", "neo-chars", "neo-crypto", "neo-fs", "neo-os", "neo-ssh", "neo-strings", "neo-test", "neo-uuid", "typescript"]
 # The shared `assert` module and its Promise observation host hooks. This
 # enables the optional `neojs-builtins` dependency and its `assert` module.
 neo-assert = ["dep:neojs-builtins", "neojs-builtins/assert"]
@@ -27,6 +27,11 @@ neo-assert = ["dep:neojs-builtins", "neojs-builtins/assert"]
 # declaration, and introspection list entry. This enables the optional
 # `neojs-builtins` dependency and its `chars` module.
 neo-chars = ["dep:neojs-builtins", "neojs-builtins/chars"]
+# The shared `crypto` (`neo:crypto`) synchronous cryptographic exports, native
+# registry object, native module declaration, and introspection list entry. This
+# enables the optional `neojs-crypto-core` dependency; `--no-default-features`
+# keeps it and all RustCrypto crates out.
+neo-crypto = ["dep:neojs-crypto-core"]
 # The shared `fs` (`neo:fs`) core filesystem operations, native registry object,
 # native module declaration, and introspection list entry. This enables the
 # optional `neojs-fs-core` dependency (and its fallible `getrandom` dependency);
@@ -66,6 +71,7 @@ test-support = []
 [dependencies]
 # The shared `neo:chars` Rust logic is enabled by the `neo-chars` feature.
 neojs-builtins = { workspace = true, optional = true }
+neojs-crypto-core = { workspace = true, optional = true }
 neojs-fs-core = { workspace = true, optional = true }
 neojs-manifest = { workspace = true, optional = true }
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }

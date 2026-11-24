@@ -1,12 +1,12 @@
 //! Native `Neo` introspection object for the QuickJS runtime.
 //!
-//! The registry, the module list, and the native `neo:chars`, `neo:fs`,
-//! `neo:os`, `neo:ssh`, `neo:strings`, and `neo:uuid` (`neo:uuid`,
+//! The registry, the module list, and the native `neo:chars`, `neo:crypto`,
+//! `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, and `neo:uuid` (`neo:uuid`,
 //! `neo:uuid/v4`, `neo:uuid/v7`) objects are Rust values. Shared ECMAScript
 //! modules (`neo:assert` and `neo:test`) are constructed once per context from
 //! their shared factories in `neojs-builtins` with native QuickJS host hooks.
 
-#[cfg(any(feature = "neo-test", feature = "neo-ssh"))]
+#[cfg(any(feature = "neo-crypto", feature = "neo-test", feature = "neo-ssh"))]
 use std::cell::RefCell;
 #[cfg(feature = "neo-test")]
 use std::rc::Rc;
@@ -28,15 +28,33 @@ pub(super) struct NeoState {
     /// The frozen public `neo:chars` object, when the feature is selected.
     #[cfg(feature = "neo-chars")]
     pub(super) chars: Option<Persistent<Object<'static>>>,
+    /// The frozen public `neo:crypto` object, when the feature is selected.
+    #[cfg(feature = "neo-crypto")]
+    pub(super) crypto: Option<Persistent<Object<'static>>>,
+    /// Frozen `Cipher.prototype` for `createEncryptor` / `createDecryptor`.
+    #[cfg(feature = "neo-crypto")]
+    pub(super) cipher_proto: Option<Persistent<Object<'static>>>,
+    /// Frozen `Hash.prototype` for `createHash` / `createHmac`.
+    #[cfg(feature = "neo-crypto")]
+    pub(super) hash_proto: Option<Persistent<Object<'static>>>,
+    /// Per-context bounded table of open stateful ciphers.
+    #[cfg(feature = "neo-crypto")]
+    pub(super) cipher_table: RefCell<neojs_crypto_core::cipher::CipherTable>,
+    /// Per-context bounded table of open incremental hashes / HMACs.
+    #[cfg(feature = "neo-crypto")]
+    pub(super) digest_table: RefCell<neojs_crypto_core::hash::DigestTable>,
+    /// Internal QuickJS class ID for `SharedArrayBuffer`, if available.
+    #[cfg(feature = "neo-crypto")]
+    pub(super) shared_array_buffer_class_id: Option<rquickjs::qjs::JSClassID>,
     /// The frozen public `neo:fs` object, when the feature is selected.
     #[cfg(feature = "neo-fs")]
     pub(super) fs: Option<Persistent<Object<'static>>>,
     /// The captured `%TypedArray%.prototype.byteLength` native getter.
     ///
-    /// Used by `neo:fs` and `neo:ssh` to read the live byte length of
-    /// length-tracking resizable-`ArrayBuffer` `Uint8Array` views without
-    /// consulting mutable prototype properties.
-    #[cfg(any(feature = "neo-fs", feature = "neo-ssh"))]
+    /// Used by `neo:crypto`, `neo:fs`, and `neo:ssh` to read the live byte
+    /// length of length-tracking resizable-`ArrayBuffer` `Uint8Array` views
+    /// without consulting mutable prototype properties.
+    #[cfg(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh"))]
     pub(super) typed_array_byte_length: Option<Persistent<Function<'static>>>,
     /// The frozen public `neo:os` object, when the feature is selected.
     #[cfg(feature = "neo-os")]
@@ -99,9 +117,26 @@ pub(super) fn install<'js>(
     let assert: Option<Value<'js>> = Some(build_assert(ctx)?);
     #[cfg(feature = "neo-chars")]
     let chars: Option<Object<'js>> = Some(super::chars::object(ctx)?);
+    #[cfg(feature = "neo-crypto")]
+    let crypto: Option<Object<'js>> = Some(super::crypto::object(ctx)?);
+    #[cfg(feature = "neo-crypto")]
+    let cipher_proto: Option<Object<'js>> = Some(super::crypto::build_cipher_proto(ctx)?);
+    #[cfg(feature = "neo-crypto")]
+    let hash_proto: Option<Object<'js>> = Some(super::crypto::build_hash_proto(ctx)?);
+    #[cfg(feature = "neo-crypto")]
+    let shared_array_buffer_class_id: Option<rquickjs::qjs::JSClassID> = {
+        let sab_val: Value<'js> = ctx.eval(
+            "typeof SharedArrayBuffer === 'function' ? new SharedArrayBuffer(0) : undefined",
+        )?;
+        if sab_val.is_object() {
+            Some(unsafe { rquickjs::qjs::JS_GetClassID(sab_val.as_raw()) })
+        } else {
+            None
+        }
+    };
     #[cfg(feature = "neo-fs")]
     let fs: Option<Object<'js>> = Some(super::fs::object(ctx)?);
-    #[cfg(any(feature = "neo-fs", feature = "neo-ssh"))]
+    #[cfg(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh"))]
     let typed_array_byte_length: Persistent<Function<'static>> = {
         let uint8_ctor: Object<'js> = ctx.globals().get("Uint8Array")?;
         let uint8_proto: Object<'js> = uint8_ctor.get("prototype")?;
@@ -132,6 +167,7 @@ pub(super) fn install<'js>(
         not(any(
             feature = "neo-assert",
             feature = "neo-chars",
+            feature = "neo-crypto",
             feature = "neo-fs",
             feature = "neo-os",
             feature = "neo-ssh",
@@ -150,6 +186,11 @@ pub(super) fn install<'js>(
     #[cfg(feature = "neo-chars")]
     if chars.is_some() {
         list.set(index, neojs_builtins::chars::SPECIFIER)?;
+        index += 1;
+    }
+    #[cfg(feature = "neo-crypto")]
+    if crypto.is_some() {
+        list.set(index, super::crypto::SPECIFIER)?;
         index += 1;
     }
     #[cfg(feature = "neo-fs")]
@@ -194,9 +235,21 @@ pub(super) fn install<'js>(
         assert: assert.map(|value| Persistent::save(ctx, value)),
         #[cfg(feature = "neo-chars")]
         chars: chars.map(|chars| Persistent::save(ctx, chars)),
+        #[cfg(feature = "neo-crypto")]
+        crypto: crypto.map(|crypto| Persistent::save(ctx, crypto)),
+        #[cfg(feature = "neo-crypto")]
+        cipher_proto: cipher_proto.map(|proto| Persistent::save(ctx, proto)),
+        #[cfg(feature = "neo-crypto")]
+        hash_proto: hash_proto.map(|proto| Persistent::save(ctx, proto)),
+        #[cfg(feature = "neo-crypto")]
+        cipher_table: RefCell::new(neojs_crypto_core::cipher::CipherTable::default()),
+        #[cfg(feature = "neo-crypto")]
+        digest_table: RefCell::new(neojs_crypto_core::hash::DigestTable::default()),
+        #[cfg(feature = "neo-crypto")]
+        shared_array_buffer_class_id,
         #[cfg(feature = "neo-fs")]
         fs: fs.map(|fs| Persistent::save(ctx, fs)),
-        #[cfg(any(feature = "neo-fs", feature = "neo-ssh"))]
+        #[cfg(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh"))]
         typed_array_byte_length: Some(typed_array_byte_length),
         #[cfg(feature = "neo-os")]
         os: os.map(|os| Persistent::save(ctx, os)),
@@ -345,6 +398,13 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
         };
         return Ok(chars.clone().restore(&ctx)?.into_value());
     }
+    #[cfg(feature = "neo-crypto")]
+    if name == super::crypto::SPECIFIER {
+        let Some(crypto) = state.crypto.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(crypto.clone().restore(&ctx)?.into_value());
+    }
     #[cfg(feature = "neo-fs")]
     if name == neojs_fs_core::SPECIFIER {
         let Some(fs) = state.fs.as_ref() else {
@@ -414,6 +474,7 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
     #[cfg(not(any(
         feature = "neo-assert",
         feature = "neo-chars",
+        feature = "neo-crypto",
         feature = "neo-fs",
         feature = "neo-os",
         feature = "neo-ssh",

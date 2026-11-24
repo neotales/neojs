@@ -25,6 +25,7 @@ interface NeoConsole {
 interface NeoBuiltInModuleMap {
   "neo:assert": typeof import("neo:assert")["default"];
   "neo:chars": typeof import("neo:chars");
+  "neo:crypto": typeof import("neo:crypto");
   "neo:fs": typeof import("neo:fs");
   "neo:os": typeof import("neo:os");
   "neo:ssh": typeof import("neo:ssh");

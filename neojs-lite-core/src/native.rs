@@ -1,4 +1,5 @@
-//! Shared QuickJS C-API helpers for native `neo:fs` and `neo:ssh` bindings.
+//! Shared QuickJS C-API helpers for native `neo:crypto`, `neo:fs`, and
+//! `neo:ssh` bindings.
 //!
 //! Provides prototype-safe error construction (`JS_NewError` +
 //! `[[DefineOwnProperty]]`), native `JS_FreezeObject`, strict plain-object
@@ -6,6 +7,8 @@
 
 use std::mem::MaybeUninit;
 
+#[cfg(feature = "neo-crypto")]
+use rquickjs::Array;
 use rquickjs::{
     Ctx, Exception, Function, Object, Result, String as JsString, TypedArray, Value,
     object::Property, qjs,
@@ -52,6 +55,92 @@ pub(super) fn get_prototype<'js>(ctx: &Ctx<'js>, val: qjs::JSValue) -> Result<Va
         });
     }
     Ok(unsafe { Value::from_raw(ctx.clone(), proto_raw) })
+}
+
+/// Sets the internal `[[Prototype]]` of `object` via `JS_SetPrototype`.
+#[cfg(feature = "neo-crypto")]
+pub(super) fn set_prototype<'js>(
+    ctx: &Ctx<'js>,
+    object: &Object<'js>,
+    proto: &Object<'js>,
+) -> Result<()> {
+    let rc =
+        unsafe { qjs::JS_SetPrototype(ctx.as_raw().as_ptr(), object.as_raw(), proto.as_raw()) };
+    if rc < 0 {
+        return Err(if ctx.has_exception() {
+            rquickjs::Error::Exception
+        } else {
+            rquickjs::Error::Unknown
+        });
+    }
+    Ok(())
+}
+
+/// Reads an own data property from `object` without walking the prototype
+/// chain or invoking getters/proxy traps.
+///
+/// Returns `Ok(None)` when the property is absent, or `Err(TypeError)` when
+/// the own property is an accessor.
+#[cfg(feature = "neo-crypto")]
+pub(super) fn own_data_property<'js>(
+    ctx: &Ctx<'js>,
+    object: qjs::JSValue,
+    name: &std::ffi::CStr,
+    accessor_msg: &str,
+) -> Result<Option<Value<'js>>> {
+    let raw = ctx.as_raw().as_ptr();
+    let atom = unsafe { qjs::JS_NewAtom(raw, name.as_ptr()) };
+    if atom == qjs::JS_ATOM_NULL {
+        return Err(rquickjs::Error::Unknown);
+    }
+    own_data_property_by_atom(ctx, object, atom, accessor_msg)
+}
+
+/// Reads an own array element data property at `index` without walking
+/// `Array.prototype` or invoking getters/proxy traps.
+#[cfg(feature = "neo-crypto")]
+pub(super) fn own_array_element<'js>(
+    ctx: &Ctx<'js>,
+    array: &Array<'js>,
+    index: u32,
+    accessor_msg: &str,
+) -> Result<Option<Value<'js>>> {
+    let raw = ctx.as_raw().as_ptr();
+    let atom = unsafe { qjs::JS_NewAtomUInt32(raw, index) };
+    if atom == qjs::JS_ATOM_NULL {
+        return Err(rquickjs::Error::Unknown);
+    }
+    own_data_property_by_atom(ctx, array.as_raw(), atom, accessor_msg)
+}
+
+#[cfg(feature = "neo-crypto")]
+fn own_data_property_by_atom<'js>(
+    ctx: &Ctx<'js>,
+    object: qjs::JSValue,
+    atom: qjs::JSAtom,
+    accessor_msg: &str,
+) -> Result<Option<Value<'js>>> {
+    let raw = ctx.as_raw().as_ptr();
+    let mut desc = MaybeUninit::<qjs::JSPropertyDescriptor>::uninit();
+    let found = unsafe { qjs::JS_GetOwnProperty(raw, desc.as_mut_ptr(), object, atom) };
+    unsafe { qjs::JS_FreeAtom(raw, atom) };
+    if found < 0 {
+        if ctx.has_exception() {
+            let _ = ctx.catch();
+        }
+        return Err(Exception::throw_type(ctx, accessor_msg));
+    }
+    if found == 0 {
+        return Ok(None);
+    }
+    let desc = unsafe { desc.assume_init() };
+    let value = unsafe { Value::from_raw(ctx.clone(), desc.value) };
+    let _getter = unsafe { Value::from_raw(ctx.clone(), desc.getter) };
+    let _setter = unsafe { Value::from_raw(ctx.clone(), desc.setter) };
+    if (desc.flags as u32 & qjs::JS_PROP_GETSET) != 0 {
+        return Err(Exception::throw_type(ctx, accessor_msg));
+    }
+    Ok(Some(value))
 }
 
 /// Reads an own getter function from `object` without invoking user traps.
@@ -125,11 +214,32 @@ pub(super) fn throw_coded_error(
 /// Validates a `Uint8Array` view (including resizable-`ArrayBuffer` views) and
 /// passes its live byte slice to `f` without executing JavaScript while the
 /// slice is alive.
+#[cfg_attr(not(any(feature = "neo-fs", feature = "neo-ssh")), allow(dead_code))]
 pub(super) fn with_uint8_array_bytes<'js, T>(
     ctx: &Ctx<'js>,
     value: &Value<'js>,
     type_msg: &str,
     f: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<T> {
+    with_uint8_array_bytes_ex(
+        ctx,
+        value,
+        type_msg,
+        |ctx| Exception::throw_type(ctx, "Uint8Array buffer is detached or out of bounds"),
+        |slice, _is_shared| f(slice),
+    )
+}
+
+/// Validates a `Uint8Array` view (including resizable-`ArrayBuffer` views),
+/// reports detached/OOB views via `on_detached_or_oob`, and passes its live
+/// byte slice and `is_shared` flag (`SharedArrayBuffer`-backed) to `f` without
+/// executing JavaScript while the slice is alive.
+pub(super) fn with_uint8_array_bytes_ex<'js, T>(
+    ctx: &Ctx<'js>,
+    value: &Value<'js>,
+    type_msg: &str,
+    on_detached_or_oob: impl Fn(&Ctx<'js>) -> rquickjs::Error,
+    f: impl FnOnce(&[u8], bool) -> Result<T>,
 ) -> Result<T> {
     let Ok(ta) = TypedArray::<u8>::from_value(value.clone()) else {
         return Err(Exception::throw_type(ctx, type_msg));
@@ -149,12 +259,21 @@ pub(super) fn with_uint8_array_bytes<'js, T>(
         if ctx.has_exception() {
             let _ = ctx.catch();
         }
-        return Err(Exception::throw_type(
-            ctx,
-            "Uint8Array buffer is detached or out of bounds",
-        ));
+        return Err(on_detached_or_oob(ctx));
     }
     let buf = unsafe { Value::from_raw(ctx.clone(), buf_raw) };
+
+    #[cfg(feature = "neo-crypto")]
+    let is_shared = {
+        let state = ctx
+            .userdata::<super::neo::NeoState>()
+            .ok_or(rquickjs::Error::Unknown)?;
+        state
+            .shared_array_buffer_class_id
+            .is_some_and(|sab_id| unsafe { qjs::JS_GetClassID(buf.as_raw()) } == sab_id)
+    };
+    #[cfg(not(feature = "neo-crypto"))]
+    let is_shared = false;
 
     let byte_length_getter = {
         let state = ctx
@@ -173,35 +292,27 @@ pub(super) fn with_uint8_array_bytes<'js, T>(
         .as_number()
         .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0)
         .map(|n| n as usize)
-        .ok_or_else(|| {
-            Exception::throw_type(ctx, "Uint8Array buffer is detached or out of bounds")
-        })?;
+        .ok_or_else(|| on_detached_or_oob(ctx))?;
 
     let offset = byte_offset as usize;
-    let end = offset.checked_add(live_len).ok_or_else(|| {
-        Exception::throw_type(ctx, "Uint8Array buffer is detached or out of bounds")
-    })?;
+    let end = offset
+        .checked_add(live_len)
+        .ok_or_else(|| on_detached_or_oob(ctx))?;
     let mut buf_size: qjs::size_t = 0;
     let buf_ptr = unsafe { qjs::JS_GetArrayBuffer(raw_ctx, &mut buf_size, buf.as_raw()) };
     if buf_ptr.is_null() {
         if ctx.has_exception() {
             let _ = ctx.catch();
         }
-        return Err(Exception::throw_type(
-            ctx,
-            "Uint8Array buffer is detached or out of bounds",
-        ));
+        return Err(on_detached_or_oob(ctx));
     }
     if end > buf_size as usize {
-        return Err(Exception::throw_type(
-            ctx,
-            "Uint8Array buffer is detached or out of bounds",
-        ));
+        return Err(on_detached_or_oob(ctx));
     }
     // SAFETY: `buf_ptr` is valid for `buf_size` bytes, `end <= buf_size`, and no
     // JavaScript executes while `slice` is alive.
     let slice = unsafe { &std::slice::from_raw_parts(buf_ptr, buf_size as usize)[offset..end] };
-    f(slice)
+    f(slice, is_shared)
 }
 
 /// Validates that `value` (when `Some` and not `undefined`) is a plain object

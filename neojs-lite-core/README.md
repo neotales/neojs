@@ -94,11 +94,11 @@ Promises, or disabled `neo-test` builds return `Error::TestRunner`.
 ## Runtime introspection
 
 The runtime installs a minimal `Neo` global. Its `engine` property is
-`"neo-lite"`. With the default `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`,
-`neo-ssh`, `neo-strings`, `neo-test`, and `neo-uuid` features the registry
-contains the canonical shared modules `neo:assert`, `neo:chars`, `neo:fs`,
-`neo:os`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and
-`neo:uuid/v7`.
+`"neo-lite"`. With the default `neo-assert`, `neo-chars`, `neo-crypto`, `neo-fs`,
+`neo-os`, `neo-ssh`, `neo-strings`, `neo-test`, and `neo-uuid` features the
+registry contains the canonical shared modules `neo:assert`, `neo:chars`,
+`neo:crypto` (13 synchronous exports only), `neo:fs`, `neo:os`, `neo:ssh`,
+`neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`.
 `Neo.getBuiltInModulesList()` returns one frozen array of canonical specifiers,
 and `Neo.getBuiltInModule(specifier)` returns the frozen registry object whose
 named exports share identity with the module namespace. The namespace itself is
@@ -111,8 +111,9 @@ non-writable, and the list is the same array for every lookup.
 ```js
 console.log(Neo.engine); // "neo-lite"
 console.log(Neo.getBuiltInModulesList());
-// [ "neo:assert", "neo:chars", "neo:fs", "neo:os", "neo:ssh", "neo:strings", "neo:test", "neo:uuid", "neo:uuid/v4", "neo:uuid/v7" ]
+// [ "neo:assert", "neo:chars", "neo:crypto", "neo:fs", "neo:os", "neo:ssh", "neo:strings", "neo:test", "neo:uuid", "neo:uuid/v4", "neo:uuid/v7" ]
 console.log(Neo.getBuiltInModule("neo:chars").isLetter(0x41)); // true
+console.log(Neo.getBuiltInModule("neo:crypto").randomBytes(16).length); // 16
 console.log(Neo.getBuiltInModule("neo:fs").exists(".")); // true
 console.log(Neo.getBuiltInModule("neo:os").platform); // e.g. "linux"
 console.log(Neo.getBuiltInModule("neo:ssh").MAX_COMMAND_BYTES); // 65536
@@ -122,14 +123,17 @@ console.log(Neo.getBuiltInModule("chars")); // undefined
 ```
 
 This is not the V8 runtime's full built-in surface. Only `neo:assert`,
-`neo:chars`, `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`,
-`neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` are implemented, and the list does
-not claim another module exists or will exist. The shared logic comes from
-`neojs-builtins` (`chars`, `os`, `strings`, and `uuid` bound as native QuickJS
-modules, `assert` and `test` evaluated from shared ECMAScript factories with
-native QuickJS Promise and queue hooks), `neojs-fs-core` (`fs` bound as a native
-QuickJS module), and `neojs-ssh-core` (`ssh` bound as a native QuickJS module).
-See [`neojs-builtins/README.md`](../neojs-builtins/README.md),
+`neo:chars`, `neo:crypto` (13 synchronous exports; no `*Async` functions),
+`neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`,
+`neo:uuid/v4`, and `neo:uuid/v7` are implemented, and the list does not claim
+another module exists or will exist. The shared logic comes from `neojs-builtins`
+(`chars`, `os`, `strings`, and `uuid` bound as native QuickJS modules, `assert`
+and `test` evaluated from shared ECMAScript factories with native QuickJS Promise
+and queue hooks), `neojs-crypto-core` (`crypto` synchronous exports bound as a
+native QuickJS module), `neojs-fs-core` (`fs` bound as a native QuickJS module),
+and `neojs-ssh-core` (`ssh` bound as a native QuickJS module). See
+[`neojs-builtins/README.md`](../neojs-builtins/README.md),
+[`neojs-crypto-core/README.md`](../neojs-crypto-core/README.md),
 [`neojs-fs-core/README.md`](../neojs-fs-core/README.md), and
 [`neojs-ssh-core/README.md`](../neojs-ssh-core/README.md) for the precise limits.
 
@@ -167,11 +171,11 @@ This crate does **not** claim parity with the V8-based `neojs`:
   QuickJS's own job queue can settle it, and `test(..., { timeout })` is
   rejected explicitly with `NEO_TEST_NO_TIMER`.
 * **Most built-in `neo:` modules are absent.** With the default features, only
-  the shared `neo:assert`, `neo:chars`, `neo:fs`, `neo:os`, `neo:ssh`,
-  `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`
-  modules are implemented. Other V8 modules are not importable, and the `Neo`
-  list does not claim them. With default features off, no built-in module is
-  implemented.
+  the shared `neo:assert`, `neo:chars`, `neo:crypto` (13 synchronous exports),
+  `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`,
+  `neo:uuid/v4`, and `neo:uuid/v7` modules are implemented. Other V8 modules
+  (and `*Async` crypto helpers) are not importable, and the `Neo` list does not
+  claim them. With default features off, no built-in module is implemented.
 * **No permissions or sandbox.** None are implemented.
 
 Both runtimes share `neojs-module-policy` for executable-extension decisions and
@@ -181,17 +185,18 @@ WebAssembly, and native addons are the same.
 
 ## Build features
 
-A default build enables `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`,
-`neo-ssh`, `neo-strings`, `neo-test`, `neo-uuid`, and `typescript`, along with
-the canonical registry, loader, introspection-list entries, and
+A default build enables `neo-assert`, `neo-chars`, `neo-crypto`, `neo-fs`,
+`neo-os`, `neo-ssh`, `neo-strings`, `neo-test`, `neo-uuid`, and `typescript`,
+along with the canonical registry, loader, introspection-list entries, and
 `Runtime::run_tests`. The opt-in `manifest` feature enables `neojs-manifest` and
 `Runtime::with_import_resolver`. Each feature controls its optional dependency
-(`neojs-builtins`, `neojs-fs-core`, `neojs-ssh-core`, `neojs-manifest`, or
-`neojs-module-policy/typescript`); with `default-features = false` those
-dependencies (along with `neotales-ssh`, `deno_ast`, `getrandom`, `uuid`,
-`glob`, `semver`, and `serde_json`), the implementation source, the registry
-objects, the loader entries, and the list entries are all absent. The list is
-then the frozen empty array.
+(`neojs-builtins`, `neojs-crypto-core`, `neojs-fs-core`, `neojs-ssh-core`,
+`neojs-manifest`, or `neojs-module-policy/typescript`); with
+`default-features = false` those dependencies (along with `aes`, `aes-gcm`,
+`bcrypt`, `cbc`, `hmac`, `pbkdf2`, `sha2`, `neotales-ssh`, `deno_ast`,
+`getrandom`, `uuid`, `glob`, `semver`, and `serde_json`), the implementation
+source, the registry objects, the loader entries, and the list entries are all
+absent. The list is then the frozen empty array.
 
 ```sh
 # Default: all shared modules present
@@ -203,6 +208,7 @@ cargo test -p neojs-lite-core --no-default-features --test feature_flags
 # One feature at a time
 cargo test -p neojs-lite-core --no-default-features --features neo-assert --test feature_flags
 cargo test -p neojs-lite-core --no-default-features --features neo-chars --test feature_flags
+cargo test -p neojs-lite-core --no-default-features --features neo-crypto --test feature_flags
 cargo test -p neojs-lite-core --no-default-features --features neo-fs --test feature_flags
 cargo test -p neojs-lite-core --no-default-features --features neo-os --test feature_flags
 cargo test -p neojs-lite-core --no-default-features --features neo-ssh --test feature_flags
@@ -216,9 +222,9 @@ another dependent enables a module or TypeScript feature for contains it even if
 this crate was requested without it. Feature selection is compile-time surface
 selection, not a security boundary or sandbox; code that runs keeps the
 process's authority. `neojs-lite` explicitly selects `neo-assert`, `neo-chars`,
-`neo-fs`, `neo-os`, `neo-ssh`, `neo-strings`, `neo-test`, `neo-uuid`, and
-`typescript` with `default-features = false`, so a change to this crate's
-defaults cannot silently change what the command advertises.
+`neo-crypto`, `neo-fs`, `neo-os`, `neo-ssh`, `neo-strings`, `neo-test`,
+`neo-uuid`, and `typescript` with `default-features = false`, so a change to
+this crate's defaults cannot silently change what the command advertises.
 
 ## Build isolation
 

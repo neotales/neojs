@@ -13,7 +13,7 @@
 //!   `console.{log,debug,info,warn,error}`, and all 17 `neo:*` built-in
 //!   modules).
 //! * [`Profile::Lite`] targets the `neojs-lite` binary
-//!   (`Neo.engine === "neo-lite"`, `console.{log,error}` only, and the 10 Lite
+//!   (`Neo.engine === "neo-lite"`, `console.{log,error}` only, and the 11 Lite
 //!   `neo:*` built-in modules).
 //!
 //! # Example
@@ -47,7 +47,7 @@ pub enum Profile {
     /// and all 17 `neo:*` built-ins).
     V8,
     /// QuickJS-backed `neojs-lite` runtime (`engine: "neo-lite"`,
-    /// `console.{log,error}` only, and the 10 Lite `neo:*` built-ins).
+    /// `console.{log,error}` only, and the 11 Lite `neo:*` built-ins).
     Lite,
 }
 
@@ -189,6 +189,7 @@ const NEO_CHARS_DTS: &str = include_str!("../types/neo/chars.d.ts");
 const NEO_CONSOLE_DTS: &str = include_str!("../types/neo/console.d.ts");
 const NEO_CRON_DTS: &str = include_str!("../types/neo/cron.d.ts");
 const NEO_CRYPTO_DTS: &str = include_str!("../types/neo/crypto.d.ts");
+const NEO_CRYPTO_LITE_DTS: &str = include_str!("../types/neo/crypto-lite.d.ts");
 const NEO_FS_DTS: &str = include_str!("../types/neo/fs.d.ts");
 const NEO_OS_DTS: &str = include_str!("../types/neo/os.d.ts");
 const NEO_PATH_DTS: &str = include_str!("../types/neo/path.d.ts");
@@ -321,6 +322,11 @@ const LITE_FILES: &[DtsFile] = &[
         content: NEO_CHARS_DTS,
     },
     DtsFile {
+        path: "neo/crypto.d.ts",
+        specifier: Some("neo:crypto"),
+        content: NEO_CRYPTO_LITE_DTS,
+    },
+    DtsFile {
         path: "neo/fs.d.ts",
         specifier: Some("neo:fs"),
         content: NEO_FS_DTS,
@@ -448,6 +454,26 @@ const CRYPTO_EXPORTS: ModuleExports = ModuleExports {
         "shamirSplitAsync",
         "shamirCombine",
         "shamirCombineAsync",
+    ],
+    has_default: false,
+};
+
+const CRYPTO_LITE_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "neo:crypto",
+    exports: &[
+        "generateEnvelopeKey",
+        "randomBytes",
+        "encrypt",
+        "decrypt",
+        "createEncryptor",
+        "createDecryptor",
+        "createHash",
+        "createHmac",
+        "pbkdf2",
+        "bcryptHash",
+        "bcryptVerify",
+        "shamirSplit",
+        "shamirCombine",
     ],
     has_default: false,
 };
@@ -598,6 +624,7 @@ const V8_EXPECTED_EXPORTS: &[ModuleExports] = &[
 const LITE_EXPECTED_EXPORTS: &[ModuleExports] = &[
     ASSERT_EXPORTS,
     CHARS_EXPORTS,
+    CRYPTO_LITE_EXPORTS,
     FS_EXPORTS,
     OS_EXPORTS,
     SSH_EXPORTS,

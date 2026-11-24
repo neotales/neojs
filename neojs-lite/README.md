@@ -73,9 +73,10 @@ This command does **not** claim parity with `neojs` (V8):
   QuickJS's own job queue can settle it, and `test(..., { timeout })` is
   rejected explicitly.
 * **Most built-in `neo:` modules are absent.** Only the shared `neo:assert`,
-  `neo:chars`, `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`,
-  `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` modules are implemented. Other V8
-  modules are not importable, and the `Neo` list does not claim them.
+  `neo:chars`, `neo:crypto` (13 synchronous exports; no `*Async` helpers),
+  `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`,
+  `neo:uuid/v4`, and `neo:uuid/v7` modules are implemented. Other V8 modules are
+  not importable, and the `Neo` list does not claim them.
 * **No permissions or sandbox.** None are implemented.
 
 Both runtimes share `neojs-module-policy` for executable-extension decisions and
@@ -85,16 +86,16 @@ WebAssembly, and native addons are the same.
 
 ## Build features
 
-The command selects `manifest`, `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`,
-`neo-ssh`, `neo-strings`, `neo-test`, `neo-uuid`, and `typescript` explicitly
-from `neojs-lite-core` with `default-features = false`, so its advertised
-surface is a command decision and does not drift with the library defaults. The
-library default enables the eight built-in module features and `typescript`
-(`manifest` is opt-in), and a library consumer can opt out completely with
-`default-features = false` (which removes `deno_ast` as well as the built-in
-module dependencies). Cargo features are additive and unify across the dependency
-graph: a build that any dependent enables the feature for contains it. Selection
-is not a sandbox.
+The command selects `manifest`, `neo-assert`, `neo-chars`, `neo-crypto`,
+`neo-fs`, `neo-os`, `neo-ssh`, `neo-strings`, `neo-test`, `neo-uuid`, and
+`typescript` explicitly from `neojs-lite-core` with `default-features = false`,
+so its advertised surface is a command decision and does not drift with the
+library defaults. The library default enables the nine built-in module features
+and `typescript` (`manifest` is opt-in), and a library consumer can opt out
+completely with `default-features = false` (which removes `deno_ast` as well as
+the built-in module dependencies). Cargo features are additive and unify across
+the dependency graph: a build that any dependent enables the feature for
+contains it. Selection is not a sandbox.
 
 ## Build isolation
 

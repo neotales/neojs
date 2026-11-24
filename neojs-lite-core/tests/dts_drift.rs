@@ -1,6 +1,7 @@
 #![cfg(all(
     feature = "neo-assert",
     feature = "neo-chars",
+    feature = "neo-crypto",
     feature = "neo-fs",
     feature = "neo-os",
     feature = "neo-ssh",

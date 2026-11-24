@@ -42,6 +42,7 @@ const V8_SPECIFIERS: &[&str] = &[
 const LITE_SPECIFIERS: &[&str] = &[
     "neo:assert",
     "neo:chars",
+    "neo:crypto",
     "neo:fs",
     "neo:os",
     "neo:ssh",
@@ -56,7 +57,6 @@ const V8_ONLY_SPECIFIERS: &[&str] = &[
     "neo:age",
     "neo:console",
     "neo:cron",
-    "neo:crypto",
     "neo:path",
     "neo:slices",
     "neo:stdio",
@@ -349,6 +349,27 @@ fn globals_and_index_match_profile_surfaces() {
         assert!(
             !lite_globals.contains(&key),
             "Lite NeoBuiltInModuleMap must NOT include {spec}"
+        );
+    }
+
+    let lite_crypto = module_dts(Profile::Lite, "neo:crypto").expect("Lite neo:crypto dts");
+    let v8_crypto = module_dts(Profile::V8, "neo:crypto").expect("V8 neo:crypto dts");
+    for async_name in [
+        "hashAsync",
+        "hmacAsync",
+        "pbkdf2Async",
+        "bcryptHashAsync",
+        "bcryptVerifyAsync",
+        "shamirSplitAsync",
+        "shamirCombineAsync",
+    ] {
+        assert!(
+            !lite_crypto.contains(async_name),
+            "Profile::Lite neo:crypto must not declare `{async_name}`"
+        );
+        assert!(
+            v8_crypto.contains(async_name),
+            "Profile::V8 neo:crypto must declare `{async_name}`"
         );
     }
 

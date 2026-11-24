@@ -1,6 +1,7 @@
 /// <reference path="./globals.d.ts" />
 /// <reference path="./neo/assert.d.ts" />
 /// <reference path="./neo/chars.d.ts" />
+/// <reference path="./neo/crypto.d.ts" />
 /// <reference path="./neo/fs.d.ts" />
 /// <reference path="./neo/os.d.ts" />
 /// <reference path="./neo/ssh.d.ts" />

@@ -51,6 +51,7 @@ console.log(Object.isFrozen(Neo.getBuiltInModulesList()));
 console.log(typeof Neo.getBuiltInModule("neo:age"));
 console.log(typeof Neo.getBuiltInModule("age"));
 console.log(typeof Neo.getBuiltInModule("neo:chars"));
+console.log(typeof Neo.getBuiltInModule("neo:crypto"));
 console.log(typeof Neo.getBuiltInModule("neo:fs"));
 console.log(typeof Neo.getBuiltInModule("neo:os"));
 console.log(typeof Neo.getBuiltInModule("neo:ssh"));
@@ -64,7 +65,7 @@ console.log(typeof Neo.getBuiltInModule("neo:uuid"));
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        "neo-lite\n10\ntrue\nundefined\nundefined\nobject\nobject\nobject\nobject\nobject\nobject\n"
+        "neo-lite\n11\ntrue\nundefined\nundefined\nobject\nobject\nobject\nobject\nobject\nobject\nobject\n"
     );
     assert_eq!(stderr(&output), "");
 }

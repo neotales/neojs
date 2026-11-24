@@ -23,9 +23,9 @@ cargo tree --locked -p neojs-dts -e normal
     `neo:uuid/v4`, `neo:uuid/v7`
 * `Profile::Lite` (`neojs-lite`, `Neo.engine === "neo-lite"`):
   * `console`: `log`, `error` only
-  * 10 `neo:*` built-in modules: `neo:assert`, `neo:chars`, `neo:fs`, `neo:os`,
-    `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`,
-    `neo:uuid/v7`
+  * 11 `neo:*` built-in modules: `neo:assert`, `neo:chars`, `neo:crypto`
+    (13 synchronous exports only), `neo:fs`, `neo:os`, `neo:ssh`,
+    `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, `neo:uuid/v7`
 
 ## Public API
 

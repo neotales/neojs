@@ -21,6 +21,7 @@ neojs-lite-core = { version = "0.1.0", path = "../neojs-lite-core", default-feat
     "manifest",
     "neo-assert",
     "neo-chars",
+    "neo-crypto",
     "neo-fs",
     "neo-os",
     "neo-ssh",

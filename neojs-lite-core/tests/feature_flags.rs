@@ -20,6 +20,9 @@ fn expected_list() -> String {
     if cfg!(feature = "neo-chars") {
         entries.push(r#""neo:chars""#);
     }
+    if cfg!(feature = "neo-crypto") {
+        entries.push(r#""neo:crypto""#);
+    }
     if cfg!(feature = "neo-fs") {
         entries.push(r#""neo:fs""#);
     }
@@ -497,6 +500,97 @@ try {
 if (imported) throw new Error("neo:ssh was importable while disabled");
 "#)
     .expect("ssh absent");
+}
+
+#[test]
+#[cfg(feature = "neo-crypto")]
+fn crypto_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:crypto")) {
+    throw new Error(`crypto is missing from the list: ${JSON.stringify(list)}`);
+}
+if (list.includes("crypto")) {
+    throw new Error(`a bare crypto name is listed: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:crypto");
+if (registry === undefined || typeof registry !== "object" || !Object.isFrozen(registry)) {
+    throw new Error("the crypto registry object is missing or unfrozen");
+}
+if (Neo.getBuiltInModule("crypto") !== undefined) {
+    throw new Error("the registry accepted a bare crypto name");
+}
+const namespace = await import("neo:crypto");
+if (namespace === registry) {
+    throw new Error("the ES module namespace must be distinct from the registry object");
+}
+const expected = [
+    "bcryptHash",
+    "bcryptVerify",
+    "createDecryptor",
+    "createEncryptor",
+    "createHash",
+    "createHmac",
+    "decrypt",
+    "encrypt",
+    "generateEnvelopeKey",
+    "pbkdf2",
+    "randomBytes",
+    "shamirCombine",
+    "shamirSplit",
+];
+if (JSON.stringify(Object.keys(registry).sort()) !== JSON.stringify(expected)) {
+    throw new Error(`unexpected registry keys: ${JSON.stringify(Object.keys(registry).sort())}`);
+}
+if (JSON.stringify(Object.keys(namespace).sort()) !== JSON.stringify(expected)) {
+    throw new Error(`unexpected namespace keys: ${JSON.stringify(Object.keys(namespace).sort())}`);
+}
+for (const name of expected) {
+    if (namespace[name] !== registry[name]) {
+        throw new Error(`the namespace export ${name} is not the registry function`);
+    }
+}
+for (const asyncName of [
+    "bcryptHashAsync",
+    "bcryptVerifyAsync",
+    "hashAsync",
+    "hmacAsync",
+    "pbkdf2Async",
+    "shamirCombineAsync",
+    "shamirSplitAsync",
+]) {
+    if (asyncName in registry || asyncName in namespace) {
+        throw new Error(`unexpected async export ${asyncName} in neojs-lite`);
+    }
+}
+"#)
+    .expect("crypto feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-crypto"))]
+fn crypto_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:crypto") || list.includes("crypto")) {
+    throw new Error(`crypto is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:crypto") !== undefined) {
+    throw new Error("the canonical crypto registry object is still present");
+}
+if (Neo.getBuiltInModule("crypto") !== undefined) {
+    throw new Error("a bare crypto name returned a module");
+}
+let imported = false;
+try {
+    await import("neo:crypto");
+    imported = true;
+} catch {
+    // Expected: the loader has no crypto entry.
+}
+if (imported) throw new Error("neo:crypto was importable while disabled");
+"#)
+    .expect("crypto absent");
 }
 
 #[test]

@@ -2136,6 +2136,7 @@ name = "neojs-lite-core"
 version = "0.1.0"
 dependencies = [
  "neojs-builtins",
+ "neojs-crypto-core",
  "neojs-dts",
  "neojs-fs-core",
  "neojs-manifest",

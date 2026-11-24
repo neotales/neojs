@@ -22,8 +22,12 @@ const ASSERT_SEQUENCE_ONE_HEX: &str = "6173736572742e6e6f742d7468656e61626c65";
 /// `NEO_TEST_DURING_RUN` from `neojs-builtins/src/test.js`.
 const TEST_SEQUENCE_ONE_HEX: &str = "4e454f5f544553545f445552494e475f52554e";
 
-/// `operating system random number generator failed` from `neojs-builtins/src/uuid.rs`.
-const UUID_SEQUENCE_ONE_HEX: &str = "6f7065726174696e672073797374656d2072616e646f6d206e756d6265722067656e657261746f72206661696c6564";
+/// `system clock is outside the UUID version 7 timestamp range` from `neojs-builtins/src/uuid.rs`.
+const UUID_SEQUENCE_ONE_HEX: &str = "73797374656d20636c6f636b206973206f7574736964652074686520555549442076657273696f6e20372074696d657374616d702072616e6765";
+
+/// `malformed or unsupported crypto envelope` from `neojs-crypto-core/src/envelope.rs`.
+const CRYPTO_SEQUENCE_ONE_HEX: &str =
+    "6d616c666f726d6564206f7220756e737570706f727465642063727970746f20656e76656c6f7065";
 
 /// `create_new and append cannot both be enabled` from `neojs-fs-core/src/ops.rs`.
 const FS_SEQUENCE_ONE_HEX: &str =
@@ -101,6 +105,12 @@ fn shared_source_bytes_follow_the_features() {
     assert_sequences(&artifact, &uuid_seqs, true, "neo-uuid is enabled");
     #[cfg(not(feature = "neo-uuid"))]
     assert_sequences(&artifact, &uuid_seqs, false, "neo-uuid is disabled");
+
+    let crypto_seqs = [CRYPTO_SEQUENCE_ONE_HEX];
+    #[cfg(feature = "neo-crypto")]
+    assert_sequences(&artifact, &crypto_seqs, true, "neo-crypto is enabled");
+    #[cfg(not(feature = "neo-crypto"))]
+    assert_sequences(&artifact, &crypto_seqs, false, "neo-crypto is disabled");
 
     let fs_seqs = [FS_SEQUENCE_ONE_HEX];
     #[cfg(feature = "neo-fs")]
