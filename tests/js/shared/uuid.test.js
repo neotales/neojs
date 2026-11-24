@@ -111,18 +111,17 @@ test("v7 embeds the 48-bit Unix millisecond timestamp and orders across millisec
     );
 
     // Advance by at least one millisecond without timers (bounded spin).
-    const startMs = Date.now();
     const earlier = v7();
-    const deadlineMs = startMs + 50;
-    while (Date.now() === startMs && Date.now() < deadlineMs) {
-        // Spin briefly until Date.now() ticks to the next millisecond.
+    const earlierMs = timestampOf(earlier);
+    const deadlineMs = Date.now() + 50;
+    while (Date.now() <= earlierMs && Date.now() < deadlineMs) {
+        // Spin briefly until Date.now() advances past earlier's millisecond.
     }
-    const afterTickMs = Date.now();
-    if (afterTickMs > startMs) {
+    if (Date.now() > earlierMs) {
         const later = v7();
         assert.ok(
-            timestampOf(later) > timestampOf(earlier),
-            `expected later v7 timestamp (${timestampOf(later)}) > earlier (${timestampOf(earlier)})`,
+            timestampOf(later) > earlierMs,
+            `expected later v7 timestamp (${timestampOf(later)}) > earlier (${earlierMs})`,
         );
         assert.ok(earlier < later, `expected ${earlier} < ${later} across millisecond boundary`);
     }

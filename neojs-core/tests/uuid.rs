@@ -2,7 +2,7 @@
 //!
 //! The JavaScript modules assert on their own and throw on failure, so a test
 //! is one module plus the Rust call that runs it. The Rust unit tests in
-//! `neojs-core/src/uuid.rs` cover the RFC 9562 vectors, the clock bounds, and
+//! `neojs-builtins/src/uuid.rs` cover the RFC 9562 vectors, the clock bounds, and
 //! the injected entropy failure.
 //!
 //! These tests cover generation only. Parsing, validation, timestamp

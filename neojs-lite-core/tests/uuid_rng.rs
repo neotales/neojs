@@ -78,3 +78,50 @@ if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.tes
 "#,
     );
 }
+
+#[test]
+fn hostile_error_and_object_prototypes_do_not_mask_uuid_error() {
+    let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    test_support::fail_next_uuid_random();
+    run_js(
+        r#"
+import { v4 } from "neo:uuid";
+
+let setterCalls = 0;
+Object.defineProperty(Error.prototype, "message", {
+    configurable: true,
+    get() {
+        return "";
+    },
+    set() {
+        setterCalls += 1;
+        throw new Error("hostile Error.prototype.message setter");
+    },
+});
+Object.defineProperty(Object.prototype, "code", {
+    configurable: true,
+    set() {
+        setterCalls += 1;
+        throw new Error("hostile Object.prototype.code setter");
+    },
+});
+Object.freeze(Error.prototype);
+
+let caught;
+try {
+    v4();
+} catch (error) {
+    caught = error;
+}
+if (setterCalls !== 0) throw new Error(`prototype setter ran ${setterCalls} times`);
+if (!(caught instanceof Error)) throw new Error(`expected Error, got ${caught}`);
+if (caught.code !== "NEO_UUID_RANDOM") throw new Error(`unexpected code: ${caught.code}`);
+if (caught.message !== "operating system random number generator failed") {
+    throw new Error(`unexpected message: ${caught.message}`);
+}
+if (caught.cause !== "getrandom: unexpected error") {
+    throw new Error(`unexpected cause: ${caught.cause}`);
+}
+"#,
+    );
+}

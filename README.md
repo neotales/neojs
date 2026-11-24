@@ -355,13 +355,12 @@ disabled build does not embed its bytes. `neo-slices` implies `neo-chars` becaus
 captures the native `chars.toUpper`/`chars.toLower` functions. Features are additive across the
 dependency graph and are not a sandbox.
 
-`neo:chars` and `neo:strings` are the native Rust modules in this change. Every other V8 built-in
-module — `neo:age`, `neo:assert`, `neo:console`, `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`,
+`neo:chars` and `neo:strings` are native V8 Rust modules. Every other V8 built-in module —
+`neo:age`, `neo:assert`, `neo:console`, `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`,
 `neo:slices`, `neo:ssh`, `neo:stdio`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` —
-still has an ECMAScript module source and is not yet migrated to a native binding. Some of those
-modules call private Rust host ops, but a host op is not a native module. The QuickJS runtime
-implements the shared `neo:chars` and `neo:strings` modules; it does not implement the V8-only
-modules.
+retains an ECMAScript module source or wrapper in V8 (with `neo:assert`, `neo:os`, `neo:test`, and
+`neo:uuid` delegating their shared core logic and sources to `neojs-builtins`). Some of those
+modules call private Rust host ops, but a host op is not a native module.
 
 The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"` and,
 with its default `neo-assert`, `neo-chars`, `neo-os`, `neo-strings`, `neo-test`, and `neo-uuid`
@@ -1936,9 +1935,10 @@ crate), all already linked transitively or added at reviewed versions; `neojs-co
 and its `password` child module add the JavaScript-facing lifecycle, encodings, bounds, work-factor
 policy, and asynchronous executor, and do not modify the crates. The `uuid` built-in uses the
 `uuid` 1.26.1 crate, dual-licensed MIT OR Apache-2.0, for RFC 9562 bit layout, version and variant
-setting, and canonical formatting; `neojs-core/src/uuid.rs` adds the fallible operating-system
-CSPRNG draw, the 48-bit clock policy, the no-monotonicity contract, the host ops, and the JavaScript
-error mapping, and does not modify the crate. The full upstream MIT copyright and
+setting, and canonical formatting; `neojs-builtins/src/uuid.rs` (shared by `neojs-core/src/uuid.rs`
+and `neojs-lite-core/src/uuid.rs`) adds the fallible operating-system CSPRNG draw, the 48-bit
+clock policy, the no-monotonicity contract, and the error mapping, and `neojs-core/src/uuid.rs` /
+`neojs-lite-core/src/uuid.rs` add the engine host ops/bindings without modifying the crate. The full upstream MIT copyright and
 permission notices, and the RustCrypto and `uuid` licence references, are reproduced in
 `neojs-core/THIRD_PARTY_NOTICES.md`, which ships with the `neojs-core` package. The project licence remains the MIT licence in `LICENSE.md`,
 Copyright (c) 2026 NeoTales and x0craft; the crate directories carry identical copies so each package

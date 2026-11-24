@@ -11,7 +11,7 @@
 use neojs_builtins::uuid as logic;
 use rquickjs::{
     Ctx, Exception, Function, Object, Result, Value, function::Rest, module::ModuleDef,
-    object::Property,
+    object::Property, qjs,
 };
 
 #[cfg(feature = "test-support")]
@@ -96,11 +96,27 @@ fn v7<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<String> {
 }
 
 fn throw_uuid_error<'js>(ctx: &Ctx<'js>, error: logic::UuidError) -> rquickjs::Error {
-    let exception = match Exception::from_message(ctx.clone(), error.code().message()) {
-        Ok(exception) => exception,
-        Err(err) => return err,
+    let raw = unsafe { qjs::JS_NewError(ctx.as_raw().as_ptr()) };
+    if raw.tag == i64::from(qjs::JS_TAG_EXCEPTION) {
+        return if ctx.has_exception() {
+            rquickjs::Error::Exception
+        } else {
+            rquickjs::Error::Unknown
+        };
+    }
+    let value = unsafe { Value::from_raw(ctx.clone(), raw) };
+    let Some(object) = value.into_object() else {
+        return rquickjs::Error::Unknown;
     };
-    if let Err(err) = exception.prop(
+    if let Err(err) = object.prop(
+        "message",
+        Property::from(error.code().message())
+            .writable()
+            .configurable(),
+    ) {
+        return err;
+    }
+    if let Err(err) = object.prop(
         "code",
         Property::from(error.code().as_str())
             .writable()
@@ -110,14 +126,14 @@ fn throw_uuid_error<'js>(ctx: &Ctx<'js>, error: logic::UuidError) -> rquickjs::E
         return err;
     }
     if let Some(cause) = error.diagnostic()
-        && let Err(err) = exception.prop(
+        && let Err(err) = object.prop(
             "cause",
             Property::from(cause.as_str()).writable().configurable(),
         )
     {
         return err;
     }
-    exception.throw()
+    ctx.throw(object.into_value())
 }
 
 fn export_from_state<'js>(

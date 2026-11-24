@@ -143,10 +143,17 @@ deno_core::extension!(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn shared_generators_return_canonical_uuids() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for text in [generate_v4().unwrap(), generate_v7().unwrap()] {
             assert_eq!(text.len(), 36);
         }
@@ -155,6 +162,9 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn injected_entropy_failure_is_single_shot() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         fail_next_uuid_random();
         let error = generate_v4().expect_err("injected random failure");
         assert_eq!(error.code(), UuidErrorCode::Random);

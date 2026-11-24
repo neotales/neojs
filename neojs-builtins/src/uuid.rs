@@ -204,7 +204,11 @@ impl std::error::Error for UuidError {}
 /// [`UuidErrorCode::Random`] with the underlying `getrandom` error retained for
 /// a safe diagnostic; callers must not use the buffer.
 pub fn fill_random(bytes: &mut [u8]) -> Result<(), UuidError> {
-    getrandom::fill(bytes).map_err(UuidError::random)
+    if let Err(error) = getrandom::fill(bytes) {
+        bytes.fill(0);
+        return Err(UuidError::random(error));
+    }
+    Ok(())
 }
 
 /// Formats 16 already-random bytes as a version 4 UUID.
