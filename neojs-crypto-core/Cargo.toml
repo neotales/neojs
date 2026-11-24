@@ -1,0 +1,29 @@
+[package]
+name = "neojs-crypto-core"
+description = "Engine-neutral synchronous cryptographic core for neo:crypto shared by V8 and QuickJS runtimes"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[features]
+# Test-only fault injection for bcrypt and Shamir CSPRNG failures. Never
+# enabled by a normal build; `neojs-core` enables it only under its own
+# `test-support` feature.
+test-support = []
+
+[dependencies]
+aes.workspace = true
+aes-gcm.workspace = true
+bcrypt.workspace = true
+cbc.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true

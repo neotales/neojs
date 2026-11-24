@@ -1,131 +1,10 @@
-//! Incremental SHA-2 hashing and HMAC for `neo:crypto`, plus bounded
+//! Incremental SHA-2 hashing and HMAC ops for `neo:crypto`, plus bounded
 //! asynchronous one-shot variants.
 //!
-//! The cryptographic primitives are the RustCrypto `sha2` and `hmac` crates.
-//! This module defines the JavaScript-facing lifecycle, the accepted algorithm
-//! and encoding names, the input bounds, the typed-array validation, and the
-//! error mapping. It is not a sandbox and does not manage secrets for the
-//! caller.
-//!
-//! # Algorithms
-//!
-//! The accepted names are `sha256`, `sha384`, and `sha512`, compared
-//! case-insensitively. No other name is accepted, and no OpenSSL alias such as
-//! `sha2-256` is guessed. The digest lengths are 32, 48, and 64 bytes.
-//!
-//! # Synchronous API
-//!
-//! `create_hash` returns an object with `update(data[, encoding])` and
-//! `digest([encoding])`. `update` accepts a `Uint8Array` of exact bytes or a
-//! string encoded as UTF-8; a string may name only `utf8`/`utf-8`, and a
-//! `Uint8Array` may not name an encoding at all. `digest()` returns a
-//! `Uint8Array`; `digest("hex")`, `digest("base64")`, `digest("base64url")`,
-//! and `digest("latin1")` (alias `binary`) return a string. `update` returns
-//! the hash object, so calls chain.
-//!
-//! `create_hmac` takes the same algorithm names and a key that is a
-//! `Uint8Array` or a UTF-8 string. HMAC accepts a key of any length, including
-//! zero; the key is copied when the object is created, so later mutation of
-//! the caller's view does not change it.
-//!
-//! # Lifecycle
-//!
-//! `digest` consumes the state. A second `digest`, and any `update` after a
-//! successful `digest`, fail with `NEO_CRYPTO_DIGESTED`. An invalid digest
-//! encoding is rejected before the state is consumed, so the object remains
-//! usable. There is no `copy()` in this slice. `close()` (and its alias
-//! `dispose()`) releases the state without producing a digest and is
-//! idempotent; a later `update` or `digest` fails with `NEO_CRYPTO_CLOSED`.
-//! The object's Rust state lives in the runtime's resource table until `digest`,
-//! `close()`, or the runtime is dropped. There is no finalizer, so an object
-//! that is created and abandoned keeps its small state until the runtime is
-//! dropped. A per-runtime hard cap, [`MAX_OPEN_DIGESTS`], bounds those abandoned
-//! objects; creation past it fails with `NEO_CRYPTO_TOO_MANY_OBJECTS`.
-//!
-//! # Asynchronous API
-//!
-//! `hash_async` and `hmac_async` return a `Promise` and are genuinely
-//! nonblocking: argument validation, the budget admission, and a single bounded
-//! copy of the input run on the isolate thread. All hashing runs on the
-//! runtime's bounded Tokio blocking pool through a `deno_core` async op: the
-//! worker builds the hash state, hashes the HMAC key, hashes the data, and
-//! encodes the digest. They are not `Promise.resolve` wrappers around a blocking
-//! call. The input is copied before the promise is returned, so mutating the
-//! caller's buffer afterwards does not change the result.
-//!
-//! The pool has four blocking threads, configured by the runtime. At most
-//! [`MAX_PENDING_ASYNC_JOBS`] jobs may be pending at once, even if every job is
-//! empty, and at most [`MAX_PENDING_ASYNC_BYTES`] of copied data and HMAC key
-//! bytes may be pending. A submission over either bound fails with
-//! `NEO_CRYPTO_BUSY` rather than queueing unbounded work. The reservation is
-//! released when the worker finishes, panics, or fails to start; a job aborted
-//! before it starts also releases it, while an already-running job stays charged
-//! until it returns. deno_core hosts async ops on a Tokio current-thread runtime on the isolate
-//! thread. `run_file` provides one; so does `run_file_async` when the caller's
-//! executor is a Tokio current-thread runtime. Any other executor, including a
-//! multi-thread Tokio runtime, gets `NEO_CRYPTO_NO_EXECUTOR` before any input is
-//! copied, and the synchronous API still works. A runtime with no captured
-//! blocking-pool handle reports `NEO_CRYPTO_INTERNAL`. The JavaScript wrapper
-//! calls the join op as soon as it receives the job id, so the job's
-//! resource-table entry is removed then. If the returned promise is never
-//! awaited, its completed digest is retained by that promise until the promise
-//! is collected; the worker and its reservation still finish and release
-//! first.
-//!
-//! Cancellation is best effort, not a guarantee that work stops, and it is not
-//! triggered by abandoning the returned JavaScript `Promise`. The wrapper
-//! starts the join op immediately, so an unawaited promise still drives the job
-//! to completion; its result is retained by the promise until it is collected.
-//! Dropping the runtime drops the `JsRuntime`, its pending join-op futures, and
-//! any unjoined job resources. That aborts a job that has not started on a
-//! blocking thread; Tokio then drops its owned input and releases its
-//! reservation. Dropping only the `run_file_async` entry future stops polling
-//! but does not drop the runtime's op futures or resources, so it is not
-//! cancellation. A job that has already started on a blocking thread cannot be
-//! stopped: abort is a no-op, the input stays owned until the worker returns,
-//! and the job and byte reservations remain charged until it finishes. Its
-//! result is discarded if the join future is gone. The four-thread pool and the
-//! 64-job/64-MiB admission bounds still apply to every admitted job, so
-//! cancellation cannot be used to exceed them.
-//!
-//! # Limits and allocation
-//!
-//! One synchronous hash object accepts at most [`MAX_HASH_INPUT_BYTES`] of
-//! input across all `update` calls. One HMAC key may be at most
-//! [`MAX_HMAC_KEY_BYTES`], and one asynchronous call accepts at most
-//! [`MAX_HASH_INPUT_BYTES`] of data. A string is measured by its UTF-8 length
-//! before it is copied. [`MAX_OPEN_DIGESTS`] bounds open incremental objects per
-//! runtime. The Rust allocations are fallible; a refused reservation is
-//! reported as `NEO_CRYPTO_LIMIT`. V8 and the JavaScript heap allocate too, so
-//! recovery from out-of-memory is not guaranteed.
-//!
-//! # Typed arrays
-//!
-//! Input views are validated with V8's internal `Uint8Array` check, so a
-//! `Proxy`, a subclass-shaped object, and another typed-array kind are
-//! rejected with `TypeError`; `Symbol.hasInstance` and `byteLength` getters are
-//! never consulted. A detached view is rejected with `NEO_CRYPTO_DETACHED`.
-//! Offset views copy only their own range. `SharedArrayBuffer` views and
-//! resizable-buffer views are accepted, and the bytes are copied before any
-//! later JavaScript can run.
-//!
-//! # Password hashing
-//!
-//! The [`password`] child module adds synchronous and asynchronous PBKDF2 and
-//! bcrypt: `pbkdf2`/`pbkdf2Async`, `bcryptHash`/`bcryptHashAsync`, and
-//! `bcryptVerify`/`bcryptVerifyAsync`. It accepts the same `sha256`, `sha384`,
-//! and `sha512` names for PBKDF2, uses exact bytes or UTF-8 strings, and shares
-//! this module's executor, pending-job and pending-byte budget, cancellation
-//! gate, and typed-array validation. See the child module documentation for the
-//! bcrypt version, cost, 72-byte, and malicious-hash policy.
-//!
-//! # Scope
-//!
-//! This is not Node's `crypto` module. It does not implement algorithms outside
-//! the three names above, `createCipheriv`, `subtle`, callbacks, streaming
-//! readers, or OpenSSL's algorithm aliases. It makes no zeroization promise:
-//! key bytes, input bytes, and digest state may remain in Rust buffers and the
-//! JavaScript heap until reclaimed.
+//! Pure SHA-2 hashing, HMAC, output encodings, and bounds live in
+//! [`neojs_crypto_core::hash`]. This module retains the V8 resource table,
+//! Tokio blocking-pool worker dispatch, per-runtime pending-job/byte budget,
+//! test-only placement/cancellation hooks, and `deno_core` ops.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -150,13 +29,11 @@ use deno_core::Resource;
 use deno_core::ResourceId;
 use deno_core::op2;
 use deno_core::v8;
-use hmac::Hmac;
-use hmac::KeyInit;
-use hmac::Mac;
-use sha2::Digest;
-use sha2::Sha256;
-use sha2::Sha384;
-use sha2::Sha512;
+use neojs_crypto_core::hash::{
+    DigestState as CoreDigestState, HashAlgorithm as Algorithm, HashError as CoreHashError,
+    HashErrorCode as CoreHashErrorCode, MAX_HASH_INPUT_BYTES, MAX_HMAC_KEY_BYTES, MAX_OPEN_DIGESTS,
+    OutputEncoding, encode_digest,
+};
 use tokio::runtime::Handle;
 use tokio::runtime::RuntimeFlavor;
 use tokio::task::AbortHandle;
@@ -174,118 +51,36 @@ use crate::crypto::set_failure_parts;
 
 mod password;
 
-/// Test-only hook to make the next bcrypt salt draw fail. Compiled only with
-/// the off-by-default `test-support` feature; a normal build has no hook.
+/// Test-only hook to make the next bcrypt salt draw fail.
 #[cfg(feature = "test-support")]
 pub(crate) fn fail_next_bcrypt_random() {
-    password::fail_next_bcrypt_random();
+    neojs_crypto_core::test_support::fail_next_bcrypt_random();
 }
-
-/// Largest input accepted by one synchronous hash object and by one
-/// asynchronous call.
-pub(crate) const MAX_HASH_INPUT_BYTES: usize = 16 * 1024 * 1024;
-
-/// Largest HMAC key accepted, in bytes.
-pub(crate) const MAX_HMAC_KEY_BYTES: usize = 1024 * 1024;
 
 /// Largest amount of copied input allowed to be pending across asynchronous
 /// calls.
 pub(crate) const MAX_PENDING_ASYNC_BYTES: usize = 64 * 1024 * 1024;
 
-/// Largest number of asynchronous jobs allowed to be pending at once,
-/// regardless of their size. This bounds the queue even when every job hashes
-/// an empty input.
+/// Largest number of asynchronous jobs allowed to be pending at once.
 pub(crate) const MAX_PENDING_ASYNC_JOBS: usize = 64;
-
-/// Largest number of incremental hash and HMAC objects that may be open at
-/// once. This bounds state that a caller creates and abandons without calling
-/// `close()` or `digest()`.
-pub(crate) const MAX_OPEN_DIGESTS: usize = 1024;
-
-/// A supported SHA-2 algorithm.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Algorithm {
-    Sha256,
-    Sha384,
-    Sha512,
-}
-
-impl Algorithm {
-    /// Parse one of the three accepted, case-insensitive names.
-    fn parse(name: &str) -> Option<Self> {
-        if name.eq_ignore_ascii_case("sha256") {
-            Some(Self::Sha256)
-        } else if name.eq_ignore_ascii_case("sha384") {
-            Some(Self::Sha384)
-        } else if name.eq_ignore_ascii_case("sha512") {
-            Some(Self::Sha512)
-        } else {
-            None
-        }
-    }
-}
-
-/// A digest output encoding.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OutputEncoding {
-    /// Raw digest bytes, returned as a `Uint8Array`.
-    Binary,
-    /// Lowercase hexadecimal text.
-    Hex,
-    /// Standard Base64 with padding.
-    Base64,
-    /// URL-safe Base64 without padding.
-    Base64Url,
-    /// One JavaScript code unit per digest byte.
-    Latin1,
-}
-
-impl OutputEncoding {
-    /// Decode the numeric code the JavaScript wrapper passes.
-    fn from_code(code: u32) -> Option<Self> {
-        Some(match code {
-            0 => Self::Binary,
-            1 => Self::Hex,
-            2 => Self::Base64,
-            3 => Self::Base64Url,
-            4 => Self::Latin1,
-            _ => return None,
-        })
-    }
-}
 
 /// Stable machine-readable hash failure category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HashErrorCode {
-    /// The algorithm name is not one of the three supported names.
     Algorithm,
-    /// The string input encoding is not `utf8`.
     Encoding,
-    /// An input or allocation exceeded a documented bound.
     Limit,
-    /// `digest` was already called on this object.
     Digested,
-    /// Too much asynchronous input is already pending.
     Busy,
-    /// The event loop cannot host deno_core async ops.
     NoExecutor,
-    /// Too many incremental hash objects are open.
     TooManyObjects,
-    /// The view's buffer was detached.
     Detached,
-    /// A worker or the runtime executor failed.
     Internal,
-    /// An argument is neither a `Uint8Array` nor a string.
     Type,
-    /// A numeric argument is not an integer in its documented range.
     Range,
 }
 
 impl HashErrorCode {
-    /// The value exposed as the JavaScript error's `code` property.
-    ///
-    /// Argument errors ([`HashErrorCode::Type`] and [`HashErrorCode::Range`])
-    /// have no code and become `TypeError` or `RangeError`.
     fn as_str(self) -> Option<&'static str> {
         Some(match self {
             Self::Algorithm => "NEO_CRYPTO_ALGORITHM",
@@ -301,7 +96,6 @@ impl HashErrorCode {
         })
     }
 
-    /// The JavaScript error class used for this failure.
     fn js_class(self) -> &'static str {
         match self {
             Self::Type => "TypeError",
@@ -311,7 +105,6 @@ impl HashErrorCode {
     }
 }
 
-/// A failure safe to describe without echoing input bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct HashError {
     code: HashErrorCode,
@@ -326,7 +119,6 @@ impl HashError {
         self.code
     }
 
-    /// A fixed message. It never contains input bytes or a key.
     fn message(self) -> &'static str {
         match self.code {
             HashErrorCode::Algorithm => "unsupported hash algorithm",
@@ -357,159 +149,50 @@ impl From<CryptoError> for HashError {
     }
 }
 
-/// One incremental hash state.
-enum HashState {
-    Sha256(Sha256),
-    Sha384(Sha384),
-    Sha512(Sha512),
-}
-
-impl HashState {
-    fn new(algorithm: Algorithm) -> Self {
-        match algorithm {
-            Algorithm::Sha256 => Self::Sha256(Sha256::new()),
-            Algorithm::Sha384 => Self::Sha384(Sha384::new()),
-            Algorithm::Sha512 => Self::Sha512(Sha512::new()),
-        }
-    }
-
-    fn update(&mut self, data: &[u8]) {
-        match self {
-            Self::Sha256(hasher) => hasher.update(data),
-            Self::Sha384(hasher) => hasher.update(data),
-            Self::Sha512(hasher) => hasher.update(data),
-        }
-    }
-
-    fn finalize(self) -> Vec<u8> {
-        match self {
-            Self::Sha256(hasher) => hasher.finalize().to_vec(),
-            Self::Sha384(hasher) => hasher.finalize().to_vec(),
-            Self::Sha512(hasher) => hasher.finalize().to_vec(),
-        }
+impl From<CoreHashError> for HashError {
+    fn from(error: CoreHashError) -> Self {
+        let code = match error.code() {
+            CoreHashErrorCode::Algorithm => HashErrorCode::Algorithm,
+            CoreHashErrorCode::Encoding => HashErrorCode::Encoding,
+            CoreHashErrorCode::Limit => HashErrorCode::Limit,
+            CoreHashErrorCode::Digested | CoreHashErrorCode::Closed => HashErrorCode::Digested,
+            CoreHashErrorCode::TooManyObjects => HashErrorCode::TooManyObjects,
+            CoreHashErrorCode::Internal | _ => HashErrorCode::Internal,
+        };
+        Self::new(code)
     }
 }
 
-/// One incremental HMAC state.
-enum HmacState {
-    Sha256(Hmac<Sha256>),
-    Sha384(Hmac<Sha384>),
-    Sha512(Hmac<Sha512>),
-}
-
-impl HmacState {
-    fn new(algorithm: Algorithm, key: &[u8]) -> Result<Self, HashError> {
-        #[cfg(feature = "test-support")]
-        record_hmac_key_placement();
-        // `new_from_slice` only rejects a key length the primitive cannot
-        // represent; HMAC accepts every length this module admits.
-        let failed = || HashError::new(HashErrorCode::Internal);
-        Ok(match algorithm {
-            Algorithm::Sha256 => {
-                Self::Sha256(Hmac::<Sha256>::new_from_slice(key).map_err(|_| failed())?)
-            }
-            Algorithm::Sha384 => {
-                Self::Sha384(Hmac::<Sha384>::new_from_slice(key).map_err(|_| failed())?)
-            }
-            Algorithm::Sha512 => {
-                Self::Sha512(Hmac::<Sha512>::new_from_slice(key).map_err(|_| failed())?)
-            }
-        })
-    }
-
-    fn update(&mut self, data: &[u8]) {
-        match self {
-            Self::Sha256(mac) => mac.update(data),
-            Self::Sha384(mac) => mac.update(data),
-            Self::Sha512(mac) => mac.update(data),
-        }
-    }
-
-    fn finalize(self) -> Vec<u8> {
-        match self {
-            Self::Sha256(mac) => mac.finalize().into_bytes().to_vec(),
-            Self::Sha384(mac) => mac.finalize().into_bytes().to_vec(),
-            Self::Sha512(mac) => mac.finalize().into_bytes().to_vec(),
-        }
-    }
-}
-
-enum Inner {
-    Hash(HashState),
-    Hmac(HmacState),
-}
-
-impl Inner {
-    fn update(&mut self, data: &[u8]) {
-        match self {
-            Self::Hash(hasher) => hasher.update(data),
-            Self::Hmac(mac) => mac.update(data),
-        }
-    }
-
-    fn finalize(self) -> Vec<u8> {
-        match self {
-            Self::Hash(hasher) => hasher.finalize(),
-            Self::Hmac(mac) => mac.finalize(),
-        }
-    }
-}
-
-/// One hash or HMAC object's state.
-struct DigestState {
-    total: usize,
-    inner: Inner,
-}
+/// Thin wrapper around [`CoreDigestState`] that records test-only worker
+/// placement probes on `hmac` key construction and `update`.
+struct DigestState(CoreDigestState);
 
 impl DigestState {
     fn hash(algorithm: Algorithm) -> Self {
-        Self {
-            total: 0,
-            inner: Inner::Hash(HashState::new(algorithm)),
-        }
+        Self(CoreDigestState::hash(algorithm))
     }
 
     fn hmac(algorithm: Algorithm, key: &[u8]) -> Result<Self, HashError> {
-        if key.len() > MAX_HMAC_KEY_BYTES {
-            return Err(HashError::new(HashErrorCode::Limit));
-        }
-        Ok(Self {
-            total: 0,
-            inner: Inner::Hmac(HmacState::new(algorithm, key)?),
-        })
+        #[cfg(feature = "test-support")]
+        record_hmac_key_placement();
+        Ok(Self(CoreDigestState::hmac(algorithm, key)?))
     }
 
-    /// Bytes this object may still accept.
     fn remaining(&self) -> usize {
-        MAX_HASH_INPUT_BYTES.saturating_sub(self.total)
+        self.0.remaining()
     }
 
-    /// Add `data` to the digest, enforcing the aggregate input bound.
     fn update(&mut self, data: &[u8]) -> Result<(), HashError> {
         #[cfg(feature = "test-support")]
         record_update_placement();
-        let next = self
-            .total
-            .checked_add(data.len())
-            .ok_or_else(|| HashError::new(HashErrorCode::Limit))?;
-        if next > MAX_HASH_INPUT_BYTES {
-            return Err(HashError::new(HashErrorCode::Limit));
-        }
-        self.inner.update(data);
-        self.total = next;
-        Ok(())
+        Ok(self.0.update(data)?)
     }
 
     fn finalize(self) -> Vec<u8> {
-        self.inner.finalize()
+        self.0.finalize()
     }
 }
 
-/// A synchronous hash or HMAC object held in the resource table.
-///
-/// The open-object reservation is part of the resource, so dropping the
-/// resource through `digest`, `close`, or the runtime's resource table releases
-/// the hard-cap slot exactly once.
 struct DigestResource {
     state: RefCell<Option<DigestState>>,
     _open: OpenReservation,
@@ -530,16 +213,12 @@ impl Resource for DigestResource {
     }
 }
 
-/// One pending asynchronous job. The join op takes the handle once.
 struct AsyncDigestJob {
     handle: RefCell<Option<JoinHandle<Vec<u8>>>>,
 }
 
 impl Drop for AsyncDigestJob {
     fn drop(&mut self) {
-        // A resource dropped before its join op takes the handle (for example
-        // when the runtime is torn down) aborts a job that has not started.
-        // Aborting a running `spawn_blocking` task is a no-op.
         if let Some(handle) = self.handle.get_mut().take() {
             handle.abort();
         }
@@ -552,10 +231,6 @@ impl Resource for AsyncDigestJob {
     }
 }
 
-/// Aborts a queued blocking task if the join future is dropped.
-///
-/// A running `spawn_blocking` task cannot be stopped; abort is a no-op for it,
-/// and its reservation remains charged until it finishes.
 struct AbortOnDrop(AbortHandle);
 
 impl Drop for AbortOnDrop {
@@ -564,15 +239,6 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// The data, key, and budget reservation owned by one blocking worker.
-///
-/// Field order is deliberate: Rust drops struct fields in declaration order, so
-/// `data` and `key` are released before `_reservation`. The reservation
-/// therefore stays charged until both allocations are gone, including when the
-/// closure is dropped before it starts, when `run` returns early or panics, and
-/// when a running worker is abandoned by runtime teardown dropping its join
-/// future. `run` only borrows, so the struct can be dropped explicitly after
-/// the result is produced.
 struct WorkerOwned {
     data: Vec<u8>,
     key: Vec<u8>,
@@ -580,11 +246,6 @@ struct WorkerOwned {
 }
 
 impl WorkerOwned {
-    /// Build the state and hash on the calling thread.
-    ///
-    /// The caller must invoke this from the blocking worker, after the probe (in
-    /// test builds) is installed. It borrows the owned data and key so the
-    /// reservation stays held until `self` drops.
     fn run(&self, algorithm: Algorithm, kind: u32, encoding: OutputEncoding) -> Vec<u8> {
         let mut digest = if kind == 0 {
             DigestState::hash(algorithm)
@@ -601,7 +262,6 @@ impl WorkerOwned {
     }
 }
 
-/// The per-runtime budgets for asynchronous jobs and open incremental objects.
 #[derive(Default)]
 struct BudgetState {
     pending_jobs: usize,
@@ -609,9 +269,6 @@ struct BudgetState {
     open_digests: usize,
 }
 
-/// Shared budget counters. One mutex keeps the job and byte admission atomic,
-/// and it is safe to release from a blocking worker thread, a dropped op
-/// future, or a panic unwind.
 #[derive(Default)]
 pub(crate) struct Budget {
     state: Mutex<BudgetState>,
@@ -619,18 +276,11 @@ pub(crate) struct Budget {
 
 impl Budget {
     fn lock(&self) -> MutexGuard<'_, BudgetState> {
-        // A panic while the lock is held cannot corrupt the counters; recover
-        // the data instead of poisoning every later reservation.
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Reserve one pending job and `bytes` of owned input.
-    ///
-    /// The job count is checked and reserved even when `bytes` is zero, so an
-    /// unbounded number of empty jobs cannot queue. The byte count includes the
-    /// HMAC key, which the worker owns until it has built the keyed state.
     fn reserve_pending(self: &Arc<Self>, bytes: usize) -> Result<PendingReservation, HashError> {
         let mut state = self.lock();
         if state.pending_jobs >= MAX_PENDING_ASYNC_JOBS {
@@ -651,8 +301,6 @@ impl Budget {
         })
     }
 
-    /// Reserve one pending job for a module that shares this budget but not
-    /// this module's private error type.
     pub(crate) fn reserve_pending_busy(
         self: &Arc<Self>,
         bytes: usize,
@@ -660,7 +308,6 @@ impl Budget {
         self.reserve_pending(bytes).ok()
     }
 
-    /// Reserve one open incremental hash object.
     fn reserve_open(self: &Arc<Self>) -> Result<OpenReservation, HashError> {
         let mut state = self.lock();
         if state.open_digests >= MAX_OPEN_DIGESTS {
@@ -673,9 +320,6 @@ impl Budget {
     }
 }
 
-/// A reservation released when the worker finishes, panics, or is aborted
-/// before it starts. The guard is not `Clone`, so release happens exactly once.
-/// A running job cannot be aborted and keeps this charge until it returns.
 pub(crate) struct PendingReservation {
     budget: Arc<Budget>,
     bytes: usize,
@@ -689,7 +333,6 @@ impl Drop for PendingReservation {
     }
 }
 
-/// An open-object reservation released when its resource is dropped.
 struct OpenReservation {
     budget: Arc<Budget>,
 }
@@ -701,41 +344,23 @@ impl Drop for OpenReservation {
     }
 }
 
-/// The per-runtime executor and budgets for hashing.
-///
-/// The runtime is created inside a Tokio driver, so the extension's state
-/// initializer sees that driver's handle. An embedding that installs this
-/// extension without a Tokio context gets synchronous hashing and synchronous
-/// Shamir secret sharing only.
 pub(crate) struct CryptoExecutor {
     handle: Option<Handle>,
     budget: Arc<Budget>,
-    /// Whether the worker closure ran on the isolate thread (1) or another
-    /// thread (2). Recorded only with the off-by-default `test-support`
-    /// feature.
     #[cfg(feature = "test-support")]
     worker_placement: Arc<AtomicU32>,
-    /// Where `DigestState::update` actually ran for the last asynchronous job.
     #[cfg(feature = "test-support")]
     update_placement: Arc<AtomicU32>,
-    /// Where `HmacState::new` (HMAC key construction) actually ran for the last
-    /// asynchronous job.
     #[cfg(feature = "test-support")]
     hmac_key_placement: Arc<AtomicU32>,
-    /// Where PBKDF2 derivation actually ran for the last asynchronous job.
     #[cfg(feature = "test-support")]
     pbkdf2_placement: Arc<AtomicU32>,
-    /// Where bcrypt hashing or verification actually ran for the last
-    /// asynchronous job.
     #[cfg(feature = "test-support")]
     bcrypt_placement: Arc<AtomicU32>,
-    /// Where Shamir splitting or combination actually ran for the last
-    /// asynchronous job.
     #[cfg(feature = "test-support")]
     shamir_placement: Arc<AtomicU32>,
     #[cfg(feature = "test-support")]
     isolate_thread: ThreadId,
-    /// Test-only gate captured when the runtime is created.
     #[cfg(feature = "test-support")]
     cancellation_gate: Option<Arc<CancellationGate>>,
 }
@@ -768,12 +393,10 @@ impl CryptoExecutor {
         Arc::clone(&self.budget)
     }
 
-    /// Whether this runtime captured a blocking-pool handle.
     pub(crate) fn has_handle(&self) -> bool {
         self.handle.is_some()
     }
 
-    /// Tell the test-only cancellation gate that a join op started.
     #[cfg(feature = "test-support")]
     pub(crate) fn note_join_started(&self) {
         if let Some(gate) = &self.cancellation_gate {
@@ -781,11 +404,6 @@ impl CryptoExecutor {
         }
     }
 
-    /// Build a placement probe for one asynchronous job.
-    ///
-    /// The caller installs it on the isolate thread before copying input. The
-    /// worker installs its own clone, so a change that moves the real work back
-    /// onto the isolate thread is observable.
     #[cfg(feature = "test-support")]
     fn probe(&self) -> Arc<AsyncProbe> {
         Arc::new(AsyncProbe {
@@ -798,14 +416,6 @@ impl CryptoExecutor {
         })
     }
 
-    /// Submit one asynchronous crypto job to the bounded blocking pool.
-    ///
-    /// The caller must have checked that [`Self::handle`] is present and must
-    /// already hold a [`PendingReservation`] for the bytes the closure owns.
-    /// With `test-support`, the worker records its placement, installs the
-    /// probe, and enters the cancellation gate before running `work`. The
-    /// closure returns its raw bytes; an empty vector is the internal-failure
-    /// sentinel used by the join ops.
     pub(crate) fn spawn_blocking<F, R>(&self, work: F) -> JoinHandle<R>
     where
         F: FnOnce() -> R + Send + 'static,
@@ -841,13 +451,6 @@ impl CryptoExecutor {
     }
 }
 
-/// Per-job placement probe installed on the isolate thread and on the worker
-/// thread while an asynchronous operation runs.
-///
-/// The instrumentation lives in [`DigestState::update`], [`HmacState::new`],
-/// and the Shamir split/combine core, not just in the worker closure, so a
-/// change that moves the actual work back onto the isolate thread is
-/// observable.
 #[cfg(feature = "test-support")]
 struct AsyncProbe {
     isolate_thread: ThreadId,
@@ -916,7 +519,6 @@ fn record_bcrypt_placement() {
     });
 }
 
-/// Record where the last Shamir split or combine ran.
 #[cfg(feature = "test-support")]
 pub(crate) fn record_shamir_placement() {
     ASYNC_PROBE.with(|slot| {
@@ -929,7 +531,6 @@ pub(crate) fn record_shamir_placement() {
     });
 }
 
-/// Installs a probe for the current thread and restores the previous one.
 #[cfg(feature = "test-support")]
 struct ProbeGuard(Option<Arc<AsyncProbe>>);
 
@@ -947,14 +548,6 @@ impl Drop for ProbeGuard {
     }
 }
 
-/// Test-only gate that holds a real blocking hash worker after it starts.
-///
-/// The gate is installed into the runtime by [`with_cancellation_gate`] before
-/// [`Runtime::new`](crate::Runtime::new). A worker that reaches the gate
-/// publishes the runtime's budget and blocks until `release()`. A test can
-/// inspect the live budget while the worker is held, drop the async join
-/// future/runtime, inspect it again, then release the worker and confirm the
-/// reservation is gone.
 #[cfg(feature = "test-support")]
 #[derive(Default)]
 struct CancellationState {
@@ -968,6 +561,7 @@ struct CancellationState {
     budget: Option<Arc<Budget>>,
 }
 
+/// Test-only gate that holds a real blocking hash worker after it starts.
 #[cfg(feature = "test-support")]
 pub struct CancellationGate {
     state: Mutex<CancellationState>,
@@ -1011,8 +605,7 @@ impl CancellationGate {
         self.state.lock().unwrap_or_else(|p| p.into_inner()).started
     }
 
-    /// How many workers have reached the gate. The runtime's blocking pool has
-    /// four threads, so a queued job is one that never increments this count.
+    /// How many workers have reached the gate.
     pub fn started_count(&self) -> usize {
         self.state
             .lock()
@@ -1028,7 +621,6 @@ impl CancellationGate {
             .finished_count
     }
 
-    /// Signal that the real join op has taken the handle and is about to await.
     fn join_started(&self) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.join_started = true;
@@ -1067,9 +659,6 @@ impl CancellationGate {
     }
 
     /// Wait until the gated worker has left, up to `timeout`.
-    ///
-    /// Returns `false` if the deadline expires first. The caller must still
-    /// release the gate; the test's release guard does that on panic as well.
     pub fn wait_finished_timeout(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -1092,9 +681,6 @@ impl CancellationGate {
     }
 
     /// Wait until at least `count` gated workers have left, up to `timeout`.
-    ///
-    /// Returns `false` if the deadline expires first. The caller must still
-    /// release the gate; the test's release guard does that on panic as well.
     pub fn wait_finished_count_timeout(&self, count: usize, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -1133,9 +719,6 @@ thread_local! {
 }
 
 /// Install a cancellation gate for runtimes created by `f`.
-///
-/// The gate is read when [`CryptoExecutor::capture`] runs during
-/// `Runtime::new`; the previous thread-local is restored when `f` returns.
 #[cfg(feature = "test-support")]
 pub fn with_cancellation_gate<R>(gate: Arc<CancellationGate>, f: impl FnOnce() -> R) -> R {
     struct Restore(Option<Arc<CancellationGate>>);
@@ -1151,7 +734,6 @@ pub fn with_cancellation_gate<R>(gate: Arc<CancellationGate>, f: impl FnOnce() -
     f()
 }
 
-/// Read a JavaScript value that must already be a primitive string.
 fn checked_string<'s>(
     value: v8::Local<'s, v8::Value>,
 ) -> Result<v8::Local<'s, v8::String>, HashError> {
@@ -1161,11 +743,6 @@ fn checked_string<'s>(
     v8::Local::<v8::String>::try_from(value).map_err(|_| HashError::new(HashErrorCode::Type))
 }
 
-/// Convert a checked string to UTF-8 bytes, enforcing `limit`.
-///
-/// The UTF-8 length is read before allocating. Lone surrogates are replaced
-/// with U+FFFD by V8's lossy conversion, matching the replacement behavior of
-/// Node's UTF-8 string encoding.
 fn string_bytes(
     scope: &v8::PinScope<'_, '_>,
     string: v8::Local<'_, v8::String>,
@@ -1175,10 +752,6 @@ fn string_bytes(
     if length > limit {
         return Err(HashError::new(HashErrorCode::Limit));
     }
-    // Write directly into the single module-owned destination. The
-    // `REPLACE_INVALID_UTF8` flag preserves JavaScript's U+FFFD replacement
-    // for an unpaired surrogate, matching the previous lossy conversion
-    // without an intermediate Rust `String`.
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(length)
@@ -1192,12 +765,6 @@ fn string_bytes(
     Ok(bytes)
 }
 
-/// Measure a hash input without copying it.
-///
-/// This is used to admit an asynchronous job to the byte budget before the
-/// input is copied or a worker is started. No JavaScript runs between this
-/// measurement and the later copy, so a resizable view cannot change in
-/// between.
 fn input_length(
     scope: &v8::PinScope<'_, '_>,
     value: v8::Local<'_, v8::Value>,
@@ -1219,7 +786,6 @@ fn input_length(
     Ok(view.length)
 }
 
-/// Read a hash input: `Uint8Array` bytes or a UTF-8 string.
 fn input_bytes(
     scope: &v8::PinScope<'_, '_>,
     value: v8::Local<'_, v8::Value>,
@@ -1237,15 +803,11 @@ fn input_bytes(
     Ok(copy_view(&view)?)
 }
 
-/// Read an algorithm argument without invoking JavaScript conversion hooks.
 fn algorithm_from(
     scope: &v8::PinScope<'_, '_>,
     value: v8::Local<'_, v8::Value>,
 ) -> Result<Algorithm, HashError> {
     let string = checked_string(value)?;
-    // The accepted names are at most six ASCII characters. Reject a longer
-    // string before copying it, so an unrelated huge string cannot make this
-    // path allocate it.
     if string.length() > 16 {
         return Err(HashError::new(HashErrorCode::Algorithm));
     }
@@ -1253,7 +815,6 @@ fn algorithm_from(
     Algorithm::parse(&name).ok_or_else(|| HashError::new(HashErrorCode::Algorithm))
 }
 
-/// Read an integer numeric argument in `0..=maximum`.
 fn number_code(
     scope: &v8::PinScope<'_, '_>,
     value: v8::Local<'_, v8::Value>,
@@ -1271,7 +832,6 @@ fn number_code(
     Ok(number as u32)
 }
 
-/// Read the strings-only input encoding code. Only 0 (UTF-8) is accepted.
 fn input_encoding_code(
     scope: &v8::PinScope<'_, '_>,
     value: v8::Local<'_, v8::Value>,
@@ -1287,67 +847,6 @@ fn input_encoding_code(
     }
 }
 
-/// Encode a digest as the requested output.
-///
-/// `Latin1` returns the raw digest bytes; the JavaScript wrapper maps each byte
-/// to one code unit. `Hex`, `Base64`, and `Base64Url` return ASCII bytes.
-fn encode_digest(digest: &[u8], encoding: OutputEncoding) -> Vec<u8> {
-    match encoding {
-        OutputEncoding::Binary | OutputEncoding::Latin1 => digest.to_vec(),
-        OutputEncoding::Hex => {
-            const HEX: &[u8; 16] = b"0123456789abcdef";
-            let mut text = Vec::with_capacity(digest.len() * 2);
-            for byte in digest {
-                text.push(HEX[(byte >> 4) as usize]);
-                text.push(HEX[(byte & 0x0f) as usize]);
-            }
-            text
-        }
-        OutputEncoding::Base64 => base64_encode(digest, false),
-        OutputEncoding::Base64Url => base64_encode(digest, true),
-    }
-}
-
-/// Standard or URL-safe Base64. URL-safe output omits padding.
-fn base64_encode(input: &[u8], url_safe: bool) -> Vec<u8> {
-    const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let alphabet = if url_safe { URL_SAFE } else { STANDARD };
-    let mut output = Vec::with_capacity(input.len().div_ceil(3) * 4);
-    let (chunks, remainder) = input.as_chunks::<3>();
-    for chunk in chunks {
-        let value = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32;
-        output.push(alphabet[((value >> 18) & 63) as usize]);
-        output.push(alphabet[((value >> 12) & 63) as usize]);
-        output.push(alphabet[((value >> 6) & 63) as usize]);
-        output.push(alphabet[(value & 63) as usize]);
-    }
-    match remainder {
-        [first] => {
-            let value = (*first as u32) << 16;
-            output.push(alphabet[((value >> 18) & 63) as usize]);
-            output.push(alphabet[((value >> 12) & 63) as usize]);
-            if !url_safe {
-                output.push(b'=');
-                output.push(b'=');
-            }
-        }
-        [first, second] => {
-            let value = ((*first as u32) << 16) | ((*second as u32) << 8);
-            output.push(alphabet[((value >> 18) & 63) as usize]);
-            output.push(alphabet[((value >> 12) & 63) as usize]);
-            output.push(alphabet[((value >> 6) & 63) as usize]);
-            if !url_safe {
-                output.push(b'=');
-            }
-        }
-        [] => {}
-        _ => unreachable!("a three-byte chunk has at most a two-byte remainder"),
-    }
-    output
-}
-
-/// Create the null-prototype result object and record a resource id or failure.
 fn outcome_id<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     result: Result<ResourceId, HashError>,
@@ -1374,7 +873,6 @@ fn outcome_id<'s>(
     object.into()
 }
 
-/// Record success with no value, or the documented failure.
 fn outcome_unit<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     result: Result<(), HashError>,
@@ -1393,7 +891,6 @@ fn outcome_unit<'s>(
     object.into()
 }
 
-/// Record a digest as raw bytes or as a string, or the documented failure.
 fn outcome_digest<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     result: Result<(OutputEncoding, Vec<u8>), HashError>,
@@ -1456,11 +953,6 @@ fn op_neo_crypto_hash_create<'s, 'i>(
     outcome_id(scope, result)
 }
 
-/// Drop one incremental hash object's state explicitly.
-///
-/// The JavaScript wrapper calls this from `close()`/`dispose()`. The open-object
-/// reservation is released when the resource is removed, whether the object is
-/// closed, digested, or dropped with the runtime.
 #[op2(fast)]
 fn op_neo_crypto_hash_release(state: &mut OpState, #[smi] id: ResourceId) {
     let _ = state.resource_table.take::<DigestResource>(id);
@@ -1544,9 +1036,6 @@ fn op_neo_crypto_hash_digest<'s, 'i>(
             .borrow_mut()
             .take()
             .ok_or_else(|| HashError::new(HashErrorCode::Digested))?;
-        // Drop the table's reference now that the state is consumed. The
-        // JavaScript object cannot be used again, and the resource is freed
-        // without waiting for the runtime to be dropped.
         let _ = state.resource_table.take::<DigestResource>(id);
         let bytes = encode_digest(&digest.finalize(), encoding);
         Ok((encoding, bytes))
@@ -1554,11 +1043,6 @@ fn op_neo_crypto_hash_digest<'s, 'i>(
     outcome_digest(scope, result)
 }
 
-/// Validate and copy an asynchronous call, then submit it to the blocking pool.
-///
-/// All user-caused failures are reported here, before a worker starts, so they
-/// keep their stable `code`. The join op only reports an internal worker
-/// failure, as an empty result.
 #[allow(clippy::too_many_arguments)]
 #[op2]
 fn op_neo_crypto_async_submit<'s, 'i>(
@@ -1571,11 +1055,6 @@ fn op_neo_crypto_async_submit<'s, 'i>(
     encoding: v8::Local<'s, v8::Value>,
 ) -> v8::Local<'s, v8::Value> {
     let result = (|| {
-        // deno_core spawns the async-op driver with `deno_unsync::spawn`, which
-        // requires a Tokio current-thread runtime on the isolate thread. Without
-        // one it panics, and a multi-thread runtime could poll a non-`Send` op
-        // future on another thread. Reject before the input is copied or a
-        // pending op is created, so the failure is a clean stable error.
         if !matches!(
             Handle::try_current().map(|handle| handle.runtime_flavor()),
             Ok(RuntimeFlavor::CurrentThread)
@@ -1594,14 +1073,9 @@ fn op_neo_crypto_async_submit<'s, 'i>(
             }
             executor.budget()
         };
-        // The isolate-thread probe is installed before any possible mutation
-        // that moves key construction or `update` back onto this thread.
         #[cfg(feature = "test-support")]
         let _isolate_probe = ProbeGuard::install(Some(state.borrow::<CryptoExecutor>().probe()));
 
-        // Measure before copying, admit the job to both budgets, then copy.
-        // The worker owns the data and, for HMAC, the key until it has built
-        // the keyed state, so both lengths count against the byte budget.
         let data_length = input_length(scope, data, MAX_HASH_INPUT_BYTES)?;
         let key_length = if kind == 1 {
             input_length(scope, key, MAX_HMAC_KEY_BYTES)?
@@ -1621,22 +1095,14 @@ fn op_neo_crypto_async_submit<'s, 'i>(
         debug_assert_eq!(data.len(), data_length);
         debug_assert_eq!(key.len(), key_length);
 
-        // No hashing happens here. The worker owns the data, key, and
-        // reservation in that field order, so the reservation outlives both
-        // allocations on every exit path.
         let job = WorkerOwned {
             data,
             key,
             _reservation: reservation,
         };
         let join = state.borrow::<CryptoExecutor>().spawn_blocking(move || {
-            // The job is declared after the worker's probe and gate guards so
-            // it drops first on unwind; the explicit drop below also runs
-            // before the gate reports finished.
             let job = job;
             let result = job.run(algorithm, kind, encoding);
-            // Drop the owned allocations and then the reservation before the
-            // result leaves the worker.
             drop(job);
             result
         });
@@ -1647,7 +1113,6 @@ fn op_neo_crypto_async_submit<'s, 'i>(
     outcome_id(scope, result)
 }
 
-/// Wait for one asynchronous hash. An empty result means the worker failed.
 #[op2]
 #[buffer]
 pub(crate) async fn op_neo_crypto_async_join(
@@ -1673,11 +1138,6 @@ pub(crate) async fn op_neo_crypto_async_join(
     {
         gate.join_started();
     }
-    // If this Rust join-op future is dropped with the runtime, abort a job that
-    // has not started. Abandoning the JavaScript Promise does not drop this
-    // future; the wrapper starts the join immediately. Dropping only the entry
-    // future leaves the runtime's op futures alive. A running `spawn_blocking`
-    // task cannot be stopped and keeps its reservation until it finishes.
     let _abort = AbortOnDrop(handle.abort_handle());
     handle.await.unwrap_or_default()
 }
@@ -1706,8 +1166,6 @@ deno_core::extension!(
     docs = "SHA-2, HMAC, PBKDF2, and bcrypt ops behind `Neo.getBuiltInModule(\"neo:crypto\")`."
 );
 
-/// The off-by-default test-support extension, used to prove that asynchronous
-/// hashing runs on a blocking worker and not on the isolate thread.
 #[cfg(feature = "test-support")]
 #[op2]
 #[string]
@@ -1757,8 +1215,6 @@ deno_core::extension!(
     docs = "Test-only worker-placement probes for `neo:crypto`."
 );
 
-/// Return the test-support extension. Compiled only with the off-by-default
-/// `test-support` feature, which a normal build never enables.
 #[cfg(feature = "test-support")]
 pub(crate) fn test_support_extension() -> deno_core::Extension {
     neojs_crypto_hash_test::init()
@@ -1768,238 +1224,7 @@ pub(crate) fn test_support_extension() -> deno_core::Extension {
 mod tests {
     use super::*;
 
-    fn decode_hex(value: &str) -> Vec<u8> {
-        assert_eq!(value.len() % 2, 0, "hex length");
-        (0..value.len())
-            .step_by(2)
-            .map(|index| u8::from_str_radix(&value[index..index + 2], 16).unwrap())
-            .collect()
-    }
-
-    fn encode_hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-    }
-
-    /// FIPS 180-4 / NIST CAVP vectors, independently reproduced with Python's
-    /// `hashlib` (OpenSSL backend) for this repository.
-    const HASH_VECTORS: [(&str, Algorithm, &str); 9] = [
-        (
-            "",
-            Algorithm::Sha256,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        ),
-        (
-            "abc",
-            Algorithm::Sha256,
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-        ),
-        (
-            "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
-            Algorithm::Sha256,
-            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
-        ),
-        (
-            "abc",
-            Algorithm::Sha384,
-            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7",
-        ),
-        (
-            "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu",
-            Algorithm::Sha384,
-            "09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039",
-        ),
-        (
-            "",
-            Algorithm::Sha384,
-            "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b",
-        ),
-        (
-            "abc",
-            Algorithm::Sha512,
-            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
-        ),
-        (
-            "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu",
-            Algorithm::Sha512,
-            "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909",
-        ),
-        (
-            "",
-            Algorithm::Sha512,
-            "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
-        ),
-    ];
-
-    #[test]
-    fn published_hash_vectors_match_incremental_and_one_shot() {
-        for (message, algorithm, expected) in HASH_VECTORS {
-            let mut state = DigestState::hash(algorithm);
-            // Feed the vector in uneven chunks so buffering is exercised.
-            let bytes = message.as_bytes();
-            let split = bytes.len() / 2;
-            state.update(&bytes[..split]).unwrap();
-            state.update(&bytes[split..]).unwrap();
-            assert_eq!(encode_hex(&state.finalize()), expected, "{message:?}");
-        }
-    }
-
-    #[test]
-    fn algorithm_names_are_small_and_case_insensitive() {
-        assert_eq!(Algorithm::parse("sha256"), Some(Algorithm::Sha256));
-        assert_eq!(Algorithm::parse("SHA384"), Some(Algorithm::Sha384));
-        assert_eq!(Algorithm::parse("Sha512"), Some(Algorithm::Sha512));
-        for name in [
-            "", "sha1", "sha224", "sha2-256", "sha-256", "md5", "SHA3-256",
-        ] {
-            assert_eq!(Algorithm::parse(name), None, "{name:?}");
-        }
-    }
-
-    /// RFC 4231 test cases 1-3, independently reproduced with Python's `hmac`
-    /// module for this repository.
-    #[test]
-    fn published_hmac_vectors_match() {
-        let cases: [(Vec<u8>, &[u8], Algorithm, &str); 9] = [
-            (
-                vec![0x0b; 20],
-                b"Hi There",
-                Algorithm::Sha256,
-                "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
-            ),
-            (
-                b"Jefe".to_vec(),
-                b"what do ya want for nothing?",
-                Algorithm::Sha256,
-                "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
-            ),
-            (
-                vec![0xaa; 20],
-                &[0xdd; 50],
-                Algorithm::Sha256,
-                "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe",
-            ),
-            (
-                vec![0x0b; 20],
-                b"Hi There",
-                Algorithm::Sha384,
-                "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6",
-            ),
-            (
-                b"Jefe".to_vec(),
-                b"what do ya want for nothing?",
-                Algorithm::Sha384,
-                "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649",
-            ),
-            (
-                vec![0xaa; 20],
-                &[0xdd; 50],
-                Algorithm::Sha384,
-                "88062608d3e6ad8a0aa2ace014c8a86f0aa635d947ac9febe83ef4e55966144b2a5ab39dc13814b94e3ab6e101a34f27",
-            ),
-            (
-                vec![0x0b; 20],
-                b"Hi There",
-                Algorithm::Sha512,
-                "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854",
-            ),
-            (
-                b"Jefe".to_vec(),
-                b"what do ya want for nothing?",
-                Algorithm::Sha512,
-                "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737",
-            ),
-            (
-                vec![0xaa; 20],
-                &[0xdd; 50],
-                Algorithm::Sha512,
-                "fa73b0089d56a284efb0f0756c890be9b1b5dbdd8ee81a3655f83e33b2279d39bf3e848279a722c806b485a47e67c807b946a337bee8942674278859e13292fb",
-            ),
-        ];
-        for (key, data, algorithm, expected) in cases {
-            let mut state = DigestState::hmac(algorithm, &key).unwrap();
-            state.update(data).unwrap();
-            assert_eq!(encode_hex(&state.finalize()), expected);
-        }
-    }
-
-    #[test]
-    fn empty_hmac_key_is_accepted() {
-        let mut state = DigestState::hmac(Algorithm::Sha256, b"").unwrap();
-        state.update(b"").unwrap();
-        assert_eq!(state.finalize().len(), 32);
-    }
-
-    #[test]
-    fn digest_encodings_are_stable() {
-        let bytes = decode_hex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-        assert_eq!(
-            encode_digest(&bytes, OutputEncoding::Hex),
-            b"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        assert_eq!(
-            std::str::from_utf8(&encode_digest(&bytes, OutputEncoding::Base64)).unwrap(),
-            "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0="
-        );
-        assert_eq!(
-            std::str::from_utf8(&encode_digest(&bytes, OutputEncoding::Base64Url)).unwrap(),
-            "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0"
-        );
-        assert_eq!(
-            encode_digest(&bytes, OutputEncoding::Binary),
-            bytes,
-            "binary is the raw digest"
-        );
-        assert_eq!(
-            encode_digest(&bytes, OutputEncoding::Latin1),
-            bytes,
-            "latin1 bytes are the raw digest"
-        );
-    }
-
-    #[test]
-    fn base64_padding_is_correct_for_every_remainder() {
-        for (input, standard, url_safe) in [
-            (&b""[..], "", ""),
-            (b"f", "Zg==", "Zg"),
-            (b"fo", "Zm8=", "Zm8"),
-            (b"foo", "Zm9v", "Zm9v"),
-            (b"foob", "Zm9vYg==", "Zm9vYg"),
-            (b"fooba", "Zm9vYmE=", "Zm9vYmE"),
-            (b"foobar", "Zm9vYmFy", "Zm9vYmFy"),
-        ] {
-            assert_eq!(
-                std::str::from_utf8(&base64_encode(input, false)).unwrap(),
-                standard
-            );
-            assert_eq!(
-                std::str::from_utf8(&base64_encode(input, true)).unwrap(),
-                url_safe
-            );
-        }
-    }
-
-    #[test]
-    fn aggregate_input_bound_is_enforced() {
-        let mut state = DigestState::hash(Algorithm::Sha256);
-        state.update(&vec![0u8; MAX_HASH_INPUT_BYTES]).unwrap();
-        assert_eq!(state.remaining(), 0);
-        assert_eq!(
-            state.update(&[0u8]).unwrap_err().code(),
-            HashErrorCode::Limit
-        );
-    }
-
-    #[test]
-    fn hmac_key_bound_is_enforced() {
-        let key = vec![0u8; MAX_HMAC_KEY_BYTES + 1];
-        let error = match DigestState::hmac(Algorithm::Sha256, &key) {
-            Ok(_) => panic!("an oversized key must fail"),
-            Err(error) => error,
-        };
-        assert_eq!(error.code(), HashErrorCode::Limit);
-        assert!(DigestState::hmac(Algorithm::Sha256, &key[..MAX_HMAC_KEY_BYTES]).is_ok());
-    }
-
+    // Unit test: Tokio blocking-pool pending-byte and pending-job budget enforcement.
     #[test]
     fn pending_budget_counts_bytes_and_jobs_and_releases() {
         let budget = Arc::new(Budget::default());
@@ -2029,6 +1254,7 @@ mod tests {
         assert_eq!(state.pending_bytes, 0);
     }
 
+    // Unit test: pending-job cap enforcement for zero-byte jobs.
     #[test]
     fn pending_job_cap_applies_to_empty_jobs() {
         let budget = Arc::new(Budget::default());
@@ -2051,6 +1277,7 @@ mod tests {
         assert_eq!(state.pending_bytes, 0);
     }
 
+    // Unit test: reservation RAII release on error and panic unwind.
     #[test]
     fn pending_reservation_releases_on_error_and_panic() {
         let budget = Arc::new(Budget::default());
@@ -2065,8 +1292,6 @@ mod tests {
             assert_eq!(state.pending_bytes, 0);
         }
 
-        // Dropping a live reservation simulates cancellation before the worker
-        // consumes it.
         {
             let _reservation = budget.reserve_pending(4).unwrap();
             assert_eq!(budget.lock().pending_jobs, 1);
@@ -2090,6 +1315,7 @@ mod tests {
         assert_eq!(state.pending_bytes, 0);
     }
 
+    // Unit test: open-object cap enforcement on runtime Budget.
     #[test]
     fn open_object_cap_is_enforced_and_releasable() {
         let budget = Arc::new(Budget::default());
@@ -2110,6 +1336,7 @@ mod tests {
         assert_eq!(budget.lock().open_digests, 0);
     }
 
+    // Unit test: WorkerOwned field-order drop guard for reservation lifetime.
     #[test]
     fn worker_owned_holds_reservation_until_it_drops() {
         let budget = Arc::new(Budget::default());
@@ -2123,7 +1350,6 @@ mod tests {
         assert_eq!(budget.lock().pending_bytes, 8);
         let result = job.run(Algorithm::Sha256, 0, OutputEncoding::Hex);
         assert_eq!(result.len(), 64);
-        // `run` borrows the job; the reservation is still held after it returns.
         assert_eq!(budget.lock().pending_jobs, 1);
         assert_eq!(budget.lock().pending_bytes, 8);
         drop(job);
@@ -2132,8 +1358,6 @@ mod tests {
         assert_eq!(state.pending_bytes, 0);
         drop(state);
 
-        // A job dropped before it starts (cancellation) releases its
-        // reservation through the same field-order drop path.
         {
             let reservation = budget.reserve_pending(12).unwrap();
             let _job = WorkerOwned {
@@ -2148,6 +1372,7 @@ mod tests {
         assert_eq!(state.pending_bytes, 0);
     }
 
+    // Unit test: JS adapter error code and class mapping.
     #[test]
     fn errors_have_stable_codes_and_no_input_bytes() {
         assert_eq!(

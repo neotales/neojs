@@ -2058,16 +2058,12 @@ dependencies = [
 name = "neojs-core"
 version = "0.1.0"
 dependencies = [
- "aes 0.9.4",
- "aes-gcm 0.10.3",
- "bcrypt",
- "cbc",
  "deno_core",
  "deno_error",
  "ed25519-dalek",
  "getrandom 0.4.3",
- "hmac",
  "neojs-builtins",
+ "neojs-crypto-core",
  "neojs-dts",
  "neojs-fs-core",
  "neojs-manifest",
@@ -2076,12 +2072,27 @@ dependencies = [
  "neojs-ssh-core",
  "neotales-age",
  "neotales-ssh",
- "pbkdf2",
  "serde_json",
  "sha2 0.11.1",
  "tempfile",
  "thiserror",
  "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "neojs-crypto-core"
+version = "0.1.0"
+dependencies = [
+ "aes 0.9.4",
+ "aes-gcm 0.10.3",
+ "bcrypt",
+ "cbc",
+ "getrandom 0.4.3",
+ "hmac",
+ "pbkdf2",
+ "sha2 0.11.1",
+ "thiserror",
  "zeroize",
 ]
 
