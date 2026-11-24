@@ -315,7 +315,7 @@ impl Drop for OpenReservation {
 struct Buffered {
     budget: Arc<CipherBudget>,
     max: usize,
-    bytes: Vec<u8>,
+    bytes: Zeroizing<Vec<u8>>,
     charged: usize,
 }
 
@@ -324,7 +324,7 @@ impl Buffered {
         Self {
             budget,
             max,
-            bytes: Vec::new(),
+            bytes: Zeroizing::new(Vec::new()),
             charged: 0,
         }
     }
@@ -334,6 +334,7 @@ impl Buffered {
         max: usize,
         bytes: Vec<u8>,
     ) -> Result<Self, CipherError> {
+        let bytes = Zeroizing::new(bytes);
         if bytes.len() > max {
             return Err(CipherError::new(CipherErrorCode::Limit));
         }
@@ -373,7 +374,7 @@ impl Buffered {
         &self.bytes
     }
 
-    fn into_bytes(mut self) -> Vec<u8> {
+    fn into_bytes(mut self) -> Zeroizing<Vec<u8>> {
         let bytes = std::mem::take(&mut self.bytes);
         self.budget.release(self.charged);
         self.charged = 0;
@@ -575,7 +576,7 @@ impl CipherState {
             }
             (CipherAlgorithm::Aes256Gcm, CipherDirection::Encrypt) => {
                 let (output, tag) =
-                    gcm_encrypt(&*self.key, &self.iv, aad_bytes, input.into_bytes())?;
+                    gcm_encrypt_zeroizing(&*self.key, &self.iv, aad_bytes, input.into_bytes())?;
                 self.tag = Some(tag);
                 Ok(output)
             }
@@ -584,9 +585,22 @@ impl CipherState {
                     .tag
                     .take()
                     .ok_or_else(|| CipherError::new(CipherErrorCode::MissingTag))?;
-                gcm_decrypt(&*self.key, &self.iv, aad_bytes, input.into_bytes(), &tag)
+                gcm_decrypt_zeroizing(&*self.key, &self.iv, aad_bytes, input.into_bytes(), &tag)
             }
         }
+    }
+}
+
+impl fmt::Debug for CipherState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CipherState")
+            .field("algorithm", &self.algorithm)
+            .field("direction", &self.direction)
+            .field("stage", &self.stage)
+            .field("key", &"[REDACTED]")
+            .field("iv", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -708,6 +722,15 @@ impl Encryptor {
     }
 }
 
+impl fmt::Debug for Encryptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Encryptor")
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
 /// Stateful AES-256-CBC / AES-256-GCM decryptor.
 pub struct Decryptor {
     state: CipherState,
@@ -801,6 +824,15 @@ impl Decryptor {
     /// Finalize decryption and return the verified plaintext.
     pub fn finalize(&mut self) -> Result<Vec<u8>, CipherError> {
         self.state.finalize()
+    }
+}
+
+impl fmt::Debug for Decryptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Decryptor")
+            .field("state", &self.state)
+            .finish()
     }
 }
 
@@ -922,6 +954,9 @@ pub fn cbc_encrypt(
     padding: bool,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, CipherError> {
+    if key.len() != KEY_LEN {
+        return Err(CipherError::new(CipherErrorCode::Key));
+    }
     if iv.len() != CBC_IV_LEN {
         return Err(CipherError::new(CipherErrorCode::Iv));
     }
@@ -960,6 +995,9 @@ pub fn cbc_decrypt(
     padding: bool,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CipherError> {
+    if key.len() != KEY_LEN {
+        return Err(CipherError::new(CipherErrorCode::Key));
+    }
     if iv.len() != CBC_IV_LEN {
         return Err(CipherError::new(CipherErrorCode::Iv));
     }
@@ -975,7 +1013,7 @@ pub fn cbc_decrypt(
     }
     let cipher = cbc::Decryptor::<aes::Aes256>::new_from_slices(key, iv)
         .map_err(|_| CipherError::new(CipherErrorCode::Key))?;
-    let mut output = Vec::new();
+    let mut output = Zeroizing::new(Vec::new());
     output
         .try_reserve_exact(ciphertext.len())
         .map_err(|_| CipherError::new(CipherErrorCode::Limit))?;
@@ -988,7 +1026,7 @@ pub fn cbc_decrypt(
     .map_err(|_| CipherError::new(CipherErrorCode::Padding))?;
     let length = produced.len();
     output.truncate(length);
-    Ok(output)
+    Ok(std::mem::take(&mut *output))
 }
 
 fn gcm_cipher(key: &[u8]) -> Result<Aes256Gcm, CipherError> {
@@ -1005,17 +1043,25 @@ pub fn gcm_encrypt(
     aad: &[u8],
     plaintext: Vec<u8>,
 ) -> Result<(Vec<u8>, [u8; TAG_LEN]), CipherError> {
+    gcm_encrypt_zeroizing(key, nonce, aad, Zeroizing::new(plaintext))
+}
+
+fn gcm_encrypt_zeroizing(
+    key: &[u8],
+    nonce: &[u8],
+    aad: &[u8],
+    mut buffer: Zeroizing<Vec<u8>>,
+) -> Result<(Vec<u8>, [u8; TAG_LEN]), CipherError> {
     if nonce.len() != GCM_IV_LEN {
         return Err(CipherError::new(CipherErrorCode::Iv));
     }
     let cipher = gcm_cipher(key)?;
-    let mut buffer = plaintext;
     let tag = cipher
         .encrypt_in_place_detached(Nonce::from_slice(nonce), aad, &mut buffer)
         .map_err(|_| CipherError::new(CipherErrorCode::Limit))?;
     let mut tag_bytes = [0u8; TAG_LEN];
     tag_bytes.copy_from_slice(tag.as_slice());
-    Ok((buffer, tag_bytes))
+    Ok((std::mem::take(&mut *buffer), tag_bytes))
 }
 
 /// One-shot detached AES-256-GCM decryption.
@@ -1026,11 +1072,20 @@ pub fn gcm_decrypt(
     ciphertext: Vec<u8>,
     tag: &[u8; TAG_LEN],
 ) -> Result<Vec<u8>, CipherError> {
+    gcm_decrypt_zeroizing(key, nonce, aad, Zeroizing::new(ciphertext), tag)
+}
+
+fn gcm_decrypt_zeroizing(
+    key: &[u8],
+    nonce: &[u8],
+    aad: &[u8],
+    mut buffer: Zeroizing<Vec<u8>>,
+    tag: &[u8; TAG_LEN],
+) -> Result<Vec<u8>, CipherError> {
     if nonce.len() != GCM_IV_LEN {
         return Err(CipherError::new(CipherErrorCode::Iv));
     }
     let cipher = gcm_cipher(key)?;
-    let mut buffer = ciphertext;
     cipher
         .decrypt_in_place_detached(
             Nonce::from_slice(nonce),
@@ -1039,7 +1094,7 @@ pub fn gcm_decrypt(
             Tag::from_slice(tag),
         )
         .map_err(|_| CipherError::new(CipherErrorCode::Authentication))?;
-    Ok(buffer)
+    Ok(std::mem::take(&mut *buffer))
 }
 
 #[cfg(test)]
@@ -1703,5 +1758,39 @@ mod tests {
             assert!(!message.contains('\u{0}'));
             assert_eq!(err.to_string(), message);
         }
+    }
+
+    // Unit test: key length checked before empty/IV/padding checks and redacted Debug.
+    #[test]
+    fn cbc_validates_key_length_before_empty_and_iv_and_redacts_debug() {
+        assert_eq!(
+            cbc_decrypt(b"bad", &[0u8; CBC_IV_LEN], false, b"")
+                .unwrap_err()
+                .code(),
+            CipherErrorCode::Key
+        );
+        assert_eq!(
+            cbc_decrypt(b"bad", &[0u8; 3], false, b"")
+                .unwrap_err()
+                .code(),
+            CipherErrorCode::Key
+        );
+        assert_eq!(
+            cbc_encrypt(b"bad", &[0u8; 3], false, b"")
+                .unwrap_err()
+                .code(),
+            CipherErrorCode::Key
+        );
+
+        let key = [0xabu8; KEY_LEN];
+        let iv = [0xcdu8; GCM_IV_LEN];
+        let enc = Encryptor::new(CipherAlgorithm::Aes256Gcm, &key, &iv, false).unwrap();
+        let dec = Decryptor::new(CipherAlgorithm::Aes256Gcm, &key, &iv, false).unwrap();
+        let enc_dbg = format!("{enc:?}");
+        let dec_dbg = format!("{dec:?}");
+        assert!(enc_dbg.contains("[REDACTED]"));
+        assert!(dec_dbg.contains("[REDACTED]"));
+        assert!(!enc_dbg.contains("171"));
+        assert!(!dec_dbg.contains("171"));
     }
 }

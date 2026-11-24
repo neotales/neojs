@@ -285,7 +285,11 @@ pub fn is_valid_bcrypt_hash(hash: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn encode_hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -503,6 +507,7 @@ mod tests {
     // Unit test: bounds check for 72-byte password limit and cost range.
     #[test]
     fn bcrypt_password_bound_is_72_bytes() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let seventy_two = vec![b'a'; MAX_BCRYPT_PASSWORD_BYTES];
         let encoded = bcrypt_hash_with_salt(&seventy_two, 4, GO_SALT).unwrap();
         assert!(bcrypt_verify(&seventy_two, &encoded));
@@ -544,6 +549,7 @@ mod tests {
     // Unit test: $2b$ prefix check on generated hashes.
     #[test]
     fn bcrypt_generated_hashes_use_2b_and_verify() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let hash = bcrypt_hash(b"correct horse battery staple", 4).unwrap();
         assert_eq!(hash.len(), BCRYPT_HASH_BYTES);
         assert!(hash.starts_with("$2b$04$"));
@@ -599,6 +605,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn fail_next_bcrypt_random_triggers_once() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         fail_next_bcrypt_random();
         assert_eq!(
             bcrypt_hash(b"secret", 4).unwrap_err().code(),

@@ -22,6 +22,7 @@ use std::fmt;
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce, Tag};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 /// Length of an AES-256 key in bytes.
 pub const KEY_LEN: usize = 32;
@@ -253,6 +254,7 @@ pub fn encrypt(
     associated_data: &[u8],
     limits: CryptoLimits,
 ) -> Result<Vec<u8>, EnvelopeError> {
+    let plaintext = Zeroizing::new(plaintext);
     if key.len() != KEY_LEN {
         return Err(EnvelopeError::new(EnvelopeErrorCode::Key));
     }
@@ -266,7 +268,7 @@ pub fn encrypt(
 
 fn encrypt_with_nonce(
     key: &[u8],
-    plaintext: Vec<u8>,
+    mut plaintext: Zeroizing<Vec<u8>>,
     associated_data: &[u8],
     limits: CryptoLimits,
     nonce: [u8; NONCE_LEN],
@@ -296,12 +298,11 @@ fn encrypt_with_nonce(
     aad.extend_from_slice(&envelope);
     aad.extend_from_slice(associated_data);
 
-    let mut buffer = plaintext;
     let tag = cipher
-        .encrypt_in_place_detached(Nonce::from_slice(&nonce), &aad, &mut buffer)
+        .encrypt_in_place_detached(Nonce::from_slice(&nonce), &aad, &mut plaintext)
         .map_err(|_| EnvelopeError::new(EnvelopeErrorCode::Limit))?;
 
-    envelope.extend_from_slice(&buffer);
+    envelope.extend_from_slice(&plaintext);
     envelope.extend_from_slice(tag.as_slice());
     Ok(envelope)
 }
@@ -376,9 +377,9 @@ fn fill_random(bytes: &mut [u8]) -> Result<(), EnvelopeError> {
 ///
 /// Fails with [`EnvelopeErrorCode::Random`] if OS entropy is unavailable.
 pub fn generate_envelope_key() -> Result<[u8; KEY_LEN], EnvelopeError> {
-    let mut key = [0u8; KEY_LEN];
-    fill_random(&mut key)?;
-    Ok(key)
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    fill_random(&mut *key)?;
+    Ok(*key)
 }
 
 /// Return `length` random bytes from the operating system CSPRNG.
@@ -390,13 +391,13 @@ pub fn random_bytes(length: usize) -> Result<Vec<u8>, EnvelopeError> {
     if length > MAX_RANDOM_BYTES {
         return Err(EnvelopeError::new(EnvelopeErrorCode::Limit));
     }
-    let mut bytes = Vec::new();
+    let mut bytes = Zeroizing::new(Vec::new());
     bytes
         .try_reserve_exact(length)
         .map_err(|_| EnvelopeError::new(EnvelopeErrorCode::Limit))?;
     bytes.resize(length, 0);
     fill_random(&mut bytes)?;
-    Ok(bytes)
+    Ok(std::mem::take(&mut *bytes))
 }
 
 #[cfg(test)]
@@ -542,7 +543,7 @@ mod tests {
         let expected = decode_hex(INTEROP_ENVELOPE);
         let emitted = encrypt_with_nonce(
             &key,
-            plaintext,
+            Zeroizing::new(plaintext),
             &aad,
             default_limits(),
             nonce_from_envelope(&expected),
@@ -555,7 +556,7 @@ mod tests {
         let expected = decode_hex(REFERENCE_ENVELOPE);
         let emitted = encrypt_with_nonce(
             &key,
-            b"neo:crypto interop fixture".to_vec(),
+            Zeroizing::new(b"neo:crypto interop fixture".to_vec()),
             &aad,
             default_limits(),
             nonce_from_envelope(&expected),

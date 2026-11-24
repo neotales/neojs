@@ -94,6 +94,10 @@ impl OutputEncoding {
 
     /// Parse a string encoding name (`hex`, `base64`, `base64url`, `latin1`,
     /// or `binary`) case-insensitively.
+    ///
+    /// Note: `"binary"` maps to [`OutputEncoding::Latin1`] (matching
+    /// `neo:crypto`'s JavaScript string-encoding alias); raw byte output is
+    /// represented by [`OutputEncoding::Binary`].
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
         if name.eq_ignore_ascii_case("hex") {
@@ -276,6 +280,21 @@ impl Hasher {
     }
 }
 
+impl fmt::Debug for Hasher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let algorithm = match self.inner {
+            HashInner::Sha256(_) => HashAlgorithm::Sha256,
+            HashInner::Sha384(_) => HashAlgorithm::Sha384,
+            HashInner::Sha512(_) => HashAlgorithm::Sha512,
+        };
+        formatter
+            .debug_struct("Hasher")
+            .field("algorithm", &algorithm)
+            .field("total", &self.total)
+            .finish()
+    }
+}
+
 enum HmacInner {
     Sha256(Hmac<Sha256>),
     Sha384(Hmac<Sha384>),
@@ -361,6 +380,22 @@ impl HmacHasher {
     #[must_use]
     pub fn finalize_encoded(self, encoding: OutputEncoding) -> Vec<u8> {
         encode_digest(&self.finalize(), encoding)
+    }
+}
+
+impl fmt::Debug for HmacHasher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let algorithm = match self.inner {
+            HmacInner::Sha256(_) => HashAlgorithm::Sha256,
+            HmacInner::Sha384(_) => HashAlgorithm::Sha384,
+            HmacInner::Sha512(_) => HashAlgorithm::Sha512,
+        };
+        formatter
+            .debug_struct("HmacHasher")
+            .field("algorithm", &algorithm)
+            .field("total", &self.total)
+            .field("key", &"[REDACTED]")
+            .finish()
     }
 }
 

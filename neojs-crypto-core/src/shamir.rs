@@ -214,6 +214,9 @@ pub fn check_total(length: usize, count: usize) -> Result<usize, ShamirError> {
 
 /// Compute `(chunk_bytes, noise_length)` for one split's temporary noise buffer.
 pub fn noise_size(secret_length: usize, threshold: usize) -> Result<(usize, usize), ShamirError> {
+    if secret_length == 0 || !(2..=MAX_SHAMIR_SHARES).contains(&threshold) {
+        return Err(ShamirError::new(ShamirErrorCode::Range));
+    }
     let stride = threshold - 1;
     let chunk_bytes = (NOISE_BUFFER_BYTES / stride).max(1).min(secret_length);
     let noise_length = chunk_bytes
@@ -347,6 +350,17 @@ pub struct SplitPayload<'a> {
     pub body: &'a [u8],
 }
 
+impl fmt::Debug for SplitPayload<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SplitPayload")
+            .field("count", &self.count)
+            .field("length", &self.length)
+            .field("body", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Split directly into a single packed [`Zeroizing`] buffer for worker transfer.
 ///
 /// Header layout: `count: u32` (LE), `length: u32` (LE), followed by `count`
@@ -418,6 +432,9 @@ pub fn parse_split_payload(bytes: &[u8]) -> Result<SplitPayload<'_>, ShamirError
     ) as usize;
     if !(2..=MAX_SHAMIR_SHARES).contains(&count) || length == 0 {
         return Err(ShamirError::new(ShamirErrorCode::Internal));
+    }
+    if length > MAX_SHAMIR_SECRET_BYTES {
+        return Err(ShamirError::new(ShamirErrorCode::Limit));
     }
     let total = count
         .checked_mul(length)
@@ -515,7 +532,11 @@ fn mul(left: u8, right: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn encode_hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -583,6 +604,7 @@ mod tests {
     // Unit test: combinatorial threshold-subset reconstruction.
     #[test]
     fn every_threshold_subset_reconstructs() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let secret = b"shamir-interop";
         let shares = shamir_split(secret, 3, 5).unwrap();
         for first in 0..shares.len() {
@@ -602,9 +624,12 @@ mod tests {
     // Unit test: packed split codec roundtrip.
     #[test]
     fn packed_split_roundtrips_through_combine() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let secret = b"packed shamir secret";
         let packed = shamir_split_packed(secret, 3, 5).unwrap();
         let payload = parse_split_payload(&packed).unwrap();
+        let dbg = format!("{payload:?}");
+        assert!(dbg.contains("[REDACTED]"));
         assert_eq!(payload.count, 5);
         assert_eq!(payload.length, secret.len());
         let stride = 1 + payload.length;
@@ -636,6 +661,7 @@ mod tests {
     // Unit test: bounds check for invalid split shapes.
     #[test]
     fn split_rejects_invalid_shapes_without_allocating_output() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(
             shamir_split(b"", 2, 3).unwrap_err().code(),
             ShamirErrorCode::Range
@@ -656,6 +682,32 @@ mod tests {
             shamir_split(&vec![0u8; MAX_SHAMIR_SECRET_BYTES + 1], 2, 2)
                 .unwrap_err()
                 .code(),
+            ShamirErrorCode::Limit
+        );
+    }
+
+    // Unit test: bounds check for noise_size and parse_split_payload secret length.
+    #[test]
+    fn noise_size_rejects_zero_secret_and_out_of_range_threshold() {
+        assert_eq!(noise_size(0, 2).unwrap_err().code(), ShamirErrorCode::Range);
+        assert_eq!(
+            noise_size(16, 0).unwrap_err().code(),
+            ShamirErrorCode::Range
+        );
+        assert_eq!(
+            noise_size(16, 1).unwrap_err().code(),
+            ShamirErrorCode::Range
+        );
+        assert_eq!(
+            noise_size(16, MAX_SHAMIR_SHARES + 1).unwrap_err().code(),
+            ShamirErrorCode::Range
+        );
+
+        let mut header = [0u8; 8];
+        header[0..4].copy_from_slice(&2u32.to_le_bytes());
+        header[4..8].copy_from_slice(&((MAX_SHAMIR_SECRET_BYTES + 1) as u32).to_le_bytes());
+        assert_eq!(
+            parse_split_payload(&header).unwrap_err().code(),
             ShamirErrorCode::Limit
         );
     }
@@ -737,11 +789,19 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn fail_next_shamir_random_triggers_once() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         fail_next_shamir_random();
         assert_eq!(
             shamir_split(b"secret", 2, 3).unwrap_err().code(),
             ShamirErrorCode::Random
         );
         assert!(shamir_split(b"secret", 2, 3).is_ok());
+
+        fail_next_shamir_random();
+        assert_eq!(
+            shamir_split_packed(b"secret", 2, 3).unwrap_err().code(),
+            ShamirErrorCode::Random
+        );
+        assert!(shamir_split_packed(b"secret", 2, 3).is_ok());
     }
 }
