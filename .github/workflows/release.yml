@@ -1,10 +1,11 @@
-# Tag-only release build and verification skeleton for neojs.
+# Tag-only 6-target release build, packaging, and smoke verification for neojs.
 #
 # Security & release boundary:
 # - Permissions are strictly `contents: read`; no secrets, signing keys, or
 #   publish tokens are accessed or stored in this workflow.
-# - Signing and publishing release artifacts (GitHub Releases / crates.io)
-#   must go through `system-admin` and an explicit release process.
+# - Signing and publishing release artifacts (GitHub Releases, checksum
+#   attestations, future OS code-signing, and any future crates.io publishing)
+#   belong exclusively to `system-admin` outside this workflow.
 #
 # Action versions use pinned major tags because this workflow was authored
 # offline without network access to resolve GitHub commit SHAs.
@@ -31,10 +32,10 @@ env:
   RUST_TOOLCHAIN: "1.100.0"
 
 jobs:
-  release-build:
-    name: Verify Tag and Build Release Binaries
+  verify-tag:
+    name: Verify Tag, Metadata, and Types
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - name: Checkout tag
         uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
@@ -55,13 +56,7 @@ jobs:
             exit 1
           fi
 
-      - name: Install pinned Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
-          rustup default "${RUST_TOOLCHAIN}"
-
-      - name: Verify toolchain pin and Cargo.toml package versions
+      - name: Verify toolchain pin matches eng/size/toolchain
         run: |
           set -euo pipefail
           size_toolchain=$(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
@@ -71,54 +66,400 @@ jobs:
             exit 1
           fi
 
-          tag_version="${GITHUB_REF_NAME#v}"
-          metadata=$(cargo metadata --no-deps --locked --format-version 1)
-          for pkg in neojs neojs-lite; do
-            pkg_version=$(jq -r --arg pkg "${pkg}" '.packages[] | select(.name == $pkg) | .version' <<<"${metadata}")
-            if [ -z "${pkg_version}" ] || [ "${pkg_version}" != "${tag_version}" ]; then
-              echo "ERROR: ${pkg} version (${pkg_version:-missing}) does not match tag version (${tag_version})" >&2
-              exit 1
-            fi
-          done
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
 
       - name: Cache Cargo dependencies and build artifacts
         uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
 
-      - name: Run release verification tests
+      - name: Verify all workspace versions and publish = false guard
         run: |
           set -euo pipefail
-          cargo test --locked
-          cargo test --locked -p neojs-builtins --all-features
-          cargo test --locked -p neojs-builtins --no-default-features
-          cargo test --locked -p neojs-lite-core -p neojs-lite
-          cargo test --locked -p neojs-lite-core --no-default-features
+          tag_version="${GITHUB_REF_NAME#v}"
+          metadata=$(cargo metadata --no-deps --locked --format-version 1)
 
-      - name: Build release binaries
-        run: cargo build --release --locked -p neojs -p neojs-lite
-
-      - name: Stage release artifacts and SHA-256 checksums
-        run: |
-          set -euo pipefail
-          rm -rf dist
-          mkdir -p dist
-          target_triple=$(rustc -vV | sed -n 's/^host: //p')
-          if [ -z "${target_triple}" ]; then
-            echo "ERROR: failed to determine rustc host target triple" >&2
+          pkg_count=$(jq '.packages | length' <<<"${metadata}")
+          if [ "${pkg_count}" -eq 0 ]; then
+            echo "ERROR: cargo metadata returned zero workspace packages" >&2
             exit 1
           fi
-          install -m 0755 target/release/neojs "dist/neojs-${GITHUB_REF_NAME}-${target_triple}"
-          install -m 0755 target/release/neojs-lite "dist/neojs-lite-${GITHUB_REF_NAME}-${target_triple}"
-          (
-            cd dist
-            sha256sum \
-              "neojs-${GITHUB_REF_NAME}-${target_triple}" \
-              "neojs-lite-${GITHUB_REF_NAME}-${target_triple}" \
-              > SHA256SUMS
-          )
 
-      - name: Upload release build artifacts
+          mapfile -t bad_versions < <(
+            jq -r --arg ver "${tag_version}" \
+              '.packages[] | select(.version != $ver) | "\(.name)=\(.version)"' <<<"${metadata}"
+          )
+          if [ "${#bad_versions[@]}" -gt 0 ]; then
+            echo "ERROR: workspace package version mismatch (expected ${tag_version}): ${bad_versions[*]}" >&2
+            exit 1
+          fi
+
+          mapfile -t publishable < <(
+            jq -r '.packages[] | select(.publish != []) | "\(.name)=\(.publish)"' <<<"${metadata}"
+          )
+          if [ "${#publishable[@]}" -gt 0 ]; then
+            echo "ERROR: workspace packages must set publish = false (publish == []): ${publishable[*]}" >&2
+            exit 1
+          fi
+
+      - name: Generate canonical V8 and Lite TypeScript declarations
+        run: |
+          set -euo pipefail
+          rm -rf dist-types
+          mkdir -p dist-types/v8 dist-types/lite
+          cargo run --locked -p neojs-lite -- types --profile v8 --out-dir dist-types/v8
+          cargo run --locked -p neojs-lite -- types --profile lite --out-dir dist-types/lite
+          test -f dist-types/v8/index.d.ts
+          test -f dist-types/lite/index.d.ts
+
+      - name: Upload canonical TypeScript declarations
         uses: actions/upload-artifact@v4 # TODO(ci): pin to full 40-char commit SHA once online
         with:
-          name: neojs-${{ github.ref_name }}-linux-x64
+          name: release-types
+          path: dist-types/
+          retention-days: 7
+          if-no-files-found: error
+
+  build:
+    name: Build & Smoke Test (${{ matrix.slug }})
+    needs: verify-tag
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slug: linux-amd64
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            archive: tar.gz
+          - slug: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+          - slug: macos-arm64
+            target: aarch64-apple-darwin
+            os: macos-15
+            archive: tar.gz
+          - slug: macos-amd64
+            target: x86_64-apple-darwin
+            os: macos-15
+            archive: tar.gz
+          - slug: windows-amd64
+            target: x86_64-pc-windows-msvc
+            os: windows-2022
+            archive: zip
+          - slug: windows-arm64
+            target: aarch64-pc-windows-msvc
+            os: windows-2022
+            archive: zip
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+
+      - name: Configure MSVC ARM64 cross-compilation environment
+        if: matrix.slug == 'windows-arm64'
+        uses: ilammy/msvc-dev-cmd@v1 # TODO(ci): pin to full 40-char commit SHA once online
+        with:
+          arch: amd64_arm64
+
+      - name: Install pinned Rust toolchain and target
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+          rustup target add "${{ matrix.target }}"
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+        with:
+          key: ${{ matrix.slug }}
+
+      - name: Build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target "${{ matrix.target }}" -p neojs -p neojs-lite
+
+      - name: Download canonical TypeScript declarations
+        uses: actions/download-artifact@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        with:
+          name: release-types
+          path: dist-types
+
+      - name: Stage and package Unix release archives
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        env:
+          MATRIX_SLUG: ${{ matrix.slug }}
+          MATRIX_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          slug="${MATRIX_SLUG}"
+          target="${MATRIX_TARGET}"
+
+          rm -rf stage dist
+          mkdir -p stage/neojs/types stage/neojs-lite/types dist
+
+          install -m 0755 "target/${target}/release/neojs" "stage/neojs/neojs"
+          install -m 0644 LICENSE.md "stage/neojs/LICENSE.md"
+          cp -R dist-types/v8/. "stage/neojs/types/"
+          tar -C stage/neojs -czf "dist/neojs-${tag}-${slug}.tar.gz" neojs LICENSE.md types
+
+          install -m 0755 "target/${target}/release/neojs-lite" "stage/neojs-lite/neojs-lite"
+          install -m 0644 LICENSE.md "stage/neojs-lite/LICENSE.md"
+          cp -R dist-types/lite/. "stage/neojs-lite/types/"
+          tar -C stage/neojs-lite -czf "dist/neojs-lite-${tag}-${slug}.tar.gz" neojs-lite LICENSE.md types
+
+      - name: Stage and package Windows release archives
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          MATRIX_SLUG: ${{ matrix.slug }}
+          MATRIX_TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:GITHUB_REF_NAME
+          $slug = $env:MATRIX_SLUG
+          $target = $env:MATRIX_TARGET
+
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue stage, dist
+          New-Item -ItemType Directory -Force -Path "stage/neojs", "stage/neojs-lite", "dist" | Out-Null
+
+          Copy-Item "target/$target/release/neojs.exe" "stage/neojs/neojs.exe"
+          Copy-Item "LICENSE.md" "stage/neojs/LICENSE.md"
+          Copy-Item -Recurse "dist-types/v8" "stage/neojs/types"
+          Compress-Archive -Path "stage/neojs/*" -DestinationPath "dist/neojs-$tag-$slug.zip" -Force
+
+          Copy-Item "target/$target/release/neojs-lite.exe" "stage/neojs-lite/neojs-lite.exe"
+          Copy-Item "LICENSE.md" "stage/neojs-lite/LICENSE.md"
+          Copy-Item -Recurse "dist-types/lite" "stage/neojs-lite/types"
+          Compress-Archive -Path "stage/neojs-lite/*" -DestinationPath "dist/neojs-lite-$tag-$slug.zip" -Force
+
+      - name: Smoke test extracted Unix archives
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        env:
+          MATRIX_SLUG: ${{ matrix.slug }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          tag_version="${tag#v}"
+          slug="${MATRIX_SLUG}"
+
+          smoke_dir=$(mktemp -d)
+          trap 'rm -rf "${smoke_dir}"' EXIT
+          mkdir -p "${smoke_dir}/neojs" "${smoke_dir}/neojs-lite"
+
+          tar -xzf "dist/neojs-${tag}-${slug}.tar.gz" -C "${smoke_dir}/neojs"
+          tar -xzf "dist/neojs-lite-${tag}-${slug}.tar.gz" -C "${smoke_dir}/neojs-lite"
+
+          neojs_bin="${smoke_dir}/neojs/neojs"
+          lite_bin="${smoke_dir}/neojs-lite/neojs-lite"
+
+          for dir in "${smoke_dir}/neojs" "${smoke_dir}/neojs-lite"; do
+            test -f "${dir}/LICENSE.md"
+            test -f "${dir}/types/index.d.ts"
+          done
+          test -x "${neojs_bin}"
+          test -x "${lite_bin}"
+
+          shopt -s nullglob
+          shared_tests=(tests/js/shared/*.test.js tests/js/shared/*.test.ts)
+          if [ "${#shared_tests[@]}" -eq 0 ]; then
+            echo "ERROR: no shared JS/TS tests found under tests/js/shared/*.test.{js,ts}" >&2
+            exit 1
+          fi
+
+          exec_with_arch() {
+            local arch_mode="$1"
+            shift
+            if [ -n "${arch_mode}" ]; then
+              arch "${arch_mode}" "$@"
+            else
+              "$@"
+            fi
+          }
+
+          run_smoke() {
+            local bin="$1"
+            local name="$2"
+            local arch_mode="$3"
+
+            local version_out
+            version_out=$(exec_with_arch "${arch_mode}" "${bin}" --version)
+            if [ "${version_out}" != "${name} ${tag_version}" ]; then
+              echo "ERROR: ${name} --version returned '${version_out}', expected '${name} ${tag_version}'" >&2
+              exit 1
+            fi
+
+            exec_with_arch "${arch_mode}" "${bin}" --help >/dev/null
+            exec_with_arch "${arch_mode}" "${bin}" types --help >/dev/null
+
+            set +e
+            exec_with_arch "${arch_mode}" "${bin}" --unknown-flag >/dev/null 2>&1
+            local unknown_rc=$?
+            set -e
+            if [ "${unknown_rc}" -ne 2 ]; then
+              echo "ERROR: ${name} --unknown-flag exited ${unknown_rc}, expected 2" >&2
+              exit 1
+            fi
+
+            exec_with_arch "${arch_mode}" "${bin}" test "${shared_tests[@]}"
+          }
+
+          if [ "${slug}" = "macos-amd64" ]; then
+            file "${neojs_bin}" | grep -q 'Mach-O 64-bit executable x86_64'
+            file "${lite_bin}" | grep -q 'Mach-O 64-bit executable x86_64'
+            otool -L "${neojs_bin}"
+            otool -L "${lite_bin}"
+            if otool -L "${neojs_bin}" "${lite_bin}" | grep -Eq '(/opt/homebrew|/usr/local)'; then
+              echo "ERROR: unexpected non-system library linkage detected in macos-amd64 binary" >&2
+              exit 1
+            fi
+            if arch -x86_64 /usr/bin/true 2>/dev/null; then
+              run_smoke "${neojs_bin}" "neojs" "-x86_64"
+              run_smoke "${lite_bin}" "neojs-lite" "-x86_64"
+            else
+              echo "Rosetta 2 unavailable on runner; verified Mach-O x86_64 headers, otool -L, LICENSE.md, and types/index.d.ts."
+            fi
+          else
+            run_smoke "${neojs_bin}" "neojs" ""
+            run_smoke "${lite_bin}" "neojs-lite" ""
+          fi
+
+      - name: Smoke test extracted Windows archives
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          MATRIX_SLUG: ${{ matrix.slug }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:GITHUB_REF_NAME
+          $tagVersion = $tag.Substring(1)
+          $slug = $env:MATRIX_SLUG
+
+          $smokeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("neojs-smoke-" + [System.Guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Force -Path "$smokeDir/neojs", "$smokeDir/neojs-lite" | Out-Null
+
+          try {
+            Expand-Archive -Path "dist/neojs-$tag-$slug.zip" -DestinationPath "$smokeDir/neojs" -Force
+            Expand-Archive -Path "dist/neojs-lite-$tag-$slug.zip" -DestinationPath "$smokeDir/neojs-lite" -Force
+
+            $neojsBin = "$smokeDir/neojs/neojs.exe"
+            $liteBin = "$smokeDir/neojs-lite/neojs-lite.exe"
+
+            foreach ($dir in @("$smokeDir/neojs", "$smokeDir/neojs-lite")) {
+              if (-not (Test-Path "$dir/LICENSE.md" -PathType Leaf)) {
+                throw "Missing LICENSE.md in extracted archive: $dir"
+              }
+              if (-not (Test-Path "$dir/types/index.d.ts" -PathType Leaf)) {
+                throw "Missing types/index.d.ts in extracted archive: $dir"
+              }
+            }
+            if (-not (Test-Path $neojsBin -PathType Leaf)) { throw "Missing $neojsBin" }
+            if (-not (Test-Path $liteBin -PathType Leaf)) { throw "Missing $liteBin" }
+
+            if ($slug -eq "windows-arm64") {
+              foreach ($bin in @($neojsBin, $liteBin)) {
+                $headers = & dumpbin /headers $bin | Out-String
+                if ($LASTEXITCODE -ne 0) {
+                  throw "dumpbin /headers failed for $bin (exit $LASTEXITCODE)"
+                }
+                if ($headers -notmatch "AA64 machine \(ARM64\)") {
+                  throw "Expected AA64 machine (ARM64) header in $bin"
+                }
+              }
+              Write-Host "Verified ARM64 PE headers, LICENSE.md, and types/index.d.ts for $slug."
+            } else {
+              $sharedTests = @(
+                Get-ChildItem -Path "tests/js/shared" -File |
+                  Where-Object { $_.Name -like "*.test.js" -or $_.Name -like "*.test.ts" } |
+                  Sort-Object FullName |
+                  ForEach-Object { $_.FullName }
+              )
+              if ($sharedTests.Count -eq 0) {
+                throw "No shared JS/TS tests found under tests/js/shared/*.test.{js,ts}"
+              }
+
+              foreach ($entry in @(
+                @{ Bin = $neojsBin; Name = "neojs" },
+                @{ Bin = $liteBin; Name = "neojs-lite" }
+              )) {
+                $ver = (& $entry.Bin --version | Out-String).Trim()
+                if ($LASTEXITCODE -ne 0 -or $ver -ne "$($entry.Name) $tagVersion") {
+                  throw "$($entry.Name) --version returned '$ver' (exit $LASTEXITCODE), expected '$($entry.Name) $tagVersion'"
+                }
+
+                & $entry.Bin --help | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                  throw "$($entry.Name) --help exited $LASTEXITCODE"
+                }
+
+                & $entry.Bin types --help | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                  throw "$($entry.Name) types --help exited $LASTEXITCODE"
+                }
+
+                $proc = Start-Process -FilePath $entry.Bin -ArgumentList "--unknown-flag" -Wait -NoNewWindow -PassThru -RedirectStandardOutput "$smokeDir/unknown-out.txt" -RedirectStandardError "$smokeDir/unknown-err.txt"
+                if ($proc.ExitCode -ne 2) {
+                  throw "$($entry.Name) --unknown-flag exited $($proc.ExitCode), expected 2"
+                }
+
+                & $entry.Bin test @sharedTests
+                if ($LASTEXITCODE -ne 0) {
+                  throw "$($entry.Name) shared JS/TS tests failed (exit $LASTEXITCODE)"
+                }
+              }
+            }
+          } finally {
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $smokeDir
+          }
+
+      - name: Upload target archives
+        uses: actions/upload-artifact@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        with:
+          name: release-archives-${{ matrix.slug }}
+          path: dist/*
+          retention-days: 7
+          if-no-files-found: error
+
+  package-checksums:
+    name: Package Checksums and Release Bundle
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download all target archives
+        uses: actions/download-artifact@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        with:
+          pattern: release-archives-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate and verify SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          cd dist
+          shopt -s nullglob
+          archives=(neojs-*.tar.gz neojs-*.zip)
+          if [ "${#archives[@]}" -ne 12 ]; then
+            echo "ERROR: expected exactly 12 release archives in dist/, found ${#archives[@]}" >&2
+            ls -la >&2
+            exit 1
+          fi
+          mapfile -t sorted_archives < <(printf '%s\n' "${archives[@]}" | LC_ALL=C sort)
+          sha256sum "${sorted_archives[@]}" > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Upload combined release bundle
+        uses: actions/upload-artifact@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        with:
+          name: release-bundle-${{ github.ref_name }}
           path: dist/
+          retention-days: 30
           if-no-files-found: error
