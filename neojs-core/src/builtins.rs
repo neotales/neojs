@@ -351,6 +351,20 @@ pub(crate) const CRYPTO_SPECIFIER: &str = "neo:crypto";
 /// [`crate::crypto_shamir`].
 const CRYPTO_MODULE: &str = include_str!("builtins/crypto.esm.js");
 
+/// The canonical module specifier for the `fs` built-in.
+///
+/// Only `neo:fs` resolves to this URL. It is the canonical and only module
+/// specifier for this built-in, so the engine caches one module instance for
+/// every importer. It is not a `file:` URL and is never read from disk.
+pub(crate) const FS_SPECIFIER: &str = neojs_fs_core::SPECIFIER;
+
+/// The ECMAScript module source served for [`FS_SPECIFIER`].
+///
+/// It re-exports the function objects from the public `fs` module object, so
+/// the module and `Neo.getBuiltInModule("neo:fs")` share identity. The functions
+/// call host ops registered by [`crate::fs`].
+const FS_MODULE: &str = include_str!("builtins/fs.esm.js");
+
 /// The canonical module specifier for the `os` built-in.
 ///
 /// Only `neo:os` resolves to this URL. It is the canonical and only module
@@ -520,6 +534,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("console", CONSOLE_SPECIFIER),
     ("cron", CRON_SPECIFIER),
     ("crypto", CRYPTO_SPECIFIER),
+    ("fs", FS_SPECIFIER),
     ("os", OS_SPECIFIER),
     ("path", PATH_SPECIFIER),
     #[cfg(feature = "neo-slices")]
@@ -581,6 +596,7 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         CONSOLE_SPECIFIER => Some(CONSOLE_MODULE),
         CRON_SPECIFIER => Some(CRON_MODULE),
         CRYPTO_SPECIFIER => Some(CRYPTO_MODULE),
+        FS_SPECIFIER => Some(FS_MODULE),
         OS_SPECIFIER => Some(OS_MODULE),
         PATH_SPECIFIER => Some(PATH_MODULE),
         #[cfg(feature = "neo-slices")]

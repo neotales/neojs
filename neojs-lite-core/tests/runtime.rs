@@ -39,6 +39,9 @@ fn expected_list() -> (String, usize) {
     if cfg!(feature = "neo-chars") {
         entries.push(r#""neo:chars""#);
     }
+    if cfg!(feature = "neo-fs") {
+        entries.push(r#""neo:fs""#);
+    }
     if cfg!(feature = "neo-os") {
         entries.push(r#""neo:os""#);
     }

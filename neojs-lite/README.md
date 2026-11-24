@@ -53,9 +53,9 @@ This command does **not** claim parity with `neojs` (V8):
   QuickJS's own job queue can settle it, and `test(..., { timeout })` is
   rejected explicitly.
 * **Most built-in `neo:` modules are absent.** Only the shared `neo:assert`,
-  `neo:chars`, `neo:os`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and
-  `neo:uuid/v7` modules are implemented. Other V8 modules are not importable,
-  and the `Neo` list does not claim them.
+  `neo:chars`, `neo:fs`, `neo:os`, `neo:strings`, `neo:test`, `neo:uuid`,
+  `neo:uuid/v4`, and `neo:uuid/v7` modules are implemented. Other V8 modules
+  are not importable, and the `Neo` list does not claim them.
 * **No permissions or sandbox.** None are implemented.
 
 Both runtimes share `neojs-module-policy` for executable-extension decisions, so
@@ -64,10 +64,10 @@ declaration files, JSON, WebAssembly, and native addons are the same.
 
 ## Build features
 
-The command selects `manifest`, `neo-assert`, `neo-chars`, `neo-os`,
+The command selects `manifest`, `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`,
 `neo-strings`, `neo-test`, and `neo-uuid` explicitly from `neojs-lite-core` with
 `default-features = false`, so its advertised surface is a command decision and
-does not drift with the library defaults. The library default enables the six
+does not drift with the library defaults. The library default enables the seven
 built-in modules (`manifest` is opt-in), and a library consumer can opt out
 completely with `default-features = false`. Cargo features are additive and
 unify across the dependency graph: a build that any dependent enables the module

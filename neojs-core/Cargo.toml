@@ -43,6 +43,7 @@ deno_error.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
 neojs-builtins = { workspace = true, features = ["assert", "os", "test", "uuid"] }
+neojs-fs-core.workspace = true
 neojs-manifest.workspace = true
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
 neojs-remote.workspace = true

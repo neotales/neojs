@@ -22,6 +22,7 @@ fn expected_specifiers() -> String {
         "neo:console",
         "neo:cron",
         "neo:crypto",
+        "neo:fs",
         "neo:os",
         "neo:path",
     ]);

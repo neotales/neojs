@@ -20,6 +20,9 @@ fn expected_list() -> String {
     if cfg!(feature = "neo-chars") {
         entries.push(r#""neo:chars""#);
     }
+    if cfg!(feature = "neo-fs") {
+        entries.push(r#""neo:fs""#);
+    }
     if cfg!(feature = "neo-os") {
         entries.push(r#""neo:os""#);
     }
@@ -316,6 +319,61 @@ try {
 if (imported) throw new Error("neo:os was importable while disabled");
 "#)
     .expect("os absent");
+}
+
+#[test]
+#[cfg(feature = "neo-fs")]
+fn fs_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:fs")) {
+    throw new Error(`fs is missing from the list: ${JSON.stringify(list)}`);
+}
+if (list.includes("fs")) {
+    throw new Error(`a bare fs name is listed: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:fs");
+if (registry === undefined || typeof registry !== "object" || !Object.isFrozen(registry)) {
+    throw new Error("the fs registry object is missing or unfrozen");
+}
+if (Neo.getBuiltInModule("fs") !== undefined) {
+    throw new Error("the registry accepted a bare fs name");
+}
+const namespace = await import("neo:fs");
+if (namespace === registry) {
+    throw new Error("the ES module namespace must be distinct from the registry object");
+}
+if (namespace.readFile !== registry.readFile || namespace.exists !== registry.exists) {
+    throw new Error("the namespace exports do not match the registry");
+}
+"#)
+    .expect("fs feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-fs"))]
+fn fs_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:fs") || list.includes("fs")) {
+    throw new Error(`fs is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:fs") !== undefined) {
+    throw new Error("the canonical fs registry object is still present");
+}
+if (Neo.getBuiltInModule("fs") !== undefined) {
+    throw new Error("a bare fs name returned a module");
+}
+let imported = false;
+try {
+    await import("neo:fs");
+    imported = true;
+} catch {
+    // Expected: the loader has no fs entry.
+}
+if (imported) throw new Error("neo:fs was importable while disabled");
+"#)
+    .expect("fs absent");
 }
 
 #[test]

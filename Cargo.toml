@@ -73,6 +73,8 @@ deno_error = "0.7"
 # runtimes; it has no engine dependency. Each dependent selects modules through
 # its features.
 neojs-builtins = { version = "0.1.0", path = "neojs-builtins" }
+# Engine-neutral core filesystem operations for `neo:fs`.
+neojs-fs-core = { version = "0.1.0", path = "neojs-fs-core" }
 # `neo.jsonc` JSONC parsing, bounded upward discovery, workspace expansion, and
 # pure import-map/workspace resolution.
 neojs-manifest = { version = "0.1.0", path = "neojs-manifest" }

@@ -1228,7 +1228,7 @@ fn reports_an_unknown_neo_module_and_lists_the_implemented_ones() {
     assert!(message.contains("not implemented"), "{message}");
     assert!(
         message.contains(
-            "neojs implements neo:age, neo:assert, neo:chars, neo:console, neo:cron, neo:crypto, neo:os, neo:path, neo:slices, neo:ssh, neo:stdio, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7"
+            "neojs implements neo:age, neo:assert, neo:chars, neo:console, neo:cron, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:stdio, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7"
         ),
         "{message}"
     );

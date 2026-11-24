@@ -25,6 +25,10 @@ const TEST_SEQUENCE_ONE_HEX: &str = "4e454f5f544553545f445552494e475f52554e";
 /// `operating system random number generator failed` from `neojs-builtins/src/uuid.rs`.
 const UUID_SEQUENCE_ONE_HEX: &str = "6f7065726174696e672073797374656d2072616e646f6d206e756d6265722067656e657261746f72206661696c6564";
 
+/// `create_new and append cannot both be enabled` from `neojs-fs-core/src/ops.rs`.
+const FS_SEQUENCE_ONE_HEX: &str =
+    "6372656174655f6e657720616e6420617070656e642063616e6e6f7420626f746820626520656e61626c6564";
+
 /// A string that is always in the shim, proving the scan reads real source bytes.
 const CONTROL_HEX: &str = "6765744275696c74496e4d6f64756c65734c697374";
 
@@ -93,4 +97,10 @@ fn shared_source_bytes_follow_the_features() {
     assert_sequences(&artifact, &uuid_seqs, true, "neo-uuid is enabled");
     #[cfg(not(feature = "neo-uuid"))]
     assert_sequences(&artifact, &uuid_seqs, false, "neo-uuid is disabled");
+
+    let fs_seqs = [FS_SEQUENCE_ONE_HEX];
+    #[cfg(feature = "neo-fs")]
+    assert_sequences(&artifact, &fs_seqs, true, "neo-fs is enabled");
+    #[cfg(not(feature = "neo-fs"))]
+    assert_sequences(&artifact, &fs_seqs, false, "neo-fs is disabled");
 }

@@ -2068,6 +2068,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "neojs-builtins",
+ "neojs-fs-core",
  "neojs-manifest",
  "neojs-module-policy",
  "neojs-remote",
@@ -2117,6 +2118,7 @@ name = "neojs-lite-core"
 version = "0.1.0"
 dependencies = [
  "neojs-builtins",
+ "neojs-fs-core",
  "neojs-manifest",
  "neojs-module-policy",
  "rquickjs",

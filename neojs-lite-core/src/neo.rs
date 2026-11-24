@@ -1,10 +1,10 @@
 //! Native `Neo` introspection object for the QuickJS runtime.
 //!
-//! The registry, the module list, and the native `neo:chars`, `neo:os`,
-//! `neo:strings`, and `neo:uuid` (`neo:uuid`, `neo:uuid/v4`, `neo:uuid/v7`)
-//! objects are Rust values. Shared ECMAScript modules (`neo:assert` and
-//! `neo:test`) are constructed once per context from their shared factories in
-//! `neojs-builtins` with native QuickJS host hooks.
+//! The registry, the module list, and the native `neo:chars`, `neo:fs`,
+//! `neo:os`, `neo:strings`, and `neo:uuid` (`neo:uuid`, `neo:uuid/v4`,
+//! `neo:uuid/v7`) objects are Rust values. Shared ECMAScript modules
+//! (`neo:assert` and `neo:test`) are constructed once per context from their
+//! shared factories in `neojs-builtins` with native QuickJS host hooks.
 
 #[cfg(feature = "neo-test")]
 use std::cell::RefCell;
@@ -28,6 +28,9 @@ pub(super) struct NeoState {
     /// The frozen public `neo:chars` object, when the feature is selected.
     #[cfg(feature = "neo-chars")]
     pub(super) chars: Option<Persistent<Object<'static>>>,
+    /// The frozen public `neo:fs` object, when the feature is selected.
+    #[cfg(feature = "neo-fs")]
+    pub(super) fs: Option<Persistent<Object<'static>>>,
     /// The frozen public `neo:os` object, when the feature is selected.
     #[cfg(feature = "neo-os")]
     pub(super) os: Option<Persistent<Object<'static>>>,
@@ -82,6 +85,8 @@ pub(super) fn install<'js>(
     let assert: Option<Value<'js>> = Some(build_assert(ctx)?);
     #[cfg(feature = "neo-chars")]
     let chars: Option<Object<'js>> = Some(super::chars::object(ctx)?);
+    #[cfg(feature = "neo-fs")]
+    let fs: Option<Object<'js>> = Some(super::fs::object(ctx)?);
     #[cfg(feature = "neo-os")]
     let os: Option<Object<'js>> = Some(super::os::object(ctx)?);
     #[cfg(feature = "neo-strings")]
@@ -103,6 +108,7 @@ pub(super) fn install<'js>(
         not(any(
             feature = "neo-assert",
             feature = "neo-chars",
+            feature = "neo-fs",
             feature = "neo-os",
             feature = "neo-strings",
             feature = "neo-test",
@@ -119,6 +125,11 @@ pub(super) fn install<'js>(
     #[cfg(feature = "neo-chars")]
     if chars.is_some() {
         list.set(index, neojs_builtins::chars::SPECIFIER)?;
+        index += 1;
+    }
+    #[cfg(feature = "neo-fs")]
+    if fs.is_some() {
+        list.set(index, neojs_fs_core::SPECIFIER)?;
         index += 1;
     }
     #[cfg(feature = "neo-os")]
@@ -153,6 +164,8 @@ pub(super) fn install<'js>(
         assert: assert.map(|value| Persistent::save(ctx, value)),
         #[cfg(feature = "neo-chars")]
         chars: chars.map(|chars| Persistent::save(ctx, chars)),
+        #[cfg(feature = "neo-fs")]
+        fs: fs.map(|fs| Persistent::save(ctx, fs)),
         #[cfg(feature = "neo-os")]
         os: os.map(|os| Persistent::save(ctx, os)),
         #[cfg(feature = "neo-strings")]
@@ -296,6 +309,13 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
         };
         return Ok(chars.clone().restore(&ctx)?.into_value());
     }
+    #[cfg(feature = "neo-fs")]
+    if name == neojs_fs_core::SPECIFIER {
+        let Some(fs) = state.fs.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(fs.clone().restore(&ctx)?.into_value());
+    }
     #[cfg(feature = "neo-os")]
     if name == neojs_builtins::os::SPECIFIER {
         let Some(os) = state.os.as_ref() else {
@@ -351,6 +371,7 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
     #[cfg(not(any(
         feature = "neo-assert",
         feature = "neo-chars",
+        feature = "neo-fs",
         feature = "neo-os",
         feature = "neo-strings",
         feature = "neo-test",

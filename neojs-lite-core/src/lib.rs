@@ -38,10 +38,10 @@
 //!   `String`.
 //! * `console.log` and `console.error` write to the process streams.
 //! * A minimal `Neo` global reports `engine` `"neo-lite"`. With the default
-//!   `neo-assert`, `neo-chars`, `neo-os`, `neo-strings`, `neo-test`, and
-//!   `neo-uuid` features the registry contains the canonical shared modules
-//!   `neo:assert`, `neo:chars`, `neo:os`, `neo:strings`, `neo:test`, `neo:uuid`,
-//!   `neo:uuid/v4`, and `neo:uuid/v7`.
+//!   `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`, `neo-strings`, `neo-test`,
+//!   and `neo-uuid` features the registry contains the canonical shared modules
+//!   `neo:assert`, `neo:chars`, `neo:fs`, `neo:os`, `neo:strings`, `neo:test`,
+//!   `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`.
 //!   `Neo.getBuiltInModulesList()` returns one frozen array of canonical
 //!   specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
 //!   registry object whose named exports share identity with the module
@@ -49,10 +49,10 @@
 //!   or another scheme returns `undefined`; a non-string name throws
 //!   `TypeError`. With `default-features = false` the registry and list are
 //!   empty and no module source is compiled in. The implementations come from
-//!   the engine-neutral `neojs-builtins` crate (`chars`, `os`, `strings`, and
-//!   `uuid` bound as native QuickJS modules, `assert` and `test` evaluated from
-//!   the shared ECMAScript factories with native QuickJS Promise and queue
-//!   hooks).
+//!   `neojs-builtins` (`chars`, `os`, `strings`, and `uuid` bound as native
+//!   QuickJS modules, `assert` and `test` evaluated from the shared ECMAScript
+//!   factories with native QuickJS Promise and queue hooks) and `neojs-fs-core`
+//!   (`fs` bound as a native QuickJS module).
 //!
 //! # What is not implemented yet
 //!
@@ -66,10 +66,10 @@
 //!   an external event fails with an error instead of hanging, and
 //!   `test(..., { timeout })` is rejected explicitly.
 //! * **Most built-in `neo:` modules are absent.** With their features enabled
-//!   this crate implements the shared `neo:assert`, `neo:chars`, `neo:os`,
-//!   `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`
-//!   modules only. Other V8 modules are not importable here, and the `Neo` list
-//!   does not claim them.
+//!   this crate implements the shared `neo:assert`, `neo:chars`, `neo:fs`,
+//!   `neo:os`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and
+//!   `neo:uuid/v7` modules only. Other V8 modules are not importable here, and
+//!   the `Neo` list does not claim them.
 //! * **No sandbox.** Permissions, host capabilities, and isolation are not
 //!   implemented.
 //!
@@ -81,6 +81,8 @@ mod runtime;
 
 #[cfg(feature = "neo-chars")]
 mod chars;
+#[cfg(feature = "neo-fs")]
+mod fs;
 mod neo;
 #[cfg(feature = "neo-os")]
 mod os;

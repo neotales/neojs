@@ -35,6 +35,7 @@ use crate::crypto::neojs_crypto;
 use crate::crypto_cipher::neojs_crypto_cipher;
 use crate::crypto_hash::neojs_crypto_hash;
 use crate::crypto_shamir::neojs_crypto_shamir;
+use crate::fs::neojs_fs;
 use crate::jsr_loader::JsrModuleLoader;
 use crate::jsr_loader::Limits as JsrLimits;
 use crate::jsr_loader::RemoteRegistry;
@@ -219,15 +220,15 @@ impl Runtime {
     /// Creates a runtime and installs the console and built-in module shims.
     ///
     /// The runtime has one realm. The `age`, `assert`, `chars`, `console`,
-    /// `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`, `strings`,
-    /// `test`, and `uuid`
+    /// `cron`, `crypto`, `fs`, `os`, `path`, `slices`, `ssh`, `stdio`,
+    /// `strings`, `test`, and `uuid`
     /// built-in modules are cached in that realm, and only their canonical
     /// `neo:` import specifiers resolve to them; a bare name such as `age` is
     /// not a built-in module specifier. A new `Runtime` creates a new realm,
     /// new functions, and new module instances. The global `Neo` reports
     /// `engine` `"neo"`, and `Neo.getBuiltInModulesList` returns one frozen
     /// array of the canonical `neo:` specifiers in registration order. The
-    /// `age`, `cron`, `crypto`, `path`, `ssh`, `stdio`, and `uuid` modules
+    /// `age`, `cron`, `crypto`, `fs`, `path`, `ssh`, `stdio`, and `uuid` modules
     /// register their private host ops in that realm before user code runs;
     /// `chars` and `strings` are native Rust modules with no ECMAScript source,
     /// `os`, `slices`, and `test` are plain ECMAScript, and `assert` calls one
@@ -581,6 +582,7 @@ impl Runtime {
             neojs_crypto_cipher::init(),
             neojs_crypto_hash::init(),
             neojs_crypto_shamir::init(),
+            neojs_fs::init(),
             neojs_path::init(),
             neojs_ssh::init(),
             neojs_stdio::init(),

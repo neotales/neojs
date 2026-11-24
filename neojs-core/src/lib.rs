@@ -59,13 +59,13 @@
 //! fragments are rejected. GitHub is not an allowlist: any `https:` URL is still
 //! allowed, and remote code is not sandboxed.
 //!
-//! It provides the `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`,
-//! `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid` built-in
+//! It provides the `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `fs`,
+//! `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid` built-in
 //! modules through `Neo.getBuiltInModule("neo:name")` and through the canonical
 //! module specifiers `neo:age`, `neo:assert`, `neo:chars`, `neo:console`,
-//! `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`,
-//! `neo:stdio`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and
-//! `neo:uuid/v7`. A bare name is not a built-in module specifier and does not
+//! `neo:cron`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:path`, `neo:slices`,
+//! `neo:ssh`, `neo:stdio`, `neo:strings`, `neo:test`, `neo:uuid`,
+//! `neo:uuid/v4`, and `neo:uuid/v7`. A bare name is not a built-in module specifier and does not
 //! resolve. The `uuid/v4` and `uuid/v7` subpaths are thin modules whose named
 //! and default exports are the same functions as `uuid.v4` and `uuid.v7`. The
 //! global `Neo` reports `engine` `"neo"`; `Neo.getBuiltInModulesList` returns
@@ -397,6 +397,7 @@ mod crypto_cipher;
 mod crypto_hash;
 mod crypto_shamir;
 mod error;
+mod fs;
 // The transport-backed loader for the private JSR resolver. `Runtime::new` does
 // not install it, so a public `jsr:` import requires the remote-loading opt-in.
 // The engine-neutral JSR core, remote transport, cache, and GitHub parser live

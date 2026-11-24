@@ -6,7 +6,7 @@
 //!
 //! Resolution accepts relative paths, absolute paths, `file:` URLs, the
 //! canonical built-in specifiers `neo:age`, `neo:assert`, `neo:chars`,
-//! `neo:console`, `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`,
+//! `neo:console`, `neo:cron`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:path`,
 //! `neo:slices`, `neo:ssh`, `neo:stdio`, `neo:strings`, `neo:test`, `neo:uuid`,
 //! `neo:uuid/v4`, and `neo:uuid/v7` ([`crate::builtins`]), and — only when the
 //! runtime was created with [`crate::Runtime::with_remote`] — absolute `https:`

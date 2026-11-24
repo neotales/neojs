@@ -340,7 +340,7 @@ subpaths appear as their canonical specifiers too.
 Neo.engine; // "neo"
 Neo.getBuiltInModulesList();
 // ["neo:age", "neo:assert", "neo:chars", "neo:console",
-//  "neo:cron", "neo:crypto", "neo:os", "neo:path", "neo:slices",
+//  "neo:cron", "neo:crypto", "neo:fs", "neo:os", "neo:path", "neo:slices",
 //  "neo:ssh", "neo:stdio", "neo:strings", "neo:test", "neo:uuid",
 //  "neo:uuid/v4", "neo:uuid/v7"]
 ```
@@ -360,15 +360,16 @@ captures the native `chars.toUpper`/`chars.toLower` functions. Features are addi
 dependency graph and are not a sandbox.
 
 `neo:chars` and `neo:strings` are native V8 Rust modules. Every other V8 built-in module —
-`neo:age`, `neo:assert`, `neo:console`, `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`,
+`neo:age`, `neo:assert`, `neo:console`, `neo:cron`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:path`,
 `neo:slices`, `neo:ssh`, `neo:stdio`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` —
 retains an ECMAScript module source or wrapper in V8 (with `neo:assert`, `neo:os`, `neo:test`, and
-`neo:uuid` delegating their shared core logic and sources to `neojs-builtins`). Some of those
+`neo:uuid` delegating their shared core logic and sources to `neojs-builtins`, and `neo:fs`
+delegating to `neojs-fs-core`). Some of those
 modules call private Rust host ops, but a host op is not a native module.
 
 The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"` and,
-with its default `neo-assert`, `neo-chars`, `neo-os`, `neo-strings`, `neo-test`, and `neo-uuid`
-features, implements the shared built-ins `neo:assert`, `neo:chars`, `neo:os`, `neo:strings`,
+with its default `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`, `neo-strings`, `neo-test`, and `neo-uuid`
+features, implements the shared built-ins `neo:assert`, `neo:chars`, `neo:fs`, `neo:os`, `neo:strings`,
 `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`. `Neo.getBuiltInModulesList()` is one
 frozen array of canonical specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
 registry object whose named exports share identity with the module namespace exports; the
@@ -377,7 +378,8 @@ empty. A bare name, another scheme, or any other specifier returns `undefined`; 
 throws `TypeError`. That list is not a claim that another V8 module is planned or available. The
 shared Rust and ECMAScript logic comes from the engine-neutral `neojs-builtins` crate (`chars`,
 `os`, `strings`, and `uuid` bound as native QuickJS modules; `assert` and `test` evaluated from
-shared factories with native QuickJS Promise and queue hooks). See `neojs-builtins/README.md` for
+shared factories with native QuickJS Promise and queue hooks) and `neojs-fs-core` (`fs` bound as a
+native QuickJS module). See `neojs-builtins/README.md` and `neojs-fs-core/README.md` for
 the shared contract and its limits.
 
 **Use the stdio built-in.** `Neo.getBuiltInModule("neo:stdio")` returns a frozen module object cached
@@ -1638,6 +1640,33 @@ variable, network, or process state beyond the system clock, installs no global,
 sandbox. It is separate from Node's `crypto.randomUUID()`, which has its own API and produces only
 version 4 values.
 
+**Filesystem operations.** `Neo.getBuiltInModule("neo:fs")` returns a frozen module object cached
+for the realm, shared across both V8 (`neojs`) and QuickJS (`neojs-lite`, gated behind the `neo-fs`
+feature). `neo:fs` is the canonical and only module specifier; there is no default export.
+
+```js
+import { exists, mkdir, readDir, readTextFile, remove, writeFileAtomic } from "neo:fs";
+
+mkdir("/tmp/example", { recursive: true });
+writeFileAtomic("/tmp/example/note.txt", "hello neo:fs");
+console.log(readTextFile("/tmp/example/note.txt")); // "hello neo:fs"
+console.log(readDir("/tmp/example").map((e) => e.name)); // ["note.txt"]
+remove("/tmp/example", { recursive: true });
+console.log(exists("/tmp/example")); // false
+```
+
+Implemented synchronous exports: `readFile(path, options?)`, `readTextFile(path, options?)`,
+`writeFile(path, data, options?)`, `writeTextFile(path, text, options?)`,
+`writeFileAtomic(path, data, options?)`, `exists(path)`, `stat(path)`, `lstat(path)`,
+`readDir(path)`, `mkdir(path, options?)`, `remove(path, options?)`, `rename(from, to)`,
+`copyFile(from, to, options?)`, and `realpath(path)`. Core logic lives in `neojs-fs-core`: paths
+must be non-empty strings without NUL bytes (`NEO_FS_INVALID_PATH`), `readDir` returns sorted
+entries with frozen items, `stat`/`lstat` return frozen metadata snapshots, `writeFileAtomic`
+uses a sibling temporary file with fallible OS entropy (`getrandom`), and filesystem errors carry
+stable `NEO_FS_*` `.code` properties without echoing caller-supplied paths. It uses the process's
+filesystem authority and is not a permission system or sandbox. See
+[`neojs-fs-core/README.md`](neojs-fs-core/README.md) for the full contract.
+
 **Planned, not implemented.** The `@neotales/chars` reference also defines the `...At` string-index
 helpers, the `...Unsafe` variants, `equalFold`, `simpleFold`, and character-code constants. The
 QuickJS `neo:chars` module uses the same broad shape without the `Unsafe` variants. None of those
@@ -1727,9 +1756,9 @@ promise still rejected without a handler when the queue empties is an error; rej
 primitive values and an Error's own data without invoking getters, proxies, `toString`, or `String`.
 It does **not** implement TypeScript, host asynchrony or timers, most `neo:` built-in modules,
 permissions, or a sandbox, and it does not claim parity with the V8 runtime. It installs a minimal
-`Neo` global whose engine is `"neo-lite"`; with the default `neo-assert`, `neo-chars`, `neo-os`,
+`Neo` global whose engine is `"neo-lite"`; with the default `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`,
 `neo-strings`, `neo-test`, and `neo-uuid` features its built-in module list is the canonical
-`["neo:assert", "neo:chars", "neo:os", "neo:strings", "neo:test", "neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]`.
+`["neo:assert", "neo:chars", "neo:fs", "neo:os", "neo:strings", "neo:test", "neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]`.
 `Neo.getBuiltInModule(specifier)` returns the frozen registry object whose named exports share
 identity with the module namespace exports; the namespace itself is a distinct object. With
 `default-features = false` the list is empty. A bare name, another scheme, or any other specifier
@@ -1763,7 +1792,7 @@ Implemented: ECMAScript modules, erasable TypeScript in `.ts` and `.mts` files, 
 local module loading, opt-in HTTPS module loading with explicit limits, opt-in `gh:`/`github:`
 specifier loading, opt-in `jsr:` resolution
 through the public JSR registry with manifest length and SHA-256 verification, imports of the
-`age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
+`age`, `assert`, `chars`, `console`, `cron`, `crypto`, `fs`, `os`, `path`, `slices`, `ssh`, `stdio`,
 `strings`, `test`, and `uuid` built-ins by their canonical `neo:` specifiers, console output,
 `neojs test` and `neojs-lite test` over
 multiple files and globs, bounded in-memory byte streams, live mutable and read-only array and
@@ -1774,7 +1803,7 @@ SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
 authentication, the built-in module registry and its `Neo.engine` and `Neo.getBuiltInModulesList`
 introspection, and the embedding API above. The QuickJS runtime (`neojs-lite-core` / `neojs-lite`)
-reports `Neo.engine` `"neo-lite"` and implements the shared `neo:assert`, `neo:chars`, `neo:os`,
+reports `Neo.engine` `"neo-lite"` and implements the shared `neo:assert`, `neo:chars`, `neo:fs`, `neo:os`,
 `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` modules by default (or an
 empty list with `default-features = false`); other V8 modules and TypeScript remain absent there.
 Features outside this list are not implemented.
@@ -1812,19 +1841,19 @@ Features outside this list are not implemented.
   rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`, or
   `NEOJS_ALLOW_REMOTE=1`), and `http:` is always rejected. In particular, `node:test` is not an
   alias for the `test` built-in; a Node-module opt-in is not implemented. The built-in modules are
-  `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
+  `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `fs`, `os`, `path`, `slices`, `ssh`, `stdio`,
   `strings`, `test`, and `uuid`,
   reached through `Neo.getBuiltInModule("neo:age")`,
   `Neo.getBuiltInModule("neo:assert")`, `Neo.getBuiltInModule("neo:chars")`,
   `Neo.getBuiltInModule("neo:console")`, `Neo.getBuiltInModule("neo:cron")`,
-  `Neo.getBuiltInModule("neo:crypto")`, `Neo.getBuiltInModule("neo:os")`,
+  `Neo.getBuiltInModule("neo:crypto")`, `Neo.getBuiltInModule("neo:fs")`, `Neo.getBuiltInModule("neo:os")`,
   `Neo.getBuiltInModule("neo:path")`, `Neo.getBuiltInModule("neo:slices")`,
   `Neo.getBuiltInModule("neo:ssh")`, `Neo.getBuiltInModule("neo:stdio")`,
   `Neo.getBuiltInModule("neo:strings")`, `Neo.getBuiltInModule("neo:test")`,
   `Neo.getBuiltInModule("neo:uuid")`,
   `Neo.getBuiltInModule("neo:uuid/v4")`, and `Neo.getBuiltInModule("neo:uuid/v7")`, or
   through the import specifiers `neo:age`, `neo:assert`, `neo:chars`, `neo:console`,
-  `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`, `neo:stdio`,
+  `neo:cron`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`, `neo:stdio`,
   `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`. Other `neo:` modules
   are rejected by name. Bare module specifiers, including a bare built-in name such as `age`, are
   rejected unless mapped by an active `neo.jsonc` `imports` map or workspace `@scope/pkg` member;
@@ -1860,7 +1889,8 @@ Features outside this list are not implemented.
   PBKDF2 and bcrypt, and six for GF(256) Shamir secret sharing, including their bounded
   asynchronous paths. `uuid` calls two host ops for RFC 9562 version 4 and version 7 generation;
   both draw from the operating system CSPRNG, and a failed draw returns an error rather than falling
-  back. `ssh` calls three
+  back. `fs` calls fourteen synchronous host ops backed by `neojs-fs-core` using the process's
+  filesystem authority; it provides no permission system or sandbox. `ssh` calls three
   host ops: it performs DNS and outbound TCP, completes the SSH handshake, verifies an explicit
   Ed25519 host-key pin or explicit `known_hosts` text, authenticates with exactly one of a password,
   an in-memory private key, or an explicit Unix `agent: true`, and runs one command at a time. It has

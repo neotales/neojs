@@ -144,6 +144,10 @@ impl Resolver for FileResolver {
         // a fragment. Resolving to the same string gives the engine one module
         // identity for static and dynamic imports. With both module features
         // off the dependency is absent and this block is not compiled.
+        #[cfg(feature = "neo-fs")]
+        if name == neojs_fs_core::SPECIFIER {
+            return Ok(neojs_fs_core::SPECIFIER.to_owned());
+        }
         #[cfg(any(
             feature = "neo-assert",
             feature = "neo-chars",
@@ -253,10 +257,15 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
-        // `neo:chars`, `neo:os`, `neo:strings`, `neo:uuid`, `neo:uuid/v4`, and
-        // `neo:uuid/v7` are native QuickJS modules (`declare_def`) with no
-        // ECMAScript source; `neo:assert` and `neo:test` declare the shared
-        // `.esm.js` re-export wrappers from `neojs-builtins`.
+        // `neo:chars`, `neo:fs`, `neo:os`, `neo:strings`, `neo:uuid`,
+        // `neo:uuid/v4`, and `neo:uuid/v7` are native QuickJS modules
+        // (`declare_def`) with no ECMAScript source; `neo:assert` and
+        // `neo:test` declare the shared `.esm.js` re-export wrappers from
+        // `neojs-builtins`.
+        #[cfg(feature = "neo-fs")]
+        if name == neojs_fs_core::SPECIFIER {
+            return Module::declare_def::<crate::fs::FsModule, _>(ctx.clone(), name);
+        }
         #[cfg(any(
             feature = "neo-assert",
             feature = "neo-chars",

@@ -206,6 +206,25 @@
     const opUuidV4 = uuidOps.op_neo_uuid_v4;
     const opUuidV7 = uuidOps.op_neo_uuid_v7;
 
+    // The fs host ops are captured here for the same reason: replacing
+    // `Deno.core.ops` later does not change what the module calls. They perform
+    // synchronous filesystem operations via `neojs-fs-core`.
+    const fsOps = Deno.core.ops;
+    const opFsReadFile = fsOps.op_neo_fs_read_file;
+    const opFsReadTextFile = fsOps.op_neo_fs_read_text_file;
+    const opFsWriteFile = fsOps.op_neo_fs_write_file;
+    const opFsWriteTextFile = fsOps.op_neo_fs_write_text_file;
+    const opFsWriteFileAtomic = fsOps.op_neo_fs_write_file_atomic;
+    const opFsExists = fsOps.op_neo_fs_exists;
+    const opFsStat = fsOps.op_neo_fs_stat;
+    const opFsLstat = fsOps.op_neo_fs_lstat;
+    const opFsReadDir = fsOps.op_neo_fs_read_dir;
+    const opFsMkdir = fsOps.op_neo_fs_mkdir;
+    const opFsRemove = fsOps.op_neo_fs_remove;
+    const opFsRename = fsOps.op_neo_fs_rename;
+    const opFsCopyFile = fsOps.op_neo_fs_copy_file;
+    const opFsRealpath = fsOps.op_neo_fs_realpath;
+
     /**
      * Throw the exception described by a failed host result.
      *
@@ -1815,6 +1834,156 @@
     const uuidV7Module = Object.freeze({
         default: uuidV7,
         v7: uuidV7,
+    });
+
+    /**
+     * Turn an fs host result object into its value or the documented exception.
+     *
+     * The host result object has a null prototype so its properties cannot be
+     * intercepted. `code` is defined as an own property via `Object.defineProperty`
+     * so an inherited `Error.prototype.code` / `Object.prototype.code` setter
+     * cannot observe or swallow it.
+     */
+    function throwFs(response) {
+        if (response.name === "TypeError") {
+            throw new makeTypeError(response.message);
+        }
+        if (response.name === "RangeError") {
+            throw new makeRangeError(response.message);
+        }
+        const error = new makeError(response.message);
+        defineProperty(error, "code", {
+            __proto__: null,
+            value: response.code,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+        });
+        throw error;
+    }
+
+    function unwrapFs(response) {
+        if (response.ok) return response.value;
+        throwFs(response);
+    }
+
+    function unwrapFsUnit(response) {
+        if (!response.ok) throwFs(response);
+    }
+
+    function fsReadFile(path, options) {
+        if (arguments.length < 1 || arguments.length > 2) {
+            throw new makeTypeError("readFile takes one or two arguments");
+        }
+        return unwrapFs(opFsReadFile(path, options));
+    }
+
+    function fsReadTextFile(path, options) {
+        if (arguments.length < 1 || arguments.length > 2) {
+            throw new makeTypeError("readTextFile takes one or two arguments");
+        }
+        return unwrapFs(opFsReadTextFile(path, options));
+    }
+
+    function fsWriteFile(path, data, options) {
+        if (arguments.length < 2 || arguments.length > 3) {
+            throw new makeTypeError("writeFile takes two or three arguments");
+        }
+        unwrapFsUnit(opFsWriteFile(path, data, options));
+    }
+
+    function fsWriteTextFile(path, text, options) {
+        if (arguments.length < 2 || arguments.length > 3) {
+            throw new makeTypeError("writeTextFile takes two or three arguments");
+        }
+        unwrapFsUnit(opFsWriteTextFile(path, text, options));
+    }
+
+    function fsWriteFileAtomic(path, data, options) {
+        if (arguments.length < 2 || arguments.length > 3) {
+            throw new makeTypeError("writeFileAtomic takes two or three arguments");
+        }
+        unwrapFsUnit(opFsWriteFileAtomic(path, data, options));
+    }
+
+    function fsExists(path) {
+        if (arguments.length !== 1) {
+            throw new makeTypeError("exists takes exactly one argument");
+        }
+        return unwrapFs(opFsExists(path));
+    }
+
+    function fsStat(path) {
+        if (arguments.length !== 1) {
+            throw new makeTypeError("stat takes exactly one argument");
+        }
+        return unwrapFs(opFsStat(path));
+    }
+
+    function fsLstat(path) {
+        if (arguments.length !== 1) {
+            throw new makeTypeError("lstat takes exactly one argument");
+        }
+        return unwrapFs(opFsLstat(path));
+    }
+
+    function fsReadDir(path) {
+        if (arguments.length !== 1) {
+            throw new makeTypeError("readDir takes exactly one argument");
+        }
+        return unwrapFs(opFsReadDir(path));
+    }
+
+    function fsMkdir(path, options) {
+        if (arguments.length < 1 || arguments.length > 2) {
+            throw new makeTypeError("mkdir takes one or two arguments");
+        }
+        unwrapFsUnit(opFsMkdir(path, options));
+    }
+
+    function fsRemove(path, options) {
+        if (arguments.length < 1 || arguments.length > 2) {
+            throw new makeTypeError("remove takes one or two arguments");
+        }
+        unwrapFsUnit(opFsRemove(path, options));
+    }
+
+    function fsRename(from, to) {
+        if (arguments.length !== 2) {
+            throw new makeTypeError("rename takes exactly two arguments");
+        }
+        unwrapFsUnit(opFsRename(from, to));
+    }
+
+    function fsCopyFile(from, to, options) {
+        if (arguments.length < 2 || arguments.length > 3) {
+            throw new makeTypeError("copyFile takes two or three arguments");
+        }
+        unwrapFsUnit(opFsCopyFile(from, to, options));
+    }
+
+    function fsRealpath(path) {
+        if (arguments.length !== 1) {
+            throw new makeTypeError("realpath takes exactly one argument");
+        }
+        return unwrapFs(opFsRealpath(path));
+    }
+
+    const fs = freeze({
+        readFile: fsReadFile,
+        readTextFile: fsReadTextFile,
+        writeFile: fsWriteFile,
+        writeTextFile: fsWriteTextFile,
+        writeFileAtomic: fsWriteFileAtomic,
+        exists: fsExists,
+        stat: fsStat,
+        lstat: fsLstat,
+        readDir: fsReadDir,
+        mkdir: fsMkdir,
+        remove: fsRemove,
+        rename: fsRename,
+        copyFile: fsCopyFile,
+        realpath: fsRealpath,
     });
 
     // The ssh module is a synchronous command-execution slice. It is not a
@@ -3901,6 +4070,7 @@
         ["neo:console", consoleModule],
         ["neo:cron", cron],
         ["neo:crypto", crypto],
+        ["neo:fs", fs],
         ["neo:os", os],
         ["neo:path", path],
         // __NEO_SLICES_REGISTRY_ENTRY__
