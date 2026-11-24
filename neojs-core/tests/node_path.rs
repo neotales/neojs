@@ -226,6 +226,10 @@ import { posix } from "node:path";
 const oneMiB = "a".repeat(1_048_576);
 const tooLarge = "a".repeat(1_048_577);
 
+if (posix.normalize(oneMiB).length !== 1_048_576) {
+    throw new Error("the exact single-path bound was rejected");
+}
+
 let code = null;
 try {
     posix.normalize(tooLarge);
