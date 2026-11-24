@@ -10,7 +10,7 @@
 # Usage:
 #   NEOTALES_V8_CACHE=/verified/cache \
 #   NEOTALES_V8_PROCEDURE=/read-only/procedure \
-#   eng/v8-source/build-bounded.sh [--prepare-only | --run-root-only]
+#   eng/v8-source/build-bounded.sh [--prepare-only | --run-root-only | --check-procedure-only]
 #
 # The build root is recreated from the verified source on every run. It must
 # not overlap the cache, procedure, or repository. Every run gets a unique
@@ -25,8 +25,9 @@ MODE=build
 case ${1:-} in
     --prepare-only) MODE=prepare ;;
     --run-root-only) MODE=run-root ;;
+    --check-procedure-only) MODE=check-procedure ;;
     "") ;;
-    *) echo "usage: $0 [--prepare-only | --run-root-only]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--prepare-only | --run-root-only | --check-procedure-only]" >&2; exit 2 ;;
 esac
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -59,6 +60,66 @@ new_run_root() {
         die "cannot create a unique run root under $runs"
 }
 
+# Verify the exact procedure code that this script is about to execute.
+# `git status` without --ignored does not see ignored helpers, so check the
+# helper directory with --ignored and compare every HEAD helper's bytes and
+# executable bit. The recorded commit is the identity, not a signature.
+verify_procedure() {
+    [ -x "$PROCEDURE/eng/v8-source/prepare.sh" ] ||
+        die "missing verified prepare.sh in $PROCEDURE"
+    PROCEDURE_REV=$(git -C "$PROCEDURE" rev-parse HEAD) ||
+        die "cannot read procedure HEAD in $PROCEDURE"
+    local status
+    status=$(git -C "$PROCEDURE" status --porcelain --untracked-files=normal) ||
+        die "cannot inspect procedure worktree $PROCEDURE"
+    if [ -n "$status" ]; then
+        printf 'dirty procedure entries:\n%s\n' "$status" >&2
+        die "procedure worktree $PROCEDURE must be clean for provenance"
+    fi
+    status=$(git -C "$PROCEDURE" status --porcelain --untracked-files=all --ignored -- eng/v8-source) ||
+        die "cannot inspect procedure helpers in $PROCEDURE"
+    if [ -n "$status" ]; then
+        printf 'procedure helper entries:\n%s\n' "$status" >&2
+        die "procedure helper directory has untracked, ignored, staged, or modified entries"
+    fi
+
+    PROCEDURE_HELPER_TREE=$(git -C "$PROCEDURE" rev-parse "$PROCEDURE_REV:eng/v8-source") ||
+        die "procedure has no eng/v8-source tree at $PROCEDURE_REV"
+    for helper in prepare.sh validate_tar.py verify_git_tree.py materialize_git_tree.py; do
+        git -C "$PROCEDURE" cat-file -e "$PROCEDURE_REV:eng/v8-source/$helper" 2>/dev/null ||
+            die "procedure helper is not tracked at $PROCEDURE_REV: $helper"
+    done
+
+    local list=$BUILD/.procedure-helpers.$$
+    git -C "$PROCEDURE" ls-tree -r -z "$PROCEDURE_REV" -- eng/v8-source > "$list" ||
+        die "cannot list procedure helpers in $PROCEDURE"
+    PROCEDURE_HELPER_FILES=0
+    local record meta path mode rest type blob actual
+    while IFS= read -r -d '' record; do
+        meta=${record%%$'\t'*}
+        path=${record#*$'\t'}
+        mode=${meta%% *}
+        rest=${meta#* }
+        type=${rest%% *}
+        blob=${rest#* }
+        [ "$type" = blob ] || die "procedure helper is not a blob: $path"
+        actual=$PROCEDURE/$path
+        [ -f "$actual" ] || die "procedure helper missing or not a regular file: $path"
+        [ ! -L "$actual" ] || die "procedure helper is a symlink: $path"
+        case $mode in
+            100755) [ -x "$actual" ] || die "procedure helper is not executable: $path" ;;
+            100644) [ ! -x "$actual" ] || die "procedure helper is unexpectedly executable: $path" ;;
+            *) die "procedure helper has unsupported git mode $mode: $path" ;;
+        esac
+        git -C "$PROCEDURE" cat-file blob "$blob" | cmp -s - "$actual" ||
+            die "procedure helper does not match $PROCEDURE_REV: $path"
+        PROCEDURE_HELPER_FILES=$((PROCEDURE_HELPER_FILES + 1))
+    done < "$list"
+    rm -f "$list"
+    [ "$PROCEDURE_HELPER_FILES" -gt 0 ] ||
+        die "procedure helper directory is empty"
+}
+
 BUILD=$(canon "$BUILD")
 CACHE=$(canon "$CACHE")
 PROCEDURE=$(canon "$PROCEDURE")
@@ -81,18 +142,16 @@ if [ "$MODE" = run-root ]; then
     exit 0
 fi
 
-[ -x "$PROCEDURE/eng/v8-source/prepare.sh" ] ||
-    die "missing verified prepare.sh in $PROCEDURE"
+verify_procedure
+
+if [ "$MODE" = check-procedure ]; then
+    printf 'procedure %s helper-tree %s files %s\n' \
+        "$PROCEDURE_REV" "$PROCEDURE_HELPER_TREE" "$PROCEDURE_HELPER_FILES"
+    exit 0
+fi
+
 [ -f "$PATCH" ] || die "missing $PATCH"
 [ -f "$BUILDER_LOCK" ] || die "missing $BUILDER_LOCK"
-
-# Provenance records a commit, so the tree that supplies the procedure must be
-# clean. This is a drift/identity check, not attacker authentication.
-PROCEDURE_STATUS=$(git -C "$PROCEDURE" status --porcelain --untracked-files=normal)
-if [ -n "$PROCEDURE_STATUS" ]; then
-    printf 'dirty procedure entries:\n%s\n' "$PROCEDURE_STATUS" >&2
-    die "procedure worktree $PROCEDURE must be clean for provenance"
-fi
 
 # Read-only verification of the prepared inputs.
 "$PROCEDURE/eng/v8-source/prepare.sh" --verify-only
@@ -167,7 +226,9 @@ grep -q neojs_v8_get_own_enumerable_string_keys_bounded "$RUN_ROOT/symbols.txt" 
 cp "$ARCHIVE" "$ARTIFACT/librusty_v8.a"
 ARCHIVE_SHA=$(sha256sum "$ARTIFACT/librusty_v8.a" | cut -d' ' -f1)
 ARCHIVE_SIZE=$(stat -c %s "$ARTIFACT/librusty_v8.a")
-PROCEDURE_REV=$(git -C "$PROCEDURE" rev-parse HEAD)
+# Re-check after the long build so provenance describes the same procedure
+# identity and the same helper bytes that were used.
+verify_procedure
 LOCK_SHA=$(sha256sum "$BUILDER_LOCK" | cut -d' ' -f1)
 cat > "$ARTIFACT/provenance.txt" <<EOF
 built_utc=$BUILT_UTC
@@ -182,6 +243,9 @@ patched_api_cc=$API_CC_SHA
 builder_lock_sha256=$LOCK_SHA
 procedure_commit=$PROCEDURE_REV
 procedure_status=clean
+procedure_helpers=verified
+procedure_helper_tree=$PROCEDURE_HELPER_TREE
+procedure_helper_files=$PROCEDURE_HELPER_FILES
 cache=$CACHE
 archive_sha256=$ARCHIVE_SHA
 archive_size=$ARCHIVE_SIZE

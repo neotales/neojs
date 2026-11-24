@@ -134,14 +134,18 @@ adapter therefore requires a V8 archive built from the pinned
 The patch adds a narrow C ABI used only by `neojs-node`; it is separate from the
 `deno_core` and `rquickjs-sys` patches. `eng/v8-source/build-bounded.sh` verifies
 the prepared inputs, recreates a fresh isolated source tree, checks the exact
-patch and post-patch file hashes, rejects overlapping build roots, requires a
-clean procedure worktree, locks the output root, uses the committed
-`builder.lock` with `--locked` (pinning `bindgen 0.72.1`), builds with
+patch and post-patch file hashes, rejects overlapping build roots, and verifies
+the procedure helper code it executes. That check rejects ignored, untracked,
+staged, modified or mode-changed entries under `eng/v8-source`, and requires
+every recorded helper to be a regular non-symlink file whose bytes and Git
+executable bit match the recorded commit. It locks the output root, uses the
+committed `builder.lock` with `--locked` (pinning `bindgen 0.72.1`), builds with
 `V8_FROM_SOURCE`, and prints the archive path and hash. Every run gets a unique
 `mktemp -d` run root, so target and artifact directories are never reused. The
-caller supplies and must trust the prepared cache/procedure roots;
-`--verify-only` is drift detection, not attacker authentication. Neither the V8
-tree nor the archive is committed.
+provenance records the helper tree object and file count. The caller supplies
+and must trust the prepared cache/procedure roots; `--verify-only` is drift
+detection, not attacker authentication. Neither the V8 tree nor the archive is
+committed.
 
 The engine API supports `JS_OBJECT_TYPE` ordinary objects with fast or
 dictionary properties and fast non-double elements. It rejects Proxy, functions,

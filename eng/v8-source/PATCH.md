@@ -61,6 +61,7 @@ worktree. From the verified `prepare.sh` inputs:
 | ICU data | `icudtl.dat` sha256 `1cf67874b5a87a8363a86fb3f81e3cbbed54d389062dab8fb52308d5cf8c8612`; `icudtb.dat` sha256 `c58e1567b34e12a672b24ff4a5f21efa4c4481ab64a213dde059309b01aacde2` |
 | Rust toolchain | sha256 `832de79f8d90940f4aaef023f83a00c1e7210c023f4d57f606b7bf9831c889aa`, 274393124 bytes |
 | Chromium clang | sha256 `de584381536aa5ba2403033c4f8b70f3c39c2e5d7fa87c953b7fd8bfbba0ee2a`, 69635068 bytes |
+| Procedure helper tree | `86590659ebb17b1e40d867e7e6268d0a407d488a` (7 files at `3f925189837b7f0d3c334e43f9fae9eb38d8683b`) |
 | Patch file | sha256 `addc1c8b41a614911a4f1c8905780c3dffbaa3888ecdb159d8a444bc71ae044c`, 387 lines |
 | Patched `keys.h` | sha256 `5fbf2e84da60df7f0b7b8e35d8dc73d261ab44043e6fe9e3cef6835cfd0d4179` |
 | Patched `keys.cc` | sha256 `262f305d6b7918a594362ea829ce074f51a862272cc1c631da102e5bf765e56a` |
@@ -87,21 +88,35 @@ The script recreates a fresh source tree, applies the exact patch, uses the
 verified `GN`, Chromium clang, Rust toolchain and build-env, sets
 `V8_FROM_SOURCE=1`, and builds a release `librusty_v8.a` in a unique
 `mktemp -d` run root per invocation. It requires `flock`, rejects `/` and
-overlapping roots, and refuses a dirty procedure worktree before copying any
-source. It publishes the archive plus `provenance.txt` under
+overlapping roots, and verifies the procedure code it executes before copying
+any source. It publishes the archive plus `provenance.txt` under
 `<run-root>/artifact/`; the provenance records the run root, procedure commit,
-`procedure_status=clean`, patch/file hashes, builder-lock hash, archive hash
-and size. `--run-root-only` is a test-only mode used by
-`eng/v8-source/test-build-bounded.sh` to prove that two runs in the same clock
-second still get distinct roots. The V8 tree and archive are not committed.
+`procedure_status=clean`, `procedure_helpers=verified`, the helper tree object
+and file count, patch/file hashes, builder-lock hash, archive hash and size.
+`--run-root-only` and `--check-procedure-only` are test-only modes used by
+`eng/v8-source/test-build-bounded.sh` to prove unique run roots and helper
+verification/rejection. The V8 tree and archive are not committed.
 
-Observed local build (Linux x86_64, 12 jobs, 31m11s):
+The procedure check is deliberately stronger than `git status`:
+`git status --porcelain --untracked-files=all --ignored -- eng/v8-source` must
+be empty, so an ignored helper cannot hide. Every file in the recorded
+`eng/v8-source` tree must be a regular non-symlink file, must have the recorded
+Git executable bit, and must byte-match the recorded blob. The known executed
+helpers (`prepare.sh`, `validate_tar.py`, `verify_git_tree.py`,
+`materialize_git_tree.py`) must be tracked. The check runs again after the
+long build so provenance describes the same helper identity. This is drift and
+identity verification, not attacker authentication.
+
+Observed local build (Linux x86_64, 12 jobs, 31m05s):
 
 - `librusty_v8.a`: 186,863,610 bytes
 - sha256: `e9d7d15a0b8e85409fbb8d4f592bba3d86fc6ea544a550cc750e50e36f639a8d`
 - The unique-run-root script build produced this artifact and wrote
-  `runs/20261123T235827Z.rEnuzh/artifact/provenance.txt`; an earlier manual
-  build from the same source produced `6daab0e5…`, and other builds produced
+  `runs/20261124T004722Z.oLmiEC/artifact/provenance.txt`; that provenance
+  records `procedure_helpers=verified`, helper tree
+  `86590659ebb17b1e40d867e7e6268d0a407d488a` and 7 helper files. The same
+  archive hash was observed from the immediately preceding script build; an
+  earlier manual build produced `6daab0e5…`, and other builds produced
   `12735288…`, `cca39e…`, `643ddb…`, `67552f…`, `f3a244…`. The differences
   are the no-bit-reproducibility caveat, not a pin. Rebuilding the archive
   requires `cargo clean -p v8` in the consumer target because Cargo does not
