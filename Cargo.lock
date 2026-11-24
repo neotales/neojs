@@ -2035,6 +2035,7 @@ name = "neojs"
 version = "0.1.0"
 dependencies = [
  "neojs-core",
+ "neojs-dts",
  "neojs-manifest",
  "neojs-module-policy",
  "neotales-ssh",
@@ -2067,6 +2068,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "neojs-builtins",
+ "neojs-dts",
  "neojs-fs-core",
  "neojs-manifest",
  "neojs-module-policy",
@@ -2122,6 +2124,7 @@ name = "neojs-lite-core"
 version = "0.1.0"
 dependencies = [
  "neojs-builtins",
+ "neojs-dts",
  "neojs-fs-core",
  "neojs-manifest",
  "neojs-module-policy",

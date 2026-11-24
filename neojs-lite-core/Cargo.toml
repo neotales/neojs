@@ -72,4 +72,5 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+neojs-dts.workspace = true
 tempfile.workspace = true
