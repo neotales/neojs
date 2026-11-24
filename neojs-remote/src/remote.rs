@@ -51,7 +51,33 @@
 //! checked before allocation, and a body followed by extra bytes is rejected.
 //! Publications are serialized by a per-key lock file. Each request receives a
 //! monotonic per-key revision from a revision file updated under that lock, so
-//! ordering does not depend on the wall clock.
+//! ordering does not depend on the wall clock. A separate representation
+//! identity combines the validator (when present) with the actual body digest,
+//! so a weak ETag shared by different bytes is not treated as the same
+//! representation. A `200` publishes only when its request revision is newer than
+//! the current entry, redirect pointer, or tombstone; a `304` publishes only
+//! when the current representation still matches and its request revision is not
+//! older; and `no-store` publishes an absent-entry tombstone. Lock acquisition
+//! for revision allocation and publication is capped at 250 ms (`CACHE_LOCK_BUDGET`)
+//! and at the remaining fetch deadline: with a longer deadline, a held or stale
+//! lock skips the cache operation and the fetch continues to the network; when
+//! the remaining deadline is at or below the cap, the lock may consume all of
+//! it and the fetch times out before the transport is contacted.
+//!
+//! This detects corruption, torn writes, and lost-update races, not an
+//! adversary who can write both the metadata and the body in the user's cache
+//! directory. There is no signature or content-addressed store, so the cache
+//! does not pin a version or provide integrity beyond transport TLS and those
+//! consistency checks. A cache read or write failure is ignored: the module is
+//! fetched and the program continues. Openness of the cache directory is the
+//! user's responsibility.
+//!
+//! This is not SSRF protection. There is no host allowlist, no private-address
+//! rejection, and no DNS pinning: the client fetches whatever HTTPS URL the
+//! caller names, using the process's network authority. Remote code has the
+//! same authority as local code once it runs; it is not a sandbox. The cache is
+//! an internal part of module loading; neojs exposes no `fetch`-style API and
+//! no way for JavaScript to read the cache.
 //!
 //! Offline callers can use [`Cache::load_offline`] to read and SHA-256-verify
 //! cached entries without taking write locks, without consulting `max-age`
@@ -603,8 +629,11 @@ impl RemoteClient {
         }
     }
 
-    /// Creates a client over an injected transport.
-    #[cfg(any(test, feature = "test-support"))]
+    /// Creates a client over a caller-supplied [`RemoteTransport`].
+    ///
+    /// This is available even when the `network` feature is disabled, allowing
+    /// custom or scripted transports without pulling in HTTP or TLS
+    /// dependencies.
     pub fn with_transport(options: RemoteOptions, transport: Arc<dyn RemoteTransport>) -> Self {
         let cache = options
             .cache_dir
@@ -769,6 +798,7 @@ impl RemoteClient {
         let mut current = initial.clone();
         let mut initial_generation: Option<String> = None;
         let mut redirects = 0u32;
+        let mut redirect_no_store = false;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -787,13 +817,23 @@ impl RemoteClient {
             {
                 self.record_url(&current)?;
                 admission.commit(cached.body.len())?;
-                self.publish_redirect_pointer(
-                    &initial,
-                    &current,
-                    redirects,
-                    initial_generation.as_deref(),
-                    deadline,
-                );
+                if redirects > 0 && current != initial {
+                    if redirect_no_store {
+                        if let (Some(gen0), Some(cache)) =
+                            (initial_generation.as_deref(), &self.cache)
+                        {
+                            let _ = cache.tombstone_if_newer(&initial, gen0, deadline);
+                        }
+                    } else {
+                        self.publish_redirect_pointer(
+                            &initial,
+                            &current,
+                            redirects,
+                            initial_generation.as_deref(),
+                            deadline,
+                        );
+                    }
+                }
                 return Ok(FetchedModule {
                     body: cached.body.clone(),
                     final_url: current,
@@ -880,6 +920,12 @@ impl RemoteClient {
                             generation,
                             deadline,
                         );
+                        if redirects > 0
+                            && current != initial
+                            && let Some(gen0) = initial_generation.as_deref()
+                        {
+                            let _ = cache.tombstone_if_newer(&initial, gen0, deadline);
+                        }
                     } else if cache
                         .merge_revalidated(
                             &current,
@@ -890,14 +936,22 @@ impl RemoteClient {
                             self.options.max_module_bytes,
                         )
                         .is_ok()
+                        && redirects > 0
+                        && current != initial
                     {
-                        self.publish_redirect_pointer(
-                            &initial,
-                            &current,
-                            redirects,
-                            initial_generation.as_deref(),
-                            deadline,
-                        );
+                        if redirect_no_store {
+                            if let Some(gen0) = initial_generation.as_deref() {
+                                let _ = cache.tombstone_if_newer(&initial, gen0, deadline);
+                            }
+                        } else {
+                            self.publish_redirect_pointer(
+                                &initial,
+                                &current,
+                                redirects,
+                                initial_generation.as_deref(),
+                                deadline,
+                            );
+                        }
                     }
                 }
                 return Ok(FetchedModule {
@@ -908,6 +962,16 @@ impl RemoteClient {
             }
 
             if (300..=399).contains(&response.status) {
+                let directives = CacheDirectives::parse(response.cache_control.as_deref());
+                if directives.no_store {
+                    redirect_no_store = true;
+                    if redirects == 0
+                        && let (Some(gen0), Some(cache)) =
+                            (initial_generation.as_deref(), &self.cache)
+                    {
+                        let _ = cache.tombstone_if_newer(&initial, gen0, deadline);
+                    }
+                }
                 let Some(location) = response.location.as_deref() else {
                     return Err(RemoteError::MissingRedirectLocation {
                         status: response.status,
@@ -963,6 +1027,12 @@ impl RemoteClient {
             if let (Some(generation), Some(cache)) = (request_generation.as_deref(), &self.cache) {
                 if directives.no_store {
                     let _ = cache.tombstone_if_newer(&current, generation, deadline);
+                    if redirects > 0
+                        && current != initial
+                        && let Some(gen0) = initial_generation.as_deref()
+                    {
+                        let _ = cache.tombstone_if_newer(&initial, gen0, deadline);
+                    }
                 } else {
                     let entry = CachedModule {
                         body: body.clone(),
@@ -983,14 +1053,23 @@ impl RemoteClient {
                         generation: generation.to_string(),
                         representation,
                     };
-                    if cache.store_if_newer(&current, &entry, deadline).is_ok() {
-                        self.publish_redirect_pointer(
-                            &initial,
-                            &current,
-                            redirects,
-                            initial_generation.as_deref(),
-                            deadline,
-                        );
+                    if cache.store_if_newer(&current, &entry, deadline).is_ok()
+                        && redirects > 0
+                        && current != initial
+                    {
+                        if redirect_no_store {
+                            if let Some(gen0) = initial_generation.as_deref() {
+                                let _ = cache.tombstone_if_newer(&initial, gen0, deadline);
+                            }
+                        } else {
+                            self.publish_redirect_pointer(
+                                &initial,
+                                &current,
+                                redirects,
+                                initial_generation.as_deref(),
+                                deadline,
+                            );
+                        }
                     }
                 }
             }
@@ -1412,10 +1491,31 @@ pub struct Cache {
     dir: PathBuf,
 }
 
+/// State of a `.tomb` file on disk.
+enum TombstoneState {
+    Absent,
+    Present(String),
+    Corrupt,
+}
+
+/// State of a direct cache entry file on disk.
+enum EntryState {
+    Absent,
+    Present(CachedModule),
+    CorruptOrOversized,
+}
+
+/// State of a `.redir` file on disk.
+enum RedirectState {
+    Absent,
+    Present(RedirectRecord),
+    Corrupt,
+}
+
 impl Cache {
     /// Creates a cache handle rooted at `dir`.
-    pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
     }
 
     /// Returns the default user-profile cache directory, when available from
@@ -1497,46 +1597,141 @@ impl Cache {
         Some((entry, expected_length, expected_digest))
     }
 
-    /// Loads an entry, returning `None` when it is absent, tombstoned, or
-    /// malformed.
+    /// Loads an entry, returning `None` when it is absent, tombstoned,
+    /// superseded by a newer redirect pointer, corrupt, or oversized.
     fn load(&self, url: &Url, max_body: usize) -> Option<CachedModule> {
-        if self.read_tombstone(url).is_some() {
+        let tomb = self.read_tombstone_state(url);
+        if matches!(tomb, TombstoneState::Corrupt) {
             return None;
         }
-        let (mut reader, mut entry, expected_length, expected_digest) = self.open_entry(url)?;
-        if expected_length > max_body {
+        let EntryState::Present(entry) = self.load_entry_state(url, max_body) else {
+            return None;
+        };
+        if let TombstoneState::Present(tomb_gen) = tomb
+            && tomb_gen.as_str() >= entry.generation.as_str()
+        {
             return None;
         }
-        let mut body = vec![0u8; expected_length];
-        reader.read_exact(&mut body).ok()?;
-        let mut extra = [0u8; 1];
-        if reader.read(&mut extra).ok()? != 0 {
-            return None;
+        match self.read_redirect_state(url) {
+            RedirectState::Corrupt => return None,
+            RedirectState::Present(redirect)
+                if redirect.generation.as_str() > entry.generation.as_str() =>
+            {
+                return None;
+            }
+            _ => {}
         }
-        if !expected_digest.eq_ignore_ascii_case(&hex_encode(&Sha256::digest(&body))) {
-            return None;
+        match self.read_tombstone_state(url) {
+            TombstoneState::Corrupt => return None,
+            TombstoneState::Present(tomb_gen) if tomb_gen.as_str() >= entry.generation.as_str() => {
+                return None;
+            }
+            _ => {}
         }
-        if self.read_tombstone(url).is_some() {
-            return None;
-        }
-        entry.body = body;
         Some(entry)
     }
 
-    /// Reads and SHA-256-verifies a cached entry offline using the default
-    /// module size limit.
+    fn load_entry_state(&self, url: &Url, max_body: usize) -> EntryState {
+        let path = self.path(url);
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return EntryState::Absent;
+            }
+            Err(_) => return EntryState::CorruptOrOversized,
+        };
+        let mut reader = BufReader::new(file);
+        let Some(magic) = read_line_bounded(&mut reader, 64) else {
+            return EntryState::CorruptOrOversized;
+        };
+        if magic.trim_end() != CACHE_MAGIC {
+            return EntryState::CorruptOrOversized;
+        }
+        let Some(length_line) = read_line_bounded(&mut reader, 32) else {
+            return EntryState::CorruptOrOversized;
+        };
+        let Ok(metadata_length) = length_line.trim().parse::<usize>() else {
+            return EntryState::CorruptOrOversized;
+        };
+        if metadata_length > MAX_META_BYTES {
+            return EntryState::CorruptOrOversized;
+        }
+        let mut metadata = vec![0u8; metadata_length];
+        if reader.read_exact(&mut metadata).is_err() {
+            return EntryState::CorruptOrOversized;
+        }
+        let Ok(metadata_str) = std::str::from_utf8(&metadata) else {
+            return EntryState::CorruptOrOversized;
+        };
+        let Some((mut entry, expected_length, expected_digest)) = parse_metadata(metadata_str)
+        else {
+            return EntryState::CorruptOrOversized;
+        };
+        if expected_length > max_body {
+            return EntryState::CorruptOrOversized;
+        }
+        let mut body = vec![0u8; expected_length];
+        if reader.read_exact(&mut body).is_err() {
+            return EntryState::CorruptOrOversized;
+        }
+        let mut extra = [0u8; 1];
+        match reader.read(&mut extra) {
+            Ok(0) => {}
+            _ => return EntryState::CorruptOrOversized,
+        }
+        if !expected_digest.eq_ignore_ascii_case(&hex_encode(&Sha256::digest(&body))) {
+            return EntryState::CorruptOrOversized;
+        }
+        entry.body = body;
+        EntryState::Present(entry)
+    }
+
+    /// Reads and SHA-256-verifies a cached entry offline using
+    /// [`DEFAULT_MAX_MODULE_BYTES`] (16 MiB).
     ///
     /// This takes no write locks, ignores `max-age` freshness expiry (returning
-    /// valid verified cached bytes even if stale), honors `.tomb` tombstones,
-    /// and resolves bounded `.redir` redirect pointers (up to
-    /// [`DEFAULT_MAX_REDIRECTS`] hops, rejecting redirect loops and excess
-    /// hops).
+    /// valid verified cached bytes even if stale), honors `.tomb` tombstones
+    /// (failing closed on corrupt tombstones or corrupt/oversized entries), and
+    /// resolves bounded `.redir` redirect pointers (up to
+    /// [`DEFAULT_MAX_REDIRECTS`] hops).
+    ///
+    /// Returns:
+    /// - `Ok(Some(module))` on a verified cache hit (possibly after following
+    ///   redirect pointers).
+    /// - `Ok(None)` when the entry is absent, tombstoned, corrupt, malformed, or
+    ///   exceeds the size bound.
+    /// - `Err(RemoteError)` when `url` is not a valid credential-free `https:`
+    ///   URL, or when cached redirect pointers form a loop or exceed
+    ///   [`DEFAULT_MAX_REDIRECTS`] hops.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use neojs_remote::{Cache, RemoteError};
+    /// use url::Url;
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let cache = Cache::new(dir.path());
+    ///
+    /// let url = Url::parse("https://example.test/mod.js").unwrap();
+    /// assert_eq!(cache.load_offline(&url).unwrap(), None);
+    ///
+    /// let bad = Url::parse("http://example.test/mod.js").unwrap();
+    /// assert!(matches!(
+    ///     cache.load_offline(&bad),
+    ///     Err(RemoteError::UnsupportedScheme { .. })
+    /// ));
+    /// ```
     pub fn load_offline(&self, url: &Url) -> Result<Option<OfflineModule>, RemoteError> {
         self.load_offline_with_limit(url, DEFAULT_MAX_MODULE_BYTES)
     }
 
     /// Reads and SHA-256-verifies a cached entry offline with an explicit
-    /// `max_body` limit.
+    /// `max_body` limit in bytes.
+    ///
+    /// Behaves identically to [`Self::load_offline`], except that cached bodies
+    /// larger than `max_body` bytes are treated as a miss (`Ok(None)`) without
+    /// falling back to any `.redir` pointer.
     pub fn load_offline_with_limit(
         &self,
         url: &Url,
@@ -1548,16 +1743,56 @@ impl Cache {
         visited.insert(Self::key(&current));
         let mut hops = 0u32;
         loop {
-            if self.read_tombstone(&current).is_some() {
+            let tomb = self.read_tombstone_state(&current);
+            if matches!(tomb, TombstoneState::Corrupt) {
                 return Ok(None);
             }
-            if let Some(entry) = self.load(&current, max_body) {
+            let entry = self.load_entry_state(&current, max_body);
+            if matches!(entry, EntryState::CorruptOrOversized) {
+                return Ok(None);
+            }
+            let redir = self.read_redirect_state(&current);
+            if matches!(redir, RedirectState::Corrupt) {
+                return Ok(None);
+            }
+
+            let tomb_gen = match &tomb {
+                TombstoneState::Present(generation) => Some(generation.as_str()),
+                _ => None,
+            };
+            let entry_gen = match &entry {
+                EntryState::Present(cached) => Some(cached.generation.as_str()),
+                _ => None,
+            };
+            let redir_gen = match &redir {
+                RedirectState::Present(record) => Some(record.generation.as_str()),
+                _ => None,
+            };
+
+            if let Some(tg) = tomb_gen
+                && tg >= entry_gen.unwrap_or("")
+                && tg >= redir_gen.unwrap_or("")
+            {
+                return Ok(None);
+            }
+
+            if let EntryState::Present(cached) = entry
+                && cached.generation.as_str() >= redir_gen.unwrap_or("")
+            {
+                match self.read_tombstone_state(&current) {
+                    TombstoneState::Corrupt => return Ok(None),
+                    TombstoneState::Present(tg) if tg.as_str() >= cached.generation.as_str() => {
+                        return Ok(None);
+                    }
+                    _ => {}
+                }
                 return Ok(Some(OfflineModule {
-                    body: entry.body,
+                    body: cached.body,
                     final_url: current,
                 }));
             }
-            let Some(redirect) = self.read_redirect(&current) else {
+
+            let RedirectState::Present(redirect) = redir else {
                 return Ok(None);
             };
             let target = request_url(&redirect.target);
@@ -1573,8 +1808,12 @@ impl Cache {
                     limit: DEFAULT_MAX_REDIRECTS,
                 });
             }
-            if self.read_tombstone(&current).is_some() {
-                return Ok(None);
+            match self.read_tombstone_state(&current) {
+                TombstoneState::Corrupt => return Ok(None),
+                TombstoneState::Present(tg) if tg.as_str() >= redirect.generation.as_str() => {
+                    return Ok(None);
+                }
+                _ => {}
             }
             visited.insert(target_key);
             current = target;
@@ -1650,53 +1889,100 @@ impl Cache {
         Ok(format!("{next:020}"))
     }
 
-    fn read_tombstone(&self, url: &Url) -> Option<String> {
-        let file = File::open(self.tombstone_path(url)).ok()?;
+    fn read_tombstone_state(&self, url: &Url) -> TombstoneState {
+        let file = match File::open(self.tombstone_path(url)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return TombstoneState::Absent;
+            }
+            Err(_) => return TombstoneState::Corrupt,
+        };
         let mut reader = BufReader::new(file);
-        if read_line_bounded(&mut reader, 64)?.trim_end() != TOMBSTONE_MAGIC {
-            return None;
+        let Some(magic) = read_line_bounded(&mut reader, 64) else {
+            return TombstoneState::Corrupt;
+        };
+        if magic.trim_end() != TOMBSTONE_MAGIC {
+            return TombstoneState::Corrupt;
         }
-        let generation = read_line_bounded(&mut reader, 128)?;
+        let Some(generation) = read_line_bounded(&mut reader, 128) else {
+            return TombstoneState::Corrupt;
+        };
         let generation = generation.trim().to_string();
         if generation.is_empty() {
-            None
+            TombstoneState::Corrupt
         } else {
-            Some(generation)
+            TombstoneState::Present(generation)
         }
     }
 
-    fn read_redirect(&self, url: &Url) -> Option<RedirectRecord> {
-        let file = File::open(self.redirect_path(url)).ok()?;
+    fn read_redirect_state(&self, url: &Url) -> RedirectState {
+        let file = match File::open(self.redirect_path(url)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return RedirectState::Absent;
+            }
+            Err(_) => return RedirectState::Corrupt,
+        };
         let mut reader = BufReader::new(file);
-        let magic = read_line_bounded(&mut reader, 64)?;
+        let Some(magic) = read_line_bounded(&mut reader, 64) else {
+            return RedirectState::Corrupt;
+        };
         if magic.trim_end() != REDIRECT_MAGIC {
-            return None;
+            return RedirectState::Corrupt;
         }
-        let length_line = read_line_bounded(&mut reader, 32)?;
-        let metadata_length: usize = length_line.trim().parse().ok()?;
+        let Some(length_line) = read_line_bounded(&mut reader, 32) else {
+            return RedirectState::Corrupt;
+        };
+        let Ok(metadata_length) = length_line.trim().parse::<usize>() else {
+            return RedirectState::Corrupt;
+        };
         if metadata_length > MAX_META_BYTES {
-            return None;
+            return RedirectState::Corrupt;
         }
         let mut metadata = vec![0u8; metadata_length];
-        reader.read_exact(&mut metadata).ok()?;
-        let mut extra = [0u8; 1];
-        if reader.read(&mut extra).ok()? != 0 {
-            return None;
+        if reader.read_exact(&mut metadata).is_err() {
+            return RedirectState::Corrupt;
         }
-        parse_redirect_metadata(std::str::from_utf8(&metadata).ok()?)
+        let mut extra = [0u8; 1];
+        match reader.read(&mut extra) {
+            Ok(0) => {}
+            _ => return RedirectState::Corrupt,
+        }
+        let Ok(metadata_str) = std::str::from_utf8(&metadata) else {
+            return RedirectState::Corrupt;
+        };
+        match parse_redirect_metadata(metadata_str) {
+            Some(record) => RedirectState::Present(record),
+            None => RedirectState::Corrupt,
+        }
     }
 
-    /// Returns the current published generation, including a tombstone or
-    /// redirect pointer.
+    #[cfg(test)]
+    fn read_redirect(&self, url: &Url) -> Option<RedirectRecord> {
+        match self.read_redirect_state(url) {
+            RedirectState::Present(record) => Some(record),
+            RedirectState::Absent | RedirectState::Corrupt => None,
+        }
+    }
+
+    /// Returns the highest published generation across any valid tombstone,
+    /// redirect pointer, or entry metadata present for `url`.
     fn state(&self, url: &Url) -> Option<String> {
-        if let Some(generation) = self.read_tombstone(url) {
-            return Some(generation);
+        let mut best: Option<String> = None;
+        if let TombstoneState::Present(generation) = self.read_tombstone_state(url) {
+            best = Some(best.map_or(generation.clone(), |current| current.max(generation)));
         }
-        if let Some(redirect) = self.read_redirect(url) {
-            return Some(redirect.generation);
+        if let RedirectState::Present(redirect) = self.read_redirect_state(url) {
+            best = Some(best.map_or(redirect.generation.clone(), |current| {
+                current.max(redirect.generation)
+            }));
         }
-        self.read_metadata(url)
-            .map(|(entry, _, _)| entry.generation)
+        if let Some((entry, _, _)) = self.read_metadata(url) {
+            best = Some(best.map_or(entry.generation.clone(), |current| {
+                current.max(entry.generation)
+            }));
+        }
+        best
     }
 
     /// Writes an entry atomically, returning a filesystem error on failure.
@@ -1768,7 +2054,7 @@ impl Cache {
         max_body: usize,
     ) -> std::io::Result<bool> {
         let _lock = self.lock(url, deadline)?;
-        if self.read_tombstone(url).is_some() {
+        if !matches!(self.read_tombstone_state(url), TombstoneState::Absent) {
             return Ok(false);
         }
         let Some(mut current) = self.load(url, max_body) else {
@@ -1835,7 +2121,7 @@ impl Cache {
         deadline: Instant,
     ) -> std::io::Result<bool> {
         let _lock = self.lock(url, deadline)?;
-        if self.read_tombstone(url).is_some() {
+        if !matches!(self.read_tombstone_state(url), TombstoneState::Absent) {
             return Ok(false);
         }
         let Some((current, _, _)) = self.read_metadata(url) else {
@@ -2154,6 +2440,7 @@ where
 
 /// Wraps a closure as an injected transport.
 #[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn test_transport<F>(fetch: F) -> Arc<dyn RemoteTransport>
 where
     F: Fn(&str, Duration, Option<&str>, Option<&str>) -> Result<TestRemoteResponse, String>
@@ -2233,6 +2520,20 @@ mod tests {
             date: None,
             age: None,
             body: Box::new(std::io::Cursor::new(body.as_bytes().to_vec())),
+        }
+    }
+
+    fn cacheable_redirect(location: &str) -> RemoteResponse {
+        RemoteResponse {
+            status: 302,
+            location: Some(location.to_owned()),
+            declared_length: None,
+            etag: None,
+            last_modified: None,
+            cache_control: None,
+            date: None,
+            age: None,
+            body: Box::new(std::io::Cursor::new(Vec::new())),
         }
     }
 
@@ -4927,7 +5228,7 @@ mod tests {
     fn live_redirect_publishes_pointer_resolved_by_load_offline() {
         let dir = tempfile::tempdir().expect("temp dir");
         let transport = ScriptedTransport::new(vec![
-            response(302, Some("https://cdn.example.test/v2/mod.ts"), ""),
+            cacheable_redirect("https://cdn.example.test/v2/mod.ts"),
             RemoteResponse {
                 status: 200,
                 location: None,
@@ -4950,7 +5251,7 @@ mod tests {
         assert_eq!(fetched.final_url, expected_final);
         assert_eq!(fetched.body, b"export const v = 2;\n");
 
-        let cache = super::Cache::new(dir.path().to_path_buf());
+        let cache = super::Cache::new(dir.path());
         let offline = cache
             .load_offline(&requested)
             .expect("offline redirect resolution")
@@ -4972,7 +5273,7 @@ mod tests {
     fn live_redirect_to_no_store_does_not_publish_redirect_pointer() {
         let dir = tempfile::tempdir().expect("temp dir");
         let transport = ScriptedTransport::new(vec![
-            response(302, Some("https://cdn.example.test/secret.js"), ""),
+            cacheable_redirect("https://cdn.example.test/secret.js"),
             response(200, None, "export const secret = 1;\n"),
         ]);
         let options = RemoteOptions::new().with_cache_dir(dir.path());
@@ -5168,7 +5469,7 @@ mod tests {
                 body: Box::new(std::io::Cursor::new(b"export const t = 1;\n".to_vec())),
             },
             // Now request `requested` -> 302 to `target`, `target` -> 304 (max-age=60).
-            response(302, Some("https://cdn.example.test/target.js"), ""),
+            cacheable_redirect("https://cdn.example.test/target.js"),
             RemoteResponse {
                 status: 304,
                 location: None,
@@ -5188,17 +5489,15 @@ mod tests {
         assert_eq!(via_304.final_url, target);
         assert_eq!(via_304.body, b"export const t = 1;\n");
 
-        let cache = super::Cache::new(dir.path().to_path_buf());
+        let cache = super::Cache::new(dir.path());
         let offline = cache.load_offline(&requested).expect("ok").expect("hit");
         assert_eq!(offline.final_url, target);
         assert_eq!(offline.body, b"export const t = 1;\n");
 
         // Now a second alias redirects to `target`, which is now a fresh cache hit.
         let alias2 = Url::parse("https://example.test/alias2.js").expect("alias2");
-        let transport2 = ScriptedTransport::new(vec![response(
-            302,
-            Some("https://cdn.example.test/target.js"),
-            "",
+        let transport2 = ScriptedTransport::new(vec![cacheable_redirect(
+            "https://cdn.example.test/target.js",
         )]);
         let fetched2 = client(options, transport2)
             .fetch(&alias2)
@@ -5207,5 +5506,276 @@ mod tests {
         let offline2 = cache.load_offline(&alias2).expect("ok").expect("hit2");
         assert_eq!(offline2.final_url, target);
         assert_eq!(offline2.body, b"export const t = 1;\n");
+    }
+
+    #[test]
+    fn corrupt_tombstone_blocks_offline_entry_and_redirect_fail_closed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let target = Url::parse("https://cdn.example.test/target.js").expect("target");
+
+        let entry = super::CachedModule {
+            body: b"export default 1;\n".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: "test".to_string(),
+        };
+        cache.store(&url, &entry).expect("store entry");
+        assert!(cache.load_offline(&url).expect("ok").is_some());
+
+        // Write a truncated/corrupt `.tomb` alongside the valid entry -> must fail closed.
+        std::fs::write(cache.tombstone_path(&url), b"corrupt-tombstone").expect("corrupt tomb");
+        assert!(
+            cache.load_offline(&url).expect("ok").is_none(),
+            "corrupt tombstone must fail closed over entry"
+        );
+        assert!(
+            cache.load(&url, 1024).is_none(),
+            "corrupt tombstone must fail closed on live cache read too"
+        );
+
+        // Also block following a valid `.redir` when `.tomb` is corrupt.
+        let _ = std::fs::remove_file(cache.tombstone_path(&url));
+        cache
+            .store_redirect_if_newer(&url, &target, "0002", test_deadline())
+            .expect("store redir");
+        cache.store(&target, &entry).expect("store target");
+        assert!(cache.load_offline(&url).expect("ok").is_some());
+
+        std::fs::write(cache.tombstone_path(&url), b"neojs-remote-tombstone 5\n")
+            .expect("truncated tomb");
+        assert!(
+            cache.load_offline(&url).expect("ok").is_none(),
+            "truncated tombstone must block following redirect"
+        );
+    }
+
+    #[test]
+    fn corrupt_or_oversized_direct_entry_does_not_fall_through_to_redirect() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path());
+        let url = Url::parse("https://example.test/entry.js").expect("url");
+        let target = Url::parse("https://cdn.example.test/fallback.js").expect("target");
+
+        let target_entry = super::CachedModule {
+            body: b"export default 'fallback';\n".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: "fallback".to_string(),
+        };
+        cache.store(&target, &target_entry).expect("store target");
+        cache
+            .store_redirect_if_newer(&url, &target, "0001", test_deadline())
+            .expect("store redir");
+        assert_eq!(
+            cache
+                .load_offline(&url)
+                .expect("ok")
+                .expect("via redir")
+                .final_url,
+            target
+        );
+
+        // Place a corrupt direct entry file alongside `.redir` -> must stop and return Ok(None).
+        std::fs::write(cache.path(&url), b"corrupt-entry-bytes").expect("corrupt entry");
+        assert!(
+            cache.load_offline(&url).expect("ok").is_none(),
+            "corrupt direct entry must not fall through to .redir"
+        );
+
+        // Place a valid but oversized direct entry alongside `.redir` -> must stop and return Ok(None).
+        let big_entry = super::CachedModule {
+            body: b"0123456789abcdef".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "0002".to_string(),
+            representation: "big".to_string(),
+        };
+        cache
+            .write_entry(&url, &big_entry)
+            .expect("write big entry");
+        assert!(
+            cache
+                .load_offline_with_limit(&url, 8)
+                .expect("ok")
+                .is_none(),
+            "oversized direct entry must not fall through to .redir"
+        );
+    }
+
+    #[test]
+    fn generation_ordering_resolves_overlapping_cache_artifacts() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = super::Cache::new(dir.path());
+        let url = Url::parse("https://example.test/multi.js").expect("url");
+        let target = Url::parse("https://cdn.example.test/target.js").expect("target");
+
+        let old_entry = super::CachedModule {
+            body: b"old".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "0001".to_string(),
+            representation: "old".to_string(),
+        };
+        let target_entry = super::CachedModule {
+            body: b"target".to_vec(),
+            stored_at: 1,
+            initial_age: 0,
+            max_age: Some(60),
+            etag: None,
+            last_modified: None,
+            generation: "0002".to_string(),
+            representation: "target".to_string(),
+        };
+        std::fs::create_dir_all(dir.path()).expect("dir");
+        cache.store(&target, &target_entry).expect("store target");
+
+        // Simulate crash leaving older entry ("0001") alongside newer redirect ("0002").
+        cache
+            .write_entry(&url, &old_entry)
+            .expect("write old entry");
+        cache
+            .write_redirect(&url, &target, "0002")
+            .expect("write newer redir");
+        assert_eq!(cache.state(&url).as_deref(), Some("0002"));
+        assert!(cache.load(&url, 1024).is_none());
+        let hit = cache
+            .load_offline(&url)
+            .expect("ok")
+            .expect("newer redir wins");
+        assert_eq!(hit.final_url, target);
+        assert_eq!(hit.body, b"target");
+
+        // Simulate crash leaving newer tombstone ("0003") alongside older entry + redirect.
+        cache
+            .write_tombstone(&url, "0003")
+            .expect("write newer tomb");
+        assert_eq!(cache.state(&url).as_deref(), Some("0003"));
+        assert!(
+            cache.load_offline(&url).expect("ok").is_none(),
+            "newer tombstone wins over entry and redirect"
+        );
+    }
+
+    #[test]
+    fn no_store_on_3xx_and_redirect_target_clears_or_tombstones_prior_redirect() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let requested = Url::parse("https://example.test/start.js").expect("requested");
+        let target = Url::parse("https://cdn.example.test/v1.js").expect("target");
+        let next_target = Url::parse("https://cdn.example.test/v2.js").expect("next");
+        let options = RemoteOptions::new().with_cache_dir(dir.path());
+        let cache = super::Cache::new(dir.path());
+
+        // 1. Prime cacheable redirect: requested -> target (200 max-age=60).
+        let t1 = ScriptedTransport::new(vec![
+            cacheable_redirect("https://cdn.example.test/v1.js"),
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: None,
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"v1".to_vec())),
+            },
+        ]);
+        client(options.clone(), t1)
+            .fetch(&requested)
+            .expect("prime redirect");
+        assert_eq!(
+            cache
+                .load_offline(&requested)
+                .expect("ok")
+                .expect("v1")
+                .body,
+            b"v1"
+        );
+
+        // 2. First hop returns `302 Cache-Control: no-store` -> tombstones `requested`,
+        // clears prior `.redir`, and does not publish a new `.redir`.
+        let t2 = ScriptedTransport::new(vec![
+            response(302, Some("https://cdn.example.test/v2.js"), ""),
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: None,
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"v2".to_vec())),
+            },
+        ]);
+        let fetched = client(options.clone(), t2)
+            .fetch(&requested)
+            .expect("302 no-store fetch");
+        assert_eq!(fetched.final_url, next_target);
+        assert_eq!(fetched.body, b"v2");
+        assert!(cache.read_redirect(&requested).is_none());
+        assert!(cache.load_offline(&requested).expect("ok").is_none());
+
+        // 3. Re-prime cacheable redirect, then have final 200 return `Cache-Control: no-store`.
+        // Must clear/tombstone `requested` so stale `v1` is not served offline.
+        let t3 = ScriptedTransport::new(vec![
+            cacheable_redirect("https://cdn.example.test/v1.js"),
+            RemoteResponse {
+                status: 200,
+                location: None,
+                declared_length: None,
+                etag: None,
+                last_modified: None,
+                cache_control: Some("max-age=60".to_string()),
+                date: None,
+                age: None,
+                body: Box::new(std::io::Cursor::new(b"v1".to_vec())),
+            },
+        ]);
+        client(options.clone(), t3)
+            .fetch(&requested)
+            .expect("re-prime");
+        assert!(cache.load_offline(&requested).expect("ok").is_some());
+
+        let t4 = ScriptedTransport::new(vec![
+            cacheable_redirect("https://cdn.example.test/v3-no-store.js"),
+            response(200, None, "secret-v3"),
+        ]);
+        client(options.clone(), t4)
+            .fetch(&requested)
+            .expect("redirect to no-store 200");
+        assert!(cache.read_redirect(&requested).is_none());
+        assert!(
+            cache.load_offline(&requested).expect("ok").is_none(),
+            "stale redirect must not survive redirect to a no-store target"
+        );
+
+        // 4. Subsequent 3xx hop (`redirects > 0`) with `no-store` also suppresses `.redir`.
+        let hop2 = Url::parse("https://example.test/hop2.js").expect("hop2");
+        let t5 = ScriptedTransport::new(vec![
+            cacheable_redirect("https://example.test/hop2.js"),
+            response(302, Some("https://cdn.example.test/v1.js"), ""),
+        ]);
+        let fetched = client(options, t5).fetch(&requested).expect("multi-hop");
+        assert_eq!(fetched.final_url, target);
+        assert!(cache.read_redirect(&requested).is_none());
+        assert!(cache.read_redirect(&hop2).is_none());
+        assert!(cache.load_offline(&requested).expect("ok").is_none());
     }
 }

@@ -682,6 +682,7 @@ fn registry_failure(action: &str, subject: &str, error: RegistryError) -> LoadFa
         RegistryError::Unavailable(reason) => {
             format!("the registry could not provide the {action} for `{subject}`: {reason}")
         }
+        other => format!("the registry could not provide the {action} for `{subject}`: {other}"),
     };
     LoadFailure::new(reason)
 }

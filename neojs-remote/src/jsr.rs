@@ -53,7 +53,10 @@
 //!
 //! [`VersionMetadata::verify_file`] checks a file's byte length and
 //! `sha256-<lowercase hex>` checksum against the manifest before a later loader
-//! executes those bytes.
+//! executes those bytes. That verifies downloaded content against the retrieved
+//! metadata; it does not establish publisher identity and is not an
+//! authentication boundary for the local cache (an attacker who consistently
+//! rewrites both a cached manifest and a cached body can keep them matching).
 //!
 //! # Limits
 //!
@@ -148,6 +151,7 @@ impl Default for Limits {
 
 /// A failure while parsing or resolving JSR metadata.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// A `jsr:` specifier is malformed.
     #[error("invalid jsr: specifier: {0}")]
@@ -179,6 +183,7 @@ pub enum Error {
 /// [`Self::Redirect`] location or an [`Self::Unavailable`] reason; both are
 /// shown to the program and the user.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RegistryError {
     /// The registry (or offline cache) has no such package, version, or file.
     #[error("the registry document was not found")]
@@ -273,7 +278,12 @@ pub struct CacheRegistry {
 }
 
 impl CacheRegistry {
-    /// Creates an offline registry over `cache` with [`DEFAULT_MAX_MODULE_BYTES`].
+    /// Creates an offline registry over `cache` with a per-file cap of
+    /// [`DEFAULT_MAX_MODULE_BYTES`] (16 MiB).
+    ///
+    /// Absent, tombstoned, corrupt, or oversized entries return
+    /// [`RegistryError::NotFound`]. Invalid URLs, redirect loops, and excess
+    /// redirect hops return [`RegistryError::Unavailable`].
     pub fn new(cache: Cache) -> Self {
         Self {
             cache,
@@ -281,7 +291,13 @@ impl CacheRegistry {
         }
     }
 
-    /// Creates an offline registry over `cache` with an explicit byte cap.
+    /// Creates an offline registry over `cache` with an explicit
+    /// `max_file_bytes` cap in bytes.
+    ///
+    /// Cached metadata documents or files larger than `max_file_bytes` bytes,
+    /// as well as absent, tombstoned, or corrupt entries, return
+    /// [`RegistryError::NotFound`]. Redirect loops and excess hops return
+    /// [`RegistryError::Unavailable`].
     pub fn with_max_file_bytes(cache: Cache, max_file_bytes: usize) -> Self {
         Self {
             cache,
@@ -1480,7 +1496,6 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use std::sync::Arc;
 
     use super::*;
@@ -2170,7 +2185,7 @@ mod tests {
             .expect("verify live");
 
         // Now resolve completely offline via CacheRegistry.
-        let offline_registry = CacheRegistry::new(Cache::new(Path::new(dir.path()).to_path_buf()));
+        let offline_registry = CacheRegistry::new(Cache::new(dir.path()));
         let off_pkg = PackageMetadata::parse(
             &offline_registry
                 .package_metadata(&spec.package)
@@ -2199,6 +2214,119 @@ mod tests {
             offline_registry.package_metadata(&missing),
             Err(RegistryError::NotFound)
         );
+    }
+
+    #[test]
+    fn cache_registry_enforces_max_file_bytes_tombstones_yanked_and_integrity() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pkg_json =
+            r#"{"scope":"scope","name":"pkg","versions":{"1.0.0":{},"1.0.1":{"yanked":true}}}"#;
+        let yanked_ver_json = format!(
+            r#"{{"manifest":{{"/mod.ts":{{"size":{},"checksum":"{MOD_SHA}"}}}},"exports":{{".":"./mod.ts"}}}}"#,
+            MOD_FILE.len()
+        );
+        let tampered_bytes = b"export const value = 9;\n".to_vec();
+
+        let transport: Arc<dyn RemoteTransport> =
+            crate::remote::test_transport(move |url, _, _, _| {
+                let (status, cache_control, body) = match url {
+                    "https://jsr.io/@scope/pkg/meta.json" => {
+                        (200, Some("max-age=60"), pkg_json.as_bytes().to_vec())
+                    }
+                    "https://jsr.io/@scope/pkg/1.0.0_meta.json" => {
+                        (200, Some("max-age=60"), VERSION_JSON.as_bytes().to_vec())
+                    }
+                    "https://jsr.io/@scope/pkg/1.0.1_meta.json" => {
+                        (200, Some("max-age=60"), yanked_ver_json.as_bytes().to_vec())
+                    }
+                    "https://jsr.io/@scope/pkg/1.0.0/mod.ts" => {
+                        (200, Some("max-age=60"), MOD_FILE.to_vec())
+                    }
+                    "https://jsr.io/@scope/pkg/1.0.1/mod.ts" => {
+                        (200, Some("max-age=60"), tampered_bytes.clone())
+                    }
+                    "https://jsr.io/@scope/tomb/meta.json" => {
+                        (200, Some("no-store"), pkg_json.as_bytes().to_vec())
+                    }
+                    other => return Err(format!("unexpected URL: {other}")),
+                };
+                Ok(TestRemoteResponse {
+                    status,
+                    cache_control: cache_control.map(str::to_owned),
+                    body,
+                    ..Default::default()
+                })
+            });
+
+        let client = RemoteClient::with_transport(
+            RemoteOptions::new().with_cache_dir(dir.path()),
+            transport,
+        );
+        let remote_registry = RemoteRegistry::new(client);
+        let pkg = PackageId::new("scope", "pkg").expect("pkg");
+        let v100 = PackageVersion {
+            package: pkg.clone(),
+            version: Version::parse("1.0.0").expect("v100"),
+        };
+        let v101 = PackageVersion {
+            package: pkg.clone(),
+            version: Version::parse("1.0.1").expect("v101"),
+        };
+        let tomb_pkg = PackageId::new("scope", "tomb").expect("tomb");
+
+        // Warm all entries (including a `no-store` tombstone on `@scope/tomb`).
+        remote_registry.package_metadata(&pkg).expect("pkg");
+        remote_registry.version_metadata(&v100).expect("v100 meta");
+        remote_registry.version_metadata(&v101).expect("v101 meta");
+        remote_registry.file(&v100, "/mod.ts").expect("v100 file");
+        remote_registry.file(&v101, "/mod.ts").expect("v101 file");
+        remote_registry.package_metadata(&tomb_pkg).expect("tomb");
+
+        let offline = CacheRegistry::new(Cache::new(dir.path()));
+
+        // Range skips yanked `1.0.1` and picks `1.0.0`; exact `1.0.1` selects yanked.
+        let off_pkg = PackageMetadata::parse(&offline.package_metadata(&pkg).expect("off pkg"))
+            .expect("parse off pkg");
+        let ranged = off_pkg
+            .select(
+                &Specifier::parse("jsr:@scope/pkg@1")
+                    .expect("spec")
+                    .constraint,
+            )
+            .expect("ranged");
+        assert_eq!(ranged.version.to_string(), "1.0.0");
+        assert!(!ranged.yanked);
+        let exact_yanked = off_pkg
+            .select(
+                &Specifier::parse("jsr:@scope/pkg@1.0.1")
+                    .expect("spec")
+                    .constraint,
+            )
+            .expect("exact yanked");
+        assert_eq!(exact_yanked.version.to_string(), "1.0.1");
+        assert!(exact_yanked.yanked);
+
+        // Tombstoned entry returns `RegistryError::NotFound`.
+        assert_eq!(
+            offline.package_metadata(&tomb_pkg),
+            Err(RegistryError::NotFound)
+        );
+
+        // Tampered cached file fails `VersionMetadata::verify_file`.
+        let off_v101_meta = VersionMetadata::parse(
+            &offline.version_metadata(&v101).expect("off v101 meta"),
+            v101.clone(),
+        )
+        .expect("parse v101");
+        let bad_bytes = offline.file(&v101, "/mod.ts").expect("load tampered bytes");
+        let verify_err = off_v101_meta
+            .verify_file("/mod.ts", &bad_bytes)
+            .expect_err("checksum mismatch must fail");
+        assert!(matches!(verify_err, Error::Integrity(_)), "{verify_err}");
+
+        // `with_max_file_bytes` rejects an oversized cached file as `NotFound`.
+        let small = CacheRegistry::with_max_file_bytes(Cache::new(dir.path()), 8);
+        assert_eq!(small.file(&v100, "/mod.ts"), Err(RegistryError::NotFound));
     }
 
     #[test]
