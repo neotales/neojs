@@ -1773,20 +1773,24 @@ cargo run -p neojs-lite-core --example embed -- examples/hello.js
 cargo build -p neojs-lite
 ```
 
-The QuickJS runtime currently runs `.js`, `.mjs`, and extensionless ECMAScript modules, resolves
+The QuickJS runtime runs `.js`, `.mjs`, extensionless ECMAScript modules, and (with the default
+`typescript` feature enabled) erasable TypeScript in `.ts` and `.mts` files via the shared
+`neojs-module-policy` stripper (preserving line and column numbers for stack traces). It resolves
 relative imports and `file:` URLs, and awaits top-level `await` that settles from QuickJS's job
 queue. It then drains queued jobs, bounded at 100,000, so trailing `.then` callbacks and unawaited
 dynamic imports still run; a nonconverging job chain or a throwing queued job fails closed, and a
 promise still rejected without a handler when the queue empties is an error; rejection diagnostics use
 primitive values and an Error's own data without invoking getters, proxies, `toString`, or `String`.
-It does **not** implement TypeScript, host asynchrony or timers, most `neo:` built-in modules,
-permissions, or a sandbox, and it does not claim parity with the V8 runtime. It installs a minimal
-`Neo` global whose engine is `"neo-lite"`; with the default `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`,
-`neo-strings`, `neo-test`, and `neo-uuid` features its built-in module list is the canonical
+It does **not** implement non-erasable TypeScript (`enum`, `namespace`, parameter properties), JSX/TSX,
+type checking, host asynchrony or timers, most `neo:` built-in modules, permissions, or a sandbox, and
+it does not claim parity with the V8 runtime. It installs a minimal `Neo` global whose engine is
+`"neo-lite"`; with the default `neo-assert`, `neo-chars`, `neo-fs`, `neo-os`, `neo-strings`,
+`neo-test`, `neo-uuid`, and `typescript` features its built-in module list is the canonical
 `["neo:assert", "neo:chars", "neo:fs", "neo:os", "neo:strings", "neo:test", "neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]`.
 `Neo.getBuiltInModule(specifier)` returns the frozen registry object whose named exports share
 identity with the module namespace exports; the namespace itself is a distinct object. With
-`default-features = false` the list is empty. A bare name, another scheme, or any other specifier
+`default-features = false` the list is empty and `typescript` (along with `deno_ast`) is disabled,
+so `.ts`/`.mts` files are rejected as unsupported entries. A bare name, another scheme, or any other specifier
 returns `undefined`, and a non-string name throws `TypeError`. All shared modules come from the
 engine-neutral `neojs-builtins` crate (`chars`, `os`, `strings`, and `uuid` bound as native QuickJS
 modules; `assert` and `test` evaluated from shared ECMAScript factories with native QuickJS Promise
@@ -1829,9 +1833,10 @@ SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
 authentication, the built-in module registry and its `Neo.engine` and `Neo.getBuiltInModulesList`
 introspection, and the embedding API above. The QuickJS runtime (`neojs-lite-core` / `neojs-lite`)
-reports `Neo.engine` `"neo-lite"` and implements the shared `neo:assert`, `neo:chars`, `neo:fs`, `neo:os`,
+reports `Neo.engine` `"neo-lite"` and enables erasable TypeScript (`.ts`/`.mts`, opt-outable via
+`--no-default-features`) plus the shared `neo:assert`, `neo:chars`, `neo:fs`, `neo:os`,
 `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` modules by default (or an
-empty list with `default-features = false`); other V8 modules and TypeScript remain absent there.
+empty list and no TypeScript stripping with `default-features = false`); other V8 modules remain absent there.
 Features outside this list are not implemented.
 
 - TypeScript has no type checking and no transpilation. Only syntax that can be erased is accepted:

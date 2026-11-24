@@ -159,7 +159,7 @@ if (greet("lite") !== "hello lite" || add(3, 4) !== 7 || fromA !== "member-a" ||
 }
 
 #[test]
-fn rejects_remote_targets_and_typescript_and_preserves_builtins() {
+fn resolves_manifest_targets_rejects_remote_and_preserves_builtins() {
     let dir = TempDir::new().expect("temp dir");
     let manifest_path = write(
         dir.path(),

@@ -442,8 +442,9 @@ impl Runtime {
     /// `Workspace::load` when `workspaces` is non-empty), and passing
     /// `ImportResolver::from_manifest` or `ImportResolver::from_workspace`
     /// here. Local `imports` and workspace `@scope/pkg` references resolve to
-    /// local `.js`/`.mjs` modules; remote targets (`https:`, `gh:`, `jsr:`,
-    /// `npm:`) are rejected because remote loading is not supported in
+    /// local `.js`/`.mjs`/`.ts`/`.mts` modules (with `.ts`/`.mts` stripped when
+    /// the `typescript` feature is enabled); remote targets (`https:`, `gh:`,
+    /// `jsr:`, `npm:`) are rejected because remote loading is not supported in
     /// `neojs-lite-core`.
     ///
     /// # Example

@@ -31,7 +31,7 @@ opt-in `manifest` feature enabled, embedders can depend on `neojs-manifest`,
 build an `ImportResolver` with `discover_manifest` (`ImportResolver::from_manifest`
 or `Workspace::load` + `ImportResolver::from_workspace`), and pass it to
 `Runtime::with_import_resolver(resolver)` to resolve `neo.jsonc` `imports` and
-workspace `@scope/pkg` references to local `.js`/`.mjs` modules (remote
+workspace `@scope/pkg` references to local `.js`/`.mjs`/`.ts`/`.mts` modules (remote
 `https:`, `gh:`, `jsr:`, and `npm:` targets are rejected); `Runtime::new()`
 performs zero implicit manifest discovery. `console.log` writes to standard
 output and `console.error` to standard error.
@@ -132,9 +132,10 @@ and [`neojs-fs-core/README.md`](../neojs-fs-core/README.md) for the precise limi
 ## Lifecycle
 
 A runtime evaluates one entry. A preflight failure (unsupported format,
-unreadable file) leaves it unused, so another entry can be tried. Once
-evaluation starts, the runtime is consumed even if evaluation, the job drain, or
-an unhandled rejection fails. Create a new runtime for subsequent work.
+unreadable file, or TypeScript strip failure) leaves it unused, so another entry
+can be tried. Once evaluation starts, the runtime is consumed even if evaluation,
+the job drain, or an unhandled rejection fails. Create a new runtime for
+subsequent work.
 
 After the entry promise settles, the runtime drains the remaining QuickJS job
 queue, so a trailing `.then` or an unawaited dynamic import still runs. The

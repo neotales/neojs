@@ -31,9 +31,10 @@ When an `ImportResolver` is installed:
   referrers cannot use `imports` or `workspaces` to escape into local `file:` paths.
 - In `neojs` (V8), `https:`, `gh:`/`github:`, and `jsr:` targets in `imports` still fail closed
   unless `--allow-remote` (or `NEOJS_ALLOW_REMOTE=1` / `RuntimeOptions::with_remote`) is enabled.
-- In `neojs-lite` (QuickJS), local `imports` and workspace `@scope/pkg` targets resolve to `.js` /
-  `.mjs` files, while `https:`, `gh:`, `jsr:`, and `npm:` targets fail with a clear error stating
-  remote loading is not supported in `neojs-lite`.
+- In `neojs-lite` (QuickJS), local `imports` and workspace `@scope/pkg` targets resolve to `.js`,
+  `.mjs`, `.ts`, and `.mts` files (with `.ts`/`.mts` stripped when the default `typescript` feature is
+  enabled, or rejected when built with `--no-default-features`), while `https:`, `gh:`, `jsr:`, and
+  `npm:` targets fail with a clear error stating remote loading is not supported in `neojs-lite`.
 - `npm:` and `node:` imports remain rejected at module resolution.
 
 ## JSONC dialect

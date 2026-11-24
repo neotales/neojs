@@ -11,15 +11,16 @@ Jobs:
   checks `rustfmt`, runs `clippy -D warnings` across workspace/builtins/lite feature
   combinations, and runs `shellcheck` on `eng/size/*.sh`.
 - **test-v8**: Runs `cargo test --locked` and, when `tests/js/shared/*.test.js`
-  exists, runs `cargo run --locked -p neojs -- test 'tests/js/shared/*.test.js'`.
+  or `tests/js/shared/*.test.ts` exist, runs `cargo run --locked -p neojs -- test`
+  over those shared files.
 - **test-lite**: Runs `neojs-builtins`, `neojs-lite-core`, and `neojs-lite` tests
   across default and `--no-default-features` configurations, plus `neojs-lite`
-  shared JS tests once `tests/js/shared/*.test.js` and the `neojs-lite test`
+  shared JS/TS tests once `tests/js/shared/*.test.{js,ts}` and the `neojs-lite test`
   subcommand exist.
 - **engine-isolation**: Verifies via `cargo tree --locked` that the default
   workspace and `neojs` graphs contain no `rquickjs`, that `neojs-lite` contains
   no `deno_core`/`deno_v8`/`v8`, and that `neojs-lite-core --no-default-features`
-  omits `neojs-builtins` as well.
+  omits `deno_ast` and `neojs-builtins` as well.
 - **size-gate**: Populates Cargo metadata (`cargo fetch --locked`) and runs
   `bash eng/size/check.sh`.
 

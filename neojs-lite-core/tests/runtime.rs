@@ -631,15 +631,17 @@ fn rejects_jsx_commonjs_typescript_and_declarations() {
 #[test]
 fn imports_mix_typescript_and_javascript() {
     let dir = tempfile::tempdir().expect("temp dir");
+    write(&dir, "lib/offset.mjs", "export const OFFSET = 3;\n");
     write(
         &dir,
         "lib/shapes.ts",
         r#"
+import { OFFSET } from "./offset.mjs";
 export interface Circle {
     radius: number;
 }
 export function area(radius: number): number {
-    return radius * radius;
+    return radius * radius + OFFSET;
 }
 "#,
     );
@@ -651,7 +653,7 @@ export const twice = (n: number): number => n * 2;
 export const label: string = "mts";
 "#,
     );
-    let main = write(
+    let ts_main = write(
         &dir,
         "main.ts",
         r#"
@@ -661,14 +663,30 @@ import { area } from "./lib/shapes.ts";
 const dynamic = await import("./lib/dynamic.mts");
 const c: Circle = { radius: 3 };
 const check = area(c.radius) + dynamic.twice(21);
-if (check !== 51 || dynamic.label !== "mts") {
+if (check !== 54 || dynamic.label !== "mts") {
     throw new Error(`unexpected result: ${check} ${dynamic.label}`);
 }
 "#,
     );
+    let js_main = write(
+        &dir,
+        "entry.js",
+        r#"
+import { area } from "./lib/shapes.ts";
+const dynamic = await import("./lib/dynamic.mts");
+if (area(4) !== 19 || dynamic.twice(5) !== 10) {
+    throw new Error("JS -> TS/MTS import failed");
+}
+"#,
+    );
 
-    let mut runtime = Runtime::new().expect("runtime");
-    runtime.run_file(&main).expect("mixed TS/JS imports");
+    let mut ts_runtime = Runtime::new().expect("runtime");
+    ts_runtime
+        .run_file(&ts_main)
+        .expect("TS -> TS/MJS/MTS imports");
+
+    let mut js_runtime = Runtime::new().expect("runtime");
+    js_runtime.run_file(&js_main).expect("JS -> TS/MTS imports");
 }
 
 #[cfg(feature = "typescript")]

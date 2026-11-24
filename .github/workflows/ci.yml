@@ -99,15 +99,15 @@ jobs:
       - name: Run V8 workspace tests
         run: cargo test --locked
 
-      - name: Run shared JS tests on neojs (if present)
+      - name: Run shared JS/TS tests on neojs (if present)
         run: |
           set -euo pipefail
           shopt -s nullglob
-          shared_tests=(tests/js/shared/*.test.js)
+          shared_tests=(tests/js/shared/*.test.js tests/js/shared/*.test.ts)
           if [ "${#shared_tests[@]}" -gt 0 ]; then
-            cargo run --locked -p neojs -- test 'tests/js/shared/*.test.js'
+            cargo run --locked -p neojs -- test "${shared_tests[@]}"
           else
-            echo "No shared JS tests found under tests/js/shared/*.test.js; skipping."
+            echo "No shared JS/TS tests found under tests/js/shared/*.test.{js,ts}; skipping."
           fi
 
   test-lite:
@@ -142,20 +142,20 @@ jobs:
       - name: Test neojs-lite-core (--no-default-features)
         run: cargo test --locked -p neojs-lite-core --no-default-features
 
-      - name: Run shared JS tests on neojs-lite (if present and supported)
+      - name: Run shared JS/TS tests on neojs-lite (if present and supported)
         run: |
           set -euo pipefail
           shopt -s nullglob
-          shared_tests=(tests/js/shared/*.test.js)
+          shared_tests=(tests/js/shared/*.test.js tests/js/shared/*.test.ts)
           if [ "${#shared_tests[@]}" -eq 0 ]; then
-            echo "No shared JS tests found under tests/js/shared/*.test.js; skipping."
+            echo "No shared JS/TS tests found under tests/js/shared/*.test.{js,ts}; skipping."
             exit 0
           fi
           if cargo run --locked -p neojs-lite -- test --help >/dev/null 2>&1 \
             || cargo run --locked -p neojs-lite -- --help | grep -Eq '(^|[[:space:]])test([[:space:]]|$)'; then
-            cargo run --locked -p neojs-lite -- test 'tests/js/shared/*.test.js'
+            cargo run --locked -p neojs-lite -- test "${shared_tests[@]}"
           else
-            echo "neojs-lite 'test' subcommand not available yet; skipping shared JS tests."
+            echo "neojs-lite 'test' subcommand not available yet; skipping shared JS/TS tests."
           fi
 
   engine-isolation:
@@ -203,9 +203,9 @@ jobs:
           fi
 
           lite_core_minimal_tree=$(cargo tree --locked -p neojs-lite-core --no-default-features --prefix none)
-          if grep -Eq '^(deno_core|deno_v8|v8|neojs-builtins) v' <<<"${lite_core_minimal_tree}"; then
-            echo "ERROR: neojs-lite-core --no-default-features graph unexpectedly contains V8, deno_core, or neojs-builtins" >&2
-            grep -E '^(deno_core|deno_v8|v8|neojs-builtins) v' <<<"${lite_core_minimal_tree}" >&2
+          if grep -Eq '^(deno_ast|deno_core|deno_v8|v8|neojs-builtins) v' <<<"${lite_core_minimal_tree}"; then
+            echo "ERROR: neojs-lite-core --no-default-features graph unexpectedly contains deno_ast, V8, deno_core, or neojs-builtins" >&2
+            grep -E '^(deno_ast|deno_core|deno_v8|v8|neojs-builtins) v' <<<"${lite_core_minimal_tree}" >&2
             exit 1
           fi
 
