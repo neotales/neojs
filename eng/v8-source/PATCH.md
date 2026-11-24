@@ -95,7 +95,13 @@ any source. It publishes the archive plus `provenance.txt` under
 and file count, patch/file hashes, builder-lock hash, archive hash and size.
 `--run-root-only` and `--check-procedure-only` are test-only modes used by
 `eng/v8-source/test-build-bounded.sh` to prove unique run roots and helper
-verification/rejection. The V8 tree and archive are not committed.
+verification/rejection. The build saves the pre-build procedure revision,
+helper-tree object and helper file count, then re-verifies the same values
+after the build and fails if the procedure switched to another clean commit;
+the post-check never overwrites the identity written to provenance.
+`--check-procedure-only --expect-rev/--expect-helper-tree/--expect-helper-files`
+lets the regression test exercise a clean commit switch without a V8 rebuild.
+The V8 tree and archive are not committed.
 
 The procedure check is deliberately stronger than `git status`:
 `git status --porcelain --untracked-files=all --ignored -- eng/v8-source` must
@@ -104,8 +110,14 @@ be empty, so an ignored helper cannot hide. Every file in the recorded
 Git executable bit, and must byte-match the recorded blob. The known executed
 helpers (`prepare.sh`, `validate_tar.py`, `verify_git_tree.py`,
 `materialize_git_tree.py`) must be tracked. The check runs again after the
-long build so provenance describes the same helper identity. This is drift and
-identity verification, not attacker authentication.
+long build and compares against the saved pre-build revision, helper-tree
+object and file count; a clean checkout that switches commits mid-build fails
+before provenance is written. This catches a switch that persists to the
+post-check. A switch that is reverted before the post-check is not
+distinguishable by this check, so the procedure worktree must not be changed
+concurrently while a build runs. This is drift and identity verification, not
+attacker authentication. The pre/post comparison is script-only, so the
+regression test covers it without rebuilding V8.
 
 Observed local build (Linux x86_64, 12 jobs, 31m05s):
 

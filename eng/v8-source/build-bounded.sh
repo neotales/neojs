@@ -22,13 +22,33 @@ CACHE=${NEOTALES_V8_CACHE:?set NEOTALES_V8_CACHE to the verified prepared cache}
 BUILD=${NEOJS_V8_BUILD_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/neotales/neojs-node-v8-build}
 JOBS=${NUM_JOBS:-12}
 MODE=build
-case ${1:-} in
-    --prepare-only) MODE=prepare ;;
-    --run-root-only) MODE=run-root ;;
-    --check-procedure-only) MODE=check-procedure ;;
-    "") ;;
-    *) echo "usage: $0 [--prepare-only | --run-root-only | --check-procedure-only]" >&2; exit 2 ;;
-esac
+EXPECT_REV=
+EXPECT_HELPER_TREE=
+EXPECT_HELPER_FILES=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --prepare-only) MODE=prepare ;;
+        --run-root-only) MODE=run-root ;;
+        --check-procedure-only) MODE=check-procedure ;;
+        --expect-rev)
+            [ $# -ge 2 ] || { echo "usage: $0 --expect-rev needs a value" >&2; exit 2; }
+            EXPECT_REV=$2
+            shift
+            ;;
+        --expect-helper-tree)
+            [ $# -ge 2 ] || { echo "usage: $0 --expect-helper-tree needs a value" >&2; exit 2; }
+            EXPECT_HELPER_TREE=$2
+            shift
+            ;;
+        --expect-helper-files)
+            [ $# -ge 2 ] || { echo "usage: $0 --expect-helper-files needs a value" >&2; exit 2; }
+            EXPECT_HELPER_FILES=$2
+            shift
+            ;;
+        *) echo "usage: $0 [--prepare-only | --run-root-only | --check-procedure-only] [--expect-rev REV] [--expect-helper-tree TREE] [--expect-helper-files N]" >&2; exit 2 ;;
+    esac
+    shift
+done
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$SCRIPT_DIR/../.." && pwd)
@@ -65,9 +85,13 @@ new_run_root() {
 # helper directory with --ignored and compare every HEAD helper's bytes and
 # executable bit. The recorded commit is the identity, not a signature.
 verify_procedure() {
+    local expected_rev=${1:-}
+    local expected_tree=${2:-}
+    local expected_files=${3:-}
     [ -x "$PROCEDURE/eng/v8-source/prepare.sh" ] ||
         die "missing verified prepare.sh in $PROCEDURE"
-    PROCEDURE_REV=$(git -C "$PROCEDURE" rev-parse HEAD) ||
+    local rev
+    rev=$(git -C "$PROCEDURE" rev-parse HEAD) ||
         die "cannot read procedure HEAD in $PROCEDURE"
     local status
     status=$(git -C "$PROCEDURE" status --porcelain --untracked-files=normal) ||
@@ -83,17 +107,18 @@ verify_procedure() {
         die "procedure helper directory has untracked, ignored, staged, or modified entries"
     fi
 
-    PROCEDURE_HELPER_TREE=$(git -C "$PROCEDURE" rev-parse "$PROCEDURE_REV:eng/v8-source") ||
-        die "procedure has no eng/v8-source tree at $PROCEDURE_REV"
+    local tree
+    tree=$(git -C "$PROCEDURE" rev-parse "$rev:eng/v8-source") ||
+        die "procedure has no eng/v8-source tree at $rev"
     for helper in prepare.sh validate_tar.py verify_git_tree.py materialize_git_tree.py; do
-        git -C "$PROCEDURE" cat-file -e "$PROCEDURE_REV:eng/v8-source/$helper" 2>/dev/null ||
-            die "procedure helper is not tracked at $PROCEDURE_REV: $helper"
+        git -C "$PROCEDURE" cat-file -e "$rev:eng/v8-source/$helper" 2>/dev/null ||
+            die "procedure helper is not tracked at $rev: $helper"
     done
 
     local list=$BUILD/.procedure-helpers.$$
-    git -C "$PROCEDURE" ls-tree -r -z "$PROCEDURE_REV" -- eng/v8-source > "$list" ||
+    git -C "$PROCEDURE" ls-tree -r -z "$rev" -- eng/v8-source > "$list" ||
         die "cannot list procedure helpers in $PROCEDURE"
-    PROCEDURE_HELPER_FILES=0
+    local files=0
     local record meta path mode rest type blob actual
     while IFS= read -r -d '' record; do
         meta=${record%%$'\t'*}
@@ -112,12 +137,25 @@ verify_procedure() {
             *) die "procedure helper has unsupported git mode $mode: $path" ;;
         esac
         git -C "$PROCEDURE" cat-file blob "$blob" | cmp -s - "$actual" ||
-            die "procedure helper does not match $PROCEDURE_REV: $path"
-        PROCEDURE_HELPER_FILES=$((PROCEDURE_HELPER_FILES + 1))
+            die "procedure helper does not match $rev: $path"
+        files=$((files + 1))
     done < "$list"
     rm -f "$list"
-    [ "$PROCEDURE_HELPER_FILES" -gt 0 ] ||
-        die "procedure helper directory is empty"
+    [ "$files" -gt 0 ] || die "procedure helper directory is empty"
+
+    if [ -n "$expected_rev" ] && [ "$rev" != "$expected_rev" ]; then
+        die "procedure revision changed during the build: got $rev, expected $expected_rev"
+    fi
+    if [ -n "$expected_tree" ] && [ "$tree" != "$expected_tree" ]; then
+        die "procedure helper tree changed during the build: got $tree, expected $expected_tree"
+    fi
+    if [ -n "$expected_files" ] && [ "$files" != "$expected_files" ]; then
+        die "procedure helper file count changed during the build: got $files, expected $expected_files"
+    fi
+
+    PROCEDURE_REV=$rev
+    PROCEDURE_HELPER_TREE=$tree
+    PROCEDURE_HELPER_FILES=$files
 }
 
 BUILD=$(canon "$BUILD")
@@ -142,13 +180,17 @@ if [ "$MODE" = run-root ]; then
     exit 0
 fi
 
-verify_procedure
-
 if [ "$MODE" = check-procedure ]; then
+    verify_procedure "$EXPECT_REV" "$EXPECT_HELPER_TREE" "$EXPECT_HELPER_FILES"
     printf 'procedure %s helper-tree %s files %s\n' \
         "$PROCEDURE_REV" "$PROCEDURE_HELPER_TREE" "$PROCEDURE_HELPER_FILES"
     exit 0
 fi
+
+verify_procedure
+PROCEDURE_REV_BEFORE=$PROCEDURE_REV
+PROCEDURE_HELPER_TREE_BEFORE=$PROCEDURE_HELPER_TREE
+PROCEDURE_HELPER_FILES_BEFORE=$PROCEDURE_HELPER_FILES
 
 [ -f "$PATCH" ] || die "missing $PATCH"
 [ -f "$BUILDER_LOCK" ] || die "missing $BUILDER_LOCK"
@@ -226,9 +268,10 @@ grep -q neojs_v8_get_own_enumerable_string_keys_bounded "$RUN_ROOT/symbols.txt" 
 cp "$ARCHIVE" "$ARTIFACT/librusty_v8.a"
 ARCHIVE_SHA=$(sha256sum "$ARTIFACT/librusty_v8.a" | cut -d' ' -f1)
 ARCHIVE_SIZE=$(stat -c %s "$ARTIFACT/librusty_v8.a")
-# Re-check after the long build so provenance describes the same procedure
-# identity and the same helper bytes that were used.
-verify_procedure
+# Re-check after the long build and fail if the procedure switched to another
+# clean commit. Do not let the post-check overwrite the pre-build identity
+# recorded in provenance.
+verify_procedure "$PROCEDURE_REV_BEFORE" "$PROCEDURE_HELPER_TREE_BEFORE" "$PROCEDURE_HELPER_FILES_BEFORE"
 LOCK_SHA=$(sha256sum "$BUILDER_LOCK" | cut -d' ' -f1)
 cat > "$ARTIFACT/provenance.txt" <<EOF
 built_utc=$BUILT_UTC
@@ -241,11 +284,11 @@ patched_keys_h=$KEYS_H_SHA
 patched_keys_cc=$KEYS_CC_SHA
 patched_api_cc=$API_CC_SHA
 builder_lock_sha256=$LOCK_SHA
-procedure_commit=$PROCEDURE_REV
+procedure_commit=$PROCEDURE_REV_BEFORE
 procedure_status=clean
 procedure_helpers=verified
-procedure_helper_tree=$PROCEDURE_HELPER_TREE
-procedure_helper_files=$PROCEDURE_HELPER_FILES
+procedure_helper_tree=$PROCEDURE_HELPER_TREE_BEFORE
+procedure_helper_files=$PROCEDURE_HELPER_FILES_BEFORE
 cache=$CACHE
 archive_sha256=$ARCHIVE_SHA
 archive_size=$ARCHIVE_SIZE

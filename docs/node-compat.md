@@ -138,7 +138,12 @@ patch and post-patch file hashes, rejects overlapping build roots, and verifies
 the procedure helper code it executes. That check rejects ignored, untracked,
 staged, modified or mode-changed entries under `eng/v8-source`, and requires
 every recorded helper to be a regular non-symlink file whose bytes and Git
-executable bit match the recorded commit. It locks the output root, uses the
+executable bit match the recorded commit. It saves the pre-build revision,
+helper-tree object and file count, re-verifies them after the build, and fails
+if a clean checkout switched commits mid-build; the post-check does not
+overwrite the identity written to provenance. A switch that is reverted before
+the post-check is not distinguishable, so the procedure worktree must not be
+changed concurrently while a build runs. It locks the output root, uses the
 committed `builder.lock` with `--locked` (pinning `bindgen 0.72.1`), builds with
 `V8_FROM_SOURCE`, and prints the archive path and hash. Every run gets a unique
 `mktemp -d` run root, so target and artifact directories are never reused. The

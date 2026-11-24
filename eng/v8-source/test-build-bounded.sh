@@ -3,8 +3,9 @@
 #
 # This does not run a V8 build. It checks that two runs with the same clock
 # second still get distinct `mktemp -d` run roots, that the clean procedure
-# helper set is accepted, and that ignored, untracked, modified, or
-# mode-changed helpers are rejected.
+# helper set is accepted, that ignored, untracked, modified, or mode-changed
+# helpers are rejected, and that a clean switch to another commit fails the
+# post-check comparison.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -55,16 +56,18 @@ make_procedure() {
 
 check_procedure() {
     local proc=$1
+    shift
     PATH="$TEST_ROOT/bin:$PATH" \
     NEOTALES_V8_CACHE="$TEST_ROOT/cache" \
     NEOTALES_V8_PROCEDURE="$proc" \
     NEOJS_V8_BUILD_DIR="$TEST_ROOT/build" \
-    "$SCRIPT_DIR/build-bounded.sh" --check-procedure-only
+    "$SCRIPT_DIR/build-bounded.sh" --check-procedure-only "$@"
 }
 
 expect_failure() {
     local name=$1 proc=$2 pattern=$3
-    if check_procedure "$proc" >"$TEST_ROOT/$name.log" 2>&1; then
+    shift 3
+    if check_procedure "$proc" "$@" >"$TEST_ROOT/$name.log" 2>&1; then
         echo "error: $name was accepted" >&2
         exit 1
     fi
@@ -83,6 +86,34 @@ printf '%s\n' "$clean_output" |
     echo "error: clean procedure was not verified: $clean_output" >&2
     exit 1
 }
+clean_rev=$(printf '%s\n' "$clean_output" | awk '{print $2}')
+clean_tree=$(printf '%s\n' "$clean_output" | awk '{print $4}')
+check_procedure "$CLEAN" \
+    --expect-rev "$clean_rev" \
+    --expect-helper-tree "$clean_tree" \
+    --expect-helper-files 4 >/dev/null
+
+expect_failure tree-mismatch "$CLEAN" "helper tree changed" \
+    --expect-rev "$clean_rev" \
+    --expect-helper-tree 0000000000000000000000000000000000000000 \
+    --expect-helper-files 4
+
+SWITCH="$TEST_ROOT/switch-procedure"
+make_procedure "$SWITCH"
+switch_output=$(check_procedure "$SWITCH")
+switch_rev=$(printf '%s\n' "$switch_output" | awk '{print $2}')
+switch_tree=$(printf '%s\n' "$switch_output" | awk '{print $4}')
+[ -n "$switch_rev" ] && [ -n "$switch_tree" ] || {
+    echo "error: switch procedure was not verified: $switch_output" >&2
+    exit 1
+}
+printf '# second clean commit\n' >> "$SWITCH/eng/v8-source/validate_tar.py"
+git -C "$SWITCH" add .
+git -C "$SWITCH" -c user.name=test -c user.email=test@example.invalid commit -qm second
+expect_failure commit-switch "$SWITCH" "revision changed" \
+    --expect-rev "$switch_rev" \
+    --expect-helper-tree "$switch_tree" \
+    --expect-helper-files 4
 
 IGNORED="$TEST_ROOT/ignored-procedure"
 make_procedure "$IGNORED"
@@ -108,5 +139,5 @@ git -C "$MODE" config core.filemode false
 chmod +x "$MODE/eng/v8-source/validate_tar.py"
 expect_failure mode "$MODE" "unexpectedly executable"
 
-printf 'ok: unique run roots, clean helper verification, and helper rejection cases\n'
+printf 'ok: unique run roots, clean helper verification, helper rejection, and clean commit-switch rejection\n'
 printf 'test root: %s\n' "$TEST_ROOT"
