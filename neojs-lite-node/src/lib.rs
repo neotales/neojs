@@ -1,10 +1,11 @@
 #![deny(unsafe_code)]
 //! QuickJS adapter for opt-in Node compatibility.
 //!
-//! This crate exposes `node:child_process` as a native QuickJS C module. The
-//! module has no JavaScript source and no JSON bridge: its named exports are
-//! Rust functions that validate guest values, call the engine-neutral
-//! `neojs-node-builtins` runner, and build QuickJS objects and errors directly.
+//! This crate exposes `node:child_process` and `node:path` as native QuickJS C
+//! modules. The modules have no JavaScript source and no JSON bridge: their
+//! named exports are Rust functions that validate guest values, call the
+//! engine-neutral `neojs-node-builtins` logic, and build QuickJS objects and
+//! errors directly.
 //!
 //! The module is installed only by
 //! `neojs_lite_core::Runtime::with_node_compat`, which stores the runtime's
@@ -37,9 +38,14 @@ use neojs_node_builtins::run_sync;
 
 pub use neojs_node_builtins::{
     CHILD_PROCESS_SPECIFIER, ChildProcessError, ChildProcessPolicy, Limits, NodeOptions,
-    PolicyError, SUPPORTED_MODULES, SyncRequest, SyncResult, is_known_node_bare_name,
-    unsupported_module_reason,
+    PATH_SPECIFIER, PolicyError, SUPPORTED_MODULES, SyncRequest, SyncResult,
+    is_known_node_bare_name, unsupported_module_reason,
 };
+
+use neojs_node_builtins::MAX_PATH_INPUT_BYTES;
+use neojs_node_builtins::PathFlavor;
+use neojs_node_builtins::PathObject;
+use neojs_node_builtins::host_cwd;
 
 const MAX_INPUT_BYTES: usize = 1_048_576;
 const MAX_ARGS: usize = 256;
@@ -159,13 +165,287 @@ impl ModuleDef for ChildProcessModule {
     }
 }
 
-/// Declares the native `node:child_process` module.
+struct PathModule;
+
+impl ModuleDef for PathModule {
+    fn declare(decl: &Declarations<'_>) -> Result<()> {
+        for name in [
+            "resolve",
+            "normalize",
+            "isAbsolute",
+            "join",
+            "relative",
+            "toNamespacedPath",
+            "dirname",
+            "basename",
+            "extname",
+            "format",
+            "parse",
+            "sep",
+            "delimiter",
+            "posix",
+            "win32",
+            "matchesGlob",
+            "_makeLong",
+            "default",
+        ] {
+            decl.declare(name)?;
+        }
+        Ok(())
+    }
+
+    fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> Result<()> {
+        let posix = path_api(ctx, PathFlavor::Posix)?;
+        let win32 = path_api(ctx, PathFlavor::Win32)?;
+        let host = if PathFlavor::host() == PathFlavor::Posix {
+            posix.clone()
+        } else {
+            win32.clone()
+        };
+        for (object, posix, win32) in [(&posix, &posix, &win32), (&win32, &posix, &win32)] {
+            define_own(object, "posix", posix.clone())?;
+            define_own(object, "win32", win32.clone())?;
+        }
+
+        exports.export("resolve", host.get::<_, Function>("resolve")?)?;
+        exports.export("normalize", host.get::<_, Function>("normalize")?)?;
+        exports.export("isAbsolute", host.get::<_, Function>("isAbsolute")?)?;
+        exports.export("join", host.get::<_, Function>("join")?)?;
+        exports.export("relative", host.get::<_, Function>("relative")?)?;
+        exports.export(
+            "toNamespacedPath",
+            host.get::<_, Function>("toNamespacedPath")?,
+        )?;
+        exports.export("dirname", host.get::<_, Function>("dirname")?)?;
+        exports.export("basename", host.get::<_, Function>("basename")?)?;
+        exports.export("extname", host.get::<_, Function>("extname")?)?;
+        exports.export("format", host.get::<_, Function>("format")?)?;
+        exports.export("parse", host.get::<_, Function>("parse")?)?;
+        exports.export("sep", host.get::<_, rquickjs::String>("sep")?)?;
+        exports.export("delimiter", host.get::<_, rquickjs::String>("delimiter")?)?;
+        exports.export("posix", host.get::<_, Object>("posix")?)?;
+        exports.export("win32", host.get::<_, Object>("win32")?)?;
+        exports.export("matchesGlob", host.get::<_, Function>("matchesGlob")?)?;
+        exports.export("_makeLong", host.get::<_, Function>("_makeLong")?)?;
+        exports.export("default", host)?;
+        Ok(())
+    }
+}
+
+fn path_api<'js>(ctx: &Ctx<'js>, flavor: PathFlavor) -> Result<Object<'js>> {
+    let api = Object::new(ctx.clone())?;
+    for name in [
+        "normalize",
+        "isAbsolute",
+        "join",
+        "resolve",
+        "relative",
+        "toNamespacedPath",
+        "dirname",
+        "basename",
+        "extname",
+        "format",
+        "parse",
+    ] {
+        define_own(&api, name, path_function(ctx.clone(), flavor, name)?)?;
+    }
+    let to_namespaced = api.get::<_, Function>("toNamespacedPath")?;
+    define_own(&api, "_makeLong", to_namespaced)?;
+    define_own(&api, "matchesGlob", path_matches_glob(ctx.clone())?)?;
+    define_own(&api, "sep", js_string(ctx, flavor.sep())?)?;
+    define_own(&api, "delimiter", js_string(ctx, flavor.delimiter())?)?;
+    Ok(api)
+}
+
+fn path_function<'js>(
+    ctx: Ctx<'js>,
+    flavor: PathFlavor,
+    name: &'static str,
+) -> Result<Function<'js>> {
+    Function::new(
+        ctx,
+        move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> Result<Value<'js>> {
+            let args = args.into_inner();
+            match name {
+                "normalize" => {
+                    let path = path_arg(&ctx, &args, 0, "path")?;
+                    Ok(
+                        js_string(&ctx, &neojs_node_builtins::normalize(flavor, &path))?
+                            .into_value(),
+                    )
+                }
+                "isAbsolute" => {
+                    let path = path_arg(&ctx, &args, 0, "path")?;
+                    Ok(Value::new_bool(
+                        ctx.clone(),
+                        neojs_node_builtins::is_absolute(flavor, &path),
+                    ))
+                }
+                "join" => {
+                    let mut paths = Vec::with_capacity(args.len());
+                    for index in 0..args.len() {
+                        paths.push(path_arg(&ctx, &args, index, "path")?);
+                    }
+                    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+                    Ok(js_string(&ctx, &neojs_node_builtins::join(flavor, &refs))?.into_value())
+                }
+                "resolve" => {
+                    let mut paths = Vec::with_capacity(args.len());
+                    for index in 0..args.len() {
+                        paths.push(path_arg(&ctx, &args, index, "path")?);
+                    }
+                    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+                    Ok(js_string(
+                        &ctx,
+                        &neojs_node_builtins::resolve(flavor, &host_cwd(), &refs),
+                    )?
+                    .into_value())
+                }
+                "relative" => {
+                    let from = path_arg(&ctx, &args, 0, "from")?;
+                    let to = path_arg(&ctx, &args, 1, "to")?;
+                    Ok(js_string(
+                        &ctx,
+                        &neojs_node_builtins::relative(flavor, &host_cwd(), &from, &to),
+                    )?
+                    .into_value())
+                }
+                "toNamespacedPath" => {
+                    let path = path_arg(&ctx, &args, 0, "path")?;
+                    Ok(js_string(
+                        &ctx,
+                        &neojs_node_builtins::to_namespaced_path(flavor, &host_cwd(), &path),
+                    )?
+                    .into_value())
+                }
+                "dirname" => {
+                    let path = path_arg(&ctx, &args, 0, "path")?;
+                    Ok(js_string(&ctx, &neojs_node_builtins::dirname(flavor, &path))?.into_value())
+                }
+                "basename" => {
+                    let path = path_arg(&ctx, &args, 0, "path")?;
+                    let suffix = path_optional_arg(&ctx, &args, 1, "suffix")?;
+                    Ok(js_string(
+                        &ctx,
+                        &neojs_node_builtins::basename(flavor, &path, suffix.as_deref()),
+                    )?
+                    .into_value())
+                }
+                "extname" => {
+                    let path = path_arg(&ctx, &args, 0, "path")?;
+                    Ok(js_string(&ctx, &neojs_node_builtins::extname(flavor, &path))?.into_value())
+                }
+                "parse" => {
+                    let path = path_arg(&ctx, &args, 0, "path")?;
+                    let parsed = neojs_node_builtins::parse(flavor, &path);
+                    let object = Object::new(ctx.clone())?;
+                    define_own(&object, "root", js_string(&ctx, &parsed.root)?)?;
+                    define_own(&object, "dir", js_string(&ctx, &parsed.dir)?)?;
+                    define_own(&object, "base", js_string(&ctx, &parsed.base)?)?;
+                    define_own(&object, "ext", js_string(&ctx, &parsed.ext)?)?;
+                    define_own(&object, "name", js_string(&ctx, &parsed.name)?)?;
+                    Ok(object.into_value())
+                }
+                "format" => {
+                    let Some(value) = args.first() else {
+                        return Err(invalid_type(&ctx, "path.format requires an object"));
+                    };
+                    if value.is_function() || !value.is_object() {
+                        return Err(invalid_type(&ctx, "path.format requires an object"));
+                    }
+                    let Some(object) = value.as_object() else {
+                        return Err(invalid_type(&ctx, "path.format requires an object"));
+                    };
+                    let root = read_optional_path_field(&ctx, object, "root")?;
+                    let dir = read_optional_path_field(&ctx, object, "dir")?;
+                    let base = read_optional_path_field(&ctx, object, "base")?;
+                    let ext = read_optional_path_field(&ctx, object, "ext")?;
+                    let name = read_optional_path_field(&ctx, object, "name")?;
+                    let path_object = PathObject {
+                        root: root.as_deref(),
+                        dir: dir.as_deref(),
+                        base: base.as_deref(),
+                        ext: ext.as_deref(),
+                        name: name.as_deref(),
+                    };
+                    Ok(
+                        js_string(&ctx, &neojs_node_builtins::format(flavor, &path_object))?
+                            .into_value(),
+                    )
+                }
+                _ => Err(coded_error(
+                    &ctx,
+                    "ERR_NODE_UNSUPPORTED",
+                    "the node:path function is not implemented",
+                )),
+            }
+        },
+    )
+}
+
+fn path_matches_glob<'js>(ctx: Ctx<'js>) -> Result<Function<'js>> {
+    Function::new(ctx, |ctx: Ctx<'js>| -> Result<Value<'js>> {
+        Err(coded_error(
+            &ctx,
+            "ERR_NODE_UNSUPPORTED",
+            "node:path matchesGlob is not implemented",
+        ))
+    })
+}
+
+fn path_arg<'js>(ctx: &Ctx<'js>, args: &[Value<'js>], index: usize, what: &str) -> Result<String> {
+    let Some(value) = args.get(index) else {
+        return Err(invalid_type(ctx, &format!("{what} must be a string")));
+    };
+    if !value.is_string() {
+        return Err(invalid_type(ctx, &format!("{what} must be a string")));
+    }
+    read_string(ctx, value, what, MAX_PATH_INPUT_BYTES)
+}
+
+fn path_optional_arg<'js>(
+    ctx: &Ctx<'js>,
+    args: &[Value<'js>],
+    index: usize,
+    what: &str,
+) -> Result<Option<String>> {
+    let Some(value) = args.get(index) else {
+        return Ok(None);
+    };
+    if value.is_undefined() {
+        Ok(None)
+    } else {
+        path_arg(ctx, args, index, what).map(Some)
+    }
+}
+
+fn read_optional_path_field<'js>(
+    ctx: &Ctx<'js>,
+    object: &Object<'js>,
+    name: &str,
+) -> Result<Option<String>> {
+    let value: Value = object.get(name)?;
+    if value.is_undefined() {
+        return Ok(None);
+    }
+    if !value.is_string() {
+        return Err(invalid_type(
+            ctx,
+            &format!("path.format field `{name}` must be a string"),
+        ));
+    }
+    read_string(ctx, &value, name, MAX_PATH_INPUT_BYTES).map(Some)
+}
+
+/// Declares the native `node:child_process` and `node:path` modules.
 ///
 /// `neojs-lite-core` calls this from its loader; no module source is read from
 /// disk or generated.
 pub fn module<'js>(ctx: Ctx<'js>, name: &str) -> Result<Module<'js, Declared>> {
     if name == CHILD_PROCESS_SPECIFIER {
         Module::declare_def::<ChildProcessModule, _>(ctx, name)
+    } else if name == PATH_SPECIFIER {
+        Module::declare_def::<PathModule, _>(ctx, name)
     } else {
         Err(rquickjs::Error::new_loading_message(
             name,
@@ -1064,6 +1344,10 @@ fn coded_error<'js>(ctx: &Ctx<'js>, code: &str, message: &str) -> rquickjs::Erro
 
 fn invalid<'js>(ctx: &Ctx<'js>, message: &str) -> rquickjs::Error {
     coded_error(ctx, "ERR_INVALID_ARG_VALUE", message)
+}
+
+fn invalid_type<'js>(ctx: &Ctx<'js>, message: &str) -> rquickjs::Error {
+    coded_error(ctx, "ERR_INVALID_ARG_TYPE", message)
 }
 
 fn request_too_large(ctx: &Ctx<'_>) -> rquickjs::Error {

@@ -4,13 +4,15 @@ Opt-in Node compatibility adapter for the V8 `neojs-core` runtime. Enable the
 `node-compat` feature on `neojs-core` and construct the runtime with
 `Runtime::with_node_compat`.
 
-The only module is `node:child_process`; only `spawnSync` and `execFileSync` are
-implemented, with `encoding: "utf8"`. Every asynchronous form throws
-`ERR_NODE_UNSUPPORTED`. The module is registered as a native V8 synthetic module
-before user code runs, so static and dynamic imports share one namespace and the
-same native function objects. There is no JavaScript source, JSON bridge, host
-op, or global installation hook. The module is not in the `Neo` registry and has
-no bare or `neo:` alias.
+The modules are `node:child_process` and `node:path`. `node:child_process`
+implements `spawnSync` and `execFileSync` with `encoding: "utf8"`; every
+asynchronous form throws `ERR_NODE_UNSUPPORTED`. `node:path` implements the
+documented POSIX/Win32 subset, with `matchesGlob` explicitly unsupported. Both
+modules are registered as native V8 synthetic modules before user code runs, so
+static and dynamic imports share one namespace and the same native function
+objects. There is no JavaScript source, JSON bridge, host op, or global
+installation hook. Neither module is in the `Neo` registry and neither has a
+bare or `neo:` alias.
 
 Option and environment enumeration uses a narrow bounded V8 engine API added by
 `eng/v8-source/patches/0001-bounded-own-enumerable-string-keys.patch`. The

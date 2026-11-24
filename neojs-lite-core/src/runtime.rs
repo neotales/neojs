@@ -373,13 +373,15 @@ impl Runtime {
 
     /// Creates a QuickJS runtime with opt-in Node compatibility.
     ///
-    /// The only implemented Node module is `node:child_process`, and only the
-    /// synchronous `spawnSync` and `execFileSync` functions are available, with
-    /// `encoding: "utf8"` required. The module is not added to the `Neo`
-    /// registry, has no bare or `neo:` alias, and is not substituted by any Neo
-    /// module. The default [`Runtime::new`] rejects every `node:` import. In
-    /// this opted-in runtime, a bare name that is a familiar Node module name is
-    /// rejected rather than resolved as a Neo module.
+    /// The implemented Node modules are `node:child_process` and `node:path`.
+    /// `node:child_process` provides the synchronous `spawnSync` and
+    /// `execFileSync` functions with `encoding: "utf8"` required. `node:path`
+    /// provides the documented path subset, including `posix` and `win32`
+    /// views. Neither module is added to the `Neo` registry, has a bare or
+    /// `neo:` alias, or is substituted by any Neo module. The default
+    /// [`Runtime::new`] rejects every `node:` import. In this opted-in runtime,
+    /// a bare name that is a familiar Node module name is rejected rather than
+    /// resolved as a Neo module.
     ///
     /// A [`neojs_lite_node::ChildProcessPolicy`] starts with no allowed
     /// programs, so importing the module is safe but every execution is denied.
@@ -395,13 +397,16 @@ impl Runtime {
     ///
     /// This is **not a sandbox**. An allowed executable runs with the authority
     /// of the neojs-lite process, including filesystem, network, and further
-    /// process creation permitted by the operating system. A timeout, output
-    /// overflow, or inherited pipe left after the direct child exits triggers a
-    /// bounded drain and a group SIGKILL; an inherited pipe is an explicit
+    /// process creation permitted by the operating system. A timeout or output
+    /// overflow kills the process group and then drains for a bounded grace; a
+    /// natural direct-child exit with an inherited pipe drains first and then
+    /// kills. An inherited pipe is an explicit
     /// `ERR_NODE_CHILD_PROCESS_INCOMPLETE` failure, not a success with possibly
     /// truncated output. A descendant that creates a new process group and
-    /// escapes is not tracked. Bounded completion is Unix-only; another platform
-    /// rejects before spawning.
+    /// escapes is not tracked. The final direct-child reap uses a blocking
+    /// `wait()` and can outlive the deadline if the operating system does not
+    /// complete the kill or reap. Unix pipe polling and process-group kill are
+    /// Unix-only; another platform rejects before spawning.
     #[cfg(feature = "node-compat")]
     pub fn with_node_compat(options: neojs_lite_node::NodeOptions) -> Result<Self, Error> {
         Self::create(Some(options))

@@ -5,12 +5,14 @@ Enable the `node-compat` feature on `neojs-lite-core` and construct the runtime
 with `Runtime::with_node_compat`.
 
 This adapter is synchronous because NeoJS Lite has no host-asynchrony loop. It
-serves only `node:child_process` with `spawnSync` and `execFileSync`, and
-`encoding: "utf8"` is required. The module is a native QuickJS C module built
-with `Module::declare_def`/`ModuleDef`; it has no JavaScript module source and
-no JSON bridge, and its named/default exports are Rust functions. `spawn`,
+serves `node:child_process` and `node:path`. `node:child_process` provides
+`spawnSync` and `execFileSync` with `encoding: "utf8"` required; `spawn`,
 `exec`, `execFile`, `execSync`, `fork`, and `ChildProcess` throw
 `ERR_NODE_UNSUPPORTED`; none is faked as a blocking call or a resolved Promise.
+`node:path` provides the documented POSIX/Win32 subset, with `matchesGlob`
+explicitly unsupported. Both are native QuickJS C modules built with
+`Module::declare_def`/`ModuleDef`; they have no JavaScript module source and no
+JSON bridge, and their named/default exports are Rust functions.
 The native `ChildProcess` export is a throwing function, not a constructible
 class; `new ChildProcess()` is a `TypeError` rather than the coded unsupported
 error. String fields are preflighted through QuickJS's string length property

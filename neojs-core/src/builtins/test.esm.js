@@ -6,7 +6,7 @@
 // fn)` and a few runner helpers, and it makes no claim about Node's options,
 // subtests, mocks, snapshots, hooks, or filters. `node:test` remains rejected
 // even when the separate Node compatibility opt-in is enabled; that opt-in
-// adds only `node:child_process`.
+// adds only `node:child_process` and `node:path`.
 const builtin = Neo.getBuiltInModule("neo:test");
 
 export const test = builtin.test;

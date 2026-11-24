@@ -56,6 +56,16 @@ fn the_default_runtime_rejects_every_node_module() {
 }
 
 #[test]
+fn the_default_runtime_rejects_node_path() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write_module(&dir, "main.js", "import \"node:path\";\n");
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime.run_file(&file).expect_err("node:path is disabled");
+    let text = format!("{error}");
+    assert!(text.contains("Node compatibility is disabled"), "{text}");
+}
+
+#[test]
 fn a_bare_node_name_is_not_an_alias() {
     let dir = tempfile::tempdir().expect("temp dir");
     let file = write_module(&dir, "main.js", "import \"child_process\";\n");
@@ -64,6 +74,17 @@ fn a_bare_node_name_is_not_an_alias() {
     let text = format!("{error}");
     assert!(text.contains("node:` prefix"), "{text}");
     assert!(!text.contains("neo:child_process"), "{text}");
+}
+
+#[test]
+fn a_bare_path_name_is_not_an_alias() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = write_module(&dir, "main.js", "import \"path\";\n");
+    let mut runtime = Runtime::with_node_compat(policy(&[])).expect("runtime");
+    let error = runtime.run_file(&file).expect_err("bare path must fail");
+    let text = format!("{error}");
+    assert!(text.contains("node:` prefix"), "{text}");
+    assert!(!text.contains("neo:path"), "{text}");
 }
 
 #[test]
@@ -99,8 +120,12 @@ fn node_modules_are_not_in_the_neo_registry() {
 import * as childProcess from "node:child_process";
 const list = Neo.getBuiltInModulesList();
 if (list.includes("node:child_process")) throw new Error("node module leaked into Neo");
+if (list.includes("node:path")) throw new Error("node:path leaked into Neo");
 if (Neo.getBuiltInModule("node:child_process") !== undefined) {
     throw new Error("node module leaked into Neo.getBuiltInModule");
+}
+if (Neo.getBuiltInModule("node:path") !== undefined) {
+    throw new Error("node:path leaked into Neo.getBuiltInModule");
 }
 if (typeof childProcess.spawnSync !== "function") {
     throw new Error("spawnSync is missing");
@@ -910,4 +935,152 @@ if (code !== "ERR_NODE_UNSUPPORTED_ENCODING") {
 "#,
     )
     .expect("encoding opt-in");
+}
+
+#[test]
+fn node_path_vectors_and_identity() {
+    run(
+        policy(&[]),
+        r#"
+import path, {
+    posix,
+    win32,
+    join,
+    normalize,
+    resolve,
+    relative,
+    dirname,
+    basename,
+    extname,
+    parse,
+    format,
+    isAbsolute,
+    toNamespacedPath,
+    sep,
+    delimiter,
+    matchesGlob,
+    _makeLong,
+} from "node:path";
+
+function eq(actual, expected, label) {
+    if (actual !== expected) {
+        throw new Error(`${label}: ${JSON.stringify(actual)} !== ${JSON.stringify(expected)}`);
+    }
+}
+function own(object, key, label) {
+    if (!Object.prototype.hasOwnProperty.call(object, key)) {
+        throw new Error(`${label} is not own`);
+    }
+}
+
+eq(sep, "/", "sep");
+eq(delimiter, ":", "delimiter");
+eq(path.posix, path, "default is posix");
+if (path.win32 === path) throw new Error("default is win32 on Unix");
+eq(path.join, join, "default join identity");
+eq(path.posix.join, posix.join, "posix join identity");
+eq(path.win32.join, win32.join, "win32 join identity");
+if (path.win32.join === path.join) throw new Error("win32 join aliased default");
+eq(posix.posix, posix, "posix self");
+eq(win32.win32, win32, "win32 self");
+eq(posix.win32, win32, "posix.win32");
+eq(win32.posix, posix, "win32.posix");
+eq(_makeLong, toNamespacedPath, "_makeLong identity");
+const dynamicPath = await import("node:path");
+eq(dynamicPath.default, path, "dynamic default identity");
+eq(dynamicPath.posix, posix, "dynamic posix identity");
+eq(dynamicPath.win32, win32, "dynamic win32 identity");
+
+eq(normalize("/foo//bar/../baz/"), "/foo/baz/", "normalize");
+eq(join("a", "b", "..", "c"), "a/c", "join");
+eq(dirname("/foo/bar/"), "/foo", "dirname");
+eq(basename("/foo/bar.txt", ".txt"), "bar", "basename suffix");
+eq(extname("/foo/bar.txt"), ".txt", "extname");
+eq(isAbsolute("/foo"), true, "isAbsolute");
+eq(resolve("/a", "b"), "/a/b", "resolve absolute");
+eq(relative("/a/b", "/a/c"), "../c", "relative");
+const parsed = parse("/foo/bar.txt");
+eq(parsed.root, "/", "parse.root");
+eq(parsed.dir, "/foo", "parse.dir");
+eq(parsed.base, "bar.txt", "parse.base");
+eq(parsed.ext, ".txt", "parse.ext");
+eq(parsed.name, "bar", "parse.name");
+eq(format({ dir: "/foo", name: "bar", ext: ".txt" }), "/foo/bar.txt", "format");
+eq(toNamespacedPath("/foo"), "/foo", "posix toNamespacedPath");
+
+eq(posix.normalize("//a//b/../c"), "/a/c", "posix normalize");
+eq(win32.normalize("C:\\foo\\..\\bar"), "C:\\bar", "win32 normalize");
+eq(win32.join("C:\\a", "b"), "C:\\a\\b", "win32 join");
+eq(win32.join("\\\\server\\share", "a"), "\\\\server\\share\\a", "win32 UNC join");
+eq(win32.dirname("C:\\foo\\bar"), "C:\\foo", "win32 dirname");
+eq(win32.basename("C:\\foo\\bar.txt", ".txt"), "bar", "win32 basename");
+eq(win32.extname("C:\\foo\\bar.txt"), ".txt", "win32 extname");
+eq(win32.isAbsolute("C:\\foo"), true, "win32 isAbsolute");
+eq(win32.resolve("C:\\a", "b"), "C:\\a\\b", "win32 resolve");
+eq(win32.relative("C:\\a\\b", "C:\\a\\c"), "..\\c", "win32 relative");
+eq(win32.relative("C:\\a\\b", "c:\\a\\c"), "..\\c", "win32 relative case");
+eq(win32.toNamespacedPath("C:\\foo"), "\\\\?\\C:\\foo", "win32 namespaced");
+const wparsed = win32.parse("C:\\foo\\bar.txt");
+eq(wparsed.root, "C:\\", "wparse.root");
+eq(wparsed.dir, "C:\\foo", "wparse.dir");
+eq(wparsed.base, "bar.txt", "wparse.base");
+eq(wparsed.ext, ".txt", "wparse.ext");
+eq(wparsed.name, "bar", "wparse.name");
+eq(win32.format({ root: "C:\\", name: "foo", ext: ".txt" }), "C:\\foo.txt", "win32 format");
+
+let unsupported = null;
+try {
+    matchesGlob("a", "*");
+} catch (error) {
+    unsupported = error && error.code;
+}
+eq(unsupported, "ERR_NODE_UNSUPPORTED", "matchesGlob unsupported");
+
+let typeError = null;
+try {
+    normalize(1);
+} catch (error) {
+    typeError = error && error.code;
+}
+eq(typeError, "ERR_INVALID_ARG_TYPE", "type error");
+let formatError = null;
+try {
+    format({ dir: 1 });
+} catch (error) {
+    formatError = error && error.code;
+}
+eq(formatError, "ERR_INVALID_ARG_TYPE", "format type error");
+
+let tooLarge = null;
+try {
+    normalize("a".repeat(1_048_577));
+} catch (error) {
+    tooLarge = error && error.code;
+}
+eq(tooLarge, "ERR_NODE_REQUEST_TOO_LARGE", "large input");
+
+for (const key of [
+    "resolve",
+    "normalize",
+    "isAbsolute",
+    "join",
+    "relative",
+    "toNamespacedPath",
+    "dirname",
+    "basename",
+    "extname",
+    "format",
+    "parse",
+    "sep",
+    "delimiter",
+    "posix",
+    "win32",
+    "matchesGlob",
+    "_makeLong",
+]) {
+    own(path, key, `default ${key}`);
+}
+"#,
+    )
+    .expect("node:path vectors");
 }

@@ -37,9 +37,10 @@ let mut runtime = Runtime::with_node_compat(NodeOptions::new(policy))?;
 
 `Runtime::new()` and every other existing constructor reject `node:`
 specifiers. A Node module is never added to `Neo.getBuiltInModulesList`, and
-`Neo.getBuiltInModule("node:child_process")` returns `undefined`. A bare
-specifier such as `child_process` is rejected with a request to use the
-`node:` prefix; it is not an alias.
+`Neo.getBuiltInModule("node:child_process")` and
+`Neo.getBuiltInModule("node:path")` return `undefined`. A bare specifier such as
+`child_process` or `path` is rejected with a request to use the `node:` prefix;
+it is not an alias.
 
 While Node compatibility is enabled, a bare specifier that is a familiar Node
 module name (including `assert`, `console`, `crypto`, `fs`, `os`, and `path`) is
@@ -185,7 +186,11 @@ handoff is retained in [`v8-bounded-enumeration-handoff.md`](v8-bounded-enumerat
 
 ## Implemented surface
 
-Only `node:child_process` is implemented. The module exports:
+Two Node modules are implemented: `node:child_process` and `node:path`.
+
+### node:child_process
+
+The module exports:
 
 | Export | Status | Notes |
 | ------ | ------ | ----- |
@@ -213,6 +218,34 @@ allocation is bounded by four times the configured cap, and the actual UTF-8
 length is checked after conversion. Public rquickjs does not expose an exact
 UTF-8 length before conversion; the QuickJS preflight is a single audited C-API
 function used only for this bound.
+
+### node:path
+
+`node:path` is a native module with no JavaScript source or wrapper. It
+provides:
+
+* `basename(path, suffix?)`, `dirname`, `extname`, `format`, `isAbsolute`,
+  `join`, `normalize`, `parse`, `relative`, `resolve`, and
+  `toNamespacedPath`;
+* `sep` and `delimiter`;
+* `posix` and `win32` views with the same functions and constants;
+* `_makeLong` as the deprecated alias for `toNamespacedPath`;
+* `matchesGlob`, which throws `ERR_NODE_UNSUPPORTED` rather than pretending to
+  implement glob matching.
+
+The host default is POSIX on Unix and Win32 on Windows, and the default object
+is the matching `posix` or `win32` view, as in Node. The other view is explicit
+and independent of the host. `path.resolve` and
+`path.toNamespacedPath` use the host working directory, as Node uses
+`process.cwd()`.
+
+Inputs are capped at 1,048,576 UTF-8 bytes per string. A larger string throws
+`ERR_NODE_REQUEST_TOO_LARGE`; a non-string argument throws
+`ERR_INVALID_ARG_TYPE`. `format` requires string fields or `undefined`; unlike
+Node's coercing formatter it does not call `ToString` on arbitrary field
+values. The algorithms follow Node's common POSIX and Win32 rules for drive
+letters, UNC and device roots, reserved device names, `.`/`..`, and trailing
+separators. This is a documented subset, not a claim of full Node path parity.
 
 Other `node:` modules are rejected with `the Node module ... is not
 implemented`. Resolution never falls through to a `neo:` module.
@@ -300,8 +333,8 @@ loop in this runtime, so the lite adapter offers only the synchronous surface.
 The shared core tests use real absolute system programs and fail if one is
 missing; they do not skip. Both adapters run the same real-operation, denial,
 registry-separation, unsupported-surface, timeout, overflow, inherited-pipe,
-hostile-serialization, and huge-request cases through their public `Runtime`
-constructors. V8 covers native module identity across static and dynamic
+hostile-serialization, path-vector, and huge-request cases through their public
+`Runtime` constructors. V8 covers native module identity across static and dynamic
 imports, the absence of a bridge global, Proxy option/environment rejection,
 and large-input caps; QuickJS covers its bounded enumeration and atom cleanup.
 The shared suite also verifies that

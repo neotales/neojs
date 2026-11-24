@@ -187,3 +187,14 @@ fn a_feature_off_runtime_rejects_node_child_process() {
     let text = format!("{error}");
     assert!(text.contains("Node compatibility is disabled"), "{text}");
 }
+
+#[test]
+fn a_feature_off_runtime_rejects_node_path() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = dir.path().join("main.js");
+    fs::write(&file, "import \"node:path\";\n").expect("write source");
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime.run_file(&file).expect_err("node must be disabled");
+    let text = format!("{error}");
+    assert!(text.contains("Node compatibility is disabled"), "{text}");
+}

@@ -8,11 +8,14 @@
 //! falls through to a NeoJS module of a similar name, because that would run a
 //! different API under a Node specifier.
 
-/// The one implemented Node module specifier.
+/// The child-process Node module specifier.
 pub const CHILD_PROCESS_SPECIFIER: &str = "node:child_process";
 
+/// The path Node module specifier.
+pub const PATH_SPECIFIER: &str = "node:path";
+
 /// The exact Node module specifiers implemented by this crate.
-pub const SUPPORTED_MODULES: &[&str] = &[CHILD_PROCESS_SPECIFIER];
+pub const SUPPORTED_MODULES: &[&str] = &[CHILD_PROCESS_SPECIFIER, PATH_SPECIFIER];
 
 /// Returns a reason for an unsupported Node specifier.
 ///

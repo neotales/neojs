@@ -39,11 +39,11 @@
 //! modules are never read from disk.
 //!
 //! Only a runtime built with `Runtime::with_node_compat` (feature
-//! `node-compat`) accepts the exact `node:child_process` specifier. That module
-//! is registered as a native synthetic module before user code runs, so the
-//! loader never produces a source for it. It is not added to the `Neo` registry
-//! or given a bare alias. Every default runtime rejects `node:` imports with a
-//! reason.
+//! `node-compat`) accepts the exact `node:child_process` and `node:path`
+//! specifiers. Those modules are registered as native synthetic modules before
+//! user code runs, so the loader never produces a source for them. They are not
+//! added to the `Neo` registry or given a bare alias. Every default runtime
+//! rejects `node:` imports with a reason.
 //!
 //! A `.ts` or `.mts` module is read as text and type-stripped before V8 sees it
 //! ([`crate::typescript`]). A file that cannot be reduced to ECMAScript fails
@@ -116,8 +116,20 @@ fn node_unsupported(specifier: &str) -> String {
 #[cfg(not(feature = "node-compat"))]
 fn node_unsupported(specifier: &str) -> String {
     format!(
-        "the Node module `{specifier}` is not implemented; supported Node modules: node:child_process"
+        "the Node module `{specifier}` is not implemented; supported Node modules: node:child_process, node:path"
     )
+}
+
+/// Returns whether the exact specifier belongs to the implemented Node set.
+#[cfg(feature = "node-compat")]
+fn is_supported_node_specifier(specifier: &str) -> bool {
+    neojs_node::SUPPORTED_MODULES.contains(&specifier)
+}
+
+/// Returns whether the exact specifier belongs to the implemented Node set.
+#[cfg(not(feature = "node-compat"))]
+fn is_supported_node_specifier(specifier: &str) -> bool {
+    matches!(specifier, "node:child_process" | "node:path")
 }
 
 /// Returns the default-runtime rejection, naming the requested module.
@@ -300,9 +312,9 @@ impl ModuleLoader for FileModuleLoader {
         referrer: &str,
         kind: ResolutionKind,
     ) -> ModuleResolveResponse {
-        if specifier == "node:child_process" {
+        if is_supported_node_specifier(specifier) {
             if self.node {
-                return builtin_url("node:child_process");
+                return builtin_url(specifier);
             }
             return Err(JsErrorBox::generic(node_disabled(specifier)));
         }
@@ -387,7 +399,10 @@ impl ModuleLoader for FileModuleLoader {
         }
         if module_specifier.scheme() == "node" {
             let reason = if self.node {
-                "the native node:child_process module is not registered in this runtime".to_string()
+                format!(
+                    "the native {} module is not registered in this runtime",
+                    module_specifier.as_str()
+                )
             } else {
                 node_disabled(module_specifier.as_str())
             };
@@ -568,7 +583,7 @@ fn case_insensitive_builtin(specifier: &str) -> Option<&'static str> {
 ///
 /// The canonical specifiers are compile-time constants, so a parse failure means
 /// the constant is malformed rather than that the importer wrote something bad.
-fn builtin_url(canonical: &'static str) -> ModuleResolveResponse {
+fn builtin_url(canonical: &str) -> ModuleResolveResponse {
     Url::parse(canonical).map_err(|error| {
         JsErrorBox::generic(format!(
             "cannot resolve built-in module `{canonical}`: {error}"

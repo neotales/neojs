@@ -10,10 +10,11 @@
 //! the same policy the V8 runtime uses.
 //!
 //! With the off-by-default `node-compat` feature, a runtime built with
-//! `Runtime::with_node_compat` also resolves the exact `node:child_process`
-//! specifier to the native QuickJS module from `neojs-lite-node`. It is never
-//! read from disk, has no bare or `neo:` alias, and is not added to the `Neo`
-//! registry. A default runtime rejects every `node:` specifier.
+//! `Runtime::with_node_compat` also resolves the exact `node:child_process` and
+//! `node:path` specifiers to native QuickJS modules from `neojs-lite-node`.
+//! They are never read from disk, have no bare or `neo:` alias, and are not
+//! added to the `Neo` registry. A default runtime rejects every `node:`
+//! specifier.
 
 use std::path::{Path, PathBuf};
 
@@ -49,8 +50,20 @@ fn node_unsupported(specifier: &str) -> String {
 #[cfg(not(feature = "node-compat"))]
 fn node_unsupported(specifier: &str) -> String {
     format!(
-        "the Node module `{specifier}` is not implemented; supported Node modules: node:child_process"
+        "the Node module `{specifier}` is not implemented; supported Node modules: node:child_process, node:path"
     )
+}
+
+/// Returns whether the exact specifier belongs to the implemented Node set.
+#[cfg(feature = "node-compat")]
+fn is_supported_node_specifier(specifier: &str) -> bool {
+    neojs_lite_node::SUPPORTED_MODULES.contains(&specifier)
+}
+
+/// Returns whether the exact specifier belongs to the implemented Node set.
+#[cfg(not(feature = "node-compat"))]
+fn is_supported_node_specifier(specifier: &str) -> bool {
+    matches!(specifier, "node:child_process" | "node:path")
 }
 
 /// Rejects any non-empty import attribute bag.
@@ -80,7 +93,8 @@ fn reject_attributes(
 /// built-ins to one canonical identity.
 ///
 /// With the `node-compat` feature, a resolver built for an opted-in runtime
-/// also accepts the exact `node:child_process` specifier. A resolver built for a
+/// also accepts the exact `node:child_process` and `node:path` specifiers. A
+/// resolver built for a
 /// default runtime rejects every `node:` specifier with a reason. A bare Node
 /// name is never accepted, even when the feature is enabled.
 ///
@@ -103,7 +117,7 @@ impl Resolver for FileResolver {
         attributes: Option<ImportAttributes<'js>>,
     ) -> Result<String> {
         reject_attributes(base, name, attributes)?;
-        if name == "node:child_process" {
+        if is_supported_node_specifier(name) {
             if self.node {
                 return Ok(name.to_owned());
             }
@@ -229,10 +243,10 @@ fn is_windows_drive_path(specifier: &str) -> bool {
 /// policy's reason. Read errors name the resolved module.
 ///
 /// A loader built for an opted-in runtime serves the exact
-/// `node:child_process` source from `neojs-lite-node`. It never reads that
-/// module from disk. A default loader rejects every `node:` name before this
-/// point, and this loader re-checks the opt-in rather than trusting the
-/// resolver alone.
+/// `node:child_process` and `node:path` modules from `neojs-lite-node`. It never
+/// reads those modules from disk. A default loader rejects every `node:` name
+/// before this point, and this loader re-checks the opt-in rather than trusting
+/// the resolver alone.
 pub(super) struct FileLoader {
     /// Whether this loader belongs to a runtime built with Node compatibility.
     pub(super) node: bool,
@@ -245,7 +259,7 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
-        if name == "node:child_process" {
+        if is_supported_node_specifier(name) {
             if !self.node {
                 return Err(Error::new_loading_message(name, node_disabled(name)));
             }

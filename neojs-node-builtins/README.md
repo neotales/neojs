@@ -9,8 +9,9 @@ in NeoJS. It is shared by the V8 adapter (`neojs-node`) and the QuickJS adapter
 | Node module           | Implemented surface                              | Explicitly absent |
 | --------------------- | ------------------------------------------------ | ----------------- |
 | `node:child_process`  | `spawnSync`, `execFileSync` with `encoding: "utf8"` | `spawn`, `exec`, `execFile`, `execSync`, `fork`, `ChildProcess`, callbacks, streams, promises |
+| `node:path`           | `basename`, `dirname`, `extname`, `format`, `isAbsolute`, `join`, `normalize`, `parse`, `relative`, `resolve`, `toNamespacedPath`, `sep`, `delimiter`, `posix`, `win32`, `_makeLong` | `matchesGlob` |
 
-The module has no bare alias and is never substituted with a `neo:` module.
+The modules have no bare alias and are never substituted with a `neo:` module.
 Every other `node:` specifier is rejected with a reason.
 
 ## Security contract

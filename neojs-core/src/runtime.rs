@@ -391,8 +391,10 @@ impl Runtime {
     /// This constructor is compiled only with the crate's `node-compat`
     /// feature. It changes three things and nothing else:
     ///
-    /// * the module loader accepts the exact specifier `node:child_process`;
-    /// * the runtime registers the native synchronous `node:child_process` module;
+    /// * the module loader accepts the exact specifiers `node:child_process`
+    ///   and `node:path`;
+    /// * the runtime registers the native synchronous `node:child_process` and
+    ///   `node:path` modules;
     /// * [`neojs_node::NodeOptions`] supplies the process policy.
     ///
     /// The default [`Runtime::new`] rejects every `node:` import with
@@ -405,11 +407,17 @@ impl Runtime {
     ///
     /// # Implemented surface
     ///
-    /// Only `spawnSync` and `execFileSync` are implemented, and both require
-    /// `encoding: "utf8"`. The supported options are `cwd`, `env`, `input` (a
-    /// string), `timeout`, `maxBuffer`, and `encoding`. `spawn`, `exec`,
-    /// `execFile`, `execSync`, `fork`, and `ChildProcess` throw
+    /// `node:child_process` provides `spawnSync` and `execFileSync`, both
+    /// requiring `encoding: "utf8"`. The supported options are `cwd`, `env`,
+    /// `input` (a string), `timeout`, `maxBuffer`, and `encoding`. `spawn`,
+    /// `exec`, `execFile`, `execSync`, `fork`, and `ChildProcess` throw
     /// `ERR_NODE_UNSUPPORTED`; no asynchronous form is faked.
+    ///
+    /// `node:path` provides `basename`, `dirname`, `extname`, `format`,
+    /// `isAbsolute`, `join`, `normalize`, `parse`, `relative`, `resolve`,
+    /// `toNamespacedPath`, `sep`, `delimiter`, and the `posix`/`win32` views.
+    /// `matchesGlob` throws `ERR_NODE_UNSUPPORTED`. This is a documented subset,
+    /// not full Node path parity.
     ///
     /// There is no shell, no `PATH` lookup, no inherited environment, no
     /// `stdio: inherit`, and no detached process. A requested program must be an
@@ -425,14 +433,17 @@ impl Runtime {
     ///
     /// The op is synchronous: it blocks the isolate thread until the direct
     /// child exits or the policy timeout kills it. The child gets its own
-    /// process group. A timeout, output overflow, or a direct-child exit that
-    /// leaves an inherited pipe open triggers a bounded drain and a group
-    /// SIGKILL; the runner never joins a reader thread that a descendant could
-    /// keep blocked. An inherited pipe left after the direct child exits is an
-    /// explicit `ERR_NODE_CHILD_PROCESS_INCOMPLETE` failure, not a success with
-    /// possibly truncated output. A descendant that creates a new process group
-    /// and escapes the group is not tracked. Bounded completion is Unix-only;
-    /// another platform rejects before spawning.
+    /// process group. A timeout or output overflow kills the group and then
+    /// drains for a bounded grace; a natural direct-child exit with an inherited
+    /// pipe drains first and then kills. The runner never joins a reader thread
+    /// that a descendant could keep blocked. An inherited pipe left after the
+    /// direct child exits is an explicit `ERR_NODE_CHILD_PROCESS_INCOMPLETE`
+    /// failure, not a success with possibly truncated output. A descendant that
+    /// creates a new process group and escapes the group is not tracked. The
+    /// final direct-child reap uses a blocking `wait()` and can outlive the
+    /// deadline if the operating system does not complete the kill or reap.
+    /// Unix pipe polling and process-group kill are Unix-only; another platform
+    /// rejects before spawning.
     ///
     /// This is **not a sandbox**. An allowed program runs with the authority of
     /// the neojs process, including filesystem, network, and further process

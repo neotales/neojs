@@ -42,10 +42,11 @@
 //!   the engine-neutral `neojs-builtins` crate, bound as native QuickJS
 //!   modules; the V8 runtime uses the same Rust logic.
 //! * With the off-by-default `node-compat` feature and
-//!   [`Runtime::with_node_compat`], the exact specifier `node:child_process`
-//!   loads a native synchronous `spawnSync`/`execFileSync` module. It is not
-//!   added to the `Neo` registry and has no bare alias. The default runtime
-//!   rejects it.
+//!   [`Runtime::with_node_compat`], the exact specifiers `node:child_process`
+//!   and `node:path` load native modules. `node:child_process` provides
+//!   synchronous `spawnSync`/`execFileSync`; `node:path` provides the documented
+//!   path subset. Neither is added to the `Neo` registry or has a bare alias.
+//!   The default runtime rejects both.
 //!
 //! # What is not implemented yet
 //!
@@ -81,7 +82,8 @@ pub use runtime::{Error, Runtime};
 #[cfg(feature = "node-compat")]
 pub use neojs_lite_node::{
     CHILD_PROCESS_SPECIFIER, ChildProcessError, ChildProcessPolicy, Limits, NodeOptions,
-    PolicyError, SUPPORTED_MODULES, is_known_node_bare_name, unsupported_module_reason,
+    PATH_SPECIFIER, PolicyError, SUPPORTED_MODULES, is_known_node_bare_name,
+    unsupported_module_reason,
 };
 
 /// Test-only hooks. Compiled only with the off-by-default `test-support`

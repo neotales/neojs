@@ -13,11 +13,15 @@
 //!
 //! # Support, exactly
 //!
-//! The only implemented Node module is `node:child_process`. Its module object
-//! provides `spawnSync` and `execFileSync` with `encoding: "utf8"` required.
-//! `spawn`, `exec`, `execFile`, `execSync`, `fork`, and every asynchronous or
-//! callback form throw `ERR_NODE_UNSUPPORTED`; they are not implemented as a
-//! blocking call or a fake resolved Promise.
+//! The implemented Node modules are `node:child_process` and `node:path`.
+//! `node:child_process` provides `spawnSync` and `execFileSync` with
+//! `encoding: "utf8"` required. `spawn`, `exec`, `execFile`, `execSync`,
+//! `fork`, and every asynchronous or callback form throw
+//! `ERR_NODE_UNSUPPORTED`; they are not implemented as a blocking call or a
+//! fake resolved Promise. `node:path` provides `basename`, `dirname`,
+//! `extname`, `format`, `isAbsolute`, `join`, `normalize`, `parse`, `relative`,
+//! `resolve`, `toNamespacedPath`, `sep`, `delimiter`, and the `posix`/`win32`
+//! views. `matchesGlob` throws `ERR_NODE_UNSUPPORTED`.
 //!
 //! Importing a Node module never reaches the NeoJS built-in registry. A Node
 //! specifier is always written with the `node:` prefix, and a bare name such as
@@ -65,6 +69,7 @@
 
 mod child_process;
 mod module;
+mod path;
 mod protocol;
 
 pub use child_process::{
@@ -72,6 +77,12 @@ pub use child_process::{
     SyncRequest, SyncResult, run_sync,
 };
 pub use module::{
-    CHILD_PROCESS_SPECIFIER, SUPPORTED_MODULES, is_known_node_bare_name, unsupported_module_reason,
+    CHILD_PROCESS_SPECIFIER, PATH_SPECIFIER, SUPPORTED_MODULES, is_known_node_bare_name,
+    unsupported_module_reason,
+};
+pub use path::{
+    MAX_PATH_INPUT_BYTES, ParsedPath, PathFlavor, PathObject, basename, dirname, extname, format,
+    host_cwd, host_flavor, is_absolute, join, normalize, parse, relative, resolve,
+    to_namespaced_path,
 };
 pub use protocol::handle_request;

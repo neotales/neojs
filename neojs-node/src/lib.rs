@@ -2,18 +2,19 @@
 //! V8 adapter for opt-in Node compatibility.
 //!
 //! The runtime creates this adapter only from
-//! `neojs_core::Runtime::with_node_compat`. It registers one native synthetic
-//! ECMAScript module named `node:child_process` through
+//! `neojs_core::Runtime::with_node_compat`. It registers native synthetic
+//! ECMAScript modules named `node:child_process` and `node:path` through
 //! `JsRuntime::register_native_module`. The named exports are native V8
 //! function objects; there is no JavaScript implementation, module facade, JSON
 //! bridge, or host op.
 //!
-//! The synchronous functions call the shared, engine-neutral
+//! `node:child_process` calls the shared, engine-neutral
 //! `neojs-node-builtins` runner directly. The runner enforces the executable
 //! allowlist, an empty inherited environment, and finite time, input, output,
-//! argument, and environment limits. The native functions validate and copy
-//! guest values before handing them to Rust; a getter or Proxy value is read at
-//! most once and never coerced.
+//! argument, and environment limits. `node:path` calls the shared pure-Rust
+//! path algorithms. The native functions validate and copy guest values before
+//! handing them to Rust; a getter or Proxy value is read at most once and never
+//! coerced.
 //!
 //! The module is registered in the normal module map before user code runs, so
 //! static imports, dynamic imports, and repeated imports observe one module
@@ -29,9 +30,14 @@ use deno_core::v8;
 
 pub use neojs_node_builtins::{
     CHILD_PROCESS_SPECIFIER, ChildProcessError, ChildProcessPolicy, Limits, NodeOptions,
-    PolicyError, SUPPORTED_MODULES, SyncRequest, SyncResult, is_known_node_bare_name, run_sync,
-    unsupported_module_reason,
+    PATH_SPECIFIER, PolicyError, SUPPORTED_MODULES, SyncRequest, SyncResult,
+    is_known_node_bare_name, run_sync, unsupported_module_reason,
 };
+
+use neojs_node_builtins::MAX_PATH_INPUT_BYTES;
+use neojs_node_builtins::PathFlavor;
+use neojs_node_builtins::PathObject;
+use neojs_node_builtins::host_cwd;
 
 const MAX_INPUT_UNITS: usize = 1_048_576;
 const MAX_ARGS: usize = 256;
@@ -133,19 +139,25 @@ fn bounded_keys<'js>(
     Ok(keys)
 }
 
-/// Installs the native `node:child_process` module and its process policy.
+/// Installs the native `node:child_process` and `node:path` modules and the
+/// process policy.
 ///
-/// Registration happens before any user module can import the specifier. The
-/// module has no default side effects and no global object.
+/// Registration happens before any user module can import either specifier.
+/// Neither module has a default side effect or a global object.
 pub fn install(js: &mut JsRuntime, options: NodeOptions) -> Result<(), String> {
     let context = js.main_context();
-    let exports = {
+    let (child_process_exports, path_exports) = {
         v8::scope!(let scope, js.v8_isolate());
         let context_local = v8::Local::new(scope, context.clone());
         let scope = &mut v8::ContextScope::new(scope, context_local);
-        build_exports(scope)?
+        (
+            build_child_process_exports(scope)?,
+            build_path_exports(scope)?,
+        )
     };
-    js.register_native_module(CHILD_PROCESS_SPECIFIER, exports)
+    js.register_native_module(CHILD_PROCESS_SPECIFIER, child_process_exports)
+        .map_err(|error| error.to_string())?;
+    js.register_native_module(PATH_SPECIFIER, path_exports)
         .map_err(|error| error.to_string())?;
     // Install the policy only after the module registration is accepted. A
     // rejected duplicate must not replace the authority of the existing module.
@@ -155,7 +167,7 @@ pub fn install(js: &mut JsRuntime, options: NodeOptions) -> Result<(), String> {
     Ok(())
 }
 
-fn build_exports<'s>(
+fn build_child_process_exports<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> Result<Vec<(FastStaticString, v8::Global<v8::Value>)>, String> {
     let spawn = native_function(scope, spawn, "spawn")?;
@@ -242,6 +254,557 @@ fn build_exports<'s>(
         api.into(),
     );
     Ok(exports)
+}
+
+fn build_path_exports<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> Result<Vec<(FastStaticString, v8::Global<v8::Value>)>, String> {
+    let posix = build_path_api(scope, PathFlavor::Posix)?;
+    let win32 = build_path_api(scope, PathFlavor::Win32)?;
+    let host = if PathFlavor::host() == PathFlavor::Posix {
+        posix
+    } else {
+        win32
+    };
+
+    for (object, other_posix, other_win32) in [(&posix, &posix, &win32), (&win32, &posix, &win32)] {
+        if !define_value(scope, object, "posix", (*other_posix).into())
+            || !define_value(scope, object, "win32", (*other_win32).into())
+        {
+            return Err("cannot define the native path views".to_string());
+        }
+    }
+    let mut exports = Vec::with_capacity(18);
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("resolve"),
+        &host,
+        "resolve",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("normalize"),
+        &host,
+        "normalize",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("isAbsolute"),
+        &host,
+        "isAbsolute",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("join"),
+        &host,
+        "join",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("relative"),
+        &host,
+        "relative",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("toNamespacedPath"),
+        &host,
+        "toNamespacedPath",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("dirname"),
+        &host,
+        "dirname",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("basename"),
+        &host,
+        "basename",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("extname"),
+        &host,
+        "extname",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("format"),
+        &host,
+        "format",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("parse"),
+        &host,
+        "parse",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("sep"),
+        &host,
+        "sep",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("delimiter"),
+        &host,
+        "delimiter",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("posix"),
+        &host,
+        "posix",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("win32"),
+        &host,
+        "win32",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("matchesGlob"),
+        &host,
+        "matchesGlob",
+    )?;
+    push_path_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("_makeLong"),
+        &host,
+        "_makeLong",
+    )?;
+    push_export(
+        scope,
+        &mut exports,
+        deno_core::ascii_str!("default"),
+        host.into(),
+    );
+    Ok(exports)
+}
+
+fn build_path_api<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    flavor: PathFlavor,
+) -> Result<v8::Local<'s, v8::Object>, String> {
+    let api = v8::Object::new(scope);
+    let normalize = path_function(scope, path_normalize, flavor, "normalize")?;
+    let is_absolute = path_function(scope, path_is_absolute, flavor, "isAbsolute")?;
+    let join = path_function(scope, path_join, flavor, "join")?;
+    let resolve = path_function(scope, path_resolve, flavor, "resolve")?;
+    let relative = path_function(scope, path_relative, flavor, "relative")?;
+    let to_namespaced = path_function(scope, path_to_namespaced_path, flavor, "toNamespacedPath")?;
+    let dirname = path_function(scope, path_dirname, flavor, "dirname")?;
+    let basename = path_function(scope, path_basename, flavor, "basename")?;
+    let extname = path_function(scope, path_extname, flavor, "extname")?;
+    let format = path_function(scope, path_format, flavor, "format")?;
+    let parse = path_function(scope, path_parse, flavor, "parse")?;
+    let matches_glob = native_function(scope, path_matches_glob, "matchesGlob")?;
+
+    for (name, value) in [
+        ("normalize", normalize),
+        ("isAbsolute", is_absolute),
+        ("join", join),
+        ("resolve", resolve),
+        ("relative", relative),
+        ("toNamespacedPath", to_namespaced),
+        ("dirname", dirname),
+        ("basename", basename),
+        ("extname", extname),
+        ("format", format),
+        ("parse", parse),
+    ] {
+        if !define_value(scope, &api, name, value.into()) {
+            return Err(format!("cannot define the native path.{name} function"));
+        }
+    }
+    if !define_value(scope, &api, "_makeLong", to_namespaced.into())
+        || !define_value(scope, &api, "matchesGlob", matches_glob.into())
+    {
+        return Err("cannot define the native path aliases".to_string());
+    }
+    for (name, value) in [("sep", flavor.sep()), ("delimiter", flavor.delimiter())] {
+        let Some(value) = v8::String::new(scope, value) else {
+            return Err(format!("cannot allocate the native path.{name} constant"));
+        };
+        if !define_value(scope, &api, name, value.into()) {
+            return Err(format!("cannot define the native path.{name} constant"));
+        }
+    }
+    Ok(api)
+}
+
+fn path_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    callback: impl v8::MapFnTo<v8::FunctionCallback>,
+    flavor: PathFlavor,
+    name: &str,
+) -> Result<v8::Local<'s, v8::Function>, String> {
+    let data = v8::Integer::new(scope, flavor as i32).into();
+    v8::Function::builder(callback)
+        .data(data)
+        .build(scope)
+        .ok_or_else(|| format!("cannot allocate the native path.{name} function"))
+}
+
+fn push_path_export<'s>(
+    scope: &v8::PinScope<'s, '_>,
+    exports: &mut Vec<(FastStaticString, v8::Global<v8::Value>)>,
+    name: FastStaticString,
+    object: &v8::Local<'s, v8::Object>,
+    key: &str,
+) -> Result<(), String> {
+    let key = v8::String::new(scope, key)
+        .ok_or_else(|| "cannot allocate a path export key".to_string())?;
+    let value = object
+        .get(scope, key.into())
+        .ok_or_else(|| "cannot read a path export".to_string())?;
+    exports.push((name, v8::Global::new(scope, value)));
+    Ok(())
+}
+
+fn path_flavor(
+    scope: &v8::PinScope<'_, '_>,
+    args: &v8::FunctionCallbackArguments<'_>,
+) -> Result<PathFlavor, Failure> {
+    let number = args.data().int32_value(scope).ok_or(Failure::Pending)?;
+    Ok(if number == 0 {
+        PathFlavor::Posix
+    } else {
+        PathFlavor::Win32
+    })
+}
+
+fn path_arg<'s>(
+    scope: &v8::PinScope<'s, '_>,
+    args: &v8::FunctionCallbackArguments<'s>,
+    index: i32,
+    what: &str,
+) -> Result<String, Failure> {
+    read_path_string(scope, args.get(index), what)
+}
+
+fn read_path_string<'s>(
+    scope: &v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+    what: &str,
+) -> Result<String, Failure> {
+    let text = read_string(scope, value, what, MAX_PATH_INPUT_BYTES)?;
+    if text.len() > MAX_PATH_INPUT_BYTES {
+        return Err(Failure::too_large());
+    }
+    Ok(text)
+}
+
+fn path_optional_arg<'s>(
+    scope: &v8::PinScope<'s, '_>,
+    args: &v8::FunctionCallbackArguments<'s>,
+    index: i32,
+    what: &str,
+) -> Result<Option<String>, Failure> {
+    let value = args.get(index);
+    if value.is_undefined() {
+        Ok(None)
+    } else {
+        read_path_string(scope, value, what).map(Some)
+    }
+}
+
+fn set_path_string<'s>(
+    scope: &v8::PinScope<'s, '_>,
+    rv: &mut v8::ReturnValue<'s, v8::Value>,
+    value: String,
+) {
+    if let Some(value) = v8::String::new(scope, &value) {
+        rv.set(value.into());
+    }
+}
+
+fn set_path_error(scope: &v8::PinScope<'_, '_>, failure: Failure) {
+    throw_failure(scope, failure);
+}
+
+fn path_normalize<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let result = (|| {
+        let flavor = path_flavor(scope, &args)?;
+        let path = path_arg(scope, &args, 0, "path")?;
+        Ok(neojs_node_builtins::normalize(flavor, &path))
+    })();
+    match result {
+        Ok(value) => set_path_string(scope, &mut rv, value),
+        Err(failure) => set_path_error(scope, failure),
+    }
+}
+
+fn path_is_absolute<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let result = (|| {
+        let flavor = path_flavor(scope, &args)?;
+        let path = path_arg(scope, &args, 0, "path")?;
+        Ok(neojs_node_builtins::is_absolute(flavor, &path))
+    })();
+    match result {
+        Ok(value) => rv.set(v8::Boolean::new(scope, value).into()),
+        Err(failure) => set_path_error(scope, failure),
+    }
+}
+
+fn path_join<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let result = (|| {
+        let flavor = path_flavor(scope, &args)?;
+        let mut paths = Vec::with_capacity(args.length() as usize);
+        for index in 0..args.length() {
+            paths.push(path_arg(scope, &args, index, "path")?);
+        }
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        Ok(neojs_node_builtins::join(flavor, &refs))
+    })();
+    match result {
+        Ok(value) => set_path_string(scope, &mut rv, value),
+        Err(failure) => set_path_error(scope, failure),
+    }
+}
+
+fn path_resolve<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let result = (|| {
+        let flavor = path_flavor(scope, &args)?;
+        let mut paths = Vec::with_capacity(args.length() as usize);
+        for index in 0..args.length() {
+            paths.push(path_arg(scope, &args, index, "path")?);
+        }
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        Ok(neojs_node_builtins::resolve(flavor, &host_cwd(), &refs))
+    })();
+    match result {
+        Ok(value) => set_path_string(scope, &mut rv, value),
+        Err(failure) => set_path_error(scope, failure),
+    }
+}
+
+fn path_relative<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let result = (|| {
+        let flavor = path_flavor(scope, &args)?;
+        let from = path_arg(scope, &args, 0, "from")?;
+        let to = path_arg(scope, &args, 1, "to")?;
+        Ok(neojs_node_builtins::relative(
+            flavor,
+            &host_cwd(),
+            &from,
+            &to,
+        ))
+    })();
+    match result {
+        Ok(value) => set_path_string(scope, &mut rv, value),
+        Err(failure) => set_path_error(scope, failure),
+    }
+}
+
+fn path_dirname<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let result = (|| {
+        let flavor = path_flavor(scope, &args)?;
+        let path = path_arg(scope, &args, 0, "path")?;
+        Ok(neojs_node_builtins::dirname(flavor, &path))
+    })();
+    match result {
+        Ok(value) => set_path_string(scope, &mut rv, value),
+        Err(failure) => set_path_error(scope, failure),
+    }
+}
+
+fn path_basename<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let result = (|| {
+        let flavor = path_flavor(scope, &args)?;
+        let path = path_arg(scope, &args, 0, "path")?;
+        let suffix = path_optional_arg(scope, &args, 1, "suffix")?;
+        Ok(neojs_node_builtins::basename(
+            flavor,
+            &path,
+            suffix.as_deref(),
+        ))
+    })();
+    match result {
+        Ok(value) => set_path_string(scope, &mut rv, value),
+        Err(failure) => set_path_error(scope, failure),
+    }
+}
+
+fn path_extname<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let result = (|| {
+        let flavor = path_flavor(scope, &args)?;
+        let path = path_arg(scope, &args, 0, "path")?;
+        Ok(neojs_node_builtins::extname(flavor, &path))
+    })();
+    match result {
+        Ok(value) => set_path_string(scope, &mut rv, value),
+        Err(failure) => set_path_error(scope, failure),
+    }
+}
+
+fn path_parse<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let result = (|| {
+        let flavor = path_flavor(scope, &args)?;
+        let path = path_arg(scope, &args, 0, "path")?;
+        Ok(neojs_node_builtins::parse(flavor, &path))
+    })();
+    match result {
+        Ok(parsed) => {
+            let object = v8::Object::new(scope);
+            for (name, value) in [
+                ("root", parsed.root),
+                ("dir", parsed.dir),
+                ("base", parsed.base),
+                ("ext", parsed.ext),
+                ("name", parsed.name),
+            ] {
+                let Some(value) = v8::String::new(scope, &value) else {
+                    return;
+                };
+                if !define_value(scope, &object, name, value.into()) {
+                    return;
+                }
+            }
+            rv.set(object.into());
+        }
+        Err(failure) => set_path_error(scope, failure),
+    }
+}
+
+fn path_format<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let result = (|| {
+        let flavor = path_flavor(scope, &args)?;
+        let value = args.get(0);
+        if !value.is_object() || value.is_null() || value.is_function() {
+            return Err(Failure::invalid_type("path.format requires an object"));
+        }
+        let object = v8::Local::<v8::Object>::try_from(value)
+            .map_err(|_| Failure::invalid_type("path.format requires an object"))?;
+        let root = read_optional_path_field(scope, &object, "root")?;
+        let dir = read_optional_path_field(scope, &object, "dir")?;
+        let base = read_optional_path_field(scope, &object, "base")?;
+        let ext = read_optional_path_field(scope, &object, "ext")?;
+        let name = read_optional_path_field(scope, &object, "name")?;
+        let path_object = PathObject {
+            root: root.as_deref(),
+            dir: dir.as_deref(),
+            base: base.as_deref(),
+            ext: ext.as_deref(),
+            name: name.as_deref(),
+        };
+        Ok(neojs_node_builtins::format(flavor, &path_object))
+    })();
+    match result {
+        Ok(value) => set_path_string(scope, &mut rv, value),
+        Err(failure) => set_path_error(scope, failure),
+    }
+}
+
+fn read_optional_path_field<'s>(
+    scope: &v8::PinScope<'s, '_>,
+    object: &v8::Local<'s, v8::Object>,
+    name: &str,
+) -> Result<Option<String>, Failure> {
+    let key = v8::String::new(scope, name).ok_or(Failure::Pending)?;
+    let value = object.get(scope, key.into()).ok_or(Failure::Pending)?;
+    if value.is_undefined() {
+        return Ok(None);
+    }
+    if !value.is_string() {
+        return Err(Failure::invalid_type(format!(
+            "path.format field `{name}` must be a string"
+        )));
+    }
+    read_path_string(scope, value, name).map(Some)
+}
+
+fn path_to_namespaced_path<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let result = (|| {
+        let flavor = path_flavor(scope, &args)?;
+        let path = path_arg(scope, &args, 0, "path")?;
+        Ok(neojs_node_builtins::to_namespaced_path(
+            flavor,
+            &host_cwd(),
+            &path,
+        ))
+    })();
+    match result {
+        Ok(value) => set_path_string(scope, &mut rv, value),
+        Err(failure) => set_path_error(scope, failure),
+    }
+}
+
+fn path_matches_glob<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    _args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    throw_coded(
+        scope,
+        "ERR_NODE_UNSUPPORTED",
+        "node:path matchesGlob is not implemented",
+    );
 }
 
 fn native_function<'s>(

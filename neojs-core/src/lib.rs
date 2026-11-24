@@ -56,11 +56,12 @@
 //! allowed, and remote code is not sandboxed.
 //!
 //! Node compatibility is off by default. With the crate's off-by-default
-//! `node-compat` feature, [`Runtime::with_node_compat`] serves only
-//! `node:child_process`, implemented as synchronous `spawnSync` and
-//! `execFileSync` with `encoding: "utf8"` required. Other `node:` modules and
-//! every asynchronous form are rejected with a reason; none is substituted with
-//! a `neo:` module. Process execution also requires an explicit exact-path
+//! `node-compat` feature, [`Runtime::with_node_compat`] serves
+//! `node:child_process` and `node:path`. `node:child_process` implements
+//! synchronous `spawnSync` and `execFileSync` with `encoding: "utf8"` required;
+//! `node:path` implements the documented path subset. Other `node:` modules and
+//! every asynchronous child-process form are rejected with a reason; none is
+//! substituted with a `neo:` module. Process execution also requires an explicit exact-path
 //! allowlist, and the policy's time, input, output, argument, and environment
 //! bounds apply. It is not a sandbox. See `docs/node-compat.md`.
 //!
@@ -145,8 +146,8 @@
 //! once and cannot turn its own cycle into a plain value.
 //! The module is available as `test` and `neo:test`;
 //! `node:` modules, including `node:test`, remain rejected by default. The
-//! off-by-default `node-compat` feature adds only `node:child_process`, never
-//! `node:test`. It is not Node's `node:test`: there are no
+//! off-by-default `node-compat` feature adds `node:child_process` and
+//! `node:path`, never `node:test`. It is not Node's `node:test`: there are no
 //! subtests, hooks, mocks, snapshots, tags, filters, retries, or parallel
 //! tests, and `test()` returns `undefined`. Tests in one file share one realm
 //! and its mutable state, so this is not isolation or a sandbox.
@@ -325,8 +326,8 @@
 //! replacements are not followed. Neither path follows a replacement of the
 //! whole `globalThis.console` property. It does not provide other `neo:` or
 //! `node:` import specifiers; `node:` modules, including `node:test`, remain
-//! rejected by default, and the off-by-default `node-compat` feature adds only
-//! `node:child_process`. CommonJS (`.cjs` and
+//! rejected by default, and the off-by-default `node-compat` feature adds
+//! `node:child_process` and `node:path`. CommonJS (`.cjs` and
 //! `.cts` files), remote imports unless [`Runtime::with_remote`] enabled them,
 //! module type attributes, and a permission system are not implemented. See the
 //! repository README for the full list of limits.
@@ -408,7 +409,8 @@ pub use runtime::TestReport;
 #[cfg(feature = "node-compat")]
 pub use neojs_node::{
     CHILD_PROCESS_SPECIFIER, ChildProcessError, ChildProcessPolicy, Limits, NodeOptions,
-    PolicyError, SUPPORTED_MODULES, is_known_node_bare_name, unsupported_module_reason,
+    PATH_SPECIFIER, PolicyError, SUPPORTED_MODULES, is_known_node_bare_name,
+    unsupported_module_reason,
 };
 
 /// Test-only hooks. Compiled only with the off-by-default `test-support`
