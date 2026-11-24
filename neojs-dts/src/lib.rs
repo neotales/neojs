@@ -36,7 +36,7 @@ mod parser;
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Runtime target profile selecting the globals and `neo:*` built-in modules
 /// included in generated TypeScript declarations.
@@ -76,6 +76,20 @@ impl Profile {
         files(self)
     }
 
+    /// Returns the ambient global `.d.ts` source (`Neo` and `console`) for this
+    /// profile.
+    #[must_use]
+    pub fn globals_dts(self) -> &'static str {
+        globals_dts(self)
+    }
+
+    /// Returns the `.d.ts` declaration source for a canonical `neo:*` module
+    /// specifier in this profile, or `None` if that specifier is not enabled.
+    #[must_use]
+    pub fn module_dts(self, specifier: &str) -> Option<&'static str> {
+        module_dts(self, specifier)
+    }
+
     /// Returns the expected runtime export contract for every `neo:*` module in
     /// this profile.
     #[must_use]
@@ -90,6 +104,9 @@ impl Profile {
     }
 
     /// Materializes this profile's `types/` directory layout under `dir`.
+    ///
+    /// See [`write_types_dir`] for overwrite, retention, and partial-write
+    /// semantics.
     pub fn write_types_dir(self, dir: &Path) -> io::Result<()> {
         write_types_dir(self, dir)
     }
@@ -659,12 +676,14 @@ pub fn render_bundle(profile: Profile) -> String {
 /// Writes the complete `types/` declaration directory for `profile` into `dir`.
 ///
 /// Creates `dir` and any nested subdirectories (such as `neo/uuid/`) as needed.
-/// Output is deterministic and overwrites any existing files at the same paths.
+/// Output is deterministic and overwrites files at the same paths while
+/// retaining any unrelated pre-existing files in `dir`.
 ///
 /// # Errors
 ///
 /// Returns an [`io::Error`] if directory creation or writing any `.d.ts` file
-/// fails.
+/// fails. Because files are written sequentially, an I/O error mid-operation
+/// may leave earlier files written in `dir` without rolling back.
 ///
 /// # Example
 ///
@@ -682,8 +701,16 @@ pub fn write_types_dir(profile: Profile, dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     for file in files(profile) {
         let mut dest = PathBuf::from(dir);
-        for component in file.path.split('/') {
-            dest.push(component);
+        for component in Path::new(file.path).components() {
+            match component {
+                Component::Normal(part) => dest.push(part),
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("invalid embedded declaration path component: {other:?}"),
+                    ));
+                }
+            }
         }
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;

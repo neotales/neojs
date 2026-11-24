@@ -73,19 +73,26 @@ declare module "neo:test" {
   }
 
   /**
-   * Register a test case to execute on the next `run()`.
-   *
-   * Omitting `fn` registers a pending test, which fails the run. Generator
-   * functions are rejected with `NEO_TEST_UNSUPPORTED`.
+   * Register a pending test case (fails the run because no callback was supplied).
    *
    * @param name Non-blank test name.
-   * @param fn Synchronous or async test body (or omitted to mark pending).
+   * @throws {TypeError} on invalid `name`.
+   * @throws {Error} with `code` `"NEO_TEST_DURING_RUN"` or `"NEO_TEST_LIMIT"`.
+   */
+  export function test(name: string): void;
+  /**
+   * Register a test case to execute on the next `run()`.
+   *
+   * Generator functions are rejected with `NEO_TEST_UNSUPPORTED`.
+   *
+   * @param name Non-blank test name.
+   * @param fn Synchronous or async test body.
    * @param options Optional registration options (`{ timeout }`).
    * @throws {TypeError} on invalid arguments or unknown options.
    * @throws {Error} with `code` `"NEO_TEST_DURING_RUN"`, `"NEO_TEST_LIMIT"`,
    * `"NEO_TEST_UNSUPPORTED"`, or `"NEO_TEST_NO_TIMER"`.
    */
-  export function test(name: string, fn?: () => unknown, options?: TestOptions): void;
+  export function test(name: string, fn: () => unknown, options?: TestOptions): void;
 
   /**
    * Execute queued tests in registration order and return the cumulative

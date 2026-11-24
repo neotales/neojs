@@ -17,7 +17,7 @@ declare module "neo:crypto" {
   /**
    * Supported digest output encodings (case-insensitive).
    */
-  export type DigestEncoding = "hex" | "base64" | "base64url" | "latin1" | "binary";
+  export type DigestEncoding = "hex" | "base64" | "base64url" | "latin1" | "binary" | (string & {});
 
   /**
    * Options accepted by `createEncryptor` and `createDecryptor` (`aes-256-cbc`
@@ -35,8 +35,8 @@ declare module "neo:crypto" {
   export interface ShamirShare {
     /** One-based GF(256) share index (`1..=255`). */
     readonly index: number;
-    /** Share bytes (same length as the secret). */
-    value: Uint8Array;
+    /** Share bytes (same length as the secret; record property is frozen, array elements remain mutable). */
+    readonly value: Uint8Array;
   }
 
   /**

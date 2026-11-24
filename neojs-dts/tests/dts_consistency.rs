@@ -454,3 +454,22 @@ fn parse_declared_exports_handles_type_exports_overloads_comments_and_clauses() 
         vec!["overloaded", "MyError", "LIMIT", "renamed"]
     );
 }
+
+// Unit-style parser test: regression test for UTF-8 char-boundary safety when
+// a backslash precedes a multi-byte UTF-8 scalar or end-of-input.
+#[test]
+fn parse_declared_exports_handles_escaped_multibyte_utf8_without_panicking() {
+    assert!(parse_declared_exports("\"\\é\"").is_empty());
+    assert!(parse_declared_exports("\"\\").is_empty());
+
+    let module = r#"
+        declare module "neo:utf8" {
+            export const escaped: "\é";
+            export function ok(): void;
+        }
+    "#;
+    let parsed = parse_declared_exports(module);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].specifier, "neo:utf8");
+    assert_eq!(parsed[0].exports, vec!["escaped", "ok"]);
+}

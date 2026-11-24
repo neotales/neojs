@@ -121,6 +121,6 @@ declare module "neo:path" {
   /** Host path list delimiter (`":"` on POSIX, `";"` on Windows). */
   export const DELIMITER: ":" | ";";
 
-  /** Host path separator pattern (`/\//` on POSIX, `/[\\/]+/` on Windows). */
+  /** Host path separator pattern (`/\/+/` on POSIX, `/[\\/]+/` on Windows). */
   export const SEPARATOR_PATTERN: RegExp;
 }

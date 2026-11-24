@@ -55,9 +55,13 @@ fn tokenize(input: &str) -> Vec<Token> {
             let mut value = String::new();
             while i < len {
                 let c = bytes[i];
-                if c == b'\\' && i + 1 < len {
-                    value.push(bytes[i + 1] as char);
-                    i += 2;
+                if c == b'\\' {
+                    if let Some(ch) = input[i + 1..].chars().next() {
+                        value.push(ch);
+                        i += 1 + ch.len_utf8();
+                    } else {
+                        i += 1;
+                    }
                     continue;
                 }
                 if c == quote {
