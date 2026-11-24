@@ -159,7 +159,8 @@ distinct conversion failure and becomes a coded `ERR_INVALID_ARG_VALUE`, never
 an `undefined` return. A GC/handle-churn unit test exercises the sink path.
 Test-only element-scan counters are `thread_local` and prove the slot loop is
 not entered before the budget check, including across parallel isolates. A
-thread-local test hook fault-injects the conversion-failure path.
+thread-local test hook fault-injects the conversion-failure path; it is inert
+unless called from native test code and is not exposed to JavaScript.
 
 The adapter applies the same caps as the QuickJS adapter: options 6 keys / 64
 scanned slots, environment 128 keys / 4096 scanned slots, and 4096 UTF-16 units

@@ -28,7 +28,8 @@ reports `kException` when V8 actually has a pending exception. Test-only
 `neojs_v8_reset_element_scan_probe`/`neojs_v8_element_scan_probe` counters are
 `thread_local`, so parallel isolates cannot race or observe one another. A
 thread-local `neojs_v8_test_set_key_conversion_failure` hook fault-injects the
-conversion-failure path for tests; it is inert unless called.
+conversion-failure path for tests; it is inert unless called from native test
+code and is not exposed to JavaScript.
 
 ## Supported and rejected objects
 
