@@ -30,25 +30,20 @@ neo-slices = ["neo-chars"]
 neo-strings = ["neojs-builtins/strings"]
 # Test-only fault injection for the peer-close reply branch. Never enabled by a
 # normal build; `neojs` enables it only for its own dev/test targets.
-test-support = ["neojs-remote/test-support", "neojs-ssh-core/test-support"]
+test-support = ["neojs-crypto-core/test-support", "neojs-remote/test-support", "neojs-ssh-core/test-support"]
 
 [dependencies]
-aes.workspace = true
-aes-gcm.workspace = true
-bcrypt.workspace = true
-cbc.workspace = true
 deno_core.workspace = true
 deno_error.workspace = true
 getrandom.workspace = true
-hmac.workspace = true
 neojs-builtins = { workspace = true, features = ["assert", "os", "test", "uuid"] }
+neojs-crypto-core.workspace = true
 neojs-fs-core.workspace = true
 neojs-manifest.workspace = true
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy", features = ["typescript"] }
 neojs-remote.workspace = true
 neojs-ssh-core.workspace = true
 neotales-age.workspace = true
-pbkdf2.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

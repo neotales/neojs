@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "neojs-builtins",
     "neojs-core",
+    "neojs-crypto-core",
     "neojs",
     "neojs-dbapi",
     "neojs-dts",
@@ -26,6 +27,7 @@ exclude = ["vendor/deno_core"]
 default-members = [
     "neojs-builtins",
     "neojs-core",
+    "neojs-crypto-core",
     "neojs",
     "neojs-dbapi",
     "neojs-dts",
@@ -77,6 +79,9 @@ deno_error = "0.7"
 # runtimes; it has no engine dependency. Each dependent selects modules through
 # its features.
 neojs-builtins = { version = "0.1.0", path = "neojs-builtins" }
+# Engine-neutral synchronous cryptographic core for `neo:crypto`. Has no JS
+# engine or Tokio dependency.
+neojs-crypto-core = { version = "0.1.0", path = "neojs-crypto-core" }
 # Engine-neutral TypeScript declaration (.d.ts) bundles for V8 and QuickJS.
 neojs-dts = { version = "0.1.0", path = "neojs-dts" }
 # Engine-neutral core filesystem operations for `neo:fs`.
