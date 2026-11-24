@@ -1,0 +1,124 @@
+# Tag-only release build and verification skeleton for neojs.
+#
+# Security & release boundary:
+# - Permissions are strictly `contents: read`; no secrets, signing keys, or
+#   publish tokens are accessed or stored in this workflow.
+# - Signing and publishing release artifacts (GitHub Releases / crates.io)
+#   must go through `system-admin` and an explicit release process.
+#
+# Action versions use pinned major tags because this workflow was authored
+# offline without network access to resolve GitHub commit SHAs.
+# TODO(ci): Pin all `uses:` references to immutable 40-char commit SHAs once online.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must stay aligned with `workspace.package.rust-version` in Cargo.toml and
+  # `eng/size/toolchain`.
+  RUST_TOOLCHAIN: "1.100.0"
+
+jobs:
+  release-build:
+    name: Verify Tag and Build Release Binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag is annotated and well-formed
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ "${tag}" != v* ]]; then
+            echo "ERROR: tag '${tag}' must start with 'v'" >&2
+            exit 1
+          fi
+          obj_type=$(git cat-file -t "refs/tags/${tag}")
+          if [ "${obj_type}" != "tag" ]; then
+            echo "ERROR: tag '${tag}' is a '${obj_type}' (lightweight tag); release builds require an annotated tag." >&2
+            exit 1
+          fi
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Verify toolchain pin and Cargo.toml package versions
+        run: |
+          set -euo pipefail
+          size_toolchain=$(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+            eng/size/toolchain | sed '/^$/d' | head -n 1)
+          if [ "${size_toolchain}" != "${RUST_TOOLCHAIN}" ]; then
+            echo "ERROR: eng/size/toolchain (${size_toolchain}) != RUST_TOOLCHAIN (${RUST_TOOLCHAIN})" >&2
+            exit 1
+          fi
+
+          tag_version="${GITHUB_REF_NAME#v}"
+          metadata=$(cargo metadata --no-deps --locked --format-version 1)
+          for pkg in neojs neojs-lite; do
+            pkg_version=$(jq -r --arg pkg "${pkg}" '.packages[] | select(.name == $pkg) | .version' <<<"${metadata}")
+            if [ -z "${pkg_version}" ] || [ "${pkg_version}" != "${tag_version}" ]; then
+              echo "ERROR: ${pkg} version (${pkg_version:-missing}) does not match tag version (${tag_version})" >&2
+              exit 1
+            fi
+          done
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+
+      - name: Run release verification tests
+        run: |
+          set -euo pipefail
+          cargo test --locked
+          cargo test --locked -p neojs-builtins --all-features
+          cargo test --locked -p neojs-builtins --no-default-features
+          cargo test --locked -p neojs-lite-core -p neojs-lite
+          cargo test --locked -p neojs-lite-core --no-default-features
+
+      - name: Build release binaries
+        run: cargo build --release --locked -p neojs -p neojs-lite
+
+      - name: Stage release artifacts and SHA-256 checksums
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          target_triple=$(rustc -vV | sed -n 's/^host: //p')
+          if [ -z "${target_triple}" ]; then
+            echo "ERROR: failed to determine rustc host target triple" >&2
+            exit 1
+          fi
+          install -m 0755 target/release/neojs "dist/neojs-${GITHUB_REF_NAME}-${target_triple}"
+          install -m 0755 target/release/neojs-lite "dist/neojs-lite-${GITHUB_REF_NAME}-${target_triple}"
+          (
+            cd dist
+            sha256sum \
+              "neojs-${GITHUB_REF_NAME}-${target_triple}" \
+              "neojs-lite-${GITHUB_REF_NAME}-${target_triple}" \
+              > SHA256SUMS
+          )
+
+      - name: Upload release build artifacts
+        uses: actions/upload-artifact@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        with:
+          name: neojs-${{ github.ref_name }}-linux-x64
+          path: dist/
+          if-no-files-found: error

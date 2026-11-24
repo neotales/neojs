@@ -1,0 +1,233 @@
+# Continuous integration for neojs.
+#
+# Action versions use pinned major tags because this workflow was authored
+# offline without network access to resolve GitHub commit SHAs.
+# TODO(ci): Pin all `uses:` references to immutable 40-char commit SHAs once online.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+    branches:
+      - dev
+      - main
+
+permissions:
+  contents: read
+
+# Cancel superseded pull_request runs; never cancel pushes to dev or main.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must stay aligned with `workspace.package.rust-version` in Cargo.toml and
+  # `eng/size/toolchain`.
+  RUST_TOOLCHAIN: "1.100.0"
+
+jobs:
+  fmt-and-lint:
+    name: Format and Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+
+      - name: Verify toolchain pin matches eng/size/toolchain
+        run: |
+          set -euo pipefail
+          size_toolchain=$(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+            eng/size/toolchain | sed '/^$/d' | head -n 1)
+          if [ "${size_toolchain}" != "${RUST_TOOLCHAIN}" ]; then
+            echo "ERROR: eng/size/toolchain (${size_toolchain}) != RUST_TOOLCHAIN (${RUST_TOOLCHAIN})" >&2
+            exit 1
+          fi
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component rustfmt,clippy
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy default workspace (V8 + shared crates)
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Clippy neojs-builtins (all features)
+        run: cargo clippy --locked -p neojs-builtins --all-features --all-targets -- -D warnings
+
+      - name: Clippy neojs-lite (default features)
+        run: cargo clippy --locked -p neojs-lite-core -p neojs-lite --all-targets -- -D warnings
+
+      - name: Clippy neojs-lite (CLI --no-default-features)
+        run: cargo clippy --locked -p neojs-lite-core -p neojs-lite --no-default-features --all-targets -- -D warnings
+
+      - name: Clippy neojs-lite-core (--no-default-features)
+        run: cargo clippy --locked -p neojs-lite-core --no-default-features --all-targets -- -D warnings
+
+      - name: Lint size-tracking shell scripts
+        run: shellcheck -x -P eng/size eng/size/*.sh
+
+  test-v8:
+    name: Test V8 Runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+
+      - name: Run V8 workspace tests
+        run: cargo test --locked
+
+      - name: Run shared JS tests on neojs (if present)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          shared_tests=(tests/js/shared/*.test.js)
+          if [ "${#shared_tests[@]}" -gt 0 ]; then
+            cargo run --locked -p neojs -- test 'tests/js/shared/*.test.js'
+          else
+            echo "No shared JS tests found under tests/js/shared/*.test.js; skipping."
+          fi
+
+  test-lite:
+    name: Test Lite Runtime and Builtins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+
+      - name: Test neojs-builtins (all features)
+        run: cargo test --locked -p neojs-builtins --all-features
+
+      - name: Test neojs-builtins (no default features)
+        run: cargo test --locked -p neojs-builtins --no-default-features
+
+      - name: Test neojs-lite-core and neojs-lite (default features)
+        run: cargo test --locked -p neojs-lite-core -p neojs-lite
+
+      - name: Test neojs-lite-core and neojs-lite (CLI --no-default-features)
+        run: cargo test --locked -p neojs-lite-core -p neojs-lite --no-default-features
+
+      - name: Test neojs-lite-core (--no-default-features)
+        run: cargo test --locked -p neojs-lite-core --no-default-features
+
+      - name: Run shared JS tests on neojs-lite (if present and supported)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          shared_tests=(tests/js/shared/*.test.js)
+          if [ "${#shared_tests[@]}" -eq 0 ]; then
+            echo "No shared JS tests found under tests/js/shared/*.test.js; skipping."
+            exit 0
+          fi
+          if cargo run --locked -p neojs-lite -- test --help >/dev/null 2>&1 \
+            || cargo run --locked -p neojs-lite -- --help | grep -Eq '(^|[[:space:]])test([[:space:]]|$)'; then
+            cargo run --locked -p neojs-lite -- test 'tests/js/shared/*.test.js'
+          else
+            echo "neojs-lite 'test' subcommand not available yet; skipping shared JS tests."
+          fi
+
+  engine-isolation:
+    name: Engine Graph Isolation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+
+      - name: Verify V8 graph excludes QuickJS
+        run: |
+          set -euo pipefail
+          v8_default_tree=$(cargo tree --locked --prefix none)
+          if grep -Eq '^rquickjs v' <<<"${v8_default_tree}"; then
+            echo "ERROR: default workspace graph unexpectedly contains rquickjs" >&2
+            grep -E '^rquickjs v' <<<"${v8_default_tree}" >&2
+            exit 1
+          fi
+
+          neojs_tree=$(cargo tree --locked -p neojs --prefix none)
+          if grep -Eq '^rquickjs v' <<<"${neojs_tree}"; then
+            echo "ERROR: neojs graph unexpectedly contains rquickjs" >&2
+            grep -E '^rquickjs v' <<<"${neojs_tree}" >&2
+            exit 1
+          fi
+
+      - name: Verify QuickJS graph excludes V8 and deno_core
+        run: |
+          set -euo pipefail
+          lite_tree=$(cargo tree --locked -p neojs-lite --prefix none)
+          if grep -Eq '^(deno_core|deno_v8|v8) v' <<<"${lite_tree}"; then
+            echo "ERROR: neojs-lite graph unexpectedly contains V8 or deno_core" >&2
+            grep -E '^(deno_core|deno_v8|v8) v' <<<"${lite_tree}" >&2
+            exit 1
+          fi
+
+          lite_core_minimal_tree=$(cargo tree --locked -p neojs-lite-core --no-default-features --prefix none)
+          if grep -Eq '^(deno_core|deno_v8|v8|neojs-builtins) v' <<<"${lite_core_minimal_tree}"; then
+            echo "ERROR: neojs-lite-core --no-default-features graph unexpectedly contains V8, deno_core, or neojs-builtins" >&2
+            grep -E '^(deno_core|deno_v8|v8|neojs-builtins) v' <<<"${lite_core_minimal_tree}" >&2
+            exit 1
+          fi
+
+  size-gate:
+    name: Size Tracker Gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+
+      - name: Populate Cargo cache for offline size-tracker tests
+        run: cargo fetch --locked
+
+      - name: Run size-tracker test and ledger validation
+        run: bash eng/size/check.sh
