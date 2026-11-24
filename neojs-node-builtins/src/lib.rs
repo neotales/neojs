@@ -42,10 +42,10 @@
 //! deadline if the operating system does not complete the kill or reap. On
 //! Unix, pipes are non-blocking and driven by `poll` on the calling thread; no
 //! reader or writer thread is created. A timeout or output overflow kills the
-//! child's process group after a short bounded drain. A direct child that exits
-//! while a descendant still holds a piped descriptor gets the same bounded
-//! drain and group kill; because output may be incomplete, that case is
-//! reported as an explicit incomplete error, never a successful status. An
+//! child's process group, then drains for a short bounded grace. A direct child
+//! that exits while a descendant still holds a piped descriptor gets a bounded
+//! drain followed by a group kill; because output may be incomplete, that case
+//! is reported as an explicit incomplete error, never a successful status. An
 //! unexpected pipe read error is reported as an explicit I/O error, never
 //! treated as end-of-file. A descendant that creates a new process group and
 //! escapes is not tracked. The optional JSON protocol used by the shared tests

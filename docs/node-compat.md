@@ -256,8 +256,8 @@ resource bound, not a sandbox.
   environment entries and 64 KiB of environment bytes. The policy caps every
   request; a larger `timeout` or `maxBuffer` is rejected rather than clamped.
   The timeout is not a hard wall-clock bound on the whole call.
-* A timeout or output overflow kills the child's process group after a short
-  bounded drain, returns any captured prefix, and reports `timedOut` or
+* A timeout or output overflow kills the child's process group, then drains for
+  a short bounded grace, returns any captured prefix, and reports `timedOut` or
   `limitExceeded`. The runner then reaps the direct child with a blocking
   `wait()`, which can outlive the deadline if the operating system does not
   complete the kill or reap.

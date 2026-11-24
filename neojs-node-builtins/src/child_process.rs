@@ -65,11 +65,13 @@ pub const MAX_REQUEST_BYTES: usize = 4_194_304;
 /// How long a killed or exited direct child's pipes may still be drained.
 ///
 /// A descendant that inherited a piped descriptor can keep it open after the
-/// direct child exits. Unix completion polls for this grace period, then kills
-/// the direct child's process group and stops. It never joins a blocked reader
-/// thread, so a descendant cannot defeat the pipe-drain deadline. The final
-/// direct-child reap is still a blocking `wait()` and can outlive the request
-/// deadline if the operating system does not complete the kill or reap.
+/// direct child exits. For a natural direct-child exit, Unix completion polls
+/// for this grace period, then kills the direct child's process group and
+/// stops. A timeout or output overflow kills first and then drains for this
+/// grace period. It never joins a blocked reader thread, so a descendant cannot
+/// defeat the pipe-drain deadline. The final direct-child reap is still a
+/// blocking `wait()` and can outlive the request deadline if the operating
+/// system does not complete the kill or reap.
 #[cfg(unix)]
 const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(50);
 
@@ -627,10 +629,11 @@ impl Drop for ChildGuard<'_> {
 ///
 /// Pipes are non-blocking and driven by `poll` on the calling thread. No reader
 /// or writer thread is created, so a descendant that inherits a pipe and keeps
-/// it open cannot make pipe draining unbounded. After the direct child exits,
-/// or after a timeout or output overflow, the runner drains for
-/// [`PIPE_DRAIN_GRACE`], kills the child's process group, and then reaps the
-/// direct child with a blocking `wait()`. That final wait is not bounded by the
+/// it open cannot make pipe draining unbounded. After a timeout or output
+/// overflow, the runner kills the child's process group, drains for
+/// [`PIPE_DRAIN_GRACE`], and then reaps the direct child with a blocking
+/// `wait()`. After a natural direct-child exit with inherited pipes, it drains
+/// for the grace period first and then kills the group. That final wait is not bounded by the
 /// deadline: if the operating system does not complete the kill or reap, the
 /// call can block past it. An escaped descendant in a new process group may
 /// still hold a pipe, but the runner has already stopped polling and drops its
