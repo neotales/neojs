@@ -1127,6 +1127,16 @@ mod bounded_keys_gc_tests {
     }
 
     #[allow(unsafe_code)]
+    struct ConversionFailureGuard;
+
+    #[allow(unsafe_code)]
+    impl Drop for ConversionFailureGuard {
+        fn drop(&mut self) {
+            unsafe { neojs_v8_test_set_key_conversion_failure(0) };
+        }
+    }
+
+    #[allow(unsafe_code)]
     #[test]
     fn conversion_failure_status_produces_a_coded_error_not_undefined() {
         let mut js = JsRuntime::new(Default::default());
@@ -1146,6 +1156,7 @@ mod bounded_keys_gc_tests {
         let object = v8::Local::<v8::Object>::try_from(value).expect("object");
 
         unsafe { neojs_v8_test_set_key_conversion_failure(1) };
+        let _guard = ConversionFailureGuard;
         assert_eq!(
             bounded_keys(scope, &object, 16, 64, 64),
             Err(BoundedKeysError::KeyConversionFailed)
@@ -1154,7 +1165,6 @@ mod bounded_keys_gc_tests {
         unsafe { neojs_v8_test_set_key_conversion_failure(1) };
         let failure = super::reject_unknown_options(scope, &object)
             .expect_err("conversion failure must become a coded error");
-        unsafe { neojs_v8_test_set_key_conversion_failure(0) };
         match failure {
             super::Failure::Coded { code, .. } => {
                 assert_eq!(code, "ERR_INVALID_ARG_VALUE");
