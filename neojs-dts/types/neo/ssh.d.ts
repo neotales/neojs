@@ -1,0 +1,152 @@
+declare module "neo:ssh" {
+  /** Maximum command byte length accepted by `SshConnection.exec` (64 KiB). */
+  export const MAX_COMMAND_BYTES: 65536;
+
+  /** Maximum captured stdout byte length returned by `SshConnection.exec` (8 MiB). */
+  export const MAX_OUTPUT_BYTES: 8388608;
+
+  /** Default TCP/handshake connect timeout in milliseconds (`15_000`). */
+  export const DEFAULT_CONNECT_TIMEOUT_MS: 15000;
+
+  /** Default per-command execution timeout in milliseconds (`30_000`). */
+  export const DEFAULT_EXEC_TIMEOUT_MS: 30000;
+
+  /**
+   * Error codes reported on `SshError.code` (`name = "SshError"`).
+   */
+  export type SshErrorCode =
+    | "NEO_SSH_ARGUMENT"
+    | "NEO_SSH_HOST_KEY_REQUIRED"
+    | "NEO_SSH_HOST_KEY"
+    | "NEO_SSH_KNOWN_HOSTS"
+    | "NEO_SSH_AUTH_METHOD"
+    | "NEO_SSH_CREDENTIAL"
+    | "NEO_SSH_AGENT"
+    | "NEO_SSH_CONNECT"
+    | "NEO_SSH_TIMEOUT"
+    | "NEO_SSH_HANDSHAKE"
+    | "NEO_SSH_AUTH"
+    | "NEO_SSH_SESSION"
+    | "NEO_SSH_LIMIT"
+    | "NEO_SSH_CLOSED"
+    | "NEO_SSH_IO"
+    | "NEO_SSH_INTERNAL";
+
+  /**
+   * Mandatory host-trust pin: supply **exactly one** of `hostKey` or `knownHosts`.
+   */
+  export type SshHostTrustOptions =
+    | {
+        /** Explicit SSH-format Ed25519 host public-key blob. */
+        hostKey: Uint8Array;
+        knownHosts?: undefined;
+      }
+    | {
+        hostKey?: undefined;
+        /** In-memory `known_hosts` host-key records. */
+        knownHosts: string;
+      };
+
+  /**
+   * Authentication method: supply **exactly one** of `password`, `privateKey`,
+   * or `agent: true`.
+   */
+  export type SshAuthOptions =
+    | {
+        /** Password credential. */
+        password: string;
+        privateKey?: undefined;
+        passphrase?: undefined;
+        agent?: false;
+      }
+    | {
+        /**
+         * In-memory unencrypted PKCS#8 DER/PEM or OpenSSH (`openssh-key-v1`/PEM)
+         * private key bytes.
+         */
+        privateKey: Uint8Array;
+        /** Optional passphrase for encrypted `openssh-key-v1` containers only. */
+        passphrase?: string;
+        password?: undefined;
+        agent?: false;
+      }
+    | {
+        /**
+         * Explicit Unix-only opt-in to authenticate via `SSH_AUTH_SOCK` after
+         * host-key verification (tries up to 16 identities).
+         */
+        agent: true;
+        password?: undefined;
+        privateKey?: undefined;
+        passphrase?: undefined;
+      };
+
+  /**
+   * Options accepted by `connect(options)`. Unknown keys throw `TypeError`.
+   */
+  export type SshConnectOptions = {
+    /** Remote hostname or IP address. */
+    host: string;
+    /** Remote TCP port (`1..=65535`, default `22`). */
+    port?: number;
+    /** SSH username (max 256 bytes). */
+    username: string;
+    /** Connect/handshake inactivity timeout in ms (`1..=120_000`, default `15_000`). */
+    connectTimeoutMs?: number;
+    /** Per-command execution timeout in ms (`1..=600_000`, default `30_000`). */
+    execTimeoutMs?: number;
+  } & SshHostTrustOptions &
+    SshAuthOptions;
+
+  /**
+   * Result returned by `SshConnection.exec(command)`.
+   */
+  export interface SshExecResult {
+    /** Captured remote stdout bytes (at most `MAX_OUTPUT_BYTES`). Remote stderr is discarded. */
+    stdout: Uint8Array;
+    /** Remote exit status code. */
+    status: number;
+  }
+
+  /**
+   * Synchronous, authenticated SSH command-execution connection returned by
+   * `connect(options)`.
+   */
+  export interface SshConnection {
+    /** Whether this connection is closed and can no longer run commands. */
+    readonly closed: boolean;
+
+    /**
+     * Synchronously execute a single command on the remote host.
+     *
+     * Blocks until exit status arrives and the session channel closes, or until
+     * `execTimeoutMs` expires. Fatal transport/session/timeout/output-limit
+     * errors close the connection; pre-flight validation errors leave it open.
+     *
+     * @param command UTF-8 string or raw bytes (max `MAX_COMMAND_BYTES`).
+     * @throws {TypeError} on wrong argument type or arity.
+     * @throws {Error} (`name = "SshError"`) with `code` `"NEO_SSH_CLOSED"`,
+     * `"NEO_SSH_LIMIT"`, `"NEO_SSH_TIMEOUT"`, `"NEO_SSH_IO"`,
+     * `"NEO_SSH_SESSION"`, or `"NEO_SSH_INTERNAL"`.
+     */
+    exec(command: string | Uint8Array): SshExecResult;
+
+    /**
+     * Close the underlying socket. Idempotent; does not send an SSH disconnect
+     * packet. Subsequent `exec` calls throw `NEO_SSH_CLOSED`.
+     */
+    close(): void;
+  }
+
+  /**
+   * Synchronously dial, verify host identity, authenticate, and return an
+   * `SshConnection`.
+   *
+   * Never reads `ssh_config`, identity files, or `~/.ssh/known_hosts`.
+   *
+   * @throws {TypeError} on invalid options or unknown option keys.
+   * @throws {RangeError} on out-of-range port or timeout values.
+   * @throws {Error} (`name = "SshError"`) with `code: SshErrorCode`.
+   */
+  export function connect(options: SshConnectOptions): SshConnection;
+}
