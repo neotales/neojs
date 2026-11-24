@@ -48,7 +48,7 @@
 //! | `gh:`, `github:`, `npm:`, `jsr:`, and `node:` normalization | Implemented as metadata |
 //! | Bounded upward discovery ([`discover_manifest`]) | Implemented |
 //! | Deterministic workspace expansion ([`Workspace`]) | Implemented |
-//! | Pure import-map & workspace resolution ([`ImportResolver`]) | Implemented (not wired into runtimes) |
+//! | Import-map & workspace resolution ([`ImportResolver`]) | Implemented (wired into V8 and QuickJS runtimes) |
 //! | `include` / `exclude` matching | Not implemented |
 //! | npm, JSR, and Node loading by this crate | Not implemented |
 //! | GitHub loading | Implemented by the V8 runtime, not this crate |

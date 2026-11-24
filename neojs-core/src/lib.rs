@@ -361,6 +361,30 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! To opt in to `neo.jsonc` `imports` and `workspaces`, depend on
+//! `neojs-manifest` and construct an [`ImportResolver`] via
+//! `discover_manifest`, `ImportResolver::from_manifest`, or `Workspace::load` +
+//! `ImportResolver::from_workspace`:
+//!
+//! ```no_run
+//! use neojs_core::{ImportResolver, Runtime};
+//! use neojs_manifest::{Workspace, discover_manifest};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut runtime = match discover_manifest(".", None)? {
+//!     Some(found) if !found.manifest.workspaces.is_empty() => {
+//!         let ws = Workspace::load(&found.path)?;
+//!         let active = ws.member_for_path("main.ts")?.map(|m| m.name());
+//!         Runtime::with_import_resolver(ImportResolver::from_workspace(&ws, active)?)?
+//!     }
+//!     Some(found) => Runtime::with_import_resolver(ImportResolver::from_manifest(&found))?,
+//!     None => Runtime::new()?,
+//! };
+//! runtime.run_file("main.ts")?;
+//! # Ok(())
+//! # }
+//! ```
 
 mod age;
 mod assert;

@@ -20,6 +20,12 @@
 //!   [`TestReport`] with pass/fail/pending/unhandled/unsettled counts.
 //! * Relative imports, absolute paths, and `file:` URLs are resolved from the
 //!   importing module. Static imports and dynamic `import()` use the same loader.
+//! * With the opt-in `manifest` Cargo feature enabled, embedders can also
+//!   depend on `neojs-manifest`, build an `ImportResolver` via
+//!   `neojs_manifest::discover_manifest` (`ImportResolver::from_manifest` or
+//!   `Workspace::load` + `ImportResolver::from_workspace`), and pass it to
+//!   `Runtime::with_import_resolver`; [`Runtime::new`] performs zero implicit
+//!   manifest discovery.
 //! * Top-level `await` works when it settles from the QuickJS job queue, for
 //!   example `await Promise.resolve(value)`.
 //! * After the entry settles, queued jobs are drained, so a trailing `.then` or

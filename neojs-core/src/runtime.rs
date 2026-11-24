@@ -382,9 +382,32 @@ impl Runtime {
     /// [`ImportResolver`].
     ///
     /// [`Runtime::new`] performs zero implicit manifest discovery. Embedders
-    /// opt in by passing a resolved [`ImportResolver`] here or via
-    /// [`Runtime::with_options`]. Remote targets in `imports` (`https:`, `gh:`,
-    /// `jsr:`) still fail closed because remote loading is disabled.
+    /// opt in by depending on `neojs-manifest`, calling
+    /// `neojs_manifest::discover_manifest` (plus `Workspace::load` when
+    /// `workspaces` is non-empty), and passing `ImportResolver::from_manifest`
+    /// or `ImportResolver::from_workspace` here or via [`Runtime::with_options`].
+    /// Remote targets in `imports` (`https:`, `gh:`, `jsr:`) still fail closed
+    /// because remote loading is disabled.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use neojs_core::{ImportResolver, Runtime};
+    /// use neojs_manifest::{Workspace, discover_manifest};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// if let Some(found) = discover_manifest(".", None)? {
+    ///     let resolver = if found.manifest.workspaces.is_empty() {
+    ///         ImportResolver::from_manifest(&found)
+    ///     } else {
+    ///         let ws = Workspace::load(&found.path)?;
+    ///         ImportResolver::from_workspace(&ws, None)?
+    ///     };
+    ///     Runtime::with_import_resolver(resolver)?.run_file("main.ts")?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_import_resolver(resolver: ImportResolver) -> Result<Self, Error> {
         Self::with_options(RuntimeOptions::new().with_import_resolver(resolver))
     }

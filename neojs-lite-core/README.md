@@ -27,11 +27,33 @@ cargo run -p neojs-lite-core --example embed -- examples/hello.js
 
 Relative imports, absolute paths, and `file:` URLs resolve from the importing
 module. Static imports and dynamic `import()` use the same loader. With the
-opt-in `manifest` feature enabled, `Runtime::with_import_resolver(resolver)`
-resolves `neo.jsonc` `imports` and workspace `@scope/pkg` references to local
-`.js`/`.mjs` modules (and rejects remote `https:`, `gh:`, `jsr:`, and `npm:`
-targets); `Runtime::new()` performs zero implicit manifest discovery.
-`console.log` writes to standard output and `console.error` to standard error.
+opt-in `manifest` feature enabled, embedders can depend on `neojs-manifest`,
+build an `ImportResolver` with `discover_manifest` (`ImportResolver::from_manifest`
+or `Workspace::load` + `ImportResolver::from_workspace`), and pass it to
+`Runtime::with_import_resolver(resolver)` to resolve `neo.jsonc` `imports` and
+workspace `@scope/pkg` references to local `.js`/`.mjs` modules (remote
+`https:`, `gh:`, `jsr:`, and `npm:` targets are rejected); `Runtime::new()`
+performs zero implicit manifest discovery. `console.log` writes to standard
+output and `console.error` to standard error.
+
+```rust
+use neojs_lite_core::{ImportResolver, Runtime};
+use neojs_manifest::{Workspace, discover_manifest};
+
+fn run_with_manifest() -> Result<(), Box<dyn std::error::Error>> {
+    let mut runtime = match discover_manifest(".", None)? {
+        Some(found) if !found.manifest.workspaces.is_empty() => {
+            let ws = Workspace::load(&found.path)?;
+            let active = ws.member_for_path("main.js")?.map(|m| m.name());
+            Runtime::with_import_resolver(ImportResolver::from_workspace(&ws, active)?)?
+        }
+        Some(found) => Runtime::with_import_resolver(ImportResolver::from_manifest(&found))?,
+        None => Runtime::new()?,
+    };
+    runtime.run_file("main.js")?;
+    Ok(())
+}
+```
 
 ## Run an in-memory module
 

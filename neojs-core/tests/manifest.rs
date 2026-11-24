@@ -1,11 +1,9 @@
 //! End-to-end tests for `neo.jsonc` `ImportResolver` integration in `neojs-core`.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
-use neojs_core::{Error, ImportResolver, RemoteOptions, Runtime, RuntimeOptions};
+use neojs_core::{Error, ImportResolver, Runtime, RuntimeOptions};
 use neojs_manifest::{DiscoveredManifest, Manifest, PackageName, Workspace};
 use tempfile::TempDir;
 
@@ -213,7 +211,9 @@ fn builtins_are_never_intercepted_and_format_and_npm_checks_hold() {
             "name": "@test/policy",
             "imports": {
                 "neo:os": "./fake-os.js",
+                "NEO:os": "./fake-os.js",
                 "node:fs": "./fake-fs.js",
+                "NODE:fs": "./fake-fs.js",
                 "bad-cjs": "./legacy.cjs",
                 "npm-dep": "npm:lodash@4.17.21"
             }
@@ -233,27 +233,35 @@ fn builtins_are_never_intercepted_and_format_and_npm_checks_hold() {
 
     let resolver = load_standalone_resolver(&manifest_path);
 
-    // `neo:os` must use real built-in, not `./fake-os.js`.
+    // `neo:os` and uppercase `NEO:os` must use real built-in, not `./fake-os.js`.
     let os_main = write(
         dir.path(),
         "os_check.ts",
         r#"
 import { platform } from "neo:os";
-if (platform === "fake") throw new Error("neo:os was shadowed by imports");
+import { platform as upperPlatform } from "NEO:os";
+if (platform === "fake" || upperPlatform === "fake" || platform !== upperPlatform) {
+    throw new Error("neo:os or NEO:os was shadowed by imports");
+}
 "#,
     );
     Runtime::with_import_resolver(resolver.clone())
         .expect("runtime")
         .run_file(&os_main)
-        .expect("neo:os succeeds");
+        .expect("neo:os and NEO:os succeed");
 
-    // `node:fs` must remain rejected.
-    let node_main = write(dir.path(), "node_check.ts", r#"import "node:fs";"#);
-    let err = Runtime::with_import_resolver(resolver.clone())
-        .expect("runtime")
-        .run_file(&node_main)
-        .expect_err("node:fs must be rejected");
-    assert!(err.to_string().contains("Node.js built-in"), "{err}");
+    // `node:fs` and uppercase `NODE:fs` must remain rejected.
+    for (file, spec) in [
+        ("node_check.ts", "node:fs"),
+        ("node_upper_check.ts", "NODE:fs"),
+    ] {
+        let node_main = write(dir.path(), file, &format!("import \"{spec}\";\n"));
+        let err = Runtime::with_import_resolver(resolver.clone())
+            .expect("runtime")
+            .run_file(&node_main)
+            .expect_err("node:fs and NODE:fs must be rejected");
+        assert!(err.to_string().contains("Node.js built-in"), "{err}");
+    }
 
     // `.cjs` target must fail neojs-module-policy check.
     let cjs_main = write(dir.path(), "cjs_check.ts", r#"import "bad-cjs";"#);
@@ -330,6 +338,10 @@ fn remote_targets_in_imports_fail_closed_without_remote_enabled() {
 #[cfg(feature = "test-support")]
 mod remote_tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use neojs_core::RemoteOptions;
     use neojs_core::test_support::TestRemoteResponse;
     use sha2::{Digest, Sha256};
 
@@ -504,5 +516,47 @@ if (httpsVal !== 42 || ghVal !== "from-gh" || jsrVal !== "from-jsr") {
             .run_file(&evil_jsr_entry)
             .expect_err("JSR referrer must not consult local ImportResolver");
         assert!(err.to_string().contains("bare module specifiers"), "{err}");
+    }
+
+    #[test]
+    fn manifest_https_error_redacts_query_string_secret() {
+        let dir = TempDir::new().expect("temp dir");
+        let manifest_path = write(
+            dir.path(),
+            "neo.jsonc",
+            r#"{
+                "name": "@test/redact",
+                "imports": {
+                    "signed-mod": "https://example.test/mod.ts?token=supersecret"
+                }
+            }"#,
+        );
+        let entry = write(
+            dir.path(),
+            "main.ts",
+            "import { value } from 'signed-mod';\nconsole.log(value);\n",
+        );
+        let resolver = load_standalone_resolver(&manifest_path);
+
+        // Runtime error (HTTP 500 or thrown error inside loaded module) must redact `?token=supersecret`.
+        let mut rt = Runtime::with_remote_transport_and_resolver(
+            RemoteOptions::new().without_cache(),
+            resolver,
+            |url, _timeout, _if_none_match, _if_modified_since| {
+                assert_eq!(url, "https://example.test/mod.ts?token=supersecret");
+                Ok(TestRemoteResponse {
+                    status: 500,
+                    body: Vec::new(),
+                    ..TestRemoteResponse::default()
+                })
+            },
+        )
+        .expect("runtime");
+
+        let err = rt.run_file(&entry).expect_err("HTTP 500 must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("https://example.test/mod.ts"), "{msg}");
+        assert!(!msg.contains("supersecret"), "query secret leaked: {msg}");
+        assert!(!msg.contains("token="), "query key leaked: {msg}");
     }
 }

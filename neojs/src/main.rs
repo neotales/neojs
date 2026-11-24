@@ -777,8 +777,9 @@ Node modules (`node:`) are rejected; there is no Node-module opt-in.
 Exit codes:
   0  the module finished, or every test file passed
   1  the module or a test failed, or a test file registered no tests
-  2  neojs could not start: bad arguments, an unreadable or unsupported entry
-     file, or a test file or glob that could not be expanded
+  2  neojs could not start: bad arguments, an invalid or missing manifest,
+     an unreadable or unsupported entry file, or a test file or glob that could
+     not be expanded
 
 Docs: https://github.com/neotales/neojs#readme
 ",

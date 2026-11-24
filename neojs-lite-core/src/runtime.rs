@@ -415,10 +415,34 @@ impl Runtime {
     /// [`neojs_manifest::ImportResolver`].
     ///
     /// [`Runtime::new`] performs zero implicit manifest discovery. Embedders
-    /// opt in by passing a resolved `ImportResolver` here. Local `imports` and
-    /// workspace `@scope/pkg` references resolve to local `.js`/`.mjs` modules;
-    /// remote targets (`https:`, `gh:`, `jsr:`, `npm:`) are rejected because
-    /// remote loading is not supported in `neojs-lite-core`.
+    /// opt in by enabling the `manifest` feature, depending on
+    /// `neojs-manifest`, calling `neojs_manifest::discover_manifest` (and
+    /// `Workspace::load` when `workspaces` is non-empty), and passing
+    /// `ImportResolver::from_manifest` or `ImportResolver::from_workspace`
+    /// here. Local `imports` and workspace `@scope/pkg` references resolve to
+    /// local `.js`/`.mjs` modules; remote targets (`https:`, `gh:`, `jsr:`,
+    /// `npm:`) are rejected because remote loading is not supported in
+    /// `neojs-lite-core`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use neojs_lite_core::{ImportResolver, Runtime};
+    /// use neojs_manifest::{Workspace, discover_manifest};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// if let Some(found) = discover_manifest(".", None)? {
+    ///     let resolver = if found.manifest.workspaces.is_empty() {
+    ///         ImportResolver::from_manifest(&found)
+    ///     } else {
+    ///         let ws = Workspace::load(&found.path)?;
+    ///         ImportResolver::from_workspace(&ws, None)?
+    ///     };
+    ///     Runtime::with_import_resolver(resolver)?.run_file("main.js")?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     #[cfg(feature = "manifest")]
     pub fn with_import_resolver(resolver: neojs_manifest::ImportResolver) -> Result<Self, Error> {
         Self::build(FileResolver::with_import_resolver(resolver))

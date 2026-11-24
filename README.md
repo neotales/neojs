@@ -43,6 +43,8 @@ Options:
                    jsr: imports; off by default
   --no-allow-remote
                    force remote loading off, overriding NEOJS_ALLOW_REMOTE
+  --config <path>  use an explicit neo.jsonc manifest instead of discovery
+  --no-config      disable automatic neo.jsonc manifest discovery
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
   -V, --version    show the version; alone, or after `--allow-remote`
   --               end option parsing, for a file or pattern beginning with `-`
@@ -55,8 +57,10 @@ Environment:
 
 With no arguments, `neojs` exits 2 and points at `--help`. `--allow-remote` is off by default and
 may appear before the module, or before or after `test`; `--no-allow-remote` forces it off even when
-`NEOJS_ALLOW_REMOTE` enables it. The module sections below document each built-in;
-[Limits](#limits) lists the unsupported features and the exit codes.
+`NEOJS_ALLOW_REMOTE` enables it. Local modules discover `neo.jsonc` upward for `imports` and
+`workspaces` (including enclosing workspace roots when running inside a workspace member directory)
+unless `--config <path>` or `--no-config` is passed. The module sections below document each
+built-in; [Limits](#limits) lists the unsupported features and the exit codes.
 
 ## What you can do ⚡
 
@@ -1682,12 +1686,15 @@ The [`neojs-dbapi` crate](neojs-dbapi/README.md) is the SQLite-only database fou
 database providers and a JavaScript/Node adapter are not yet wired in. See the
 [database API notes](docs/db-api.md) for its scope and design decisions.
 
-The [`neojs-manifest` crate](docs/neo-jsonc.md) is the bounded foundation for `neo.jsonc`: strict
-JSONC parsing, schema validation, and canonical import-specifier normalization for `gh:`,
-`github:`, `npm:`, `jsr:`, and `node:`. It does not install an import map, expand workspaces, or
-apply `include`/`exclude`. A normalized `gh:`/`github:` coordinate is the raw HTTPS URL the V8
-runtime loads when remote loading is enabled; the runtime also loads `jsr:` imports only then. The
-manifest crate does not change either decision, and `npm:` and `node:` remain rejected at runtime.
+The [`neojs-manifest` crate](docs/neo-jsonc.md) implements `neo.jsonc` support: strict JSONC parsing,
+schema validation, canonical import-specifier normalization (`gh:`, `github:`, `npm:`, `jsr:`, and
+`node:`), bounded upward discovery (`discover_manifest`), deterministic workspace expansion
+(`Workspace::load`), and `ImportResolver`. Both `neojs` (V8) and `neojs-lite` (QuickJS) wire
+`neojs-manifest` into their loaders and CLIs (`--config <path>`, `--no-config`, and upward
+discovery). Only local `file:` referrers consult `ImportResolver`, remote targets in `imports`
+(`https:`, `gh:`, `jsr:`) remain gated by `--allow-remote` in `neojs` (and are rejected in
+`neojs-lite`), `include`/`exclude` matching is not implemented, and `npm:` and `node:` remain
+rejected at runtime.
 
 ### QuickJS runtime: neojs-lite-core
 
@@ -1798,9 +1805,9 @@ Features outside this list are not implemented.
   original specifier is not recoverable at load time. That is conservative verification, not a
   bypass. JSR support covers
   exported entrypoints and the relative modules they import; `npm:`, `node:`, dist-tags,
-  private registries, authentication, import maps and `neo.jsonc`, lockfiles, offline policy, and
-  publisher signatures are not implemented. A JSR package that imports one of those fails at
-  resolution. The first metadata request for a package or version is synchronous and blocks the
+  private registries, authentication, lockfiles, offline policy, and publisher signatures are not
+  implemented (nor can a JSR package use a `neo.jsonc` import map). A JSR package that imports one
+  of those fails at resolution. The first metadata request for a package or version is synchronous and blocks the
   isolate thread. `https:` imports are
   rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`, or
   `NEOJS_ALLOW_REMOTE=1`), and `http:` is always rejected. In particular, `node:test` is not an
@@ -1820,7 +1827,8 @@ Features outside this list are not implemented.
   `neo:cron`, `neo:crypto`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`, `neo:stdio`,
   `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`. Other `neo:` modules
   are rejected by name. Bare module specifiers, including a bare built-in name such as `age`, are
-  rejected; the message names the canonical `neo:` form. Import maps are not supported.
+  rejected unless mapped by an active `neo.jsonc` `imports` map or workspace `@scope/pkg` member;
+  the message names the canonical `neo:` form.
 - Module type attributes are rejected. `with { type: "json" }`, `with { type: "text" }`, `with {
   type: "bytes" }`, and custom types fail with a reason on static and dynamic imports, including for
   built-in modules. Only untyped ECMAScript modules are loaded. Attributes that do not name a type
@@ -1888,8 +1896,8 @@ Features outside this list are not implemented.
 - Exit codes: `0` the module finished, or every selected test file ran with no failures; `1` the
   module failed to compile, resolve imports, link, or run, or a test failed, was pending, left an
   unhandled rejection or unsettled event-loop work, or registered no tests; `2` neojs could not
-  start (bad arguments, unreadable or unsupported entry file, or a test file/glob that could not be
-  expanded).
+  start (bad arguments, invalid or missing manifest, unreadable or unsupported entry file, or a test
+  file/glob that could not be expanded).
 
 Built on `deno_core` 0.413.0, with type stripping by `deno_ast` 0.53.3, test-file expansion by
 `glob` 0.3.4, AES-256-GCM by
