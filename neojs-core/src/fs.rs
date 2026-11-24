@@ -206,10 +206,26 @@ fn read_uint8_array(
         })
     })?;
     bytes.resize(length, 0);
-    if view.copy_contents(&mut bytes) != length {
-        return Err(BindingError::Type(
+    if length <= i32::MAX as usize {
+        if view.copy_contents(&mut bytes) != length {
+            return Err(BindingError::Type(
+                "Uint8Array buffer is detached or out of bounds",
+            ));
+        }
+    } else {
+        // `v8::ArrayBufferView::copy_contents` panics when `dest.len() > i32::MAX`.
+        // Copy directly from the off-heap backing store in safe Rust instead.
+        let store = buffer.get_backing_store();
+        let offset = view.byte_offset();
+        let end = offset.checked_add(length).ok_or(BindingError::Type(
             "Uint8Array buffer is detached or out of bounds",
-        ));
+        ))?;
+        let slice = store.get(offset..end).ok_or(BindingError::Type(
+            "Uint8Array buffer is detached or out of bounds",
+        ))?;
+        for (dst, src) in bytes.iter_mut().zip(slice.iter()) {
+            *dst = src.get();
+        }
     }
     Ok(bytes)
 }

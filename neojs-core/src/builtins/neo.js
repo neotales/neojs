@@ -33,6 +33,8 @@
 // `uuid` calls two private host ops that generate RFC 9562 version 4 and
 // version 7 UUIDs from the operating system CSPRNG and return canonical
 // lowercase text; it has no insecure fallback and promises no monotonic order.
+// `fs` calls fourteen private host ops in `neojs-core/src/fs.rs` backed by the
+// engine-neutral `neojs-fs-core` crate for synchronous filesystem operations.
 // The `console` module is the realm's installed console
 // object, not a separate console or an isolation boundary. The `test` module
 // runs in the realm without a private host op: it registers sync and async
@@ -107,6 +109,12 @@
     // snapshot buffer to user JavaScript and re-enter the module. Range copies
     // go through the native slice op instead.
     const typedArraySet = Function.prototype.call.bind(Uint8Array.prototype.set);
+    // `%TypedArray%.prototype.indexOf` validates attached and in-bounds state
+    // (including for resizable-ArrayBuffer views) in O(1) when passed `Infinity`
+    // as `fromIndex`, without consulting prototype mutations or reading elements.
+    const typedArrayIndexOf = Function.prototype.call.bind(
+        Object.getPrototypeOf(Uint8Array.prototype).indexOf,
+    );
 
     // The shared `chars` module is a native V8 object installed by Rust before
     // this shim runs. The registry entry below spreads that object in; the
@@ -1889,6 +1897,10 @@
         if (arguments.length < 2 || arguments.length > 3) {
             throw new makeTypeError("writeFile takes two or three arguments");
         }
+        if (typeof path !== "string") {
+            throw new makeTypeError("path must be a string");
+        }
+        typedArrayIndexOf(data, 0, 1 / 0);
         unwrapFsUnit(opFsWriteFile(path, data, options));
     }
 
@@ -1902,6 +1914,12 @@
     function fsWriteFileAtomic(path, data, options) {
         if (arguments.length < 2 || arguments.length > 3) {
             throw new makeTypeError("writeFileAtomic takes two or three arguments");
+        }
+        if (typeof path !== "string") {
+            throw new makeTypeError("path must be a string");
+        }
+        if (typeof data !== "string") {
+            typedArrayIndexOf(data, 0, 1 / 0);
         }
         unwrapFsUnit(opFsWriteFileAtomic(path, data, options));
     }

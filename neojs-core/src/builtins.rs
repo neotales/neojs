@@ -72,7 +72,9 @@
 //! byte streams and writes to the current process's standard output and standard
 //! error. It adds no filesystem, process, environment, or stdin capability. The
 //! `console` module is the realm's installed console object, not a separate
-//! console or an isolation boundary. `path` is lexical POSIX and Windows path
+//! console or an isolation boundary. `fs` calls fourteen private host ops
+//! registered by [`crate::fs`] and implemented in `neojs-fs-core` for
+//! synchronous filesystem operations. `path` is lexical POSIX and Windows path
 //! manipulation adapted from NeoLiteJS and `@neotales/path`; its only host read
 //! is the process working directory, through [`crate::path`], and only when a
 //! resolve/relative operation lacks an explicit absolute base. It adds no
@@ -80,13 +82,13 @@
 //! containment check.
 //!
 //! [`AGE_MODULE`], [`ASSERT_MODULE`], [`CONSOLE_MODULE`],
-//! [`CRON_MODULE`], [`CRYPTO_MODULE`], [`OS_MODULE`], [`PATH_MODULE`],
-//! [`SLICES_MODULE`], [`SSH_MODULE`], [`STDIO_MODULE`], [`TEST_MODULE`],
-//! [`UUID_MODULE`], [`UUID_V4_MODULE`], and [`UUID_V7_MODULE`]
+//! [`CRON_MODULE`], [`CRYPTO_MODULE`], [`FS_MODULE`], [`OS_MODULE`],
+//! [`PATH_MODULE`], [`SLICES_MODULE`], [`SSH_MODULE`], [`STDIO_MODULE`],
+//! [`TEST_MODULE`], [`UUID_MODULE`], [`UUID_V4_MODULE`], and [`UUID_V7_MODULE`]
 //! are not evaluated as scripts. They are the sources returned by the module
 //! loader for the canonical built-in specifiers [`AGE_SPECIFIER`],
 //! [`ASSERT_SPECIFIER`], [`CHARS_SPECIFIER`], [`CONSOLE_SPECIFIER`],
-//! [`CRON_SPECIFIER`], [`CRYPTO_SPECIFIER`], [`OS_SPECIFIER`],
+//! [`CRON_SPECIFIER`], [`CRYPTO_SPECIFIER`], [`FS_SPECIFIER`], [`OS_SPECIFIER`],
 //! [`PATH_SPECIFIER`], [`SLICES_SPECIFIER`], [`SSH_SPECIFIER`],
 //! [`STDIO_SPECIFIER`], [`STRINGS_SPECIFIER`], [`TEST_SPECIFIER`],
 //! [`UUID_SPECIFIER`], [`UUID_V4_SPECIFIER`], and [`UUID_V7_SPECIFIER`].
@@ -101,7 +103,7 @@
 //! [`neo_shim`], so the
 //! registry and the module bindings share identity. `assert` is the frozen callable
 //! `assert` function itself, with its named assertions as properties; it also
-//! has a default export in its module namespace. `age`, `chars`, `cron`,
+//! has a default export in its module namespace. `age`, `chars`, `cron`, `fs`,
 //! `slices`, `strings`, `test`, and `uuid` are frozen module objects whose named
 //! exports are their function or class objects, plus `test`'s constants.
 //! `console` is the console
@@ -124,8 +126,8 @@ use deno_core::url::Url;
 /// runtime. `Neo.getBuiltInModulesList` returns one frozen array of the
 /// canonical `neo:` specifiers, built from the registry in insertion order;
 /// repeated calls return that same array. The `age`,
-/// `assert`, `chars`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`, `stdio`,
-/// `strings`, `test`, `uuid`,
+/// `assert`, `chars`, `cron`, `crypto`, `fs`, `os`, `path`, `slices`, `ssh`,
+/// `stdio`, `strings`, `test`, `uuid`,
 /// `uuid/v4`, and `uuid/v7` module objects are frozen and
 /// cached, so repeated `Neo.getBuiltInModule` calls with the canonical
 /// specifier return the same object for each. The `console` module object is

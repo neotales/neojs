@@ -206,8 +206,18 @@ fn read_uint8_array<'js>(ctx: &Ctx<'js>, value: &Value<'js>, type_msg: &str) -> 
     let Ok(ta) = TypedArray::<u8>::from_value(value.clone()) else {
         return Err(Exception::throw_type(ctx, type_msg));
     };
-    // SAFETY: No JavaScript runs while `slice` is alive; we copy immediately into `Vec<u8>`.
-    let Some(slice) = (unsafe { ta.as_bytes() }) else {
+    let raw_ctx = ctx.as_raw().as_ptr();
+    let mut byte_offset: qjs::size_t = 0;
+    let buf_raw = unsafe {
+        qjs::JS_GetTypedArrayBuffer(
+            raw_ctx,
+            ta.as_value().as_raw(),
+            &mut byte_offset,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if buf_raw.tag == i64::from(qjs::JS_TAG_EXCEPTION) {
         if ctx.has_exception() {
             let _ = ctx.catch();
         }
@@ -215,7 +225,54 @@ fn read_uint8_array<'js>(ctx: &Ctx<'js>, value: &Value<'js>, type_msg: &str) -> 
             ctx,
             "Uint8Array buffer is detached or out of bounds",
         ));
+    }
+    let buf = unsafe { Value::from_raw(ctx.clone(), buf_raw) };
+
+    let byte_length_getter = {
+        let state = ctx
+            .userdata::<super::neo::NeoState>()
+            .ok_or(rquickjs::Error::Unknown)?;
+        state
+            .typed_array_byte_length
+            .as_ref()
+            .ok_or(rquickjs::Error::Unknown)?
+            .clone()
+            .restore(ctx)?
     };
+    let live_len_val: Value<'js> =
+        byte_length_getter.call((rquickjs::function::This(ta.clone()),))?;
+    let live_len = live_len_val
+        .as_number()
+        .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0)
+        .map(|n| n as usize)
+        .ok_or_else(|| {
+            Exception::throw_type(ctx, "Uint8Array buffer is detached or out of bounds")
+        })?;
+
+    let offset = byte_offset as usize;
+    let end = offset.checked_add(live_len).ok_or_else(|| {
+        Exception::throw_type(ctx, "Uint8Array buffer is detached or out of bounds")
+    })?;
+    let mut buf_size: qjs::size_t = 0;
+    let buf_ptr = unsafe { qjs::JS_GetArrayBuffer(raw_ctx, &mut buf_size, buf.as_raw()) };
+    if buf_ptr.is_null() {
+        if ctx.has_exception() {
+            let _ = ctx.catch();
+        }
+        return Err(Exception::throw_type(
+            ctx,
+            "Uint8Array buffer is detached or out of bounds",
+        ));
+    }
+    if end > buf_size as usize {
+        return Err(Exception::throw_type(
+            ctx,
+            "Uint8Array buffer is detached or out of bounds",
+        ));
+    }
+    // SAFETY: `buf_ptr` is valid for `buf_size` bytes, `end <= buf_size`, and no
+    // JavaScript executes while `slice` is alive.
+    let slice = unsafe { &std::slice::from_raw_parts(buf_ptr, buf_size as usize)[offset..end] };
     let mut out = Vec::new();
     out.try_reserve_exact(slice.len()).map_err(|_| {
         throw_fs_error(
@@ -230,7 +287,7 @@ fn read_uint8_array<'js>(ctx: &Ctx<'js>, value: &Value<'js>, type_msg: &str) -> 
     Ok(out)
 }
 
-fn get_prototype<'js>(ctx: &Ctx<'js>, val: qjs::JSValue) -> Result<Value<'js>> {
+pub(super) fn get_prototype<'js>(ctx: &Ctx<'js>, val: qjs::JSValue) -> Result<Value<'js>> {
     let proto_raw = unsafe { qjs::JS_GetPrototype(ctx.as_raw().as_ptr(), val) };
     if proto_raw.tag == i64::from(qjs::JS_TAG_EXCEPTION) {
         return Err(if ctx.has_exception() {
@@ -240,6 +297,35 @@ fn get_prototype<'js>(ctx: &Ctx<'js>, val: qjs::JSValue) -> Result<Value<'js>> {
         });
     }
     Ok(unsafe { Value::from_raw(ctx.clone(), proto_raw) })
+}
+
+pub(super) fn own_getter<'js>(
+    ctx: &Ctx<'js>,
+    object: qjs::JSValue,
+    name: &std::ffi::CStr,
+) -> Result<Function<'js>> {
+    let raw = ctx.as_raw().as_ptr();
+    let atom = unsafe { qjs::JS_NewAtom(raw, name.as_ptr()) };
+    if atom == qjs::JS_ATOM_NULL {
+        return Err(rquickjs::Error::Unknown);
+    }
+    let mut desc = MaybeUninit::<qjs::JSPropertyDescriptor>::uninit();
+    let found = unsafe { qjs::JS_GetOwnProperty(raw, desc.as_mut_ptr(), object, atom) };
+    unsafe { qjs::JS_FreeAtom(raw, atom) };
+    if found <= 0 {
+        if ctx.has_exception() {
+            let _ = ctx.catch();
+        }
+        return Err(rquickjs::Error::Unknown);
+    }
+    let desc = unsafe { desc.assume_init() };
+    let _value = unsafe { Value::from_raw(ctx.clone(), desc.value) };
+    let getter = unsafe { Value::from_raw(ctx.clone(), desc.getter) };
+    let _setter = unsafe { Value::from_raw(ctx.clone(), desc.setter) };
+    if (desc.flags as u32 & qjs::JS_PROP_GETSET) == 0 {
+        return Err(rquickjs::Error::Unknown);
+    }
+    getter.into_function().ok_or(rquickjs::Error::Unknown)
 }
 
 fn parse_options<'js>(

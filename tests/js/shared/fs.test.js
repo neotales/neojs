@@ -46,10 +46,24 @@ function withTempDir(fn) {
     const base = platform === "windows" ? "." : "/tmp";
     const root = joinPath(base, `.neojs-fs-test-${v4()}`);
     mkdir(root, { recursive: true });
+    let threw = false;
     try {
         return fn(root);
+    } catch (err) {
+        threw = true;
+        throw err;
     } finally {
-        remove(root, { recursive: true });
+        if (exists(root)) {
+            if (threw) {
+                try {
+                    remove(root, { recursive: true });
+                } catch {
+                    // Never mask the original failure thrown by `fn`.
+                }
+            } else {
+                remove(root, { recursive: true });
+            }
+        }
     }
 }
 
@@ -425,6 +439,66 @@ test("argument count, type validation, options validation, and detached Uint8Arr
         ab.transfer();
         assert.throws(() => writeFile(file, u8), TypeError);
         assert.throws(() => writeFileAtomic(file, u8), TypeError);
+
+        // Explicit `undefined` option fields and `Object.create(null)` options
+        const nullProtoOpts = Object.create(null);
+        nullProtoOpts.maxBytes = undefined;
+        assert.strictEquals(readTextFile(file, nullProtoOpts), "ok");
+        assert.strictEquals(readTextFile(file, { maxBytes: undefined }), "ok");
+        writeTextFile(file, "ok2", { create: undefined, createNew: undefined, append: undefined });
+        assert.strictEquals(readTextFile(file), "ok2");
+        mkdir(dir, { recursive: true });
+        mkdir(joinPath(dir, "undef-rec"), { recursive: undefined });
+        remove(joinPath(dir, "undef-rec"), { recursive: undefined });
+    });
+});
+
+test("resizable ArrayBuffer Uint8Array views handle grow, shrink, valid empty, and OOB", () => {
+    withTempDir((dir) => {
+        const rab = new ArrayBuffer(4, { maxByteLength: 16 });
+        const tracked = new Uint8Array(rab);
+        tracked.set([10, 20, 30, 40]);
+
+        // Grow: length-tracking view must write all 8 bytes.
+        rab.resize(8);
+        tracked.set([50, 60, 70, 80], 4);
+        const growFile = joinPath(dir, "rab-grow.bin");
+        writeFile(growFile, tracked);
+        assert.equals(Array.from(readFile(growFile)), [10, 20, 30, 40, 50, 60, 70, 80]);
+
+        const growAtomic = joinPath(dir, "rab-grow-atomic.bin");
+        writeFileAtomic(growAtomic, tracked);
+        assert.equals(Array.from(readFile(growAtomic)), [10, 20, 30, 40, 50, 60, 70, 80]);
+
+        // Shrink: valid shrunk view must write the remaining 2 bytes.
+        rab.resize(2);
+        const shrinkFile = joinPath(dir, "rab-shrink.bin");
+        writeFile(shrinkFile, tracked);
+        assert.equals(Array.from(readFile(shrinkFile)), [10, 20]);
+
+        const shrinkAtomic = joinPath(dir, "rab-shrink-atomic.bin");
+        writeFileAtomic(shrinkAtomic, tracked);
+        assert.equals(Array.from(readFile(shrinkAtomic)), [10, 20]);
+
+        // Zero-length valid view at the exact end offset (`byteOffset === byteLength`) writes 0 bytes.
+        const validEmpty = new Uint8Array(rab, 2);
+        const emptyFile = joinPath(dir, "rab-empty.bin");
+        writeFile(emptyFile, validEmpty);
+        assert.equals(Array.from(readFile(emptyFile)), []);
+
+        // Out-of-bounds RAB views (tracked and fixed-length) must throw TypeError without writing.
+        rab.resize(8);
+        const oobTracked = new Uint8Array(rab, 4);
+        const oobFixed = new Uint8Array(rab, 4, 4);
+        rab.resize(2);
+
+        const sentinel = joinPath(dir, "rab-sentinel.bin");
+        writeFile(sentinel, new Uint8Array([99]));
+        assert.throws(() => writeFile(sentinel, oobTracked), TypeError);
+        assert.throws(() => writeFile(sentinel, oobFixed), TypeError);
+        assert.throws(() => writeFileAtomic(sentinel, oobTracked), TypeError);
+        assert.throws(() => writeFileAtomic(sentinel, oobFixed), TypeError);
+        assert.equals(Array.from(readFile(sentinel)), [99]);
     });
 });
 

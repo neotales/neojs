@@ -1655,16 +1655,41 @@ remove("/tmp/example", { recursive: true });
 console.log(exists("/tmp/example")); // false
 ```
 
-Implemented synchronous exports: `readFile(path, options?)`, `readTextFile(path, options?)`,
-`writeFile(path, data, options?)`, `writeTextFile(path, text, options?)`,
-`writeFileAtomic(path, data, options?)`, `exists(path)`, `stat(path)`, `lstat(path)`,
-`readDir(path)`, `mkdir(path, options?)`, `remove(path, options?)`, `rename(from, to)`,
-`copyFile(from, to, options?)`, and `realpath(path)`. Core logic lives in `neojs-fs-core`: paths
-must be non-empty strings without NUL bytes (`NEO_FS_INVALID_PATH`), `readDir` returns sorted
-entries with frozen items, `stat`/`lstat` return frozen metadata snapshots, `writeFileAtomic`
-uses a sibling temporary file with fallible OS entropy (`getrandom`), and filesystem errors carry
-stable `NEO_FS_*` `.code` properties without echoing caller-supplied paths. It uses the process's
-filesystem authority and is not a permission system or sandbox. See
+Implemented synchronous exports and options:
+
+- `readFile(path, options?)` -> `Uint8Array` and `readTextFile(path, options?)` -> `string`:
+  `options?: { maxBytes?: number }` (non-negative safe integer; `RangeError` if negative, `NaN`,
+  fractional, or above `Number.MAX_SAFE_INTEGER`; `NEO_FS_TOO_LARGE` if the file exceeds `maxBytes`;
+  `NEO_FS_INVALID_UTF8` on invalid UTF-8 in `readTextFile`).
+- `writeFile(path, data, options?)` (`data: Uint8Array`) and `writeTextFile(path, text, options?)`
+  (`text: string`): `options?: { create?: boolean, createNew?: boolean, append?: boolean }`
+  (defaults: `create: true`, `createNew: false`, `append: false`; `createNew: true` + `append: true`
+  fails with `NEO_FS_INVALID_ARGUMENT`).
+- `writeFileAtomic(path, data, options?)` (`data: Uint8Array | string`):
+  `options?: { sync?: boolean, overwrite?: boolean }` (defaults: `sync: true`, `overwrite: true`).
+  Writes to a unique sibling temporary file using fallible OS entropy (`getrandom`) and replaces or
+  links atomically (`NEO_FS_ALREADY_EXISTS` when `overwrite: false`).
+- `exists(path)` -> `boolean` (follows symlinks; returns `false` only on `NotFound` and throws
+  `NEO_FS_*` on other errors).
+- `stat(path)` (follows symlinks) and `lstat(path)` (does not follow symlinks) -> frozen
+  `{ isFile, isDirectory, isSymlink, size, modifiedMs, readonly }` where `size` is an IEEE-754
+  `number` in bytes, `modifiedMs` is `number | null` (Unix epoch milliseconds), and `readonly` is a
+  `boolean`.
+- `readDir(path)` -> array of frozen `{ name, isFile, isDirectory, isSymlink }` sorted
+  lexicographically by `name`.
+- `mkdir(path, options?)` and `remove(path, options?)`: `options?: { recursive?: boolean }`
+  (default: `false`; `remove` never follows symlinks, even with `recursive: true`).
+- `rename(from, to)` and `copyFile(from, to, options?)`: `options?: { overwrite?: boolean }`
+  (default: `false`; `overwrite: false` uses `create_new` to avoid TOCTOU clobbering, and
+  `overwrite: true` treats self-copy as a no-op).
+- `realpath(path)` -> canonical `string`.
+
+Core logic lives in `neojs-fs-core`: paths must be non-empty strings without NUL bytes or unpaired
+surrogates (`NEO_FS_INVALID_PATH`), argument/type/options errors (including unknown option keys,
+non-plain/Proxy/getter/symbol/non-enumerable options objects, and detached or out-of-bounds
+`Uint8Array` views) throw `TypeError` (or `RangeError` for out-of-range `maxBytes`), and
+filesystem errors carry stable `NEO_FS_*` `.code` properties without echoing caller-supplied
+paths. It uses the process's filesystem authority and is not a permission system or sandbox. See
 [`neojs-fs-core/README.md`](neojs-fs-core/README.md) for the full contract.
 
 **Planned, not implemented.** The `@neotales/chars` reference also defines the `...At` string-index
@@ -1765,7 +1790,8 @@ identity with the module namespace exports; the namespace itself is a distinct o
 returns `undefined`, and a non-string name throws `TypeError`. All shared modules come from the
 engine-neutral `neojs-builtins` crate (`chars`, `os`, `strings`, and `uuid` bound as native QuickJS
 modules; `assert` and `test` evaluated from shared ECMAScript factories with native QuickJS Promise
-and queue hooks). `neojs-lite-core::Runtime::run_tests` and `neojs-lite test <file-or-glob>...` run
+and queue hooks) and `neojs-fs-core` (`fs` bound as a native QuickJS module).
+`neojs-lite-core::Runtime::run_tests` and `neojs-lite test <file-or-glob>...` run
 `neo:test` suites on QuickJS using the same `TestReport` contract and deterministic glob expansion
 (`neojs-module-policy`) as `neojs test`, rejecting `test(..., { timeout })` explicitly because
 QuickJS has no host timers. The `neojs-builtins` crate has no V8 or QuickJS dependency. Both

@@ -31,6 +31,13 @@ pub(super) struct NeoState {
     /// The frozen public `neo:fs` object, when the feature is selected.
     #[cfg(feature = "neo-fs")]
     pub(super) fs: Option<Persistent<Object<'static>>>,
+    /// The captured `%TypedArray%.prototype.byteLength` native getter.
+    ///
+    /// Used by `neo:fs` to read the live byte length of length-tracking
+    /// resizable-`ArrayBuffer` `Uint8Array` views without consulting mutable
+    /// prototype properties.
+    #[cfg(feature = "neo-fs")]
+    pub(super) typed_array_byte_length: Option<Persistent<Function<'static>>>,
     /// The frozen public `neo:os` object, when the feature is selected.
     #[cfg(feature = "neo-os")]
     pub(super) os: Option<Persistent<Object<'static>>>,
@@ -87,6 +94,14 @@ pub(super) fn install<'js>(
     let chars: Option<Object<'js>> = Some(super::chars::object(ctx)?);
     #[cfg(feature = "neo-fs")]
     let fs: Option<Object<'js>> = Some(super::fs::object(ctx)?);
+    #[cfg(feature = "neo-fs")]
+    let typed_array_byte_length: Persistent<Function<'static>> = {
+        let uint8_ctor: Object<'js> = ctx.globals().get("Uint8Array")?;
+        let uint8_proto: Object<'js> = uint8_ctor.get("prototype")?;
+        let ta_proto = super::fs::get_prototype(ctx, uint8_proto.as_raw())?;
+        let getter = super::fs::own_getter(ctx, ta_proto.as_raw(), c"byteLength")?;
+        Persistent::save(ctx, getter)
+    };
     #[cfg(feature = "neo-os")]
     let os: Option<Object<'js>> = Some(super::os::object(ctx)?);
     #[cfg(feature = "neo-strings")]
@@ -166,6 +181,8 @@ pub(super) fn install<'js>(
         chars: chars.map(|chars| Persistent::save(ctx, chars)),
         #[cfg(feature = "neo-fs")]
         fs: fs.map(|fs| Persistent::save(ctx, fs)),
+        #[cfg(feature = "neo-fs")]
+        typed_array_byte_length: Some(typed_array_byte_length),
         #[cfg(feature = "neo-os")]
         os: os.map(|os| Persistent::save(ctx, os)),
         #[cfg(feature = "neo-strings")]
