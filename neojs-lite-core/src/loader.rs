@@ -70,7 +70,12 @@ impl Resolver for FileResolver {
         // a fragment. Resolving to the same string gives the engine one module
         // identity for static and dynamic imports. With both module features
         // off the dependency is absent and this block is not compiled.
-        #[cfg(any(feature = "neo-chars", feature = "neo-strings"))]
+        #[cfg(any(
+            feature = "neo-assert",
+            feature = "neo-chars",
+            feature = "neo-strings",
+            feature = "neo-test"
+        ))]
         if let Some(builtin) = neojs_builtins::module(name) {
             return Ok(builtin.specifier.to_owned());
         }
@@ -164,12 +169,21 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
-        // A shared canonical module is a native QuickJS module. The module
-        // declaration is the only interface; its evaluation exports the function
-        // objects created by the matching binding. No ECMAScript source is read.
-        #[cfg(any(feature = "neo-chars", feature = "neo-strings"))]
+        // `neo:chars` and `neo:strings` are native QuickJS modules (`declare_def`)
+        // with no ECMAScript source; `neo:assert` and `neo:test` declare the
+        // shared `.esm.js` re-export wrappers from `neojs-builtins`.
+        #[cfg(any(
+            feature = "neo-assert",
+            feature = "neo-chars",
+            feature = "neo-strings",
+            feature = "neo-test"
+        ))]
         if let Some(builtin) = neojs_builtins::module(name) {
             match builtin.specifier {
+                #[cfg(feature = "neo-assert")]
+                neojs_builtins::assert::SPECIFIER => {
+                    return Module::declare(ctx.clone(), name, neojs_builtins::assert::ESM_SOURCE);
+                }
                 #[cfg(feature = "neo-chars")]
                 neojs_builtins::chars::SPECIFIER => {
                     return Module::declare_def::<crate::chars::CharsModule, _>(ctx.clone(), name);
@@ -180,6 +194,10 @@ impl Loader for FileLoader {
                         ctx.clone(),
                         name,
                     );
+                }
+                #[cfg(feature = "neo-test")]
+                neojs_builtins::test::SPECIFIER => {
+                    return Module::declare(ctx.clone(), name, neojs_builtins::test::ESM_SOURCE);
                 }
                 _ => {
                     return Err(Error::new_loading_message(

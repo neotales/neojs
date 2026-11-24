@@ -17,6 +17,9 @@
 
 use std::path::Path;
 
+#[cfg(feature = "test-glob")]
+pub mod test_glob;
+
 /// How a file would be executed, decided by its name alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModuleFormat {

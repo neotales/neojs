@@ -1,57 +1,76 @@
 # neojs-builtins
 
-Engine-independent Rust implementations of Neo built-in modules shared by the
-V8 runtime (`neojs-core`) and the QuickJS runtime (`neojs-lite-core`).
+Engine-independent implementations of Neo built-in modules shared by the V8
+runtime (`neojs-core`) and the QuickJS runtime (`neojs-lite-core`).
 
-The crate contains Rust logic and metadata only. It has no `deno_core`
-dependency, no `rquickjs` dependency, and performs no I/O, so it can sit in both
-dependency graphs without moving an engine across the separation boundary. Each
-engine binds the same Rust functions with its own native function and module
-objects; there is no ECMAScript implementation source in this crate.
+The crate contains Rust logic, shared ECMAScript factory/wrapper sources, and
+metadata only. It has no `deno_core` dependency, no `rquickjs` dependency, and
+performs no I/O, so it can sit in both dependency graphs without moving an
+engine across the separation boundary.
 
 ```sh
 cargo test -p neojs-builtins --all-features
 cargo test -p neojs-builtins
-cargo tree -p neojs-builtins -e normal
+cargo tree -p neojs-builtins --all-features -e normal
 ```
 
 ## What is shared
 
-Each module contributes:
+Each module contributes a `BuiltinModule` descriptor with its canonical `neo:`
+specifier, exact export names, and `Backend` (`Backend::Rust` or
+`Backend::Ecmascript`):
 
-* a Rust implementation with total predicates and explicit case-mapping results;
-* a `BuiltinModule` descriptor with the canonical specifier, the exact export
-  names, and the Rust backend marker.
+* **`Backend::Rust` (`chars`, `strings`)**: pure Rust implementations with total
+  predicates and explicit results. V8 creates native V8 function objects and
+  registers native synthetic modules; QuickJS exports native QuickJS functions
+  from native modules.
+* **`Backend::Ecmascript` (`assert`, `test`)**: shared ECMAScript factory
+  functions (`assert.js`, `test.js`) and `.esm.js` re-export wrappers
+  parameterized by engine-supplied host hooks (`isNativePromise`,
+  `observePromise`, `print`, rejection tracking, job/event-loop checks, and
+  optional timers).
 
-Each engine keeps its own binding. V8 creates native V8 function objects,
-registers a native synthetic module with the deno_core seam, and installs the
-same object in the registry. QuickJS creates native QuickJS functions and
-exports them from a native QuickJS module. In both engines the registry property
-and the module export are the same function object; the ES module namespace is a
-distinct object.
+In both engines, the registry entry and the ES module exports share function and
+class identity while the ES module namespace remains a distinct object.
 
 ## Module selection
 
-Every shared module has its own Cargo feature. `chars` and `strings` are the
-modules this crate implements today. The other `neo:` built-in modules remain
-ECMAScript module sources in the V8 runtime and are not yet migrated here; the
-QuickJS runtime implements `chars` and `strings`.
+Every shared module has its own Cargo feature: `assert`, `chars`, `strings`, and
+`test`.
 
-* `neojs-core` has positive `neo-chars` and `neo-strings` features that enable
-  the optional `neojs-builtins` dependency and the matching module. A default
-  V8 build enables both. `neo-slices` implies `neo-chars` because `CharSlice`
-  captures the native `chars.toUpper` and `chars.toLower` functions. Disabling
-  a module removes its native registration, its registry entry, its loader
-  entry, and its binding bytes.
-* `neojs-lite-core` has the same positive features, enabled by its default
-  feature set. `default-features = false` removes the dependency, the native
-  objects, the module declarations, the registry entries, and the introspection
-  list entries.
+* `neojs-core` enables `assert` and `test` unconditionally and `chars` and
+  `strings` in its default feature set. `neo-slices` implies `neo-chars` because
+  `CharSlice` captures the native `chars.toUpper` and `chars.toLower`
+  functions.
+* `neojs-lite-core` enables `neo-assert`, `neo-chars`, `neo-strings`, and
+  `neo-test` in its default feature set. `default-features = false` removes the
+  `neojs-builtins` dependency, the registry entries, the loader entries, and the
+  introspection list entries.
 * `neojs-builtins` itself has no default module features. A build without a
   module has no descriptor and no implementation code for it.
 
 Cargo features are additive and unify across the dependency graph. Module
 selection is compile-time surface selection, not a sandbox.
+
+## `neo:assert` and `neo:test`
+
+* `neo:assert` (`assert` feature): callable `assert` / `ok`, `equals`,
+  `notEquals`, `strictEquals`, `notStrictEquals`, `fail`, `throws`,
+  `doesNotThrow`, `rejects`, `doesNotReject`, and `AssertionError` (`code:
+  "NEO_ASSERT"`). Native Promises are checked and observed through engine hooks
+  without consulting user `.then` or `Symbol.species`.
+* `neo:test` (`test` feature): `test`, `run`, `MAX_TESTS`, and
+  `TestFailureError` (`code: "NEO_TEST_FAILURES"`). When host timers are
+  unavailable (QuickJS), `test(..., { timeout })` is rejected explicitly with
+  `NEO_TEST_NO_TIMER`, and `run({ settle: true })` drains the bounded job queue.
+
+The shared JavaScript contract suite in `tests/js/shared/*.test.js` runs under
+both engines:
+
+```sh
+cargo run -p neojs -- test 'tests/js/shared/*.test.js'
+cargo run -p neojs-lite -- test 'tests/js/shared/*.test.js'
+```
 
 ## `neo:chars`
 

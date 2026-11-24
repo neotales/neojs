@@ -12,13 +12,21 @@ fn run(source: &str) -> Result<(), neojs_lite_core::Error> {
 }
 
 /// The canonical list this build selected, in registration order.
-fn expected_list() -> &'static str {
-    match (cfg!(feature = "neo-chars"), cfg!(feature = "neo-strings")) {
-        (true, true) => r#"["neo:chars", "neo:strings"]"#,
-        (true, false) => r#"["neo:chars"]"#,
-        (false, true) => r#"["neo:strings"]"#,
-        (false, false) => "[]",
+fn expected_list() -> String {
+    let mut entries = Vec::new();
+    if cfg!(feature = "neo-assert") {
+        entries.push(r#""neo:assert""#);
     }
+    if cfg!(feature = "neo-chars") {
+        entries.push(r#""neo:chars""#);
+    }
+    if cfg!(feature = "neo-strings") {
+        entries.push(r#""neo:strings""#);
+    }
+    if cfg!(feature = "neo-test") {
+        entries.push(r#""neo:test""#);
+    }
+    format!("[{}]", entries.join(", "))
 }
 
 #[test]
@@ -146,4 +154,116 @@ try {
 if (imported) throw new Error("neo:strings was importable while disabled");
 "#)
     .expect("strings absent");
+}
+
+#[test]
+#[cfg(feature = "neo-assert")]
+fn assert_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:assert")) {
+    throw new Error(`assert is missing from the list: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:assert");
+if (typeof registry !== "function" || !Object.isFrozen(registry)) {
+    throw new Error("the assert registry object is missing or unfrozen");
+}
+if (Neo.getBuiltInModule("assert") !== undefined) {
+    throw new Error("the registry accepted a bare assert name");
+}
+const namespace = await import("neo:assert");
+if (namespace === registry) {
+    throw new Error("the ES module namespace must be distinct from the registry object");
+}
+if (namespace.default !== registry || namespace.equals !== registry.equals) {
+    throw new Error("the namespace exports do not match the registry");
+}
+namespace.equals({ a: [1, 2] }, { a: [1, 2] });
+"#)
+    .expect("assert feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-assert"))]
+fn assert_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:assert") || list.includes("assert")) {
+    throw new Error(`assert is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:assert") !== undefined) {
+    throw new Error("the canonical assert registry object is still present");
+}
+let imported = false;
+try {
+    await import("neo:assert");
+    imported = true;
+} catch {
+    // Expected: the loader has no assert entry.
+}
+if (imported) throw new Error("neo:assert was importable while disabled");
+"#)
+    .expect("assert absent");
+}
+
+#[test]
+#[cfg(feature = "neo-test")]
+fn test_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:test")) {
+    throw new Error(`test is missing from the list: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:test");
+if (registry === undefined || typeof registry !== "object" || !Object.isFrozen(registry)) {
+    throw new Error("the test registry object is missing or unfrozen");
+}
+if (Neo.getBuiltInModule("test") !== undefined) {
+    throw new Error("the registry accepted a bare test name");
+}
+const namespace = await import("neo:test");
+if (namespace === registry) {
+    throw new Error("the ES module namespace must be distinct from the registry object");
+}
+if (namespace.test !== registry.test || namespace.default !== registry.test) {
+    throw new Error("the namespace exports do not match the registry");
+}
+"#)
+    .expect("test feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-test"))]
+fn test_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:test") || list.includes("test")) {
+    throw new Error(`test is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:test") !== undefined) {
+    throw new Error("the canonical test registry object is still present");
+}
+let imported = false;
+try {
+    await import("neo:test");
+    imported = true;
+} catch {
+    // Expected: the loader has no test entry.
+}
+if (imported) throw new Error("neo:test was importable while disabled");
+"#)
+    .expect("test absent");
+}
+
+#[test]
+#[cfg(not(feature = "neo-test"))]
+fn run_tests_returns_error_when_test_feature_is_disabled() {
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime
+        .run_tests()
+        .expect_err("run_tests must fail when neo-test is disabled");
+    assert!(
+        matches!(error, neojs_lite_core::Error::TestRunner(ref message) if message.contains("neo-test")),
+        "{error:?}"
+    );
 }

@@ -25,17 +25,30 @@ writes to standard output and `console.error` to standard error.
 The command maps module and job failures to exit 1 and preflight failures to
 exit 2, matching the V8 `neojs` command's classes.
 
+## Run tests
+
+```sh
+cargo run -p neojs-lite -- test 'tests/js/shared/*.test.js'
+```
+
+`neojs-lite test <file-or-glob>...` expands each argument using the same
+deterministic glob rules as `neojs test`, runs each file in a fresh runtime, and
+exits `0` when every test passes, `1` on a test/module/unsettled/unhandled
+failure or when a file registers no tests, and `2` on startup or glob errors.
+
 ## Limitations
 
 This command does **not** claim parity with `neojs` (V8):
 
 * **No TypeScript.** `.ts` and `.mts` are rejected with a clear reason. Use
   `.js` or `.mjs`.
-* **No host asynchrony.** There are no timers or host Promise integration. A
-  top-level `await` works only when QuickJS's own job queue can settle it.
-* **Most built-in `neo:` modules are absent.** Only the shared `neo:chars` and
-  `neo:strings` modules are implemented. Other V8 modules are not importable,
-  and the `Neo` list does not claim them.
+* **No host timers or external asynchrony.** There are no timers and no event
+  loop beyond QuickJS's own job queue. A top-level `await` works only when
+  QuickJS's own job queue can settle it, and `test(..., { timeout })` is
+  rejected explicitly.
+* **Most built-in `neo:` modules are absent.** Only the shared `neo:assert`,
+  `neo:chars`, `neo:strings`, and `neo:test` modules are implemented. Other V8
+  modules are not importable, and the `Neo` list does not claim them.
 * **No permissions or sandbox.** None are implemented.
 
 Both runtimes share `neojs-module-policy` for executable-extension decisions, so
@@ -44,13 +57,13 @@ declaration files, JSON, WebAssembly, and native addons are the same.
 
 ## Build features
 
-The command selects `neo-chars` and `neo-strings` explicitly from
-`neojs-lite-core` with `default-features = false`, so its advertised surface is a
-command decision and does not drift with the library defaults. The library
-default also enables both, but a library consumer can opt out with
-`default-features = false`. Cargo features are additive and unify across the
-dependency graph: a build that any dependent enables the module for contains it.
-Selection is not a sandbox.
+The command selects `neo-assert`, `neo-chars`, `neo-strings`, and `neo-test`
+explicitly from `neojs-lite-core` with `default-features = false`, so its
+advertised surface is a command decision and does not drift with the library
+defaults. The library default also enables all four, but a library consumer can
+opt out with `default-features = false`. Cargo features are additive and unify
+across the dependency graph: a build that any dependent enables the module for
+contains it. Selection is not a sandbox.
 
 ## Build isolation
 

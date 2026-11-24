@@ -11,7 +11,7 @@ authors.workspace = true
 [dependencies]
 neojs-core = { version = "0.1.0", path = "../neojs-core" }
 # Deterministic shell-style expansion for `neojs test`.
-glob.workspace = true
+neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy", features = ["test-glob"] }
 
 [dev-dependencies]
 # The duplicate dependency enables the test-only fault injection for this

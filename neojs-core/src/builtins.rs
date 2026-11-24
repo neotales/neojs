@@ -157,6 +157,12 @@ const NATIVE_ENTRIES_TOKEN: &str = "// __NEO_NATIVE_ENTRIES__";
 /// never appears in JavaScript.
 const NATIVE_STRINGS_TOKEN: &str = "// __NEO_NATIVE_STRINGS_ENTRY__";
 
+/// The marker replaced with the shared `neo:assert` factory source.
+const ASSERT_IMPL_TOKEN: &str = "// __NEO_ASSERT_IMPL__";
+
+/// The marker replaced with the shared `neo:test` factory source.
+const TEST_IMPL_TOKEN: &str = "// __NEO_TEST_IMPL__";
+
 /// The marker replaced with the separate `slices` implementation source.
 ///
 /// The implementation is not part of [`NEO_SHIM_SOURCE`]. It is compiled in
@@ -191,7 +197,9 @@ const SLICES_REGISTRY_TOKEN: &str = "// __NEO_SLICES_REGISTRY_ENTRY__";
 pub(crate) fn neo_shim() -> String {
     let shim = NEO_SHIM_SOURCE
         .replace(OS_PLATFORM_TOKEN, &js_string(std::env::consts::OS))
-        .replace(OS_ARCH_TOKEN, &js_string(std::env::consts::ARCH));
+        .replace(OS_ARCH_TOKEN, &js_string(std::env::consts::ARCH))
+        .replace(ASSERT_IMPL_TOKEN, neojs_builtins::assert::FACTORY_SOURCE)
+        .replace(TEST_IMPL_TOKEN, neojs_builtins::test::FACTORY_SOURCE);
 
     #[cfg(feature = "neo-chars")]
     let shim = shim.replace(
@@ -218,6 +226,8 @@ pub(crate) fn neo_shim() -> String {
         .replace(SLICES_IMPL_TOKEN, "")
         .replace(SLICES_REGISTRY_TOKEN, "");
 
+    debug_assert!(!shim.contains(ASSERT_IMPL_TOKEN));
+    debug_assert!(!shim.contains(TEST_IMPL_TOKEN));
     debug_assert!(!shim.contains(NATIVE_ENTRIES_TOKEN));
     debug_assert!(!shim.contains(NATIVE_STRINGS_TOKEN));
     debug_assert!(!shim.contains(SLICES_IMPL_TOKEN));
@@ -275,10 +285,10 @@ pub(crate) const ASSERT_SPECIFIER: &str = "neo:assert";
 ///
 /// It re-exports the callable `assert` function and its named assertions from
 /// the public `assert` module object, and also exposes that function as the
-/// default export. The implementations are in [`neo_shim`]; the only host op
-/// called observes a genuine native Promise and is registered by
-/// [`crate::assert`].
-const ASSERT_MODULE: &str = include_str!("builtins/assert.esm.js");
+/// default export. The factory implementation and this ESM wrapper live in
+/// `neojs_builtins::assert`; [`neo_shim`] supplies the V8 Promise hooks, and the
+/// only host op called observes a genuine native Promise via [`crate::assert`].
+const ASSERT_MODULE: &str = neojs_builtins::assert::ESM_SOURCE;
 
 /// The canonical module specifier for the `chars` built-in.
 ///
@@ -446,9 +456,11 @@ pub(crate) const TEST_SPECIFIER: &str = "neo:test";
 ///
 /// It re-exports the callable `test` function and the runner helpers from the
 /// public `test` module object, so the module and
-/// `Neo.getBuiltInModule("neo:test")` share identity. The implementation is in
-/// [`neo_shim`]; it calls no host op.
-const TEST_MODULE: &str = include_str!("builtins/test.esm.js");
+/// `Neo.getBuiltInModule("neo:test")` share identity. The factory
+/// implementation and this ESM wrapper live in `neojs_builtins::test`;
+/// [`neo_shim`] supplies V8's print, timer, rejection-handler, and event-loop
+/// hooks.
+const TEST_MODULE: &str = neojs_builtins::test::ESM_SOURCE;
 
 /// The canonical module specifier for the `uuid` built-in.
 ///
@@ -605,7 +617,8 @@ mod tests {
     use super::resolve;
     use super::resolve_name;
     use super::{
-        NATIVE_ENTRIES_TOKEN, NATIVE_STRINGS_TOKEN, SLICES_IMPL_TOKEN, SLICES_REGISTRY_TOKEN,
+        ASSERT_IMPL_TOKEN, NATIVE_ENTRIES_TOKEN, NATIVE_STRINGS_TOKEN, SLICES_IMPL_TOKEN,
+        SLICES_REGISTRY_TOKEN, TEST_IMPL_TOKEN,
     };
     use deno_core::url::Url;
 
@@ -654,6 +667,8 @@ mod tests {
         let shim = neo_shim();
         assert!(!shim.contains(OS_PLATFORM_TOKEN));
         assert!(!shim.contains(OS_ARCH_TOKEN));
+        assert!(!shim.contains(ASSERT_IMPL_TOKEN));
+        assert!(!shim.contains(TEST_IMPL_TOKEN));
         assert!(!shim.contains(NATIVE_ENTRIES_TOKEN));
         assert!(!shim.contains(NATIVE_STRINGS_TOKEN));
         assert!(!shim.contains(SLICES_IMPL_TOKEN));

@@ -8,4 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+# Deterministic shell-style test-file expansion shared by `neojs test` and
+# `neojs-lite test`. Off by default so engine library crates do not pull `glob`.
+test-glob = ["dep:glob"]
+
 [dependencies]
+glob = { workspace = true, optional = true }

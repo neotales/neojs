@@ -18,9 +18,13 @@ path = "src/main.rs"
 # `neojs-lite-core` defaults, so a change to the library defaults cannot
 # silently change what the command advertises. This is not a sandbox.
 neojs-lite-core = { version = "0.1.0", path = "../neojs-lite-core", default-features = false, features = [
+    "neo-assert",
     "neo-chars",
     "neo-strings",
+    "neo-test",
 ] }
+# Deterministic shell-style expansion for `neojs-lite test`.
+neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy", features = ["test-glob"] }
 
 [dev-dependencies]
 tempfile.workspace = true

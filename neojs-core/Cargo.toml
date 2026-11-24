@@ -20,14 +20,14 @@ authors.workspace = true
 # not a sandbox.
 default = ["neo-chars", "neo-slices", "neo-strings"]
 # The native `chars` binding and its canonical V8 registration. This enables
-# the optional `neojs-builtins` dependency and its `chars` module.
-neo-chars = ["dep:neojs-builtins", "neojs-builtins/chars"]
+# the shared `chars` module in `neojs-builtins`.
+neo-chars = ["neojs-builtins/chars"]
 # `slices` and its loader/registry entries. It cannot be built without `chars`:
 # `CharSlice` captures `chars.toUpper` and `chars.toLower`.
 neo-slices = ["neo-chars"]
 # The native `strings` binding and its canonical V8 registration. This enables
-# the optional `neojs-builtins` dependency and its `strings` module.
-neo-strings = ["dep:neojs-builtins", "neojs-builtins/strings"]
+# the shared `strings` module in `neojs-builtins`.
+neo-strings = ["neojs-builtins/strings"]
 # Test-only fault injection for the peer-close reply branch. Never enabled by a
 # normal build; `neojs` enables it only for its own dev/test targets.
 test-support = []
@@ -43,7 +43,7 @@ deno_error.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
 httpdate.workspace = true
-neojs-builtins = { workspace = true, optional = true }
+neojs-builtins = { workspace = true, features = ["assert", "test"] }
 neojs-manifest = { version = "0.1.0", path = "../neojs-manifest" }
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
 neotales-age.workspace = true
