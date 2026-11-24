@@ -2071,6 +2071,7 @@ dependencies = [
  "neojs-manifest",
  "neojs-module-policy",
  "neojs-remote",
+ "neojs-ssh-core",
  "neotales-age",
  "neotales-ssh",
  "pbkdf2",
@@ -2187,6 +2188,16 @@ dependencies = [
  "thiserror",
  "ureq",
  "url",
+]
+
+[[package]]
+name = "neojs-ssh-core"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "neotales-ssh",
+ "thiserror",
+ "zeroize",
 ]
 
 [[package]]
