@@ -21,7 +21,7 @@ use neojs_crypto_core::envelope::{
 };
 use rquickjs::{
     Ctx, Exception, Function, Object, Result, TypedArray, Value, function::Rest, module::ModuleDef,
-    qjs,
+    object::Property, qjs,
 };
 
 use crate::native::{freeze_native, throw_coded_error, with_uint8_array_bytes_ex};
@@ -49,86 +49,90 @@ pub(super) const EXPORTS: &[&str] = &[
     "shamirSplit",
 ];
 
+pub(super) fn define_method<'js>(
+    object: &Object<'js>,
+    name: &str,
+    func: Function<'js>,
+    length: usize,
+) -> Result<()> {
+    let func = func.with_name(name)?.with_length(length)?;
+    object.prop(
+        name,
+        Property::from(func).writable().enumerable().configurable(),
+    )?;
+    Ok(())
+}
+
 /// Creates the frozen public registry object for `neo:crypto`.
 pub(super) fn object<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
     let object = Object::new(ctx.clone())?;
-    object.set(
+    define_method(
+        &object,
         "bcryptHash",
-        Function::new(ctx.clone(), password::bcrypt_hash)?
-            .with_name("bcryptHash")?
-            .with_length(2)?,
+        Function::new(ctx.clone(), password::bcrypt_hash)?,
+        2,
     )?;
-    object.set(
+    define_method(
+        &object,
         "bcryptVerify",
-        Function::new(ctx.clone(), password::bcrypt_verify)?
-            .with_name("bcryptVerify")?
-            .with_length(2)?,
+        Function::new(ctx.clone(), password::bcrypt_verify)?,
+        2,
     )?;
-    object.set(
+    define_method(
+        &object,
         "createDecryptor",
-        Function::new(ctx.clone(), cipher::create_decryptor)?
-            .with_name("createDecryptor")?
-            .with_length(4)?,
+        Function::new(ctx.clone(), cipher::create_decryptor)?,
+        4,
     )?;
-    object.set(
+    define_method(
+        &object,
         "createEncryptor",
-        Function::new(ctx.clone(), cipher::create_encryptor)?
-            .with_name("createEncryptor")?
-            .with_length(4)?,
+        Function::new(ctx.clone(), cipher::create_encryptor)?,
+        4,
     )?;
-    object.set(
+    define_method(
+        &object,
         "createHash",
-        Function::new(ctx.clone(), hash::create_hash)?
-            .with_name("createHash")?
-            .with_length(1)?,
+        Function::new(ctx.clone(), hash::create_hash)?,
+        1,
     )?;
-    object.set(
+    define_method(
+        &object,
         "createHmac",
-        Function::new(ctx.clone(), hash::create_hmac)?
-            .with_name("createHmac")?
-            .with_length(2)?,
+        Function::new(ctx.clone(), hash::create_hmac)?,
+        2,
     )?;
-    object.set(
-        "decrypt",
-        Function::new(ctx.clone(), decrypt)?
-            .with_name("decrypt")?
-            .with_length(3)?,
-    )?;
-    object.set(
-        "encrypt",
-        Function::new(ctx.clone(), encrypt)?
-            .with_name("encrypt")?
-            .with_length(3)?,
-    )?;
-    object.set(
+    define_method(&object, "decrypt", Function::new(ctx.clone(), decrypt)?, 3)?;
+    define_method(&object, "encrypt", Function::new(ctx.clone(), encrypt)?, 3)?;
+    define_method(
+        &object,
         "generateEnvelopeKey",
-        Function::new(ctx.clone(), generate_envelope_key)?
-            .with_name("generateEnvelopeKey")?
-            .with_length(0)?,
+        Function::new(ctx.clone(), generate_envelope_key)?,
+        0,
     )?;
-    object.set(
+    define_method(
+        &object,
         "pbkdf2",
-        Function::new(ctx.clone(), password::pbkdf2)?
-            .with_name("pbkdf2")?
-            .with_length(5)?,
+        Function::new(ctx.clone(), password::pbkdf2)?,
+        5,
     )?;
-    object.set(
+    define_method(
+        &object,
         "randomBytes",
-        Function::new(ctx.clone(), random_bytes)?
-            .with_name("randomBytes")?
-            .with_length(1)?,
+        Function::new(ctx.clone(), random_bytes)?,
+        1,
     )?;
-    object.set(
+    define_method(
+        &object,
         "shamirCombine",
-        Function::new(ctx.clone(), shamir::shamir_combine)?
-            .with_name("shamirCombine")?
-            .with_length(2)?,
+        Function::new(ctx.clone(), shamir::shamir_combine)?,
+        2,
     )?;
-    object.set(
+    define_method(
+        &object,
         "shamirSplit",
-        Function::new(ctx.clone(), shamir::shamir_split)?
-            .with_name("shamirSplit")?
-            .with_length(3)?,
+        Function::new(ctx.clone(), shamir::shamir_split)?,
+        3,
     )?;
     freeze_native(ctx, &object)?;
     Ok(object)
@@ -199,9 +203,9 @@ fn throw_envelope_error(ctx: &Ctx<'_>, error: EnvelopeError) -> rquickjs::Error 
 
 pub(super) fn bytes_to_uint8_array<'js>(
     ctx: &Ctx<'js>,
-    bytes: Zeroizing<Vec<u8>>,
+    bytes: &[u8],
 ) -> Result<TypedArray<'js, u8>> {
-    TypedArray::<u8>::new(ctx.clone(), bytes.as_slice())
+    TypedArray::<u8>::new_copy(ctx.clone(), bytes)
 }
 
 pub(super) fn read_uint8_bytes<'js>(
@@ -371,7 +375,7 @@ fn generate_envelope_key<'js>(
     }
     let key =
         Zeroizing::new(core_generate_envelope_key().map_err(|e| throw_envelope_error(&ctx, e))?);
-    TypedArray::<u8>::new(ctx, key.as_slice())
+    bytes_to_uint8_array(&ctx, key.as_slice())
 }
 
 fn random_bytes<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<TypedArray<'js, u8>> {
@@ -390,7 +394,7 @@ fn random_bytes<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<TypedArray
         "length must be a non-negative safe integer within the limit",
     )?;
     let bytes = Zeroizing::new(core_random_bytes(len).map_err(|e| throw_envelope_error(&ctx, e))?);
-    bytes_to_uint8_array(&ctx, bytes)
+    bytes_to_uint8_array(&ctx, &bytes)
 }
 
 fn read_optional_aad<'js>(ctx: &Ctx<'js>, value: Option<&Value<'js>>) -> Result<Vec<u8>> {
@@ -400,7 +404,7 @@ fn read_optional_aad<'js>(ctx: &Ctx<'js>, value: Option<&Value<'js>>) -> Result<
     if value.is_undefined() {
         return Ok(Vec::new());
     }
-    let aad = read_uint8_bytes(
+    let mut aad = read_uint8_bytes(
         ctx,
         value,
         "associatedData must be a Uint8Array",
@@ -408,7 +412,7 @@ fn read_optional_aad<'js>(ctx: &Ctx<'js>, value: Option<&Value<'js>>) -> Result<
         "input exceeds the crypto size limit",
         true,
     )?;
-    Ok(aad.to_vec())
+    Ok(std::mem::take(&mut *aad))
 }
 
 fn encrypt<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<TypedArray<'js, u8>> {
@@ -426,7 +430,7 @@ fn encrypt<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<TypedArray<'js,
         "NEO_CRYPTO_KEY",
         "key must be exactly 32 bytes",
     )?;
-    let plaintext = read_uint8_bytes(
+    let mut plaintext = read_uint8_bytes(
         &ctx,
         &args.0[1],
         "plaintext must be a Uint8Array",
@@ -435,8 +439,13 @@ fn encrypt<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<TypedArray<'js,
         true,
     )?;
     let aad = read_optional_aad(&ctx, args.0.get(2))?;
-    let envelope = core_encrypt(&key, plaintext.to_vec(), &aad, CryptoLimits::default())
-        .map_err(|e| throw_envelope_error(&ctx, e))?;
+    let envelope = core_encrypt(
+        &key,
+        std::mem::take(&mut *plaintext),
+        &aad,
+        CryptoLimits::default(),
+    )
+    .map_err(|e| throw_envelope_error(&ctx, e))?;
     TypedArray::<u8>::new(ctx, envelope)
 }
 
@@ -455,7 +464,7 @@ fn decrypt<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<TypedArray<'js,
         "NEO_CRYPTO_KEY",
         "key must be exactly 32 bytes",
     )?;
-    let envelope = read_uint8_bytes(
+    let mut envelope = read_uint8_bytes(
         &ctx,
         &args.0[1],
         "envelope must be a Uint8Array",
@@ -465,8 +474,13 @@ fn decrypt<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<TypedArray<'js,
     )?;
     let aad = read_optional_aad(&ctx, args.0.get(2))?;
     let plaintext = Zeroizing::new(
-        core_decrypt(&key, envelope.to_vec(), &aad, CryptoLimits::default())
-            .map_err(|e| throw_envelope_error(&ctx, e))?,
+        core_decrypt(
+            &key,
+            std::mem::take(&mut *envelope),
+            &aad,
+            CryptoLimits::default(),
+        )
+        .map_err(|e| throw_envelope_error(&ctx, e))?,
     );
-    bytes_to_uint8_array(&ctx, plaintext)
+    bytes_to_uint8_array(&ctx, &plaintext)
 }

@@ -1,26 +1,64 @@
 //! Incremental SHA-2 hash and HMAC bindings for QuickJS.
 
 use std::cell::Cell;
-use std::rc::Rc;
 
+use neojs_crypto_core::Zeroizing;
 use neojs_crypto_core::hash::{
     HashAlgorithm, HashError, HashErrorCode, MAX_HMAC_KEY_BYTES, OutputEncoding,
 };
 use rquickjs::{
-    Ctx, Exception, Function, IntoJs, Object, Result, String as JsString, TypedArray, Value,
+    Class, Constructor, Ctx, Exception, Function, IntoJs, JsLifetime, Object, Result,
+    String as JsString, Value,
+    class::{JsClass, Readable, Trace, Tracer},
     function::{Rest, This},
     object::Property,
 };
 
-use super::{read_ascii_or_utf8_string, read_uint8_bytes, read_utf8_bytes, throw_crypto_error};
-use crate::native::{freeze_native, set_prototype};
+use super::{
+    bytes_to_uint8_array, define_method, read_ascii_or_utf8_string, read_uint8_bytes,
+    read_utf8_bytes, throw_crypto_error,
+};
+use crate::native::freeze_native;
 
 #[derive(Clone, Copy)]
 struct HashHandle {
     id: u32,
     digested: bool,
     closed: bool,
-    obj_ptr: usize,
+}
+
+struct HashBrand(Cell<HashHandle>);
+
+impl<'js> Trace<'js> for HashBrand {
+    fn trace<'a>(&self, _tracer: Tracer<'a, 'js>) {}
+}
+
+unsafe impl<'js> JsLifetime<'js> for HashBrand {
+    type Changed<'to> = HashBrand;
+}
+
+impl<'js> JsClass<'js> for HashBrand {
+    const NAME: &'static str = "Hash";
+    type Mutable = Readable;
+
+    fn constructor(_ctx: &Ctx<'js>) -> Result<Option<Constructor<'js>>> {
+        Ok(None)
+    }
+}
+
+struct HashSlotGuard<'a, 'js> {
+    ctx: &'a Ctx<'js>,
+    id: Option<u32>,
+}
+
+impl Drop for HashSlotGuard<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(id) = self.id
+            && let Some(state) = self.ctx.userdata::<crate::neo::NeoState>()
+        {
+            state.digest_table.borrow_mut().close(id);
+        }
+    }
 }
 
 fn hash_ctor<'js>(ctx: Ctx<'js>, _args: Rest<Value<'js>>) -> Result<()> {
@@ -168,14 +206,10 @@ pub(super) fn create_hmac<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<
     build_hash_object(&ctx, id)
 }
 
-fn check_receiver<'js>(ctx: &Ctx<'js>, this: &Value<'js>, expected_ptr: usize) -> Result<()> {
-    let valid = this
-        .as_object()
-        .is_some_and(|obj| unsafe { obj.as_raw().u.ptr as usize } == expected_ptr);
-    if !valid {
-        return Err(Exception::throw_type(ctx, "invalid Hash receiver"));
-    }
-    Ok(())
+fn check_receiver<'js>(ctx: &Ctx<'js>, this: &Value<'js>) -> Result<Class<'js, HashBrand>> {
+    this.as_object()
+        .and_then(Class::<HashBrand>::from_object)
+        .ok_or_else(|| Exception::throw_type(ctx, "invalid Hash receiver"))
 }
 
 fn check_active(ctx: &Ctx<'_>, handle: &Cell<HashHandle>) -> Result<u32> {
@@ -198,7 +232,7 @@ fn check_active(ctx: &Ctx<'_>, handle: &Cell<HashHandle>) -> Result<u32> {
 }
 
 fn build_hash_object<'js>(ctx: &Ctx<'js>, id: u32) -> Result<Object<'js>> {
-    let obj = Object::new(ctx.clone())?;
+    let mut slot_guard = HashSlotGuard { ctx, id: Some(id) };
     let proto = {
         let state = ctx
             .userdata::<crate::neo::NeoState>()
@@ -210,31 +244,27 @@ fn build_hash_object<'js>(ctx: &Ctx<'js>, id: u32) -> Result<Object<'js>> {
             .clone()
             .restore(ctx)?
     };
-    set_prototype(ctx, &obj, &proto)?;
+    let cls = Class::instance_proto(
+        HashBrand(Cell::new(HashHandle {
+            id,
+            digested: false,
+            closed: false,
+        })),
+        proto,
+    )?;
 
-    let obj_ptr = unsafe { obj.as_raw().u.ptr as usize };
-    let handle = Rc::new(Cell::new(HashHandle {
-        id,
-        digested: false,
-        closed: false,
-        obj_ptr,
-    }));
-
-    let h = Rc::clone(&handle);
     let update_fn = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>,
-              this: This<Value<'js>>,
-              args: Rest<Value<'js>>|
-              -> Result<Value<'js>> {
-            check_receiver(&ctx, &this.0, h.get().obj_ptr)?;
+        |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<Value<'js>> {
+            let cls = check_receiver(&ctx, &this.0)?;
+            let h = &cls.borrow().0;
             if args.0.is_empty() || args.0.len() > 2 {
                 return Err(Exception::throw_type(
                     &ctx,
                     "update takes one or two arguments",
                 ));
             }
-            let did = check_active(&ctx, &h)?;
+            let did = check_active(&ctx, h)?;
             let data = &args.0[0];
             let encoding = args.0.get(1);
             if data.is_string() {
@@ -283,31 +313,26 @@ fn build_hash_object<'js>(ctx: &Ctx<'js>, id: u32) -> Result<Object<'js>> {
             }
             Ok(this.0)
         },
-    )?
-    .with_name("update")?
-    .with_length(2)?;
+    )?;
 
-    let h = Rc::clone(&handle);
     let digest_fn = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>,
-              this: This<Value<'js>>,
-              args: Rest<Value<'js>>|
-              -> Result<Value<'js>> {
-            check_receiver(&ctx, &this.0, h.get().obj_ptr)?;
+        |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<Value<'js>> {
+            let cls = check_receiver(&ctx, &this.0)?;
+            let h = &cls.borrow().0;
             if args.0.len() > 1 {
                 return Err(Exception::throw_type(
                     &ctx,
                     "digest takes at most one argument",
                 ));
             }
-            let did = check_active(&ctx, &h)?;
+            let did = check_active(&ctx, h)?;
             let encoding = parse_output_encoding(&ctx, args.0.first())?;
             let mut cur = h.get();
             cur.digested = true;
             h.set(cur);
 
-            let bytes = {
+            let bytes = Zeroizing::new({
                 let state = ctx
                     .userdata::<crate::neo::NeoState>()
                     .ok_or(rquickjs::Error::Unknown)?;
@@ -315,14 +340,14 @@ fn build_hash_object<'js>(ctx: &Ctx<'js>, id: u32) -> Result<Object<'js>> {
                 table
                     .digest(did, encoding)
                     .map_err(|e| throw_hash_error(&ctx, e))?
-            };
+            });
             match encoding {
                 OutputEncoding::Binary => {
-                    let ta = TypedArray::<u8>::new(ctx, bytes)?;
+                    let ta = bytes_to_uint8_array(&ctx, &bytes)?;
                     Ok(ta.into_value())
                 }
                 OutputEncoding::Latin1 => {
-                    let text: String = bytes.into_iter().map(char::from).collect();
+                    let text: String = bytes.iter().copied().map(char::from).collect();
                     JsString::from_str(ctx, &text).map(JsString::into_value)
                 }
                 OutputEncoding::Hex | OutputEncoding::Base64 | OutputEncoding::Base64Url => {
@@ -333,44 +358,37 @@ fn build_hash_object<'js>(ctx: &Ctx<'js>, id: u32) -> Result<Object<'js>> {
                 }
             }
         },
-    )?
-    .with_name("digest")?
-    .with_length(1)?;
+    )?;
 
-    let h = Rc::clone(&handle);
     let close_fn = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<()> {
-            check_receiver(&ctx, &this.0, h.get().obj_ptr)?;
+        |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<()> {
+            let cls = check_receiver(&ctx, &this.0)?;
             if !args.0.is_empty() {
                 return Err(Exception::throw_type(&ctx, "close takes no arguments"));
             }
-            close_hash_handle(&ctx, &h)
+            close_hash_handle(&ctx, &cls.borrow().0)
         },
-    )?
-    .with_name("close")?
-    .with_length(0)?;
+    )?;
 
-    let h = handle;
     let dispose_fn = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<()> {
-            check_receiver(&ctx, &this.0, h.get().obj_ptr)?;
+        |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<()> {
+            let cls = check_receiver(&ctx, &this.0)?;
             if !args.0.is_empty() {
                 return Err(Exception::throw_type(&ctx, "dispose takes no arguments"));
             }
-            close_hash_handle(&ctx, &h)
+            close_hash_handle(&ctx, &cls.borrow().0)
         },
-    )?
-    .with_name("dispose")?
-    .with_length(0)?;
+    )?;
 
-    obj.set("update", update_fn)?;
-    obj.set("digest", digest_fn)?;
-    obj.set("close", close_fn)?;
-    obj.set("dispose", dispose_fn)?;
-    freeze_native(ctx, &obj)?;
-    Ok(obj)
+    define_method(&cls, "update", update_fn, 2)?;
+    define_method(&cls, "digest", digest_fn, 1)?;
+    define_method(&cls, "close", close_fn, 0)?;
+    define_method(&cls, "dispose", dispose_fn, 0)?;
+    freeze_native(ctx, &cls)?;
+    slot_guard.id = None;
+    Ok((*cls).clone())
 }
 
 fn close_hash_handle(ctx: &Ctx<'_>, handle: &Cell<HashHandle>) -> Result<()> {

@@ -1,7 +1,6 @@
 //! Bounded stateful AES-256-CBC and AES-256-GCM cipher bindings for QuickJS.
 
 use std::cell::Cell;
-use std::rc::Rc;
 
 use neojs_crypto_core::Zeroizing;
 use neojs_crypto_core::cipher::{
@@ -9,16 +8,17 @@ use neojs_crypto_core::cipher::{
 };
 use neojs_crypto_core::envelope::{KEY_LEN, TAG_LEN};
 use rquickjs::{
-    Ctx, Exception, Function, Object, Result, TypedArray, Value,
+    Class, Constructor, Ctx, Exception, Function, JsLifetime, Object, Result, TypedArray, Value,
+    class::{JsClass, Readable, Trace, Tracer},
     function::{Rest, This},
     object::Property,
 };
 
 use super::{
-    bytes_to_uint8_array, read_ascii_or_utf8_string, read_uint8_bytes, read_uint8_exact,
-    read_utf8_bytes, throw_crypto_error,
+    bytes_to_uint8_array, define_method, read_ascii_or_utf8_string, read_uint8_bytes,
+    read_uint8_exact, read_utf8_bytes, throw_crypto_error,
 };
-use crate::native::{freeze_native, parse_options, set_prototype};
+use crate::native::{freeze_native, parse_options};
 
 #[derive(Clone, Copy)]
 struct CipherHandle {
@@ -27,7 +27,40 @@ struct CipherHandle {
     is_gcm: bool,
     finalized: bool,
     closed: bool,
-    obj_ptr: usize,
+}
+
+struct CipherBrand(Cell<CipherHandle>);
+
+impl<'js> Trace<'js> for CipherBrand {
+    fn trace<'a>(&self, _tracer: Tracer<'a, 'js>) {}
+}
+
+unsafe impl<'js> JsLifetime<'js> for CipherBrand {
+    type Changed<'to> = CipherBrand;
+}
+
+impl<'js> JsClass<'js> for CipherBrand {
+    const NAME: &'static str = "Cipher";
+    type Mutable = Readable;
+
+    fn constructor(_ctx: &Ctx<'js>) -> Result<Option<Constructor<'js>>> {
+        Ok(None)
+    }
+}
+
+struct CipherSlotGuard<'a, 'js> {
+    ctx: &'a Ctx<'js>,
+    id: Option<u32>,
+}
+
+impl Drop for CipherSlotGuard<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(id) = self.id
+            && let Some(state) = self.ctx.userdata::<crate::neo::NeoState>()
+        {
+            state.cipher_table.borrow_mut().close(id);
+        }
+    }
 }
 
 fn cipher_ctor<'js>(ctx: Ctx<'js>, _args: Rest<Value<'js>>) -> Result<()> {
@@ -153,14 +186,10 @@ fn create_cipher<'js>(
     )
 }
 
-fn check_receiver<'js>(ctx: &Ctx<'js>, this: &Value<'js>, expected_ptr: usize) -> Result<()> {
-    let valid = this
-        .as_object()
-        .is_some_and(|obj| unsafe { obj.as_raw().u.ptr as usize } == expected_ptr);
-    if !valid {
-        return Err(Exception::throw_type(ctx, "invalid Cipher receiver"));
-    }
-    Ok(())
+fn check_receiver<'js>(ctx: &Ctx<'js>, this: &Value<'js>) -> Result<Class<'js, CipherBrand>> {
+    this.as_object()
+        .and_then(Class::<CipherBrand>::from_object)
+        .ok_or_else(|| Exception::throw_type(ctx, "invalid Cipher receiver"))
 }
 
 fn assert_open(ctx: &Ctx<'_>, handle: &Cell<CipherHandle>) -> Result<()> {
@@ -208,7 +237,7 @@ fn build_cipher_object<'js>(
     is_encrypt: bool,
     is_gcm: bool,
 ) -> Result<Object<'js>> {
-    let obj = Object::new(ctx.clone())?;
+    let mut slot_guard = CipherSlotGuard { ctx, id: Some(id) };
     let proto = {
         let state = ctx
             .userdata::<crate::neo::NeoState>()
@@ -220,33 +249,32 @@ fn build_cipher_object<'js>(
             .clone()
             .restore(ctx)?
     };
-    set_prototype(ctx, &obj, &proto)?;
+    let cls = Class::instance_proto(
+        CipherBrand(Cell::new(CipherHandle {
+            id,
+            is_encrypt,
+            is_gcm,
+            finalized: false,
+            closed: false,
+        })),
+        proto,
+    )?;
 
-    let obj_ptr = unsafe { obj.as_raw().u.ptr as usize };
-    let handle = Rc::new(Cell::new(CipherHandle {
-        id,
-        is_encrypt,
-        is_gcm,
-        finalized: false,
-        closed: false,
-        obj_ptr,
-    }));
-
-    let h = Rc::clone(&handle);
     let update_fn = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>,
-              this: This<Value<'js>>,
-              args: Rest<Value<'js>>|
-              -> Result<TypedArray<'js, u8>> {
-            check_receiver(&ctx, &this.0, h.get().obj_ptr)?;
+        |ctx: Ctx<'js>,
+         this: This<Value<'js>>,
+         args: Rest<Value<'js>>|
+         -> Result<TypedArray<'js, u8>> {
+            let cls = check_receiver(&ctx, &this.0)?;
+            let h = &cls.borrow().0;
             if args.0.is_empty() || args.0.len() > 2 {
                 return Err(Exception::throw_type(
                     &ctx,
                     "update takes one or two arguments",
                 ));
             }
-            assert_buffering(&ctx, &h)?;
+            assert_buffering(&ctx, h)?;
             let data = &args.0[0];
             let encoding = args.0.get(1);
             if data.is_string() {
@@ -299,22 +327,20 @@ fn build_cipher_object<'js>(
             }
             TypedArray::<u8>::new(ctx, [])
         },
-    )?
-    .with_name("update")?
-    .with_length(2)?;
+    )?;
 
-    let h = Rc::clone(&handle);
     let final_fn = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>,
-              this: This<Value<'js>>,
-              args: Rest<Value<'js>>|
-              -> Result<TypedArray<'js, u8>> {
-            check_receiver(&ctx, &this.0, h.get().obj_ptr)?;
+        |ctx: Ctx<'js>,
+         this: This<Value<'js>>,
+         args: Rest<Value<'js>>|
+         -> Result<TypedArray<'js, u8>> {
+            let cls = check_receiver(&ctx, &this.0)?;
+            let h = &cls.borrow().0;
             if !args.0.is_empty() {
                 return Err(Exception::throw_type(&ctx, "final takes no arguments"));
             }
-            assert_buffering(&ctx, &h)?;
+            assert_buffering(&ctx, h)?;
             let mut cur = h.get();
             cur.finalized = true;
             h.set(cur);
@@ -331,27 +357,22 @@ fn build_cipher_object<'js>(
                         .map_err(|e| throw_cipher_error(&ctx, e))?,
                 )
             };
-            bytes_to_uint8_array(&ctx, output)
+            bytes_to_uint8_array(&ctx, &output)
         },
-    )?
-    .with_name("final")?
-    .with_length(0)?;
+    )?;
 
-    let h = Rc::clone(&handle);
     let set_aad_fn = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>,
-              this: This<Value<'js>>,
-              args: Rest<Value<'js>>|
-              -> Result<Value<'js>> {
-            check_receiver(&ctx, &this.0, h.get().obj_ptr)?;
+        |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<Value<'js>> {
+            let cls = check_receiver(&ctx, &this.0)?;
+            let h = &cls.borrow().0;
             if args.0.len() != 1 {
                 return Err(Exception::throw_type(
                     &ctx,
                     "setAAD takes exactly one argument",
                 ));
             }
-            assert_buffering(&ctx, &h)?;
+            assert_buffering(&ctx, h)?;
             let cur = h.get();
             if !cur.is_gcm {
                 return Err(throw_crypto_error(
@@ -360,7 +381,7 @@ fn build_cipher_object<'js>(
                     "associated data is only supported for aes-256-gcm",
                 ));
             }
-            let aad = read_uint8_bytes(
+            let mut aad = read_uint8_bytes(
                 &ctx,
                 &args.0[0],
                 "aad must be a Uint8Array",
@@ -376,30 +397,25 @@ fn build_cipher_object<'js>(
                 table
                     .get_mut(cur.id)
                     .map_err(|e| throw_cipher_error(&ctx, e))?
-                    .set_aad(aad.to_vec())
+                    .set_aad(std::mem::take(&mut *aad))
                     .map_err(|e| throw_cipher_error(&ctx, e))?;
             }
             Ok(this.0)
         },
-    )?
-    .with_name("setAAD")?
-    .with_length(1)?;
+    )?;
 
-    let h = Rc::clone(&handle);
     let set_tag_fn = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>,
-              this: This<Value<'js>>,
-              args: Rest<Value<'js>>|
-              -> Result<Value<'js>> {
-            check_receiver(&ctx, &this.0, h.get().obj_ptr)?;
+        |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<Value<'js>> {
+            let cls = check_receiver(&ctx, &this.0)?;
+            let h = &cls.borrow().0;
             if args.0.len() != 1 {
                 return Err(Exception::throw_type(
                     &ctx,
                     "setAuthTag takes exactly one argument",
                 ));
             }
-            assert_buffering(&ctx, &h)?;
+            assert_buffering(&ctx, h)?;
             let cur = h.get();
             if !cur.is_gcm || cur.is_encrypt {
                 return Err(throw_crypto_error(
@@ -429,22 +445,20 @@ fn build_cipher_object<'js>(
             }
             Ok(this.0)
         },
-    )?
-    .with_name("setAuthTag")?
-    .with_length(1)?;
+    )?;
 
-    let h = Rc::clone(&handle);
     let get_tag_fn = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>,
-              this: This<Value<'js>>,
-              args: Rest<Value<'js>>|
-              -> Result<TypedArray<'js, u8>> {
-            check_receiver(&ctx, &this.0, h.get().obj_ptr)?;
+        |ctx: Ctx<'js>,
+         this: This<Value<'js>>,
+         args: Rest<Value<'js>>|
+         -> Result<TypedArray<'js, u8>> {
+            let cls = check_receiver(&ctx, &this.0)?;
+            let h = &cls.borrow().0;
             if !args.0.is_empty() {
                 return Err(Exception::throw_type(&ctx, "getAuthTag takes no arguments"));
             }
-            assert_open(&ctx, &h)?;
+            assert_open(&ctx, h)?;
             let cur = h.get();
             if !cur.is_gcm || !cur.is_encrypt {
                 return Err(throw_crypto_error(
@@ -460,7 +474,7 @@ fn build_cipher_object<'js>(
                     "final must be called before getAuthTag",
                 ));
             }
-            let tag = {
+            let tag = Zeroizing::new({
                 let state = ctx
                     .userdata::<crate::neo::NeoState>()
                     .ok_or(rquickjs::Error::Unknown)?;
@@ -470,28 +484,23 @@ fn build_cipher_object<'js>(
                     .map_err(|e| throw_cipher_error(&ctx, e))?
                     .auth_tag()
                     .map_err(|e| throw_cipher_error(&ctx, e))?
-            };
-            TypedArray::<u8>::new(ctx, tag.as_slice())
+            });
+            bytes_to_uint8_array(&ctx, tag.as_slice())
         },
-    )?
-    .with_name("getAuthTag")?
-    .with_length(0)?;
+    )?;
 
-    let h = Rc::clone(&handle);
     let set_padding_fn = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>,
-              this: This<Value<'js>>,
-              args: Rest<Value<'js>>|
-              -> Result<Value<'js>> {
-            check_receiver(&ctx, &this.0, h.get().obj_ptr)?;
+        |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<Value<'js>> {
+            let cls = check_receiver(&ctx, &this.0)?;
+            let h = &cls.borrow().0;
             if args.0.len() != 1 {
                 return Err(Exception::throw_type(
                     &ctx,
                     "setAutoPadding takes exactly one argument",
                 ));
             }
-            assert_buffering(&ctx, &h)?;
+            assert_buffering(&ctx, h)?;
             let cur = h.get();
             if cur.is_gcm {
                 return Err(throw_crypto_error(
@@ -519,48 +528,41 @@ fn build_cipher_object<'js>(
             }
             Ok(this.0)
         },
-    )?
-    .with_name("setAutoPadding")?
-    .with_length(1)?;
+    )?;
 
-    let h = Rc::clone(&handle);
     let close_fn = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<()> {
-            check_receiver(&ctx, &this.0, h.get().obj_ptr)?;
+        |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<()> {
+            let cls = check_receiver(&ctx, &this.0)?;
             if !args.0.is_empty() {
                 return Err(Exception::throw_type(&ctx, "close takes no arguments"));
             }
-            close_cipher_handle(&ctx, &h)
+            close_cipher_handle(&ctx, &cls.borrow().0)
         },
-    )?
-    .with_name("close")?
-    .with_length(0)?;
+    )?;
 
-    let h = handle;
     let dispose_fn = Function::new(
         ctx.clone(),
-        move |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<()> {
-            check_receiver(&ctx, &this.0, h.get().obj_ptr)?;
+        |ctx: Ctx<'js>, this: This<Value<'js>>, args: Rest<Value<'js>>| -> Result<()> {
+            let cls = check_receiver(&ctx, &this.0)?;
             if !args.0.is_empty() {
                 return Err(Exception::throw_type(&ctx, "dispose takes no arguments"));
             }
-            close_cipher_handle(&ctx, &h)
+            close_cipher_handle(&ctx, &cls.borrow().0)
         },
-    )?
-    .with_name("dispose")?
-    .with_length(0)?;
+    )?;
 
-    obj.set("update", update_fn)?;
-    obj.set("final", final_fn)?;
-    obj.set("setAAD", set_aad_fn)?;
-    obj.set("setAuthTag", set_tag_fn)?;
-    obj.set("getAuthTag", get_tag_fn)?;
-    obj.set("setAutoPadding", set_padding_fn)?;
-    obj.set("close", close_fn)?;
-    obj.set("dispose", dispose_fn)?;
-    freeze_native(ctx, &obj)?;
-    Ok(obj)
+    define_method(&cls, "update", update_fn, 2)?;
+    define_method(&cls, "final", final_fn, 0)?;
+    define_method(&cls, "setAAD", set_aad_fn, 1)?;
+    define_method(&cls, "setAuthTag", set_tag_fn, 1)?;
+    define_method(&cls, "getAuthTag", get_tag_fn, 0)?;
+    define_method(&cls, "setAutoPadding", set_padding_fn, 1)?;
+    define_method(&cls, "close", close_fn, 0)?;
+    define_method(&cls, "dispose", dispose_fn, 0)?;
+    freeze_native(ctx, &cls)?;
+    slot_guard.id = None;
+    Ok((*cls).clone())
 }
 
 fn close_cipher_handle(ctx: &Ctx<'_>, handle: &Cell<CipherHandle>) -> Result<()> {

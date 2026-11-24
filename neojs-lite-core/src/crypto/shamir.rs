@@ -86,7 +86,7 @@ pub(super) fn shamir_split<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result
     let out = Array::new(ctx.clone())?;
     for (position, share) in shares.into_iter().enumerate() {
         let index = share.index();
-        let bytes = bytes_to_uint8_array(&ctx, share.into_value())?;
+        let bytes = bytes_to_uint8_array(&ctx, &share.into_value())?;
         let record = Object::new(ctx.clone())?;
         record.prop(
             "index",
@@ -141,13 +141,26 @@ pub(super) fn shamir_combine<'js>(
     let array = shares_val
         .as_array()
         .ok_or_else(|| Exception::throw_type(&ctx, "shares must be an Array"))?;
-    let count = array.len();
-    if !(2..=MAX_SHAMIR_SHARES).contains(&count) {
-        return Err(Exception::throw_range(
+    let Some(len_val) = own_data_property(
+        &ctx,
+        shares_val.as_raw(),
+        c"length",
+        "shares length must be an own data property",
+    )?
+    else {
+        return Err(Exception::throw_type(
             &ctx,
-            "numeric argument is outside its documented range",
+            "shares length must be an own data property",
         ));
-    }
+    };
+    let count = read_integer(
+        &ctx,
+        &len_val,
+        2,
+        MAX_SHAMIR_SHARES,
+        "shares length must be a number",
+        "numeric argument is outside its documented range",
+    )?;
 
     let mut plans = Vec::new();
     plans
@@ -277,5 +290,5 @@ pub(super) fn shamir_combine<'js>(
 
     let recovered: Zeroizing<Vec<u8>> =
         core_shamir_combine(&shares).map_err(|e| throw_shamir_error(&ctx, e))?;
-    bytes_to_uint8_array(&ctx, recovered)
+    bytes_to_uint8_array(&ctx, &recovered)
 }

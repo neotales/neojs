@@ -57,25 +57,6 @@ pub(super) fn get_prototype<'js>(ctx: &Ctx<'js>, val: qjs::JSValue) -> Result<Va
     Ok(unsafe { Value::from_raw(ctx.clone(), proto_raw) })
 }
 
-/// Sets the internal `[[Prototype]]` of `object` via `JS_SetPrototype`.
-#[cfg(feature = "neo-crypto")]
-pub(super) fn set_prototype<'js>(
-    ctx: &Ctx<'js>,
-    object: &Object<'js>,
-    proto: &Object<'js>,
-) -> Result<()> {
-    let rc =
-        unsafe { qjs::JS_SetPrototype(ctx.as_raw().as_ptr(), object.as_raw(), proto.as_raw()) };
-    if rc < 0 {
-        return Err(if ctx.has_exception() {
-            rquickjs::Error::Exception
-        } else {
-            rquickjs::Error::Unknown
-        });
-    }
-    Ok(())
-}
-
 /// Reads an own data property from `object` without walking the prototype
 /// chain or invoking getters/proxy traps.
 ///

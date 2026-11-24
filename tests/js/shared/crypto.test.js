@@ -501,3 +501,65 @@ test("Uint8Array RAB views, detached buffers, and hostile prototypes are handled
         else delete Object.prototype.code;
     }
 });
+
+test("regression guards: verify length >60, huge shamir array, Object.prototype setters, invalid receivers, and SharedArrayBuffer", async () => {
+    // 1. bcryptVerify with hash length != 60 returns false cleanly with no dangling exception
+    assert.strictEquals(bcryptVerify("pw", "x".repeat(61)), false);
+    const fsMod = await import("neo:fs");
+    assert.strictEquals(typeof fsMod.readTextFile, "function");
+
+    // 2. shamirCombine rejects arrays with length >= 2^31 cleanly without panicking
+    const huge = [];
+    huge.length = 0x80000000;
+    assert.throws(() => shamirCombine(huge), RangeError);
+
+    // 3. Object.prototype setters cannot observe or hijack created Cipher/Hash methods
+    const origUpdate = Object.getOwnPropertyDescriptor(Object.prototype, "update");
+    let setterFired = 0;
+    try {
+        Object.defineProperty(Object.prototype, "update", {
+            configurable: true,
+            set() {
+                setterFired += 1;
+            },
+        });
+        const h = createHash("sha256");
+        const key = generateEnvelopeKey();
+        const enc = createEncryptor("aes-256-gcm", key, randomBytes(12));
+        assert.strictEquals(setterFired, 0);
+        h.close();
+        enc.close();
+    } finally {
+        if (origUpdate) Object.defineProperty(Object.prototype, "update", origUpdate);
+        else delete Object.prototype.update;
+    }
+
+    // 4. Unforgeable receiver branding rejects spoofed `this` with TypeError
+    const key = generateEnvelopeKey();
+    const enc = createEncryptor("aes-256-gcm", key, randomBytes(12));
+    const h = createHash("sha256");
+    try {
+        assert.throws(() => enc.update.call({}, new Uint8Array(1)), TypeError);
+        assert.throws(() => enc.update.call(null, new Uint8Array(1)), TypeError);
+        assert.throws(() => enc.update.call(Object.create(enc), new Uint8Array(1)), TypeError);
+        assert.throws(() => enc.update.call(h, new Uint8Array(1)), TypeError);
+        assert.throws(() => h.digest.call(null), TypeError);
+        assert.throws(() => h.digest.call({}), TypeError);
+        assert.throws(() => h.digest.call(Object.create(h)), TypeError);
+        assert.throws(() => h.digest.call(enc), TypeError);
+    } finally {
+        enc.close();
+        h.close();
+    }
+
+    // 5. SharedArrayBuffer-backed inputs are rejected cleanly in Shamir split & combine
+    const sab = new SharedArrayBuffer(4);
+    const sharedView = new Uint8Array(sab);
+    sharedView.set([1, 2, 3, 4]);
+    expectCryptoError(() => shamirSplit(sharedView, 2, 3), "NEO_CRYPTO_SHAMIR_SHARED");
+    const shares = shamirSplit(Uint8Array.of(1, 2, 3, 4), 2, 3);
+    expectCryptoError(
+        () => shamirCombine([shares[0], { index: shares[1].index, value: sharedView }]),
+        "NEO_CRYPTO_SHAMIR_SHARED",
+    );
+});

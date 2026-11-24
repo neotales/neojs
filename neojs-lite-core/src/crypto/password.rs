@@ -11,9 +11,8 @@ use rquickjs::{Ctx, Exception, Result, TypedArray, Value, function::Rest};
 
 use super::hash::parse_hash_algorithm;
 use super::{
-    bytes_to_uint8_array, detached_error, read_ascii_or_utf8_string, read_integer,
-    read_uint8_bytes, read_utf8_bytes, throw_crypto_error, utf8_len_with_replacement,
-    with_string_utf16,
+    bytes_to_uint8_array, detached_error, read_integer, read_uint8_bytes, read_utf8_bytes,
+    throw_crypto_error, utf8_len_with_replacement, with_string_utf16,
 };
 use crate::native::with_uint8_array_bytes_ex;
 
@@ -88,7 +87,7 @@ pub(super) fn pbkdf2<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<Typed
         core_pbkdf2(algorithm, &password, &salt, iterations, length)
             .map_err(|e| throw_password_error(&ctx, e))?,
     );
-    bytes_to_uint8_array(&ctx, derived)
+    bytes_to_uint8_array(&ctx, &derived)
 }
 
 pub(super) fn bcrypt_hash<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<String> {
@@ -127,62 +126,47 @@ pub(super) fn bcrypt_verify<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Resul
     }
 
     let password_val = &args.0[0];
-    let password = if password_val.is_string() {
-        let too_long = with_string_utf16(
+    let password_too_long = if password_val.is_string() {
+        with_string_utf16(
             &ctx,
             password_val,
             "expected a Uint8Array or a string",
             |units| Ok(utf8_len_with_replacement(units) > MAX_BCRYPT_PASSWORD_BYTES),
-        )?;
-        if too_long {
-            return Ok(false);
-        }
-        read_utf8_bytes(
-            &ctx,
-            password_val,
-            "expected a Uint8Array or a string",
-            MAX_BCRYPT_PASSWORD_BYTES,
-            "input exceeds the password hashing size limit",
         )?
     } else {
-        let too_long = with_uint8_array_bytes_ex(
+        with_uint8_array_bytes_ex(
             &ctx,
             password_val,
             "expected a Uint8Array or a string",
             detached_error,
             |slice, _| Ok(slice.len() > MAX_BCRYPT_PASSWORD_BYTES),
-        )?;
-        if too_long {
-            return Ok(false);
-        }
-        read_uint8_bytes(
-            &ctx,
-            password_val,
-            "expected a Uint8Array or a string",
-            MAX_BCRYPT_PASSWORD_BYTES,
-            "input exceeds the password hashing size limit",
-            true,
         )?
     };
-
-    let mut hash_too_long = false;
-    let hash = read_ascii_or_utf8_string(
-        &ctx,
-        hash_val,
-        "hash must be a string",
-        BCRYPT_HASH_BYTES,
-        |ctx| {
-            hash_too_long = true;
-            Exception::throw_type(ctx, "hash length")
-        },
-    );
-    let hash = match hash {
-        Ok(h) => h,
-        Err(_) if hash_too_long => return Ok(false),
-        Err(e) => return Err(e),
-    };
-    if hash.len() != BCRYPT_HASH_BYTES || !is_valid_bcrypt_hash(&hash) {
+    if password_too_long {
         return Ok(false);
     }
+
+    let Some(hash) = with_string_utf16(&ctx, hash_val, "hash must be a string", |units| {
+        if units.len() != BCRYPT_HASH_BYTES {
+            return Ok(None);
+        }
+        let mut out = String::with_capacity(BCRYPT_HASH_BYTES);
+        for res in char::decode_utf16(units.iter().copied()) {
+            let ch = res.unwrap_or(char::REPLACEMENT_CHARACTER);
+            if out.len() + ch.len_utf8() > BCRYPT_HASH_BYTES {
+                return Ok(None);
+            }
+            out.push(ch);
+        }
+        if out.len() != BCRYPT_HASH_BYTES || !is_valid_bcrypt_hash(&out) {
+            return Ok(None);
+        }
+        Ok(Some(out))
+    })?
+    else {
+        return Ok(false);
+    };
+
+    let password = read_secret_input(&ctx, password_val, MAX_BCRYPT_PASSWORD_BYTES)?;
     Ok(core_bcrypt_verify(&password, &hash))
 }
