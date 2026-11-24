@@ -2095,6 +2095,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "neojs-dts"
+version = "0.1.0"
+
+[[package]]
 name = "neojs-fs-core"
 version = "0.1.0"
 dependencies = [
