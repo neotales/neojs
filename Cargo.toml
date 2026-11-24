@@ -74,9 +74,6 @@ neojs-builtins = { version = "0.1.0", path = "neojs-builtins" }
 # Engine-neutral HTTPS transport, global cache, GitHub normalization, and JSR
 # resolution. Has no JS engine dependency; `network` enables `ureq` + `rustls`.
 neojs-remote = { version = "0.1.0", path = "neojs-remote" }
-# Engine-neutral npm specifier, SemVer, package.json, exports, CAS/tarball, and
-# virtual graph resolver. Has no JS engine dependency and is offline by default.
-neojs-npm = { version = "0.1.0", path = "neojs-npm" }
 base64 = "0.22.1"
 flate2 = "1.1.11"
 indexmap = { version = "2.14.2", features = ["serde"] }

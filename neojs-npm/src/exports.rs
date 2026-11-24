@@ -125,84 +125,35 @@ impl ExportsResolver {
         resolve_exports_field(exports, pkg_name, subpath)
     }
 
-    /// Resolves a `#...` import specifier against `pkg_json.imports`.
+    /// Resolves a `#...` import specifier against a package's `pkg_json.imports`
+    /// and verified `.tree`, classifying internal files via
+    /// [`neojs_module_policy::package_module_format`].
     ///
     /// External targets (`"dep"` or `"dep/sub"`) are only allowed if `dep` is
-    /// declared in `dependencies`, `optionalDependencies`, or `peerDependencies`
-    /// (unless `allow_undeclared_external` is false; callers in `ProjectPackageResolver`
-    /// pass the project's `PackageJson`, whose `dependencies`/`optionalDependencies`
-    /// already include all declared deps).
+    /// declared in `dependencies`, `optionalDependencies`, or `peerDependencies`.
     pub fn resolve_package_import(
-        tree: Option<&PackageTree>,
-        cas: Option<&CasStore>,
+        tree: &PackageTree,
+        cas: &CasStore,
         pkg_json: &PackageJson,
         pkg_name: &str,
         specifier: &str,
     ) -> Result<PackageImportTarget, ExportsError> {
-        if !specifier.starts_with('#') || specifier == "#" || specifier.starts_with("#/") {
-            return Err(ExportsError::PackageImportNotDefined {
-                package: pkg_name.to_owned(),
-                specifier: specifier.to_owned(),
-            });
-        }
-        let Some(imports_map) = &pkg_json.imports else {
-            return Err(ExportsError::PackageImportNotDefined {
-                package: pkg_name.to_owned(),
-                specifier: specifier.to_owned(),
-            });
-        };
+        resolve_import_impl(Some((tree, cas)), None, pkg_json, pkg_name, specifier)
+    }
 
-        let target =
-            resolve_map_lookup(imports_map, pkg_name, specifier, false)?.ok_or_else(|| {
-                ExportsError::PackageImportNotDefined {
-                    package: pkg_name.to_owned(),
-                    specifier: specifier.to_owned(),
-                }
-            })?;
-
-        if let Some(rel) = target.strip_prefix("./") {
-            let clean = normalize_target_rel(pkg_name, &target, rel)?;
-            if let (Some(tree), Some(cas)) = (tree, cas) {
-                let resolved = classify_tree_file(tree, cas, pkg_name, &clean)?;
-                return Ok(PackageImportTarget::InternalFile(resolved));
-            }
-            return Ok(PackageImportTarget::InternalFile(ResolvedPackageFile {
-                rel_path: clean,
-                format: ModuleFormat::JavaScript,
-                package_type: pkg_json.package_type,
-            }));
-        }
-
-        if target.starts_with('/') || target.starts_with("../") {
-            return Err(ExportsError::InvalidTarget {
-                package: pkg_name.to_owned(),
-                target,
-                reason: "import target may not use `/` or `../`".to_owned(),
-            });
-        }
-
-        let (ext_name, ext_subpath) =
-            split_bare_package_specifier(&target).map_err(|err: SpecifierError| {
-                ExportsError::InvalidTarget {
-                    package: pkg_name.to_owned(),
-                    target: target.clone(),
-                    reason: err.to_string(),
-                }
-            })?;
-        if !pkg_json.is_declared_dependency(ext_name.as_str()) {
-            return Err(ExportsError::InvalidTarget {
-                package: pkg_name.to_owned(),
-                target,
-                reason: format!(
-                    "external `#imports` target `{}` is not declared in dependencies/optionalDependencies/peerDependencies",
-                    ext_name
-                ),
-            });
-        }
-        Ok(PackageImportTarget::ExternalPackage {
-            name: ext_name,
-            subpath: ext_subpath,
-        })
+    /// Resolves a `#...` import specifier against a project `package.json`,
+    /// classifying local `./...` targets via
+    /// [`neojs_module_policy::package_module_format`].
+    ///
+    /// External targets (`"dep"` or `"dep/sub"`) must be declared in the
+    /// project `package.json`'s `dependencies` or `optionalDependencies`.
+    pub fn resolve_project_import(
+        pkg_json: &PackageJson,
+        project_root: &Path,
+        pkg_name: &str,
+        specifier: &str,
+    ) -> Result<PackageImportTarget, ExportsError> {
+        resolve_import_impl(None, Some(project_root), pkg_json, pkg_name, specifier)
     }
 
     /// Determines the nearest `package.json` `"type"` for `rel_path` inside `tree`
@@ -256,6 +207,90 @@ impl ExportsResolver {
     ) -> Result<ResolvedPackageFile, ExportsError> {
         classify_tree_file(tree, cas, pkg_name, rel_path)
     }
+}
+
+fn resolve_import_impl(
+    package_store: Option<(&PackageTree, &CasStore)>,
+    project_root: Option<&Path>,
+    pkg_json: &PackageJson,
+    pkg_name: &str,
+    specifier: &str,
+) -> Result<PackageImportTarget, ExportsError> {
+    if !specifier.starts_with('#') || specifier == "#" || specifier.starts_with("#/") {
+        return Err(ExportsError::PackageImportNotDefined {
+            package: pkg_name.to_owned(),
+            specifier: specifier.to_owned(),
+        });
+    }
+    let Some(imports_map) = &pkg_json.imports else {
+        return Err(ExportsError::PackageImportNotDefined {
+            package: pkg_name.to_owned(),
+            specifier: specifier.to_owned(),
+        });
+    };
+
+    let target = resolve_map_lookup(imports_map, pkg_name, specifier, false)?.ok_or_else(|| {
+        ExportsError::PackageImportNotDefined {
+            package: pkg_name.to_owned(),
+            specifier: specifier.to_owned(),
+        }
+    })?;
+
+    if let Some(rel) = target.strip_prefix("./") {
+        let clean = normalize_target_rel(pkg_name, &target, rel)?;
+        if let Some((tree, cas)) = package_store {
+            let resolved = classify_tree_file(tree, cas, pkg_name, &clean)?;
+            return Ok(PackageImportTarget::InternalFile(resolved));
+        }
+        let classify_path = match project_root {
+            Some(root) => root.join(&clean),
+            None => Path::new(&clean).to_path_buf(),
+        };
+        let format =
+            package_module_format(&classify_path, pkg_json.package_type).map_err(|reason| {
+                ExportsError::UnsupportedModuleFormat {
+                    package: pkg_name.to_owned(),
+                    path: clean.clone(),
+                    reason,
+                }
+            })?;
+        return Ok(PackageImportTarget::InternalFile(ResolvedPackageFile {
+            rel_path: clean,
+            format,
+            package_type: pkg_json.package_type,
+        }));
+    }
+
+    if target.starts_with('/') || target.starts_with("../") {
+        return Err(ExportsError::InvalidTarget {
+            package: pkg_name.to_owned(),
+            target,
+            reason: "import target may not use `/` or `../`".to_owned(),
+        });
+    }
+
+    let (ext_name, ext_subpath) =
+        split_bare_package_specifier(&target).map_err(|err: SpecifierError| {
+            ExportsError::InvalidTarget {
+                package: pkg_name.to_owned(),
+                target: target.clone(),
+                reason: err.to_string(),
+            }
+        })?;
+    if !pkg_json.is_declared_dependency(ext_name.as_str()) {
+        return Err(ExportsError::InvalidTarget {
+            package: pkg_name.to_owned(),
+            target,
+            reason: format!(
+                "external `#imports` target `{}` is not declared in dependencies/optionalDependencies/peerDependencies",
+                ext_name
+            ),
+        });
+    }
+    Ok(PackageImportTarget::ExternalPackage {
+        name: ext_name,
+        subpath: ext_subpath,
+    })
 }
 
 fn classify_tree_file(

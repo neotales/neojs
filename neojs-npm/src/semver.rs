@@ -630,11 +630,11 @@ fn expand_hyphen_range(
         }
         (Some(m), None, None) => out.push(Comparator {
             op: Op::Lt,
-            version: ver_pre0(m.saturating_add(1), 0, 0),
+            version: ver_pre0(next_component(m, full_range)?, 0, 0),
         }),
         (Some(m), Some(n), None) => out.push(Comparator {
             op: Op::Lt,
-            version: ver_pre0(m, n.saturating_add(1), 0),
+            version: ver_pre0(m, next_component(n, full_range)?, 0),
         }),
         (Some(m), Some(n), Some(p)) => out.push(Comparator {
             op: Op::Le,
@@ -658,11 +658,11 @@ fn expand_comparator(
 ) -> Result<(), SemverError> {
     if let Some(rest) = tok.strip_prefix('^') {
         let p = parse_partial(rest, full_range)?;
-        return expand_caret(p, out);
+        return expand_caret(p, full_range, out);
     }
     if let Some(rest) = tok.strip_prefix('~') {
         let p = parse_partial(rest, full_range)?;
-        return expand_tilde(p, out);
+        return expand_tilde(p, full_range, out);
     }
     let (op, rest) = if let Some(r) = tok.strip_prefix(">=") {
         (Some(Op::Ge), r)
@@ -693,7 +693,7 @@ fn expand_comparator(
             });
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(m.saturating_add(1), 0, 0),
+                version: ver_pre0(next_component(m, full_range)?, 0, 0),
             });
         }
         (None | Some(Op::Exact), Some(m), Some(n), None) => {
@@ -703,7 +703,7 @@ fn expand_comparator(
             });
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(m, n.saturating_add(1), 0),
+                version: ver_pre0(m, next_component(n, full_range)?, 0),
             });
         }
         (None | Some(Op::Exact), Some(m), Some(n), Some(patch)) => {
@@ -728,13 +728,13 @@ fn expand_comparator(
         (Some(Op::Gt), Some(m), None, None) => {
             out.push(Comparator {
                 op: Op::Ge,
-                version: ver(m.saturating_add(1), 0, 0),
+                version: ver(next_component(m, full_range)?, 0, 0),
             });
         }
         (Some(Op::Gt), Some(m), Some(n), None) => {
             out.push(Comparator {
                 op: Op::Ge,
-                version: ver(m, n.saturating_add(1), 0),
+                version: ver(m, next_component(n, full_range)?, 0),
             });
         }
         (Some(Op::Ge), None, _, _) => {
@@ -782,13 +782,13 @@ fn expand_comparator(
         (Some(Op::Le), Some(m), None, None) => {
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(m.saturating_add(1), 0, 0),
+                version: ver_pre0(next_component(m, full_range)?, 0, 0),
             });
         }
         (Some(Op::Le), Some(m), Some(n), None) => {
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(m, n.saturating_add(1), 0),
+                version: ver_pre0(m, next_component(n, full_range)?, 0),
             });
         }
         (Some(prim_op), Some(m), Some(n), Some(patch)) => {
@@ -808,7 +808,11 @@ fn expand_comparator(
     Ok(())
 }
 
-fn expand_tilde(p: PartialVersion, out: &mut Vec<Comparator>) -> Result<(), SemverError> {
+fn expand_tilde(
+    p: PartialVersion,
+    full_range: &str,
+    out: &mut Vec<Comparator>,
+) -> Result<(), SemverError> {
     match (p.major, p.minor, p.patch) {
         (None, _, _) => out.push(Comparator {
             op: Op::Ge,
@@ -821,7 +825,7 @@ fn expand_tilde(p: PartialVersion, out: &mut Vec<Comparator>) -> Result<(), Semv
             });
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(m.saturating_add(1), 0, 0),
+                version: ver_pre0(next_component(m, full_range)?, 0, 0),
             });
         }
         (Some(m), Some(n), None) => {
@@ -831,7 +835,7 @@ fn expand_tilde(p: PartialVersion, out: &mut Vec<Comparator>) -> Result<(), Semv
             });
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(m, n.saturating_add(1), 0),
+                version: ver_pre0(m, next_component(n, full_range)?, 0),
             });
         }
         (Some(m), Some(n), Some(patch)) => {
@@ -847,7 +851,7 @@ fn expand_tilde(p: PartialVersion, out: &mut Vec<Comparator>) -> Result<(), Semv
             });
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(m, n.saturating_add(1), 0),
+                version: ver_pre0(m, next_component(n, full_range)?, 0),
             });
         }
         _ => unreachable!(),
@@ -855,7 +859,11 @@ fn expand_tilde(p: PartialVersion, out: &mut Vec<Comparator>) -> Result<(), Semv
     Ok(())
 }
 
-fn expand_caret(p: PartialVersion, out: &mut Vec<Comparator>) -> Result<(), SemverError> {
+fn expand_caret(
+    p: PartialVersion,
+    full_range: &str,
+    out: &mut Vec<Comparator>,
+) -> Result<(), SemverError> {
     match (p.major, p.minor, p.patch) {
         (None, _, _) => out.push(Comparator {
             op: Op::Ge,
@@ -868,7 +876,7 @@ fn expand_caret(p: PartialVersion, out: &mut Vec<Comparator>) -> Result<(), Semv
             });
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(m.saturating_add(1), 0, 0),
+                version: ver_pre0(next_component(m, full_range)?, 0, 0),
             });
         }
         (Some(0), Some(n), None) => {
@@ -878,7 +886,7 @@ fn expand_caret(p: PartialVersion, out: &mut Vec<Comparator>) -> Result<(), Semv
             });
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(0, n.saturating_add(1), 0),
+                version: ver_pre0(0, next_component(n, full_range)?, 0),
             });
         }
         (Some(m), Some(n), None) => {
@@ -888,7 +896,7 @@ fn expand_caret(p: PartialVersion, out: &mut Vec<Comparator>) -> Result<(), Semv
             });
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(m.saturating_add(1), 0, 0),
+                version: ver_pre0(next_component(m, full_range)?, 0, 0),
             });
         }
         (Some(0), Some(0), Some(patch)) => {
@@ -904,7 +912,7 @@ fn expand_caret(p: PartialVersion, out: &mut Vec<Comparator>) -> Result<(), Semv
             });
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(0, 0, patch.saturating_add(1)),
+                version: ver_pre0(0, 0, next_component(patch, full_range)?),
             });
         }
         (Some(0), Some(n), Some(patch)) => {
@@ -920,7 +928,7 @@ fn expand_caret(p: PartialVersion, out: &mut Vec<Comparator>) -> Result<(), Semv
             });
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(0, n.saturating_add(1), 0),
+                version: ver_pre0(0, next_component(n, full_range)?, 0),
             });
         }
         (Some(m), Some(n), Some(patch)) => {
@@ -936,12 +944,19 @@ fn expand_caret(p: PartialVersion, out: &mut Vec<Comparator>) -> Result<(), Semv
             });
             out.push(Comparator {
                 op: Op::Lt,
-                version: ver_pre0(m.saturating_add(1), 0, 0),
+                version: ver_pre0(next_component(m, full_range)?, 0, 0),
             });
         }
         _ => unreachable!(),
     }
     Ok(())
+}
+
+fn next_component(val: u64, full_range: &str) -> Result<u64, SemverError> {
+    val.checked_add(1).ok_or_else(|| SemverError::InvalidRange {
+        range: full_range.to_owned(),
+        reason: "SemVer upper bound overflow".to_owned(),
+    })
 }
 
 fn zero_version() -> NpmVersion {
@@ -1106,5 +1121,7 @@ mod tests {
             VersionConstraint::DistTag("latest".to_owned())
         );
         assert!(VersionConstraint::parse("1.2.3.4").is_err());
+        assert!(NpmRange::parse("^18446744073709551615.0.0").is_err());
+        assert!(NpmRange::parse("~18446744073709551615").is_err());
     }
 }

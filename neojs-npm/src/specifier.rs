@@ -516,11 +516,23 @@ pub(crate) fn validate_subpath(raw: &str) -> Result<String, SpecifierError> {
             reason: "subpath contains control characters".to_owned(),
         });
     }
+    if has_windows_drive_prefix(raw) {
+        return Err(SpecifierError::InvalidSubpath {
+            subpath: raw.to_owned(),
+            reason: "subpath may not contain a Windows drive prefix".to_owned(),
+        });
+    }
     for segment in raw.split('/') {
         if segment.is_empty() || segment == "." || segment == ".." {
             return Err(SpecifierError::InvalidSubpath {
                 subpath: raw.to_owned(),
                 reason: "subpath contains empty, `.`, or `..` segment".to_owned(),
+            });
+        }
+        if has_windows_drive_prefix(segment) {
+            return Err(SpecifierError::InvalidSubpath {
+                subpath: raw.to_owned(),
+                reason: "subpath may not contain a Windows drive prefix".to_owned(),
             });
         }
         if segment.eq_ignore_ascii_case("node_modules") {
@@ -531,6 +543,11 @@ pub(crate) fn validate_subpath(raw: &str) -> Result<String, SpecifierError> {
         }
     }
     Ok(raw.to_owned())
+}
+
+pub(crate) fn has_windows_drive_prefix(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 fn extract_name_prefix(rest: &str) -> Result<&str, SpecifierError> {

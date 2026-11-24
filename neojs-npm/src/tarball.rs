@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 
 use crate::cas::{
-    CasError, CasStore, atomic_write_file, hex_lower, read_verified_file, sha256_hex,
+    CasError, CasStore, atomic_write_file, hex_lower, read_bounded_regular_file,
+    read_verified_file, sha256_hex,
 };
 use crate::package_json::{MAX_PACKAGE_JSON_BYTES, PackageJson, PackageJsonError};
 
@@ -203,21 +204,7 @@ impl PackageTree {
         }
         let bytes = match expected_tree_sha256 {
             Some(tree_hash) => read_verified_file(&path, tree_hash, None, 16 * 1024 * 1024)?,
-            None => {
-                // Verify file is a regular file and bounded; compute self-hash below.
-                let actual = std::fs::read(&path).map_err(|err| CasError::Io {
-                    operation: "read .tree",
-                    reason: err.to_string(),
-                })?;
-                if actual.len() > 16 * 1024 * 1024 {
-                    return Err(CasError::TooLarge {
-                        size: actual.len() as u64,
-                        limit: 16 * 1024 * 1024,
-                    }
-                    .into());
-                }
-                actual
-            }
+            None => read_bounded_regular_file(&path, None, 16 * 1024 * 1024)?,
         };
         let tree_sha256 = sha256_hex(&bytes);
         let mut tree: Self =
@@ -227,6 +214,13 @@ impl PackageTree {
         if tree.version != 1 {
             return Err(TarballError::MalformedTar {
                 reason: format!("unsupported .tree version {}", tree.version),
+            });
+        }
+        let tree_sri = parse_sha512_sri(&tree.integrity)?;
+        if tree_sri != expected_sha512 {
+            return Err(TarballError::IntegrityMismatch {
+                expected: integrity.to_owned(),
+                actual: tree.integrity.clone(),
             });
         }
         tree.tree_sha256 = tree_sha256;
@@ -340,12 +334,29 @@ impl TarballIngestor {
         tree.tree_sha256 = sha256_hex(&tree_bytes);
 
         // Publish .tgz first, then .tree ONLY after every referenced CAS blob exists.
+        // Verify pre-existing artifacts rather than trusting `.exists()` so tampered
+        // cache artifacts fail closed.
         let tgz_target = archive_path(self.cas.cache_root(), registry_origin, &sha512_hex);
-        if !tgz_target.exists() {
+        if tgz_target.exists() {
+            let expected_tgz_sha256 = sha256_hex(tgz_bytes);
+            let _ = read_verified_file(
+                &tgz_target,
+                &expected_tgz_sha256,
+                Some(tgz_bytes.len() as u64),
+                self.limits.max_tarball_compressed_bytes,
+            )?;
+        } else {
             atomic_write_file(&self.cas.tmp_dir(), &tgz_target, tgz_bytes, 0o444)?;
         }
         let tree_target = tree_path(self.cas.cache_root(), registry_origin, &sha512_hex);
-        if !tree_target.exists() {
+        if tree_target.exists() {
+            let _ = read_verified_file(
+                &tree_target,
+                &tree.tree_sha256,
+                Some(tree_bytes.len() as u64),
+                16 * 1024 * 1024,
+            )?;
+        } else {
             atomic_write_file(&self.cas.tmp_dir(), &tree_target, &tree_bytes, 0o444)?;
         }
 
@@ -427,6 +438,10 @@ impl<R> BoundedReader<R> {
             limit,
         }
     }
+
+    fn remaining(&self) -> usize {
+        self.limit.saturating_sub(self.read_total)
+    }
 }
 
 impl<R: Read> BoundedReader<R> {
@@ -488,9 +503,19 @@ fn read_tar_entries<R: Read>(
 
     loop {
         if !reader.read_exact_bounded(&mut header)? {
+            if next_pax_path.is_some() || next_pax_size.is_some() || next_gnu_longname.is_some() {
+                return Err(TarballError::MalformedTar {
+                    reason: "dangling extended tar header at EOF".to_owned(),
+                });
+            }
             break;
         }
         if header.iter().all(|&b| b == 0) {
+            if next_pax_path.is_some() || next_pax_size.is_some() || next_gnu_longname.is_some() {
+                return Err(TarballError::MalformedTar {
+                    reason: "dangling extended tar header before EOF marker".to_owned(),
+                });
+            }
             // Standard tar ends with two 512-byte zero blocks; consume optional second zero block.
             if reader.read_exact_bounded(&mut header)? && !header.iter().all(|&b| b == 0) {
                 return Err(TarballError::MalformedTar {
@@ -532,7 +557,13 @@ fn read_tar_entries<R: Read>(
             }
             b'0' | b'\0' | b'5' => {}
             other => {
-                let raw_name = parse_ustar_path(&header);
+                let _ = (
+                    next_pax_path.take(),
+                    next_pax_size.take(),
+                    next_gnu_longname.take(),
+                );
+                let raw_name =
+                    parse_ustar_path(&header).unwrap_or_else(|_| "<invalid-utf8-path>".to_owned());
                 return Err(TarballError::UnsupportedEntryType {
                     path: raw_name,
                     typeflag: other as char,
@@ -547,10 +578,12 @@ fn read_tar_entries<R: Read>(
             });
         }
 
-        let raw_path = next_pax_path
-            .take()
-            .or_else(|| next_gnu_longname.take())
-            .unwrap_or_else(|| parse_ustar_path(&header));
+        let pax_path = next_pax_path.take();
+        let gnu_long = next_gnu_longname.take();
+        let raw_path = match pax_path.or(gnu_long) {
+            Some(path) => path,
+            None => parse_ustar_path(&header)?,
+        };
         let size = next_pax_size.take().unwrap_or(header_size);
 
         let is_dir = typeflag == b'5';
@@ -573,6 +606,11 @@ fn read_tar_entries<R: Read>(
                 path: raw_path,
                 size: size_usize,
                 limit: limits.max_file_bytes,
+            });
+        }
+        if size_usize > reader.remaining() {
+            return Err(TarballError::UncompressedLimitExceeded {
+                limit: limits.max_tarball_uncompressed_bytes,
             });
         }
 
@@ -642,7 +680,7 @@ fn parse_tar_size(field: &[u8]) -> Result<u64, TarballError> {
         let mut val: u64 = u64::from(field[0] & 0x7f);
         for &b in &field[1..] {
             val = val
-                .checked_shl(8)
+                .checked_mul(256)
                 .ok_or_else(|| TarballError::MalformedTar {
                     reason: "tar size overflow".to_owned(),
                 })?
@@ -699,7 +737,7 @@ fn parse_pax_records(data: &[u8]) -> Result<(Option<String>, Option<u64>), Tarba
         let rec_len: usize = len_str.parse().map_err(|_| TarballError::MalformedTar {
             reason: "PAX record length is not an integer".to_owned(),
         })?;
-        if rec_len <= space_rel + 1 || pos + rec_len > data.len() {
+        if rec_len <= space_rel + 1 || rec_len > rest.len() {
             return Err(TarballError::MalformedTar {
                 reason: "PAX record length out of bounds".to_owned(),
             });
@@ -726,15 +764,19 @@ fn parse_pax_records(data: &[u8]) -> Result<(Option<String>, Option<u64>), Tarba
     Ok((path, size))
 }
 
-fn parse_ustar_path(header: &[u8; 512]) -> String {
+fn parse_ustar_path(header: &[u8; 512]) -> Result<String, TarballError> {
     let name_bytes = header[0..100].split(|&b| b == 0).next().unwrap_or(&[]);
     let prefix_bytes = header[345..500].split(|&b| b == 0).next().unwrap_or(&[]);
-    let name = String::from_utf8_lossy(name_bytes);
+    let name = std::str::from_utf8(name_bytes).map_err(|_| TarballError::MalformedTar {
+        reason: "tar entry name is not valid UTF-8".to_owned(),
+    })?;
     if prefix_bytes.is_empty() {
-        name.into_owned()
+        Ok(name.to_owned())
     } else {
-        let prefix = String::from_utf8_lossy(prefix_bytes);
-        format!("{prefix}/{name}")
+        let prefix = std::str::from_utf8(prefix_bytes).map_err(|_| TarballError::MalformedTar {
+            reason: "tar entry prefix is not valid UTF-8".to_owned(),
+        })?;
+        Ok(format!("{prefix}/{name}"))
     }
 }
 
@@ -762,9 +804,7 @@ fn normalize_tar_entry_path(
             reason: "path contains NUL, backslash, or control characters".to_owned(),
         });
     }
-    if raw.starts_with('/')
-        || (raw.len() >= 2 && raw.as_bytes()[0].is_ascii_alphabetic() && raw.as_bytes()[1] == b':')
-    {
+    if raw.starts_with('/') || crate::specifier::has_windows_drive_prefix(raw) {
         return Err(TarballError::UnsafeEntryPath {
             path: raw.to_owned(),
             reason: "absolute paths and drive prefixes are forbidden".to_owned(),
@@ -789,6 +829,12 @@ fn normalize_tar_entry_path(
             return Err(TarballError::UnsafeEntryPath {
                 path: raw.to_owned(),
                 reason: "path contains empty, `.`, or `..` segment".to_owned(),
+            });
+        }
+        if crate::specifier::has_windows_drive_prefix(seg) {
+            return Err(TarballError::UnsafeEntryPath {
+                path: raw.to_owned(),
+                reason: "path segment contains a Windows drive prefix".to_owned(),
             });
         }
         if seg.eq_ignore_ascii_case("node_modules") {

@@ -538,10 +538,10 @@ impl ResolvedNpmGraph {
         referrer: &Url,
         specifier: &str,
     ) -> Result<NpmReferrerResolution, ResolverError> {
-        if specifier.starts_with("neo:") {
+        if has_scheme_prefix_ci(specifier, "neo:") {
             return Ok(NpmReferrerResolution::NeoBuiltin(specifier.to_owned()));
         }
-        if specifier.starts_with("node:") {
+        if has_scheme_prefix_ci(specifier, "node:") {
             return Ok(NpmReferrerResolution::NodeBuiltin(specifier.to_owned()));
         }
 
@@ -623,8 +623,8 @@ impl ResolvedNpmGraph {
         // `#...` subpath import against this package's `"imports"`.
         if specifier.starts_with('#') {
             let resolved = ExportsResolver::resolve_package_import(
-                Some(&ref_pkg.tree),
-                Some(&self.cas),
+                &ref_pkg.tree,
+                &self.cas,
                 &ref_pkg.package_json,
                 ref_pkg.name.as_str(),
                 specifier,
@@ -1470,7 +1470,12 @@ impl ProjectPackageResolver {
     /// Discovers the nearest `package.json` walking upward from `start_dir`
     /// (bounded by [`MAX_DISCOVERY_DEPTH`] and canonical symlink-loop detection).
     pub fn discover(start_dir: &Path) -> Result<Option<Self>, ResolverError> {
-        let mut current = start_dir.to_path_buf();
+        use std::io::Read as _;
+
+        let mut current =
+            fs::canonicalize(start_dir).map_err(|err| ResolverError::ProjectManifest {
+                reason: err.to_string(),
+            })?;
         let mut visited = BTreeSet::new();
         for _ in 0..MAX_DISCOVERY_DEPTH {
             if let Ok(canon) = fs::canonicalize(&current)
@@ -1480,19 +1485,19 @@ impl ProjectPackageResolver {
             }
             let candidate = current.join("package.json");
             if candidate.is_file() {
-                let meta =
-                    fs::metadata(&candidate).map_err(|err| ResolverError::ProjectManifest {
+                let file =
+                    fs::File::open(&candidate).map_err(|err| ResolverError::ProjectManifest {
                         reason: err.to_string(),
                     })?;
-                if meta.len() > MAX_PACKAGE_JSON_BYTES as u64 {
-                    return Err(PackageJsonError::TooLarge {
-                        size: meta.len() as usize,
-                    }
-                    .into());
+                let mut bytes = Vec::new();
+                file.take((MAX_PACKAGE_JSON_BYTES as u64) + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|err| ResolverError::ProjectManifest {
+                        reason: err.to_string(),
+                    })?;
+                if bytes.len() > MAX_PACKAGE_JSON_BYTES {
+                    return Err(PackageJsonError::TooLarge { size: bytes.len() }.into());
                 }
-                let bytes = fs::read(&candidate).map_err(|err| ResolverError::ProjectManifest {
-                    reason: err.to_string(),
-                })?;
                 let package_json = PackageJson::parse_bytes(&bytes)?;
                 return Ok(Some(Self {
                     root_dir: current,
@@ -1567,8 +1572,8 @@ impl ProjectPackageResolver {
         specifier: &str,
         graph: &ResolvedNpmGraph,
     ) -> Result<ProjectResolution, ResolverError> {
-        if specifier.starts_with("neo:")
-            || specifier.starts_with("node:")
+        if has_scheme_prefix_ci(specifier, "neo:")
+            || has_scheme_prefix_ci(specifier, "node:")
             || specifier.starts_with("./")
             || specifier.starts_with("../")
             || specifier.starts_with('/')
@@ -1580,10 +1585,9 @@ impl ProjectPackageResolver {
         let proj_name = self.package_json.name.as_deref().unwrap_or("<project>");
 
         if specifier.starts_with('#') {
-            let resolved = ExportsResolver::resolve_package_import(
-                None,
-                None,
+            let resolved = ExportsResolver::resolve_project_import(
                 &self.package_json,
+                &self.root_dir,
                 proj_name,
                 specifier,
             )?;
@@ -1610,7 +1614,20 @@ impl ProjectPackageResolver {
     }
 
     fn resolve_local_rel(&self, rel_path: &str) -> Result<ProjectResolution, ResolverError> {
+        use std::path::Component;
+
         let clean = validate_subpath(rel_path)?;
+        if !Path::new(&clean)
+            .components()
+            .all(|comp| matches!(comp, Component::Normal(_)))
+        {
+            return Err(SpecifierError::InvalidSubpath {
+                subpath: rel_path.to_owned(),
+                reason: "local project subpath must consist strictly of normal path components"
+                    .to_owned(),
+            }
+            .into());
+        }
         let full = self.root_dir.join(&clean);
         let format = self.classify_local_file(&full).map_err(|reason| {
             ExportsError::UnsupportedModuleFormat {
@@ -1660,4 +1677,10 @@ impl ProjectPackageResolver {
         let url = graph.resolve_instance_entry(instance_id, subpath)?;
         Ok(ProjectResolution::NpmModule(url))
     }
+}
+
+fn has_scheme_prefix_ci(specifier: &str, prefix_lower: &str) -> bool {
+    specifier
+        .get(..prefix_lower.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix_lower))
 }

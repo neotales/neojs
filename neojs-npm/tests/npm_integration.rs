@@ -1079,10 +1079,11 @@ fn project_package_json_maps_bare_imports_without_node_modules_and_never_interce
     );
 
     // `#imports` internal and external targets + self-reference.
+    let canon_proj_dir = fs::canonicalize(proj_dir.path()).unwrap();
     assert_eq!(
         project.resolve_specifier("#internal", &graph).unwrap(),
         ProjectResolution::LocalFile {
-            path: proj_dir.path().join("src/internal.mjs"),
+            path: canon_proj_dir.join("src/internal.mjs"),
             format: ModuleFormat::JavaScript,
         }
     );
@@ -1097,14 +1098,22 @@ fn project_package_json_maps_bare_imports_without_node_modules_and_never_interce
     assert_eq!(
         project.resolve_specifier("my-app/self", &graph).unwrap(),
         ProjectResolution::LocalFile {
-            path: proj_dir.path().join("src/internal.mjs"),
+            path: canon_proj_dir.join("src/internal.mjs"),
             format: ModuleFormat::JavaScript,
         }
     );
 
-    // Never intercept `neo:` or `node:` built-ins.
+    // Never intercept `neo:` or `node:` built-ins (including uppercase scheme variants).
     assert_eq!(
         project.resolve_specifier("neo:crypto", &graph).unwrap(),
+        ProjectResolution::NotIntercepted
+    );
+    assert_eq!(
+        project.resolve_specifier("NODE:fs", &graph).unwrap(),
+        ProjectResolution::NotIntercepted
+    );
+    assert_eq!(
+        project.resolve_specifier("NEO:assert", &graph).unwrap(),
         ProjectResolution::NotIntercepted
     );
     assert_eq!(
@@ -1114,4 +1123,234 @@ fn project_package_json_maps_bare_imports_without_node_modules_and_never_interce
 
     // Undeclared bare package fails closed.
     assert!(project.resolve_specifier("undeclared-pkg", &graph).is_err());
+}
+
+#[test]
+fn regression_tarball_hardening_and_windows_drive_and_case_insensitive_builtins() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cas = CasStore::new(tmp.path());
+    let ingestor = TarballIngestor::new(cas.clone(), NpmLimits::default());
+    let origin = "https://registry.npmjs.org";
+
+    // 1. Base-256 tar size overflow (`0x81` + trailing zeroes) -> MalformedTar.
+    let mut overflow_hdr = write_tar_header("package/overflow.mjs", b'0', 0);
+    overflow_hdr[124] = 0x81;
+    let sum: u32 = overflow_hdr
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| {
+            if (148..156).contains(&i) {
+                u32::from(b' ')
+            } else {
+                u32::from(b)
+            }
+        })
+        .sum();
+    let csum = format!("{sum:06o}\0 ");
+    overflow_hdr[148..156].copy_from_slice(csum.as_bytes());
+    let mut overflow_tar = overflow_hdr.to_vec();
+    overflow_tar.resize(overflow_tar.len() + 1024, 0);
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(&overflow_tar).unwrap();
+    let overflow_tgz = gz.finish().unwrap();
+    let overflow_sri = format!(
+        "sha512-{}",
+        BASE64_STANDARD.encode(Sha512::digest(&overflow_tgz))
+    );
+    assert!(matches!(
+        ingestor.ingest(origin, &overflow_sri, &overflow_tgz),
+        Err(TarballError::MalformedTar { .. })
+    ));
+
+    // 2. PAX size override + GNU `L` longname + both `L` and `x` before one entry
+    //    (verifying GNU `L` does NOT leak onto the subsequent entry).
+    let mut pax_gnu_tar = Vec::new();
+    let pkg_json = br#"{"name":"paxgnu","version":"1.0.0","type":"module"}"#;
+    let pkg_hdr = write_tar_header("package/package.json", b'0', pkg_json.len());
+    pax_gnu_tar.extend_from_slice(&pkg_hdr);
+    pax_gnu_tar.extend_from_slice(pkg_json);
+    pax_gnu_tar.resize(pax_gnu_tar.len() + (512 - (pkg_json.len() % 512)) % 512, 0);
+
+    // Entry with GNU `L` followed by PAX `x` (both path and size).
+    let gnu_name = b"package/leaked-gnu-name.mjs\0";
+    let gnu_hdr = write_tar_header("././@LongLink", b'L', gnu_name.len());
+    pax_gnu_tar.extend_from_slice(&gnu_hdr);
+    pax_gnu_tar.extend_from_slice(gnu_name);
+    pax_gnu_tar.resize(pax_gnu_tar.len() + (512 - (gnu_name.len() % 512)) % 512, 0);
+
+    let body_a = b"export const a = 1;\n";
+    let mut pax_payload = encode_pax_record("path", "package/pax-wins.mjs");
+    pax_payload.extend_from_slice(&encode_pax_record("size", &body_a.len().to_string()));
+    let pax_hdr = write_tar_header("PaxHeader/a", b'x', pax_payload.len());
+    pax_gnu_tar.extend_from_slice(&pax_hdr);
+    pax_gnu_tar.extend_from_slice(&pax_payload);
+    pax_gnu_tar.resize(
+        pax_gnu_tar.len() + (512 - (pax_payload.len() % 512)) % 512,
+        0,
+    );
+    let hdr_a = write_tar_header("package/ignored.mjs", b'0', 0);
+    pax_gnu_tar.extend_from_slice(&hdr_a);
+    pax_gnu_tar.extend_from_slice(body_a);
+    pax_gnu_tar.resize(pax_gnu_tar.len() + (512 - (body_a.len() % 512)) % 512, 0);
+
+    // Subsequent normal entry MUST use its own header path, not `leaked-gnu-name.mjs`.
+    let body_b = b"export const b = 2;\n";
+    let hdr_b = write_tar_header("package/next.mjs", b'0', body_b.len());
+    pax_gnu_tar.extend_from_slice(&hdr_b);
+    pax_gnu_tar.extend_from_slice(body_b);
+    pax_gnu_tar.resize(pax_gnu_tar.len() + (512 - (body_b.len() % 512)) % 512, 0);
+    pax_gnu_tar.resize(pax_gnu_tar.len() + 1024, 0);
+
+    let mut gz2 = GzEncoder::new(Vec::new(), Compression::default());
+    gz2.write_all(&pax_gnu_tar).unwrap();
+    let pax_gnu_tgz = gz2.finish().unwrap();
+    let pax_gnu_sri = format!(
+        "sha512-{}",
+        BASE64_STANDARD.encode(Sha512::digest(&pax_gnu_tgz))
+    );
+    let tree = ingestor.ingest(origin, &pax_gnu_sri, &pax_gnu_tgz).unwrap();
+    assert!(tree.get_file("pax-wins.mjs").is_some());
+    assert!(tree.get_file("next.mjs").is_some());
+    assert!(tree.get_file("leaked-gnu-name.mjs").is_none());
+
+    // 3. Re-ingesting when on-disk `.tree` was tampered must fail closed.
+    let sha512_hex = {
+        let mut h = String::new();
+        for b in Sha512::digest(&pax_gnu_tgz) {
+            use std::fmt::Write as _;
+            let _ = write!(h, "{b:02x}");
+        }
+        h
+    };
+    let tree_disk_path = cas
+        .npm_origin_dir(origin)
+        .join("trees")
+        .join(format!("sha512-{sha512_hex}.tree"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tree_disk_path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    fs::write(
+        &tree_disk_path,
+        b"{\"version\":1,\"integrity\":\"sha512-x\"}",
+    )
+    .unwrap();
+    assert!(matches!(
+        ingestor.ingest(origin, &pax_gnu_sri, &pax_gnu_tgz),
+        Err(TarballError::Cas(
+            CasError::IntegrityMismatch { .. } | CasError::SizeMismatch { .. }
+        ))
+    ));
+
+    // 4. Truncated tar / orphan PAX header at EOF -> MalformedTar.
+    let mut orphan_tar = Vec::new();
+    let orphan_pax = encode_pax_record("path", "package/orphan.mjs");
+    orphan_tar.extend_from_slice(&write_tar_header(
+        "PaxHeader/orphan",
+        b'x',
+        orphan_pax.len(),
+    ));
+    orphan_tar.extend_from_slice(&orphan_pax);
+    orphan_tar.resize(orphan_tar.len() + (512 - (orphan_pax.len() % 512)) % 512, 0);
+    let mut gz3 = GzEncoder::new(Vec::new(), Compression::default());
+    gz3.write_all(&orphan_tar).unwrap();
+    let orphan_tgz = gz3.finish().unwrap();
+    let orphan_sri = format!(
+        "sha512-{}",
+        BASE64_STANDARD.encode(Sha512::digest(&orphan_tgz))
+    );
+    assert!(matches!(
+        ingestor.ingest(origin, &orphan_sri, &orphan_tgz),
+        Err(TarballError::MalformedTar { .. })
+    ));
+
+    // 5. Windows drive-path injection rejected in tarballs, specifiers, and exports.
+    let (drv_tgz, drv_sri) = build_tgz(&[
+        TarEntrySpec::file(
+            "package/package.json",
+            br#"{"name":"drv","version":"1.0.0"}"#.to_vec(),
+        ),
+        TarEntrySpec::file("package/C:/evil.mjs", b"export const bad = 1;".to_vec()),
+    ]);
+    assert!(matches!(
+        ingestor.ingest(origin, &drv_sri, &drv_tgz),
+        Err(TarballError::UnsafeEntryPath { .. })
+    ));
+    assert!(NpmSpecifier::parse("npm:pkg/C:/evil.mjs").is_err());
+
+    let bad_exports_pkg = neojs_npm::PackageJson::parse_str(
+        r##"{
+            "name": "win-drive-test",
+            "type": "module",
+            "exports": { ".": "./C:/Windows/System32/evil.mjs" },
+            "imports": { "#bad": "./C:/Windows/System32/evil.mjs" }
+        }"##,
+    )
+    .unwrap();
+    assert!(matches!(
+        neojs_npm::ExportsResolver::resolve_exports_target(
+            bad_exports_pkg.exports.as_ref().unwrap(),
+            "win-drive-test",
+            None
+        ),
+        Err(ExportsError::InvalidTarget { .. })
+    ));
+    assert!(matches!(
+        neojs_npm::ExportsResolver::resolve_project_import(
+            &bad_exports_pkg,
+            tmp.path(),
+            "win-drive-test",
+            "#bad"
+        ),
+        Err(ExportsError::InvalidTarget { .. })
+    ));
+
+    // 6. Project `#imports` local ESM classification + case-insensitive `NEO:`/`NODE:` in npm referrers.
+    let ts_proj = neojs_npm::PackageJson::parse_str(
+        r##"{
+            "name": "ts-proj",
+            "type": "module",
+            "imports": { "#mod": "./src/mod.ts", "#cjs": "./src/bad.cjs" }
+        }"##,
+    )
+    .unwrap();
+    let ts_res =
+        neojs_npm::ExportsResolver::resolve_project_import(&ts_proj, tmp.path(), "ts-proj", "#mod")
+            .unwrap();
+    assert!(matches!(
+        ts_res,
+        neojs_npm::PackageImportTarget::InternalFile(f) if f.format == ModuleFormat::TypeScript
+    ));
+    assert!(matches!(
+        neojs_npm::ExportsResolver::resolve_project_import(&ts_proj, tmp.path(), "ts-proj", "#cjs"),
+        Err(ExportsError::UnsupportedModuleFormat { .. })
+    ));
+
+    let mut reg = MockRegistry::new();
+    reg.publish_simple(
+        "builtin-caller",
+        "1.0.0",
+        true,
+        r#"{"name":"builtin-caller","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+        &[("index.mjs", "export const x = 1;\n")],
+    );
+    let graph = NpmGraphResolver::new(&reg, cas)
+        .resolve_specifiers(&[NpmSpecifier::parse("npm:builtin-caller@1.0.0").unwrap()])
+        .unwrap();
+    let caller_url: url::Url = "npm://registry.npmjs.org/builtin-caller/1.0.0/0/index.mjs"
+        .parse()
+        .unwrap();
+    assert_eq!(
+        graph
+            .resolve_from_npm_referrer(&caller_url, "NEO:crypto")
+            .unwrap(),
+        NpmReferrerResolution::NeoBuiltin("NEO:crypto".to_owned())
+    );
+    assert_eq!(
+        graph
+            .resolve_from_npm_referrer(&caller_url, "NODE:path")
+            .unwrap(),
+        NpmReferrerResolution::NodeBuiltin("NODE:path".to_owned())
+    );
 }

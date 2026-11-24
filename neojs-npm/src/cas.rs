@@ -240,15 +240,13 @@ pub fn validate_sha256_hex(digest: &str) -> Result<(), CasError> {
     }
 }
 
-/// Reads and verifies a regular file at `path` using `O_NOFOLLOW` (on Unix),
-/// `fstat` regular-file + size check, bounded single read, and SHA-256 verification.
-pub fn read_verified_file(
+/// Reads a regular file at `path` using `O_NOFOLLOW` (on Unix), `fstat`
+/// regular-file + size check, and a single bounded read up to `max_bytes`.
+pub fn read_bounded_regular_file(
     path: &Path,
-    expected_sha256_hex: &str,
     expected_size: Option<u64>,
     max_bytes: usize,
 ) -> Result<Vec<u8>, CasError> {
-    validate_sha256_hex(expected_sha256_hex)?;
     let file = open_nofollow(path)?;
     let meta = file.metadata().map_err(|err| CasError::Io {
         operation: "stat",
@@ -297,7 +295,19 @@ pub fn read_verified_file(
             actual: buf.len() as u64,
         });
     }
+    Ok(buf)
+}
 
+/// Reads and verifies a regular file at `path` using `O_NOFOLLOW` (on Unix),
+/// `fstat` regular-file + size check, bounded single read, and SHA-256 verification.
+pub fn read_verified_file(
+    path: &Path,
+    expected_sha256_hex: &str,
+    expected_size: Option<u64>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CasError> {
+    validate_sha256_hex(expected_sha256_hex)?;
+    let buf = read_bounded_regular_file(path, expected_size, max_bytes)?;
     let actual_digest = sha256_hex(&buf);
     if actual_digest != expected_sha256_hex {
         return Err(CasError::IntegrityMismatch {
