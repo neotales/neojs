@@ -57,7 +57,7 @@ use crate::Error;
 pub const MAX_SPECIFIER_BYTES: usize = 8 * 1024;
 
 const MAX_VERSION_BYTES: usize = 128;
-const MAX_SUBPATH_BYTES: usize = 1024;
+pub(crate) const MAX_SUBPATH_BYTES: usize = 1024;
 const MAX_GH_REFERENCE_BYTES: usize = 256;
 
 const NPM_REASON: &str =
@@ -185,6 +185,7 @@ pub struct NpmSpecifier {
     name: String,
     version: String,
     subpath: Option<String>,
+    trailing_slash: bool,
 }
 
 impl NpmSpecifier {
@@ -205,9 +206,10 @@ impl NpmSpecifier {
 
     /// Returns `npm:name@version` plus the optional subpath.
     pub fn canonical(&self) -> String {
-        match &self.subpath {
-            Some(subpath) => format!("npm:{}@{}/{subpath}", self.name, self.version),
-            None => format!("npm:{}@{}", self.name, self.version),
+        match (&self.subpath, self.trailing_slash) {
+            (Some(subpath), _) => format!("npm:{}@{}/{subpath}", self.name, self.version),
+            (None, true) => format!("npm:{}@{}/", self.name, self.version),
+            (None, false) => format!("npm:{}@{}", self.name, self.version),
         }
     }
 }
@@ -225,6 +227,7 @@ pub struct JsrSpecifier {
     name: String,
     version: String,
     subpath: Option<String>,
+    trailing_slash: bool,
 }
 
 impl JsrSpecifier {
@@ -250,12 +253,13 @@ impl JsrSpecifier {
 
     /// Returns `jsr:@scope/name@version` plus the optional subpath.
     pub fn canonical(&self) -> String {
-        match &self.subpath {
-            Some(subpath) => format!(
+        match (&self.subpath, self.trailing_slash) {
+            (Some(subpath), _) => format!(
                 "jsr:@{}/{}@{}/{subpath}",
                 self.scope, self.name, self.version
             ),
-            None => format!("jsr:@{}/{}@{}", self.scope, self.name, self.version),
+            (None, true) => format!("jsr:@{}/{}@{}/", self.scope, self.name, self.version),
+            (None, false) => format!("jsr:@{}/{}@{}", self.scope, self.name, self.version),
         }
     }
 }
@@ -329,25 +333,40 @@ impl fmt::Display for GhSpecifier {
 /// `github:` parse successfully and report [`Support::NormalizedOnly`]: this
 /// crate normalizes the coordinate but installs no import map.
 pub fn normalize_specifier(raw: &str) -> Result<NormalizedSpecifier, Error> {
+    normalize_specifier_with_mode(raw, false)
+}
+
+/// Parses and canonicalizes a prefix import-map target ending in `/`.
+pub(crate) fn normalize_prefix_specifier(raw: &str) -> Result<NormalizedSpecifier, Error> {
+    if !raw.ends_with('/') {
+        return Err(invalid("a prefix import-map target must end with `/`"));
+    }
+    normalize_specifier_with_mode(raw, true)
+}
+
+fn normalize_specifier_with_mode(
+    raw: &str,
+    allow_prefix_slash: bool,
+) -> Result<NormalizedSpecifier, Error> {
     validate_input(raw)?;
 
     if let Some(rest) = raw.strip_prefix("gh:") {
-        return parse_gh(rest);
+        return parse_gh(rest, allow_prefix_slash);
     }
     if let Some(rest) = raw.strip_prefix("github:") {
-        return parse_gh(rest);
+        return parse_gh(rest, allow_prefix_slash);
     }
     if let Some(rest) = raw.strip_prefix("npm:") {
-        return parse_npm(rest);
+        return parse_npm(rest, allow_prefix_slash);
     }
     if let Some(rest) = raw.strip_prefix("jsr:") {
-        return parse_jsr(rest);
+        return parse_jsr(rest, allow_prefix_slash);
     }
     if let Some(rest) = raw.strip_prefix("node:") {
-        return parse_node(rest);
+        return parse_node(rest, allow_prefix_slash);
     }
     if raw.starts_with("https:") {
-        return parse_https(raw);
+        return parse_https(raw, allow_prefix_slash);
     }
     if raw.starts_with("http:") {
         return Err(Error::UnsupportedTransport {
@@ -376,7 +395,7 @@ pub fn normalize_specifier(raw: &str) -> Result<NormalizedSpecifier, Error> {
         });
     }
     if is_relative_path(raw) {
-        return parse_relative_path(raw);
+        return parse_relative_path(raw, allow_prefix_slash);
     }
     if scheme_of(raw).is_some() {
         return Err(Error::UnsupportedTransport {
@@ -410,7 +429,7 @@ fn validate_input(raw: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn parse_gh(rest: &str) -> Result<NormalizedSpecifier, Error> {
+fn parse_gh(rest: &str, allow_prefix_slash: bool) -> Result<NormalizedSpecifier, Error> {
     let Some((owner, remainder)) = rest.split_once('/') else {
         return Err(invalid(
             "a gh: or github: specifier must name `owner/repo@reference/path`",
@@ -432,7 +451,16 @@ fn parse_gh(rest: &str) -> Result<NormalizedSpecifier, Error> {
     validate_gh_owner(owner)?;
     validate_gh_repo(repo)?;
     validate_gh_reference(reference)?;
-    validate_module_path(path, MAX_SUBPATH_BYTES, "the GitHub path")?;
+    let trimmed_path = if allow_prefix_slash {
+        let trimmed = path.strip_suffix('/').unwrap_or(path);
+        if !trimmed.is_empty() {
+            validate_module_path(trimmed, MAX_SUBPATH_BYTES, "the GitHub path")?;
+        }
+        trimmed
+    } else {
+        validate_module_path(path, MAX_SUBPATH_BYTES, "the GitHub path")?;
+        path
+    };
 
     let mut url = Url::parse("https://raw.githubusercontent.com/").map_err(|_| {
         invalid("could not build the GitHub raw URL; this is an internal constant error")
@@ -443,8 +471,13 @@ fn parse_gh(rest: &str) -> Result<NormalizedSpecifier, Error> {
             .map_err(|_| invalid("could not build the GitHub raw URL"))?;
         segments.pop_if_empty();
         segments.push(owner).push(repo).push(reference);
-        for segment in path.split('/') {
-            segments.push(segment);
+        if !trimmed_path.is_empty() {
+            for segment in trimmed_path.split('/') {
+                segments.push(segment);
+            }
+        }
+        if allow_prefix_slash {
+            segments.push("");
         }
     }
 
@@ -497,7 +530,7 @@ fn parse_gh_legacy_reference(after_slash: &str) -> Result<(&str, &str), Error> {
     Ok((reference, path))
 }
 
-fn parse_npm(rest: &str) -> Result<NormalizedSpecifier, Error> {
+fn parse_npm(rest: &str, allow_prefix_slash: bool) -> Result<NormalizedSpecifier, Error> {
     let Some(name) = parse_npm_name(rest)? else {
         return Err(invalid("an npm: package name is empty"));
     };
@@ -514,17 +547,14 @@ fn parse_npm(rest: &str) -> Result<NormalizedSpecifier, Error> {
         None => (version_and_path, None),
     };
     validate_version(version)?;
-    let subpath = subpath
-        .map(|subpath| {
-            validate_module_path(subpath, MAX_SUBPATH_BYTES, "the npm: subpath")?;
-            Ok::<String, Error>(subpath.to_owned())
-        })
-        .transpose()?;
+    let (subpath, trailing_slash) =
+        parse_subpath_with_mode(subpath, allow_prefix_slash, "the npm: subpath")?;
 
     Ok(NormalizedSpecifier::Npm(NpmSpecifier {
         name: name.to_owned(),
         version: version.to_owned(),
         subpath,
+        trailing_slash,
     }))
 }
 
@@ -558,7 +588,7 @@ fn parse_npm_name(rest: &str) -> Result<Option<&str>, Error> {
     Ok(Some(name))
 }
 
-fn parse_jsr(rest: &str) -> Result<NormalizedSpecifier, Error> {
+fn parse_jsr(rest: &str, allow_prefix_slash: bool) -> Result<NormalizedSpecifier, Error> {
     let Some(after_scope) = rest.strip_prefix('@') else {
         return Err(invalid(
             "a jsr: package must be scoped, as `jsr:@scope/name@version`",
@@ -585,27 +615,49 @@ fn parse_jsr(rest: &str) -> Result<NormalizedSpecifier, Error> {
         None => (version_and_path, None),
     };
     validate_version(version)?;
-    let subpath = subpath
-        .map(|subpath| {
-            validate_module_path(subpath, MAX_SUBPATH_BYTES, "the jsr: subpath")?;
-            Ok::<String, Error>(subpath.to_owned())
-        })
-        .transpose()?;
+    let (subpath, trailing_slash) =
+        parse_subpath_with_mode(subpath, allow_prefix_slash, "the jsr: subpath")?;
 
     Ok(NormalizedSpecifier::Jsr(JsrSpecifier {
         scope: scope.to_owned(),
         name: name.to_owned(),
         version: version.to_owned(),
         subpath,
+        trailing_slash,
     }))
 }
 
-fn parse_node(rest: &str) -> Result<NormalizedSpecifier, Error> {
-    validate_node_name(rest)?;
+fn parse_subpath_with_mode(
+    subpath: Option<&str>,
+    allow_prefix_slash: bool,
+    subject: &str,
+) -> Result<(Option<String>, bool), Error> {
+    let Some(subpath) = subpath else {
+        return Ok((None, false));
+    };
+    if allow_prefix_slash {
+        let trimmed = subpath.strip_suffix('/').unwrap_or(subpath);
+        if trimmed.is_empty() {
+            return Ok((None, true));
+        }
+        validate_module_path(trimmed, MAX_SUBPATH_BYTES, subject)?;
+        return Ok((Some(format!("{trimmed}/")), true));
+    }
+    validate_module_path(subpath, MAX_SUBPATH_BYTES, subject)?;
+    Ok((Some(subpath.to_owned()), false))
+}
+
+fn parse_node(rest: &str, allow_prefix_slash: bool) -> Result<NormalizedSpecifier, Error> {
+    let check = if allow_prefix_slash {
+        rest.strip_suffix('/').unwrap_or(rest)
+    } else {
+        rest
+    };
+    validate_node_name(check)?;
     Ok(NormalizedSpecifier::Node(format!("node:{rest}")))
 }
 
-fn parse_https(raw: &str) -> Result<NormalizedSpecifier, Error> {
+fn parse_https(raw: &str, allow_prefix_slash: bool) -> Result<NormalizedSpecifier, Error> {
     let url = Url::parse(raw).map_err(|_| invalid("the https: URL is malformed"))?;
     if url.scheme() != "https" {
         return Err(invalid("the URL scheme must be `https`"));
@@ -616,6 +668,11 @@ fn parse_https(raw: &str) -> Result<NormalizedSpecifier, Error> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(invalid(
             "an https: URL with a username or password is not supported",
+        ));
+    }
+    if allow_prefix_slash && (url.query().is_some() || url.fragment().is_some()) {
+        return Err(invalid(
+            "a prefix https: URL may not contain a query or fragment",
         ));
     }
     Ok(NormalizedSpecifier::Https(url.to_string()))
@@ -645,8 +702,21 @@ fn parse_file_url(raw: &str) -> Result<NormalizedSpecifier, Error> {
     Ok(NormalizedSpecifier::FileUrl(url.to_string()))
 }
 
-fn parse_relative_path(raw: &str) -> Result<NormalizedSpecifier, Error> {
+fn parse_relative_path(raw: &str, allow_prefix_slash: bool) -> Result<NormalizedSpecifier, Error> {
+    if allow_prefix_slash && raw == "./" {
+        return Ok(NormalizedSpecifier::Path("./".to_owned()));
+    }
     let path = raw.strip_prefix("./").unwrap_or(raw);
+    if is_windows_drive_path(path) {
+        return Err(invalid(
+            "a relative path may not begin with a Windows drive prefix",
+        ));
+    }
+    let path = if allow_prefix_slash {
+        path.strip_suffix('/').unwrap_or(path)
+    } else {
+        path
+    };
     validate_module_path(path, MAX_SUBPATH_BYTES, "the relative path")?;
     Ok(NormalizedSpecifier::Path(raw.to_owned()))
 }
@@ -832,7 +902,11 @@ fn validate_node_name(name: &str) -> Result<(), Error> {
 }
 
 /// Validates a slash-separated module path with no empty, `.`, or `..` segment.
-fn validate_module_path(path: &str, max_bytes: usize, subject: &str) -> Result<(), Error> {
+pub(crate) fn validate_module_path(
+    path: &str,
+    max_bytes: usize,
+    subject: &str,
+) -> Result<(), Error> {
     if path.is_empty() {
         return Err(invalid(&format!("{subject} is empty")));
     }

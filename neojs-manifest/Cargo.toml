@@ -10,6 +10,7 @@ authors.workspace = true
 readme = "README.md"
 
 [dependencies]
+glob.workspace = true
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
 semver.workspace = true
 serde_json.workspace = true

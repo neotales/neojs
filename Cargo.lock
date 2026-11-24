@@ -2122,6 +2122,7 @@ dependencies = [
 name = "neojs-manifest"
 version = "0.1.0"
 dependencies = [
+ "glob",
  "neojs-module-policy",
  "semver",
  "serde_json",

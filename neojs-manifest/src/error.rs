@@ -97,4 +97,39 @@ pub enum Error {
         /// What would have to exist before the transport could be loaded.
         reason: &'static str,
     },
+    /// The workspace expands to more members than the accepted limit.
+    #[error("the workspace has more than {limit} members")]
+    WorkspaceTooManyMembers {
+        /// The maximum number of workspace members accepted.
+        limit: usize,
+    },
+    /// Workspace glob traversal visited more filesystem entries than the
+    /// accepted limit.
+    #[error("workspace glob traversal visited more than {limit} filesystem entries")]
+    WorkspaceGlobLimitExceeded {
+        /// The maximum number of filesystem entries inspected across workspace globs.
+        limit: usize,
+    },
+    /// A workspace member directory or manifest resolves outside the workspace
+    /// root, or points back to the workspace root itself.
+    #[error("a workspace member path escapes or points back to the workspace root")]
+    WorkspaceEscape,
+    /// A workspace member directory does not exist, is not a directory, or
+    /// contains no manifest file.
+    #[error("a workspace member directory is missing its manifest")]
+    MissingMemberManifest,
+    /// Two packages in the workspace (root or members) declare the same
+    /// `@scope/name` package name.
+    #[error("duplicate package name in workspace")]
+    DuplicateWorkspacePackage,
+    /// A workspace member declares its own `workspaces` patterns.
+    #[error("nested workspaces are not supported")]
+    NestedWorkspace,
+    /// The requested active member name does not belong to the workspace.
+    #[error("the requested package is not a member of the workspace")]
+    UnknownWorkspaceMember,
+    /// A workspace package import targets a subpath not declared in the
+    /// package's `exports`.
+    #[error("the requested subpath is not exported by the workspace package")]
+    UnexportedSubpath,
 }

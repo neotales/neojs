@@ -5,8 +5,10 @@
 //! fields listed on [`Manifest`] and rejects every other key.
 //!
 //! Parsing is pure except for [`Manifest::from_path`], which reads the one path
-//! it is given. Nothing here discovers a manifest, resolves a workspace, applies
-//! `include` or `exclude`, installs an import map, or fetches a package.
+//! it is given. Bounded upward discovery lives in [`crate::discover_manifest`],
+//! workspace expansion in [`crate::Workspace`], and import resolution in
+//! [`crate::ImportResolver`]. Nothing here applies `include` or `exclude`,
+//! installs an import map into a runtime, or fetches a package.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -24,11 +26,11 @@ use crate::specifier::NormalizedSpecifier;
 use crate::specifier::SpecifierKind;
 use crate::specifier::Support;
 use crate::specifier::is_windows_drive_path;
+use crate::specifier::normalize_prefix_specifier;
 use crate::specifier::normalize_specifier;
 
-/// The conventional manifest file name.
-///
-/// This crate never looks for the file on its own; the caller supplies a path.
+/// The conventional manifest file name searched for by
+/// [`crate::discover_manifest`] and [`crate::Workspace::load`].
 pub const MANIFEST_FILE_NAME: &str = "neo.jsonc";
 
 /// Maximum manifest bytes accepted by [`Manifest::parse`].
@@ -84,15 +86,17 @@ const RESERVED_FIELDS: &[(&str, &str)] = &[
 /// `.cts`, `.cjs`, declarations, JSON, and Wasm targets are rejected.
 ///
 /// `include`, `exclude`, and `workspaces` accept relative patterns containing
-/// `*`, `**`, `?`, `[`, `]`, `{`, or `}`, but this crate does not interpret
-/// them. They are syntax-checked metadata only. A pattern may not be absolute,
-/// may not contain `..`, and may not start with `!`.
+/// `*`, `**`, `?`, `[`, `]`, `{`, or `}`. `include` and `exclude` are
+/// syntax-checked metadata only, while `workspaces` is expanded by
+/// [`crate::Workspace::load`] (with `{...}` brace patterns rejected explicitly
+/// at expansion time). A pattern may not be absolute, may not contain `..`, and
+/// may not start with `!`.
 ///
 /// `imports` is a map from a specifier key to a normalized target. npm, JSR,
-/// and Node targets are accepted as metadata and report
-/// [`Support::Unsupported`]. Local, HTTPS, and GitHub targets report
-/// [`Support::NormalizedOnly`] because the map is not installed in a runtime;
-/// the V8 runtime can load a GitHub coordinate only as a direct specifier with
+/// and Node targets report [`Support::Unsupported`]. Local, HTTPS, and GitHub
+/// targets report [`Support::NormalizedOnly`]; [`crate::ImportResolver`]
+/// resolves them purely without installing an import map into a runtime, and
+/// the V8 runtime loads a GitHub coordinate only as a direct specifier with
 /// remote loading enabled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
@@ -110,9 +114,10 @@ pub struct Manifest {
     pub include: Vec<Pattern>,
     /// Files or patterns a package would exclude. Not interpreted here.
     pub exclude: Vec<Pattern>,
-    /// Normalized import-map entries. Not installed in a runtime.
+    /// Normalized import-map entries resolved by [`crate::ImportResolver`].
+    /// Not installed into a runtime.
     pub imports: ImportMap,
-    /// Workspace directory patterns. Not expanded here.
+    /// Workspace member directory globs, expanded by [`crate::Workspace::load`].
     pub workspaces: Vec<Pattern>,
 }
 
@@ -427,6 +432,12 @@ impl ExportTarget {
         if path.is_empty() {
             return Err(invalid_field("exports", "an export target names no file"));
         }
+        if is_windows_drive_path(path) {
+            return Err(invalid_field(
+                "exports",
+                "an export target may not begin with a Windows drive prefix",
+            ));
+        }
         if raw.len() > MAX_EXPORT_TARGET_BYTES {
             return Err(invalid_field(
                 "exports",
@@ -554,8 +565,9 @@ impl fmt::Display for Pattern {
 
 /// A validated import map.
 ///
-/// Keys are preserved exactly. Values are normalized by
-/// [`normalize_specifier`]. Iteration is sorted by key.
+/// Keys are preserved exactly. Exact-key values are normalized by
+/// [`normalize_specifier`], while trailing-`/` prefix keys require trailing-`/`
+/// targets. Iteration is sorted by key.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImportMap {
     entries: BTreeMap<String, NormalizedSpecifier>,
@@ -750,7 +762,11 @@ fn parse_imports(value: &Value) -> Result<ImportMap, Error> {
     for (key, value) in object {
         validate_import_key(key)?;
         let raw = string(value, "imports")?;
-        let specifier = normalize_specifier(raw)?;
+        let specifier = if key.ends_with('/') {
+            normalize_prefix_specifier(raw)?
+        } else {
+            normalize_specifier(raw)?
+        };
         if matches!(specifier.kind(), SpecifierKind::Bare) {
             return Err(invalid_field(
                 "imports",

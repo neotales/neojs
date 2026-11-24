@@ -1,19 +1,22 @@
 # `neo.jsonc`: manifest foundation
 
-**Status:** parsing, field validation, and import-specifier normalization are implemented in the
-`neojs-manifest` crate. Runtime manifest integration is **not** implemented. No function in this
-crate fetches a package, installs an import map, expands a workspace, matches `include`/`exclude`,
-or runs a Node compatibility transform.
+**Status:** parsing, field validation, import-specifier normalization, bounded upward discovery
+(`discover_manifest`), deterministic workspace expansion (`Workspace::load`), and pure
+import-map/workspace resolution (`ImportResolver`) are implemented in the `neojs-manifest` crate.
+Runtime manifest integration is **not** implemented. No function in this crate fetches a package,
+installs an import map into a JS engine, matches `include`/`exclude`, or runs a Node compatibility
+transform.
 
 The shape is inspired by Deno's `deno.json`, not compatible with it. Unknown keys are rejected
 rather than ignored.
 
 ## File and discovery
 
-The conventional name is `neo.jsonc`. The crate exposes the name as `MANIFEST_FILE_NAME`, but it
-never searches for the file. A caller passes an explicit path to `Manifest::from_path`, or passes
-the text to `Manifest::parse`. `from_path` reads at most `MAX_MANIFEST_BYTES + 1` bytes, so an
-oversized file is rejected without being loaded whole.
+The conventional name is `neo.jsonc`. The crate exposes the name as `MANIFEST_FILE_NAME` and
+provides bounded upward discovery via `discover_manifest` (bounded by `MAX_DISCOVERY_DEPTH = 64`,
+canonicalized visited directories, and an optional `stop_dir`). Callers can also pass an explicit
+path to `Manifest::from_path`, or pass the text to `Manifest::parse`. `from_path` reads at most
+`MAX_MANIFEST_BYTES + 1` bytes, so an oversized file is rejected without being loaded whole.
 
 No command-line flag reads `neo.jsonc` yet. `neojs` loads `jsr:` imports, and direct
 `gh:`/`github:` specifiers, when remote loading is enabled (`--allow-remote` or
@@ -150,9 +153,14 @@ bytes.
 Optional object mapping a non-empty specifier key to a target string. Keys may not contain
 whitespace, control characters, or `\`. At most 1024 entries; a key is at most 1024 bytes.
 
-Targets are normalized by the same public function, `normalize_specifier`. Bare targets such as
-`"react"` are rejected because the import map does not have a resolution stage yet. `http:`,
-`data:`, and `blob:` targets are rejected as unsupported transports.
+Exact-key targets are normalized by `normalize_specifier`. Prefix keys ending in `/` must map to a
+target ending in `/` (`./.../`, `https://.../` without query or fragment, `file:///.../`,
+`gh:owner/repo@ref/[sub/]`, `jsr:@scope/name@version/[sub/]`, `npm:name@version/[sub/]`, or
+`node:module/`). Bare targets such as `"react"` and `http:`, `data:`, and `blob:` targets are
+rejected. `ImportResolver` resolves `imports` and workspace `@scope/pkg` references purely (never
+intercepting `neo:*` or `node:*` schemes, matched ASCII-case-insensitively on the scheme), while
+preserving `Support` metadata so the runtime continues to enforce remote and unsupported-transport
+gates.
 
 | Target | Canonical form | Load status |
 | --- | --- | --- |
@@ -233,8 +241,13 @@ implemented.
 ### `workspaces`
 
 Optional array of relative directory patterns, at most 256 entries. Same spelling rules as
-`include`/`exclude`; `packages/*` is valid. The array is not expanded, no workspace manifest is
-read, and paths are not resolved.
+`include`/`exclude`; `packages/*` is valid. `Workspace::load` expands member globs
+deterministically using an explicit bounded traversal (`*`, `?`, `[...]`, and `**`, rejecting
+`{...}` brace patterns explicitly; sorted by canonical path; bounded by
+`MAX_WORKSPACE_MEMBERS = 256` and `MAX_WORKSPACE_GLOB_ENTRIES = 4096`), enforces canonical
+workspace-root containment on symlinks before descending, skips non-directory and non-UTF-8
+entries, rejects missing member manifests, duplicate `@scope/name` names, and nested workspaces, and
+indexes members for `ImportResolver`.
 
 Deno calls this key `workspace` (singular). This foundation uses `workspaces`; `workspace` is
 rejected with a message naming the accepted key. That is a deliberate incompatibility, not an
@@ -262,10 +275,9 @@ instead of a generic unknown field:
 
 ## What is deliberately not implemented
 
-- Reading `neo.jsonc` automatically, or from a parent directory.
-- Installing `imports` into a runtime loader.
-- Match or expansion for `include`, `exclude`, or `workspaces`.
-- Reading or publishing a workspace package.
+- Wiring `discover_manifest`, `Workspace`, or `ImportResolver` into the CLI or JS runtimes.
+- Match or expansion for `include` or `exclude`.
+- Publishing a workspace package.
 - npm registry resolution, semver-range selection, tarballs, `package.json` fields, CommonJS,
   lifecycle scripts, or native addons.
 - JSR metadata, checksums, module graphs, or cache policy.
