@@ -2,6 +2,7 @@
 name = "neojs-dbapi"
 description = "Driver-neutral SQL API with strict JSON configuration and portable named or positional parameters"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

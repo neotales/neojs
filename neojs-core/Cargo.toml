@@ -2,6 +2,7 @@
 name = "neojs-core"
 description = "Embeddable ECMAScript module runtime built on Deno's V8 bindings, with erasable TypeScript"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -40,7 +41,7 @@ neojs-builtins = { workspace = true, features = ["assert", "os", "test", "uuid"]
 neojs-crypto-core.workspace = true
 neojs-fs-core.workspace = true
 neojs-manifest.workspace = true
-neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy", features = ["typescript"] }
+neojs-module-policy = { version = "0.0.0-alpha.0", path = "../neojs-module-policy", features = ["typescript"] }
 neojs-remote.workspace = true
 neojs-ssh-core.workspace = true
 neotales-age.workspace = true

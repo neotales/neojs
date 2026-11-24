@@ -2,6 +2,7 @@
 name = "neojs-builtins"
 description = "Engine-independent Neo built-in module implementations shared by the V8 and QuickJS runtimes"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -2,6 +2,7 @@
 name = "neojs-lite-core"
 description = "Small embeddable QuickJS runtime for NeoJS Lite, sharing module policy with neojs"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -74,7 +75,7 @@ neojs-builtins = { workspace = true, optional = true }
 neojs-crypto-core = { workspace = true, optional = true }
 neojs-fs-core = { workspace = true, optional = true }
 neojs-manifest = { workspace = true, optional = true }
-neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
+neojs-module-policy = { version = "0.0.0-alpha.0", path = "../neojs-module-policy" }
 neojs-ssh-core = { workspace = true, optional = true }
 # Pinned: the C API and Rust API change between minor releases. 0.14.0 is the
 # version reviewed for this crate; `loader` supplies the module resolver and

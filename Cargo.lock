@@ -2032,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "neojs"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "neojs-core",
  "neojs-dts",
@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "neojs-builtins"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "getrandom 0.4.3",
  "sha2 0.11.1",
@@ -2056,7 +2056,7 @@ dependencies = [
 
 [[package]]
 name = "neojs-core"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "deno_core",
  "deno_error",
@@ -2082,7 +2082,7 @@ dependencies = [
 
 [[package]]
 name = "neojs-crypto-core"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "aes 0.9.4",
  "aes-gcm 0.10.3",
@@ -2098,7 +2098,7 @@ dependencies = [
 
 [[package]]
 name = "neojs-dbapi"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "neotales-dbapi",
  "neotales-dbapi-sqlite",
@@ -2109,11 +2109,11 @@ dependencies = [
 
 [[package]]
 name = "neojs-dts"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 
 [[package]]
 name = "neojs-fs-core"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "getrandom 0.4.3",
  "tempfile",
@@ -2122,7 +2122,7 @@ dependencies = [
 
 [[package]]
 name = "neojs-lite"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "neojs-dts",
  "neojs-lite-core",
@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "neojs-lite-core"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "neojs-builtins",
  "neojs-crypto-core",
@@ -2151,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "neojs-manifest"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "glob",
  "neojs-module-policy",
@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "neojs-module-policy"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "deno_ast",
  "glob",
@@ -2173,7 +2173,7 @@ dependencies = [
 
 [[package]]
 name = "neojs-npm"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -2192,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "neojs-remote"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "httpdate",
  "neojs-manifest",
@@ -2210,7 +2210,7 @@ dependencies = [
 
 [[package]]
 name = "neojs-ssh-core"
-version = "0.1.0"
+version = "0.0.0-alpha.0"
 dependencies = [
  "ed25519-dalek",
  "neotales-ssh",
