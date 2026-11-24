@@ -30,13 +30,22 @@ console.log(value);
     runtime.run_file(&file).expect("run file");
 }
 
-fn expected_list() -> &'static str {
-    match (cfg!(feature = "neo-chars"), cfg!(feature = "neo-strings")) {
-        (true, true) => r#"["neo:chars", "neo:strings"]"#,
-        (true, false) => r#"["neo:chars"]"#,
-        (false, true) => r#"["neo:strings"]"#,
-        (false, false) => "[]",
+#[cfg(feature = "neo-chars")]
+fn expected_list() -> (String, usize) {
+    let mut entries = Vec::new();
+    if cfg!(feature = "neo-assert") {
+        entries.push(r#""neo:assert""#);
     }
+    if cfg!(feature = "neo-chars") {
+        entries.push(r#""neo:chars""#);
+    }
+    if cfg!(feature = "neo-strings") {
+        entries.push(r#""neo:strings""#);
+    }
+    if cfg!(feature = "neo-test") {
+        entries.push(r#""neo:test""#);
+    }
+    (format!("[{}]", entries.join(", ")), entries.len())
 }
 
 #[cfg(feature = "neo-chars")]
@@ -69,7 +78,7 @@ if (Neo.getBuiltInModule("neo:chars") !== chars) {
 for (const name of [
     "age", "assert", "chars", "console", "cron", "crypto", "os", "path", "slices",
     "ssh", "stdio", "strings", "test", "uuid", "uuid/v4", "uuid/v7",
-    "neo:age", "neo:cron", "neo:test", "node:test", "node:fs", "fs",
+    "neo:age", "neo:cron", "node:test", "node:fs", "fs",
     "", "__proto__", "constructor", "neo:chars?x", "neo:chars#x",
 ]) {
     if (Neo.getBuiltInModule(name) !== undefined) {
@@ -103,16 +112,10 @@ try {
 if (!mutationThrew) throw new Error("a list mutation did not throw TypeError");
 if (list.length !== __EXPECTED_LENGTH__) throw new Error("the module list changed");
 "#;
+    let (list_json, list_len) = expected_list();
     let source = source
-        .replace("__EXPECTED_LIST__", expected_list())
-        .replace(
-            "__EXPECTED_LENGTH__",
-            if cfg!(feature = "neo-strings") {
-                "2"
-            } else {
-                "1"
-            },
-        );
+        .replace("__EXPECTED_LIST__", &list_json)
+        .replace("__EXPECTED_LENGTH__", &list_len.to_string());
     runtime
         .run_source("memory.js", &source)
         .expect("Neo introspection");
@@ -420,4 +423,122 @@ fn run_source_accepts_in_memory_modules() {
     runtime
         .run_source("memory.js", "export default 1;\n")
         .expect("in-memory module");
+}
+
+#[cfg(all(feature = "neo-assert", feature = "neo-test"))]
+#[test]
+fn run_tests_reports_sync_async_failure_pending_and_unhandled() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "memory.js",
+            r#"
+import test from "neo:test";
+import assert from "neo:assert";
+
+test("sync pass", () => assert.equals(1 + 1, 2));
+test("async pass", async () => {
+    await Promise.resolve();
+    assert.equals(2 + 2, 4);
+});
+test("sync fail", () => assert.equals(1, 2));
+test("pending case");
+test("unhandled", () => {
+    Promise.reject(new Error("unhandled in lite test"));
+});
+"#,
+        )
+        .expect("run source");
+    let report = runtime.run_tests().expect("run tests");
+    assert_eq!(report.total, 5);
+    assert_eq!(report.passed, 3);
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.pending, 1);
+    assert_eq!(report.unhandled, 1);
+    assert_eq!(report.unsettled, 0);
+    assert!(!report.all_passed());
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|line| line.contains("unhandled in lite test")),
+        "{:?}",
+        report.failures
+    );
+}
+
+#[cfg(feature = "neo-test")]
+#[test]
+fn run_tests_rejects_timeout_option_explicitly_without_timers() {
+    let mut runtime = Runtime::new().expect("runtime");
+    let error = runtime
+        .run_source(
+            "memory.js",
+            r#"
+import test from "neo:test";
+test("with timeout", () => {}, { timeout: 50 });
+"#,
+        )
+        .expect_err("timeout option must fail");
+    let neojs_lite_core::Error::Module { message, .. } = error else {
+        panic!("expected module error, got {error:?}");
+    };
+    assert!(message.contains("timeout"), "{message}");
+    assert!(
+        message.contains("timer support is unavailable"),
+        "{message}"
+    );
+}
+
+#[cfg(feature = "neo-test")]
+#[test]
+fn run_tests_reports_empty_when_test_module_is_unused() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source("memory.js", "const x = 1 + 1;\n")
+        .expect("run source");
+    let report = runtime.run_tests().expect("run tests");
+    assert_eq!(report, neojs_lite_core::TestReport::default());
+    assert!(report.all_passed());
+}
+
+#[cfg(feature = "neo-assert")]
+#[test]
+fn assert_observes_native_promises_without_consulting_then_or_species() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "memory.js",
+            r#"
+import assert from "neo:assert";
+
+let touched = 0;
+class EvilPromise extends Promise {
+    static get [Symbol.species]() {
+        touched += 1;
+        throw new Error("species touched");
+    }
+    then() {
+        touched += 1;
+        throw new Error("then touched");
+    }
+}
+
+const fulfilled = new EvilPromise((resolve) => resolve("ok"));
+if (await assert.doesNotReject(() => fulfilled) !== "ok") {
+    throw new Error("lost fulfilled subclass value");
+}
+
+const rejected = new EvilPromise((_, reject) => reject(new RangeError("bad")));
+const reason = await assert.rejects(() => rejected, RangeError);
+if (!(reason instanceof RangeError) || reason.message !== "bad") {
+    throw new Error("lost rejected subclass reason");
+}
+
+if (touched !== 0) {
+    throw new Error(`overridden then or species ran ${touched} times`);
+}
+"#,
+        )
+        .expect("native promise observation");
 }

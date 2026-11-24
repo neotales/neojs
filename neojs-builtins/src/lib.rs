@@ -1,33 +1,37 @@
 //! Engine-neutral Neo built-in module implementations.
 //!
-//! This crate holds Rust implementations and metadata for built-in modules that
-//! both the V8 runtime (`neojs-core`) and the QuickJS runtime
-//! (`neojs-lite-core`) expose. It deliberately depends on neither `deno_core`
-//! nor `rquickjs`, so it can sit in both dependency graphs without moving an
-//! engine across the separation boundary. It performs no I/O.
+//! This crate holds Rust and shared ECMAScript implementations and metadata for
+//! built-in modules that both the V8 runtime (`neojs-core`) and the QuickJS
+//! runtime (`neojs-lite-core`) expose. It deliberately depends on neither
+//! `deno_core` nor `rquickjs`, so it can sit in both dependency graphs without
+//! moving an engine across the separation boundary. It performs no I/O.
 //!
 //! # What is shared
 //!
 //! A module contributes:
 //!
-//! * a Rust implementation with total predicates and explicit error results;
+//! * either a Rust implementation (`Backend::Rust`, e.g. `chars` and `strings`)
+//!   with total predicates and explicit error results, or a shared ECMAScript
+//!   factory and ESM wrapper (`Backend::Ecmascript`, e.g. `assert` and `test`)
+//!   parameterized by engine host hooks;
 //! * a [`BuiltinModule`] descriptor with the canonical specifier and the exact
 //!   export names.
 //!
-//! Each engine keeps its own binding. The V8 runtime creates native V8 function
-//! objects and the QuickJS runtime exports native QuickJS functions. There is no
-//! ECMAScript implementation source and no ECMAScript module wrapper in this
-//! crate.
+//! Each engine keeps its own binding. For Rust modules, V8 creates native V8
+//! function objects and QuickJS exports native QuickJS functions. For shared
+//! ECMAScript modules, each engine evaluates the shared factory once per realm
+//! with its native host hooks and serves the shared `.esm.js` wrapper.
 //!
 //! # Module selection
 //!
-//! Every shared module has its own Cargo feature. `chars` and `strings` are the
-//! current modules. The features are off by default; a dependent that wants a
-//! module enables it. `neojs-core` and `neojs-lite-core` enable them in their
-//! default feature sets. Cargo features are additive and unify across the
-//! dependency graph, so a build that another dependent enables a module for
-//! contains that module. Selecting modules is compile-time surface selection,
-//! not a sandbox.
+//! Every shared module has its own Cargo feature. `assert`, `chars`, `strings`,
+//! and `test` are the current modules. The features are off by default; a
+//! dependent that wants a module enables it. `neojs-core` enables `assert` and
+//! `test` unconditionally and `chars`/`strings` in its default feature set;
+//! `neojs-lite-core` enables all four in its default feature set. Cargo features
+//! are additive and unify across the dependency graph, so a build that another
+//! dependent enables a module for contains that module. Selecting modules is
+//! compile-time surface selection, not a sandbox.
 //!
 //! # Precise limits
 //!
@@ -49,6 +53,9 @@ pub enum Backend {
     /// Implemented by Rust functions in this crate and bound natively by each
     /// engine. There is no ECMAScript source.
     Rust,
+    /// Implemented by shared ECMAScript source in this crate with engine-provided
+    /// host hooks.
+    Ecmascript,
 }
 
 /// One shared built-in module, described without reference to an engine.
@@ -62,17 +69,25 @@ pub struct BuiltinModule {
     pub backend: Backend,
 }
 
+#[cfg(feature = "assert")]
+pub mod assert;
 #[cfg(feature = "chars")]
 pub mod chars;
 #[cfg(feature = "strings")]
 pub mod strings;
+#[cfg(feature = "test")]
+pub mod test;
 
 /// Every shared module this build selected, in registration order.
 pub static MODULES: &[BuiltinModule] = &[
+    #[cfg(feature = "assert")]
+    assert::MODULE,
     #[cfg(feature = "chars")]
     chars::MODULE,
     #[cfg(feature = "strings")]
     strings::MODULE,
+    #[cfg(feature = "test")]
+    test::MODULE,
 ];
 
 /// Returns the shared module for a canonical specifier, or `None`.
@@ -92,6 +107,24 @@ mod tests {
 
     #[test]
     fn the_registry_is_canonical_and_exact() {
+        #[cfg(feature = "assert")]
+        {
+            assert_eq!(
+                module("neo:assert").map(|builtin| builtin.specifier),
+                Some("neo:assert")
+            );
+            assert!(module("assert").is_none());
+            assert!(module("NEO:assert").is_none());
+            assert!(module("neo:assert?x").is_none());
+            assert!(module("neo:assert#x").is_none());
+            assert_eq!(assert::MODULE.specifier, "neo:assert");
+            assert_eq!(assert::MODULE.backend, Backend::Ecmascript);
+        }
+        #[cfg(not(feature = "assert"))]
+        {
+            assert!(module("neo:assert").is_none());
+        }
+
         #[cfg(feature = "chars")]
         {
             assert_eq!(
@@ -128,16 +161,43 @@ mod tests {
             assert!(module("neo:strings").is_none());
         }
 
-        #[cfg(not(any(feature = "chars", feature = "strings")))]
+        #[cfg(feature = "test")]
+        {
+            assert_eq!(
+                module("neo:test").map(|builtin| builtin.specifier),
+                Some("neo:test")
+            );
+            assert!(module("test").is_none());
+            assert!(module("NEO:test").is_none());
+            assert!(module("neo:test?x").is_none());
+            assert!(module("neo:test#x").is_none());
+            assert_eq!(test::MODULE.specifier, "neo:test");
+            assert_eq!(test::MODULE.backend, Backend::Ecmascript);
+        }
+        #[cfg(not(feature = "test"))]
+        {
+            assert!(module("neo:test").is_none());
+        }
+
+        #[cfg(not(any(
+            feature = "assert",
+            feature = "chars",
+            feature = "strings",
+            feature = "test"
+        )))]
         assert!(MODULES.is_empty());
     }
 
     #[test]
-    fn every_descriptor_has_exports_and_a_rust_backend() {
+    fn every_descriptor_has_exports_and_expected_backend() {
         for builtin in MODULES {
             assert!(builtin.specifier.starts_with("neo:"));
             assert!(!builtin.exports.is_empty());
-            assert_eq!(builtin.backend, Backend::Rust);
+            match builtin.specifier {
+                "neo:chars" | "neo:strings" => assert_eq!(builtin.backend, Backend::Rust),
+                "neo:assert" | "neo:test" => assert_eq!(builtin.backend, Backend::Ecmascript),
+                other => panic!("unexpected built-in module: {other}"),
+            }
         }
     }
 }

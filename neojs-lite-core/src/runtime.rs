@@ -38,7 +38,7 @@ globalThis.console = Object.freeze({
 
 /// Unhandled promise rejections recorded by QuickJS's host rejection tracker.
 #[derive(Default)]
-struct RejectionState {
+pub(super) struct RejectionState {
     /// Rejections not yet marked handled. The promise and reason are rooted, so
     /// a handled notification cannot be confused with a later promise that
     /// reuses a freed address.
@@ -52,7 +52,8 @@ struct RetainedRejection {
     /// retained and is used only as an identity token.
     key: usize,
     /// Keeps the promise alive and gives it a stable address.
-    _promise: Persistent<Value<'static>>,
+    #[cfg_attr(not(feature = "neo-test"), allow(dead_code))]
+    promise: Persistent<Value<'static>>,
     /// Keeps the reason alive so formatting can be deferred without invoking
     /// user code in the tracker callback.
     reason: Persistent<Value<'static>>,
@@ -79,7 +80,7 @@ impl RejectionState {
         } else if !self.unhandled.iter().any(|entry| entry.key == key) {
             self.unhandled.push(RetainedRejection {
                 key,
-                _promise: Persistent::save(ctx, promise),
+                promise: Persistent::save(ctx, promise),
                 reason: Persistent::save(ctx, reason),
             });
         }
@@ -310,6 +311,51 @@ pub enum Error {
     /// entry module had already started.
     #[error("the runtime has already run an entry module; create a new runtime")]
     RuntimeConsumed,
+
+    /// The `test` runner returned an unusable report or failed unexpectedly.
+    ///
+    /// This is a runner fault, not a test failure. Test failures are reported in
+    /// [`TestReport`] and make the command exit non-zero; this variant means
+    /// the counts could not be trusted, so they are not returned.
+    #[error("test runner failed: {0}")]
+    TestRunner(String),
+}
+
+/// Cumulative counts from the `neo:test` built-in in one runtime.
+///
+/// `total` counts executed tests, including pending ones. `passed`, `failed`,
+/// and `pending` partition it. `unhandled` is separate: it counts unhandled
+/// Promise rejections observed while the test module was active. A run is
+/// successful only when [`TestReport::all_passed`] is true, which requires no
+/// failure, no pending test, no unhandled rejection, and no unsettled work.
+///
+/// The counts are cumulative across explicit `run()` calls and the host's
+/// final call, so catching a failure from `run()` cannot hide it from the host.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TestReport {
+    /// Tests executed so far, including pending tests.
+    pub total: u32,
+    /// Tests that returned without throwing or rejecting.
+    pub passed: u32,
+    /// Tests that threw, rejected, or returned an unsupported value.
+    pub failed: u32,
+    /// Tests registered without a callback.
+    pub pending: u32,
+    /// Unhandled Promise rejections observed while the test module was active.
+    pub unhandled: u32,
+    /// 1 when the job queue still reported pending work after the bounded
+    /// settle rounds, otherwise 0. An unsettled verdict is a failure.
+    pub unsettled: u32,
+    /// One summary line per failure, in execution order.
+    pub failures: Vec<String>,
+}
+
+impl TestReport {
+    /// True when no test failed, none is pending, no rejection was unhandled,
+    /// and no job-queue work was left unsettled.
+    pub fn all_passed(&self) -> bool {
+        self.failed == 0 && self.pending == 0 && self.unhandled == 0 && self.unsettled == 0
+    }
 }
 
 /// Installs a test-only way to force QuickJS garbage collection.
@@ -387,7 +433,11 @@ impl Runtime {
                     })?;
                 ctx.globals().set("__neojsLiteWrite", write)?;
                 ctx.eval::<(), _>(CONSOLE_SHIM)?;
-                crate::neo::install(&ctx)?;
+                crate::neo::install(
+                    &ctx,
+                    #[cfg(feature = "neo-test")]
+                    &rejections,
+                )?;
                 #[cfg(test)]
                 install_test_gc(&ctx)?;
                 Ok(())
@@ -504,13 +554,68 @@ impl Runtime {
                         message: caught_message(&ctx, error),
                     }
                 })?;
-            drive_entry(&ctx, &name, &promise)
+            drive_promise::<()>(&ctx, &name, &promise)?;
+            #[cfg(feature = "neo-test")]
+            flush_unhandled_rejections(&ctx, &self.rejections).map_err(|error| Error::Module {
+                module: name.clone(),
+                message: caught_message(&ctx, error),
+            })?;
+            Ok(())
         });
         match result {
             Ok(()) => self.report_unhandled_rejections(name),
             Err(error) => {
                 self.clear_rejection_roots();
                 Err(error)
+            }
+        }
+    }
+
+    /// Runs the tests registered with `neo:test` and returns their cumulative report.
+    ///
+    /// Tests may be registered at top level or after a top-level await. A failing
+    /// test, a pending test, an unhandled rejection, or remaining unsettled job
+    /// queue work is recorded in the returned [`TestReport`], not as an `Err`.
+    /// `Err` means the runner itself failed, could not settle a test Promise, or
+    /// returned an inconsistent report.
+    pub fn run_tests(&mut self) -> Result<TestReport, Error> {
+        #[cfg(not(feature = "neo-test"))]
+        {
+            Err(Error::TestRunner(
+                "the `neo-test` feature is not enabled in this build".to_string(),
+            ))
+        }
+        #[cfg(feature = "neo-test")]
+        {
+            const TEST_RUN_SCRIPT: &str =
+                r#"Neo.getBuiltInModule("neo:test").run({ throwOnFailure: false, settle: true })"#;
+
+            let result = self.context.with(|ctx| {
+                let value: Value<'_> = ctx
+                    .eval(TEST_RUN_SCRIPT)
+                    .map_err(|error| Error::TestRunner(caught_message(&ctx, error)))?;
+                let promise = value.into_promise().ok_or_else(|| {
+                    Error::TestRunner("the test runner did not return a Promise".to_string())
+                })?;
+                let report_value = drive_promise::<Value<'_>>(&ctx, "<neojs:test>", &promise)
+                    .map_err(|error| match error {
+                        Error::Module { message, .. } => Error::TestRunner(message),
+                        other => other,
+                    })?;
+                if let Err(error) = flush_unhandled_rejections(&ctx, &self.rejections) {
+                    return Err(Error::TestRunner(caught_message(&ctx, error)));
+                }
+                read_test_report(report_value)
+            });
+            match result {
+                Ok(report) => {
+                    self.report_unhandled_rejections("<neojs:test>".to_string())?;
+                    Ok(report)
+                }
+                Err(error) => {
+                    self.clear_rejection_roots();
+                    Err(error)
+                }
             }
         }
     }
@@ -581,12 +686,141 @@ fn runtime_ptr(ctx: &Ctx<'_>) -> *mut qjs::JSRuntime {
     unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) }
 }
 
+/// Delivers any remaining unhandled rejections to the `neo:test` handler, if
+/// installed.
+///
+/// The pending vector is taken before invoking the JS callback so a re-entrant
+/// rejection inside the callback cannot conflict with a `RefCell` borrow.
+#[cfg(feature = "neo-test")]
+pub(super) fn flush_unhandled_rejections<'js>(
+    ctx: &Ctx<'js>,
+    rejections: &Rc<RefCell<RejectionState>>,
+) -> rquickjs::Result<()> {
+    let handler = {
+        let Some(state) = ctx.userdata::<crate::neo::NeoState>() else {
+            return Ok(());
+        };
+        state.rejection_handler.borrow().clone()
+    };
+    let Some(handler) = handler else {
+        return Ok(());
+    };
+    let handler = handler.restore(ctx)?;
+    let pending = rejections.borrow_mut().take();
+    for rejection in pending {
+        let promise = rejection.promise.clone().restore(ctx)?;
+        let reason = rejection.reason.clone().restore(ctx)?;
+        let _ = handler.call::<_, Value<'js>>((promise, reason));
+        clear_pending_exception(ctx);
+    }
+    Ok(())
+}
+
+/// Validates and reads the summary object returned by `neo:test`'s `run()`.
+#[cfg(feature = "neo-test")]
+fn read_test_report(value: Value<'_>) -> Result<TestReport, Error> {
+    let Some(object) = value.into_object() else {
+        return Err(Error::TestRunner(
+            "the test report is not an object".to_string(),
+        ));
+    };
+
+    let read_u32 = |name: &str| -> Result<u32, Error> {
+        let field: Value<'_> = object
+            .get(name)
+            .map_err(|_| Error::TestRunner(format!("the test report has no `{name}` field")))?;
+        if let Some(int) = field.as_int() {
+            return u32::try_from(int)
+                .map_err(|_| Error::TestRunner(format!("the `{name}` field is not a u32")));
+        }
+        if let Some(float) = field.as_float()
+            && float.is_finite()
+            && float >= 0.0
+            && float <= f64::from(u32::MAX)
+            && float.fract() == 0.0
+        {
+            return Ok(float as u32);
+        }
+        Err(Error::TestRunner(format!(
+            "the `{name}` field is not a u32"
+        )))
+    };
+
+    let total = read_u32("total")?;
+    let passed = read_u32("passed")?;
+    let failed = read_u32("failed")?;
+    let pending = read_u32("pending")?;
+    let unhandled = read_u32("unhandled")?;
+    let unsettled = read_u32("unsettled")?;
+    if passed
+        .checked_add(failed)
+        .and_then(|count| count.checked_add(pending))
+        != Some(total)
+    {
+        return Err(Error::TestRunner(
+            "the test counts do not add up".to_string(),
+        ));
+    }
+    if unsettled > 1 {
+        return Err(Error::TestRunner(
+            "the `unsettled` field must be 0 or 1".to_string(),
+        ));
+    }
+
+    let failures_value: Value<'_> = object
+        .get("failures")
+        .map_err(|_| Error::TestRunner("the test report has no `failures` array".to_string()))?;
+    let Some(failures) = failures_value.into_array() else {
+        return Err(Error::TestRunner(
+            "the test report has no `failures` array".to_string(),
+        ));
+    };
+    let mut lines = Vec::with_capacity(failures.len());
+    for index in 0..failures.len() {
+        let entry: Value<'_> = failures
+            .get(index)
+            .map_err(|_| Error::TestRunner("a test failure entry is missing".to_string()))?;
+        let Some(text) = entry.into_string() else {
+            return Err(Error::TestRunner(
+                "a test failure entry is not a string".to_string(),
+            ));
+        };
+        let text = text.to_string().map_err(|_| {
+            Error::TestRunner("a test failure entry is not valid UTF-8".to_string())
+        })?;
+        lines.push(text);
+    }
+
+    let expected_failures = failed
+        .checked_add(pending)
+        .and_then(|count| count.checked_add(unhandled))
+        .and_then(|count| count.checked_add(unsettled))
+        .ok_or_else(|| Error::TestRunner("the test failure count overflowed".to_string()))?;
+    if lines.len() as u64 != u64::from(expected_failures) {
+        return Err(Error::TestRunner(format!(
+            "the test report has {} failure line(s) for {} failed, pending, unhandled, or unsettled result(s)",
+            lines.len(),
+            expected_failures
+        )));
+    }
+
+    Ok(TestReport {
+        total,
+        passed,
+        failed,
+        pending,
+        unhandled,
+        unsettled,
+        failures: lines,
+    })
+}
+
 /// Returns whether QuickJS has at least one queued job.
 ///
 /// Checking before execution is what lets an entry that uses exactly the job
 /// budget succeed: the budget is only enforced when another job is known to be
 /// waiting, so no extra job runs merely to discover the queue is empty.
-fn is_job_pending(ctx: &Ctx<'_>) -> bool {
+pub(super) fn is_job_pending(ctx: &Ctx<'_>) -> bool {
     // SAFETY: the runtime pointer comes from a live context.
     unsafe { qjs::JS_IsJobPending(runtime_ptr(ctx)) }
 }
@@ -638,11 +872,16 @@ fn execute_job(ctx: &Ctx<'_>) -> JobStep {
 /// The same budget bounds both phases. If the queue still produces a job after
 /// the budget is exhausted, the call fails closed instead of spinning. The
 /// runtime is single-entry, so the caller cannot meaningfully continue it.
-fn drive_entry(ctx: &Ctx<'_>, module: &str, promise: &rquickjs::Promise<'_>) -> Result<(), Error> {
+fn drive_promise<'js, T: rquickjs::FromJs<'js>>(
+    ctx: &Ctx<'js>,
+    module: &str,
+    promise: &rquickjs::Promise<'js>,
+) -> Result<T, Error> {
     let mut jobs = 0usize;
+    let output;
     loop {
-        if let Some(result) = promise.result::<()>() {
-            result.map_err(|error| Error::Module {
+        if let Some(result) = promise.result::<T>() {
+            output = result.map_err(|error| Error::Module {
                 module: module.to_owned(),
                 message: caught_message(ctx, error),
             })?;
@@ -703,7 +942,7 @@ fn drive_entry(ctx: &Ctx<'_>, module: &str, promise: &rquickjs::Promise<'_>) -> 
             }
         }
     }
-    Ok(())
+    Ok(output)
 }
 
 /// Formats a QuickJS error, retrieving and clearing any pending exception.

@@ -16,6 +16,12 @@ const CHARS_SEQUENCE_ONE_HEX: &str =
 /// `FROM_INDEX_NOT_INTEGER` from the Rust `strings` implementation and binding.
 const STRINGS_SEQUENCE_ONE_HEX: &str = "66726f6d496e646578206d75737420626520616e20696e7465676572";
 
+/// `assert.not-thenable` from `neojs-builtins/src/assert.js`.
+const ASSERT_SEQUENCE_ONE_HEX: &str = "6173736572742e6e6f742d7468656e61626c65";
+
+/// `NEO_TEST_DURING_RUN` from `neojs-builtins/src/test.js`.
+const TEST_SEQUENCE_ONE_HEX: &str = "4e454f5f544553545f445552494e475f52554e";
+
 /// A string that is always in the shim, proving the scan reads real source bytes.
 const CONTROL_HEX: &str = "6765744275696c74496e4d6f64756c65734c697374";
 
@@ -66,4 +72,16 @@ fn shared_source_bytes_follow_the_features() {
     assert_sequences(&artifact, &strings, true, "neo-strings is enabled");
     #[cfg(not(feature = "neo-strings"))]
     assert_sequences(&artifact, &strings, false, "neo-strings is disabled");
+
+    let assert_seqs = [ASSERT_SEQUENCE_ONE_HEX];
+    #[cfg(feature = "neo-assert")]
+    assert_sequences(&artifact, &assert_seqs, true, "neo-assert is enabled");
+    #[cfg(not(feature = "neo-assert"))]
+    assert_sequences(&artifact, &assert_seqs, false, "neo-assert is disabled");
+
+    let test_seqs = [TEST_SEQUENCE_ONE_HEX];
+    #[cfg(feature = "neo-test")]
+    assert_sequences(&artifact, &test_seqs, true, "neo-test is enabled");
+    #[cfg(not(feature = "neo-test"))]
+    assert_sequences(&artifact, &test_seqs, false, "neo-test is disabled");
 }

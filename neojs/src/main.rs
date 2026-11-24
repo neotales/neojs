@@ -1,7 +1,5 @@
 //! Command-line entry point for neojs.
 
-mod test_command;
-
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -351,7 +349,7 @@ impl TestTotals {
 /// fresh runtime can also load `https:` modules, with its own default remote
 /// limits and the shared user-profile package cache.
 fn run_tests(patterns: &[String], allow_remote: bool) -> ExitCode {
-    let files = match test_command::expand(patterns) {
+    let files = match neojs_module_policy::test_glob::expand(patterns) {
         Ok(files) => files,
         Err(message) => {
             eprintln!("neojs: {message}");

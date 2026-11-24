@@ -2034,8 +2034,8 @@ dependencies = [
 name = "neojs"
 version = "0.1.0"
 dependencies = [
- "glob",
  "neojs-core",
+ "neojs-module-policy",
  "neotales-ssh",
  "tempfile",
  "tokio",
@@ -2101,6 +2101,7 @@ name = "neojs-lite"
 version = "0.1.0"
 dependencies = [
  "neojs-lite-core",
+ "neojs-module-policy",
  "tempfile",
 ]
 
@@ -2131,6 +2132,9 @@ dependencies = [
 [[package]]
 name = "neojs-module-policy"
 version = "0.1.0"
+dependencies = [
+ "glob",
+]
 
 [[package]]
 name = "neotales-age"

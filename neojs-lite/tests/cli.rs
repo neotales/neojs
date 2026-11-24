@@ -60,7 +60,7 @@ console.log(typeof Neo.getBuiltInModule("neo:strings"));
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        "neo-lite\n2\ntrue\nundefined\nundefined\nobject\nobject\n"
+        "neo-lite\n4\ntrue\nundefined\nundefined\nobject\nobject\n"
     );
     assert_eq!(stderr(&output), "");
 }
@@ -270,5 +270,120 @@ fn help_and_version_succeed() {
         stdout(&version).starts_with("neojs-lite "),
         "{}",
         stdout(&version)
+    );
+}
+
+#[test]
+fn test_subcommand_runs_globs_deduplicates_and_reports_summary() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(
+        &dir,
+        "a.test.js",
+        r#"
+import test from "neo:test";
+import assert from "neo:assert";
+test("sync pass", () => assert.equals({ ok: true }, { ok: true }));
+"#,
+    );
+    write(
+        &dir,
+        "b.test.js",
+        r#"
+import test from "neo:test";
+import assert from "neo:assert";
+test("async pass", async () => {
+    const val = await Promise.resolve(42);
+    assert.strictEquals(val, 42);
+});
+"#,
+    );
+    let glob_arg = format!("{}/*.test.js", dir.path().display());
+    let a_file = dir.path().join("a.test.js");
+
+    let output = run(&[
+        std::ffi::OsStr::new("test"),
+        std::ffi::OsStr::new(&glob_arg),
+        a_file.as_os_str(),
+    ]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("ok 1 - sync pass"), "{out}");
+    assert!(out.contains("ok 1 - async pass"), "{out}");
+    assert!(
+        out.contains("# 2 selected file(s): 2 test(s): 2 passed, 0 failed, 0 pending, 0 unhandled, 0 unsettled; 0 file(s) failed"),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_subcommand_continues_after_failure_and_isolates_files() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(
+        &dir,
+        "a-fail.test.js",
+        r#"
+import test from "neo:test";
+globalThis.leaked = true;
+test("fails", () => { throw new Error("boom"); });
+"#,
+    );
+    write(
+        &dir,
+        "b-pass.test.js",
+        r#"
+import test from "neo:test";
+test("isolated", () => {
+    if (globalThis.leaked !== undefined) throw new Error("leaked");
+});
+"#,
+    );
+    let glob_arg = format!("{}/*.test.js", dir.path().display());
+
+    let output = run(&[
+        std::ffi::OsStr::new("test"),
+        std::ffi::OsStr::new(&glob_arg),
+    ]);
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("not ok 1 - fails"), "{out}");
+    assert!(out.contains("ok 1 - isolated"), "{out}");
+    assert!(
+        out.contains("# 2 selected file(s): 2 test(s): 1 passed, 1 failed"),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_subcommand_fails_empty_files_and_unmatched_globs() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(&dir, "empty.test.js", "console.log('no tests');\n");
+    let empty_file = dir.path().join("empty.test.js");
+
+    let empty = run(&[std::ffi::OsStr::new("test"), empty_file.as_os_str()]);
+    assert_eq!(empty.status.code(), Some(1), "stderr: {}", stderr(&empty));
+    assert!(
+        stderr(&empty).contains("no tests registered"),
+        "{}",
+        stderr(&empty)
+    );
+
+    let missing_glob = format!("{}/missing*.test.js", dir.path().display());
+    let unmatched = run(&[
+        std::ffi::OsStr::new("test"),
+        std::ffi::OsStr::new(&missing_glob),
+    ]);
+    assert_eq!(unmatched.status.code(), Some(2));
+    assert!(
+        stderr(&unmatched).contains("matched no files"),
+        "{}",
+        stderr(&unmatched)
+    );
+
+    let no_args = run(&[std::ffi::OsStr::new("test")]);
+    assert_eq!(no_args.status.code(), Some(2));
+    assert!(
+        stderr(&no_args).contains("no test files or globs given"),
+        "{}",
+        stderr(&no_args)
     );
 }

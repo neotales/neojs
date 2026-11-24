@@ -1,4 +1,4 @@
-//! Deterministic expansion of the files and globs given to `neojs test`.
+//! Deterministic expansion of the files and globs given to `test` commands.
 //!
 //! Each argument is either an existing regular file or a shell-style glob whose
 //! metacharacters are `*`, `?`, and `[`. Globs never cross a path separator for
@@ -7,7 +7,7 @@
 //! arguments run each file once regardless of their order.
 //!
 //! A missing literal, an unreadable directory, a malformed pattern, or a glob
-//! that selects no regular files is an error. The command never turns an
+//! that selects no regular files is an error. The expansion never turns an
 //! unmatched argument into a silent empty run, because that looks exactly like
 //! a passing suite.
 
@@ -18,13 +18,16 @@ use std::path::PathBuf;
 use glob::MatchOptions;
 use glob::glob_with;
 
-/// Expands each argument and returns the canonical files in sorted order.
+/// Expands each argument and returns the canonical regular files in sorted order.
 ///
 /// A file that exists literally is accepted even when its name contains a glob
 /// metacharacter. Directories selected by a glob are skipped; a pattern that
 /// selects only directories is an error. The caller receives no duplicate
 /// paths and no path that is not a regular file.
-pub(crate) fn expand(patterns: &[String]) -> Result<Vec<PathBuf>, String> {
+///
+/// Fails with a descriptive error message when any pattern is empty, missing,
+/// malformed, unreadable, or selects no regular files.
+pub fn expand(patterns: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut files = BTreeSet::new();
     for pattern in patterns {
         if pattern.is_empty() {

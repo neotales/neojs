@@ -68,10 +68,12 @@ mod runtime;
 #[cfg(feature = "neo-chars")]
 mod chars;
 mod neo;
+#[cfg(any(feature = "neo-assert", feature = "neo-test"))]
+mod promise;
 #[cfg(feature = "neo-strings")]
 mod strings;
 
-pub use runtime::{Error, Runtime};
+pub use runtime::{Error, Runtime, TestReport};
 
 /// Test-only hooks. Compiled only with the off-by-default `test-support`
 /// feature, which a normal build never enables.
