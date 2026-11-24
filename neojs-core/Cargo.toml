@@ -30,7 +30,7 @@ neo-slices = ["neo-chars"]
 neo-strings = ["neojs-builtins/strings"]
 # Test-only fault injection for the peer-close reply branch. Never enabled by a
 # normal build; `neojs` enables it only for its own dev/test targets.
-test-support = ["neojs-remote/test-support"]
+test-support = ["neojs-remote/test-support", "neojs-ssh-core/test-support"]
 
 [dependencies]
 aes.workspace = true
@@ -47,8 +47,8 @@ neojs-fs-core.workspace = true
 neojs-manifest.workspace = true
 neojs-module-policy = { version = "0.1.0", path = "../neojs-module-policy" }
 neojs-remote.workspace = true
+neojs-ssh-core.workspace = true
 neotales-age.workspace = true
-neotales-ssh.workspace = true
 pbkdf2.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
@@ -60,6 +60,7 @@ zeroize.workspace = true
 # test. Normal builds do not enable this feature.
 deno_core = { workspace = true, features = ["native_module_testing"] }
 ed25519-dalek = { version = "3.0.0", features = ["pkcs8"] }
+neotales-ssh.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros"] }

@@ -438,7 +438,7 @@ pub mod test_support {
     /// the host op and the JavaScript `closed` state without relying on a
     /// racy TCP reset. It has no effect unless the feature is enabled.
     pub fn fail_next_peer_close_reply() {
-        crate::ssh::FAIL_NEXT_PEER_CLOSE_REPLY.store(true, std::sync::atomic::Ordering::SeqCst);
+        neojs_ssh_core::test_support::fail_next_peer_close_reply();
     }
 
     /// Install a deterministic cwd sequence for `f` and return its call count.
