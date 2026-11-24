@@ -189,6 +189,99 @@ if (undefinedSpawn.status !== 0 || undefinedSpawn.stdout !== "\n") {
 }
 
 #[test]
+fn throwing_object_prototype_setters_before_import_do_not_break_default_export() {
+    require("/bin/echo");
+    run(
+        policy(&["/bin/echo"]),
+        r#"
+const names = [
+    "spawnSync",
+    "execFileSync",
+    "spawn",
+    "exec",
+    "execFile",
+    "execSync",
+    "fork",
+    "ChildProcess",
+];
+const boom = new Error("pre-import prototype setter ran");
+for (const name of names) {
+    Object.defineProperty(Object.prototype, name, {
+        configurable: true,
+        set() { throw boom; },
+    });
+}
+try {
+    const childProcess = await import("node:child_process");
+    if (typeof childProcess.default !== "object") throw new Error("default export missing");
+    for (const name of names) {
+        if (childProcess.default[name] !== childProcess[name]) {
+            throw new Error(`${name} identity changed`);
+        }
+        if (!Object.prototype.hasOwnProperty.call(childProcess.default, name)) {
+            throw new Error(`${name} is not own`);
+        }
+    }
+    const result = childProcess.default.spawnSync("/bin/echo", ["ok"], { encoding: "utf8" });
+    if (result.status !== 0 || result.stdout !== "ok\n") {
+        throw new Error("actual default-export call failed");
+    }
+} finally {
+    for (const name of names) delete Object.prototype[name];
+}
+"#,
+    )
+    .expect("throwing pre-import prototype setters");
+}
+
+#[test]
+fn nonthrowing_object_prototype_setters_before_import_are_not_called() {
+    require("/bin/echo");
+    run(
+        policy(&["/bin/echo"]),
+        r#"
+const names = [
+    "spawnSync",
+    "execFileSync",
+    "spawn",
+    "exec",
+    "execFile",
+    "execSync",
+    "fork",
+    "ChildProcess",
+];
+globalThis.__prototypeSetterCalls = [];
+for (const name of names) {
+    Object.defineProperty(Object.prototype, name, {
+        configurable: true,
+        get() { return undefined; },
+        set() { globalThis.__prototypeSetterCalls.push(name); },
+    });
+}
+try {
+    const childProcess = await import("node:child_process");
+    if (globalThis.__prototypeSetterCalls.length !== 0) {
+        throw new Error(`prototype setters ran: ${globalThis.__prototypeSetterCalls.join(",")}`);
+    }
+    for (const name of names) {
+        if (childProcess.default[name] !== childProcess[name]) {
+            throw new Error(`${name} identity changed`);
+        }
+        if (!Object.prototype.hasOwnProperty.call(childProcess.default, name)) {
+            throw new Error(`${name} is not own`);
+        }
+    }
+    const output = childProcess.default.execFileSync("/bin/echo", ["ok"], { encoding: "utf8" });
+    if (output !== "ok\n") throw new Error("actual default-export call failed");
+} finally {
+    for (const name of names) delete Object.prototype[name];
+}
+"#,
+    )
+    .expect("nonthrowing pre-import prototype setters");
+}
+
+#[test]
 fn hostile_prototype_setters_do_not_break_native_results_or_errors() {
     require("/bin/echo");
     require("/bin/sh");

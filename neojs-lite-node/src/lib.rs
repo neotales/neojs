@@ -146,14 +146,14 @@ impl ModuleDef for ChildProcessModule {
         exports.export("ChildProcess", child_process.clone())?;
 
         let default = Object::new(ctx.clone())?;
-        default.set("spawnSync", spawn_sync)?;
-        default.set("execFileSync", exec_file_sync)?;
-        default.set("spawn", spawn)?;
-        default.set("exec", exec)?;
-        default.set("execFile", exec_file)?;
-        default.set("execSync", exec_sync)?;
-        default.set("fork", fork)?;
-        default.set("ChildProcess", child_process)?;
+        define_own(&default, "spawnSync", spawn_sync)?;
+        define_own(&default, "execFileSync", exec_file_sync)?;
+        define_own(&default, "spawn", spawn)?;
+        define_own(&default, "exec", exec)?;
+        define_own(&default, "execFile", exec_file)?;
+        define_own(&default, "execSync", exec_sync)?;
+        define_own(&default, "fork", fork)?;
+        define_own(&default, "ChildProcess", child_process)?;
         exports.export("default", default)?;
         Ok(())
     }
