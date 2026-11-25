@@ -181,3 +181,8 @@ url = "2"
 # Unicode General_Category lookup for `vaeljs-builtins::chars`. The crate ships
 # the Unicode 16.0 tables, is `no_std`, and has no dependencies of its own.
 unicode-general-category = "1.1.0"
+
+# Strip symbol tables from shipped release binaries (`vjs` and `vjs-lite`) across
+# all 6 release targets while preserving unwind tables for clean panics.
+[profile.release]
+strip = "symbols"

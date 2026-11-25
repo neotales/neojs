@@ -15,18 +15,24 @@ cargo tree --locked -p vaeljs-dts -e normal
 
 ## Profiles
 
-* `Profile::V8` (`vaeljs`, `Vael.engine === "vael"`):
+* `Profile::V8` (`vjs` / `vaeljs`, `Vael.engine === "vael"`, 31 modules total):
   * `console`: `log`, `debug`, `info`, `warn`, `error`
   * 20 `vael:*` built-in modules: `vael:age`, `vael:assert`, `vael:chars`,
     `vael:console`, `vael:cron`, `vael:crypto`, `vael:db`, `vael:fs`, `vael:http`,
     `vael:os`, `vael:path`, `vael:slices`, `vael:ssh`, `vael:stdio`, `vael:strings`,
     `vael:template`, `vael:test`, `vael:uuid`, `vael:uuid/v4`, `vael:uuid/v7`
-* `Profile::Lite` (`vaeljs-lite`, `Vael.engine === "vael-lite"`):
+  * 11 `node:*` compatibility modules: `node:buffer`, `node:child_process`,
+    `node:crypto`, `node:fs`, `node:fs/promises`, `node:os`, `node:path`,
+    `node:path/posix`, `node:path/win32`, `node:process`, `node:url`
+* `Profile::Lite` (`vjs-lite` / `vaeljs-lite`, `Vael.engine === "vael-lite"`, 25 modules total):
   * `console`: `log`, `debug`, `info`, `warn`, `error`
   * 15 `vael:*` built-in modules: `vael:assert`, `vael:chars`, `vael:console`,
     `vael:crypto` (13 synchronous exports only), `vael:fs`, `vael:os`, `vael:path`,
     `vael:slices`, `vael:ssh`, `vael:strings`, `vael:template`, `vael:test`,
     `vael:uuid`, `vael:uuid/v4`, `vael:uuid/v7`
+  * 10 `node:*` compatibility modules: `node:buffer`, `node:child_process`
+    (sync only), `node:crypto`, `node:fs` (sync only), `node:os`, `node:path`,
+    `node:path/posix`, `node:path/win32`, `node:process`, `node:url`
 
 ## Public API
 
