@@ -74,7 +74,10 @@
 //! `console` module is the realm's installed console object, not a separate
 //! console or an isolation boundary. `fs` calls fourteen private host ops
 //! registered by [`crate::fs`] and implemented in `neojs-fs-core` for
-//! synchronous filesystem operations. `path` is lexical POSIX and Windows path
+//! synchronous filesystem operations. When `neo-http` is enabled, `http`
+//! (`neo:http`) exposes a Go-style `ServeMux` router, traversal/symlink-safe
+//! static file serving, RFC 6265 cookies, composable middleware, and a live
+//! HTTP/1.1 server backed by `neojs-http-core`, `hyper`, and `tokio`. `path` is lexical POSIX and Windows path
 //! manipulation adapted from NeoLiteJS and `@neotales/path`; its only host read
 //! is the process working directory, through [`crate::path`], and only when a
 //! resolve/relative operation lacks an explicit absolute base. It adds no
@@ -126,11 +129,11 @@ use deno_core::url::Url;
 /// runtime. `Neo.getBuiltInModulesList` returns one frozen array of the
 /// canonical `neo:` specifiers, built from the registry in insertion order;
 /// repeated calls return that same array. The `age`,
-/// `assert`, `chars`, `cron`, `crypto`, `fs`, `os`, `path`, `slices`, `ssh`,
-/// `stdio`, `strings`, `test`, `uuid`,
-/// `uuid/v4`, and `uuid/v7` module objects are frozen and
-/// cached, so repeated `Neo.getBuiltInModule` calls with the canonical
-/// specifier return the same object for each. The `console` module object is
+/// `assert`, `chars`, `cron`, `crypto`, `fs`, `http` (when `neo-http` is
+/// enabled), `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`,
+/// `uuid`, `uuid/v4`, and `uuid/v7` module objects are frozen and cached, so
+/// repeated `Neo.getBuiltInModule` calls with the canonical specifier return
+/// the same object for each. The `console` module object is
 /// the console object the runtime installed, captured after the console shim
 /// runs. At installation time the
 /// registry, the module bindings, and the global console share the same

@@ -36,7 +36,7 @@ use neojs_http_core::{
     validate_header_name, validate_header_value,
 };
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 /// Maximum concurrent `ServeMux` router instances per isolate.
@@ -44,6 +44,12 @@ const MAX_ROUTERS: usize = 1024;
 
 /// Maximum concurrent live HTTP servers per isolate.
 const MAX_SERVERS: usize = 64;
+
+/// Maximum concurrent TCP connections accepted per server.
+const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
+
+/// Maximum concurrent live `IncomingRequestResource` slots across an isolate.
+const MAX_PENDING_REQUESTS: usize = 1024;
 
 /// Bounded queue depth between Hyper connection tasks and the JS accept loop.
 const REQUEST_CHANNEL_CAPACITY: usize = 256;
@@ -63,6 +69,9 @@ const MAX_ALLOWED_BODY_BYTES: usize = 256 * 1024 * 1024;
 /// Timeout for receiving HTTP/1.1 request headers on a connection.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Timeout for reading an incoming HTTP/1.1 request body.
+const DEFAULT_BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Default body size limit exposed to `neo:http` (`DEFAULT_MAX_BODY_BYTES`).
 const DEFAULT_BODY_LIMIT: usize = DEFAULT_MAX_BODY_BYTES;
 
@@ -70,6 +79,7 @@ const DEFAULT_BODY_LIMIT: usize = DEFAULT_MAX_BODY_BYTES;
 struct ResourceCounts {
     routers: AtomicUsize,
     servers: AtomicUsize,
+    pending_requests: AtomicUsize,
 }
 
 /// Per-isolate HTTP host state stored in `OpState`.
@@ -106,6 +116,7 @@ impl Resource for RouterResource {
 
 struct IncomingRequest {
     method: String,
+    is_head: bool,
     url: String,
     path: String,
     remote_addr: String,
@@ -116,13 +127,22 @@ struct IncomingRequest {
 
 struct HttpResponseData {
     status: u16,
+    is_head: bool,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
 struct IncomingRequestResource {
+    is_head: bool,
     data: RefCell<Option<IncomingRequestData>>,
     resp_tx: RefCell<Option<oneshot::Sender<HttpResponseData>>>,
+    counts: Arc<ResourceCounts>,
+}
+
+impl Drop for IncomingRequestResource {
+    fn drop(&mut self) {
+        self.counts.pending_requests.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 struct IncomingRequestData {
@@ -323,6 +343,19 @@ fn read_uint8_array(
         return Err(("TypeError", "Uint8Array buffer is detached"));
     }
     let length = view.byte_length();
+    let offset = view.byte_offset();
+    let Some(end) = offset.checked_add(length) else {
+        return Err((
+            "TypeError",
+            "Uint8Array buffer is detached or out of bounds",
+        ));
+    };
+    if end > buffer.byte_length() {
+        return Err((
+            "TypeError",
+            "Uint8Array buffer is detached or out of bounds",
+        ));
+    }
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(length)
@@ -337,11 +370,6 @@ fn read_uint8_array(
         }
     } else {
         let store = buffer.get_backing_store();
-        let offset = view.byte_offset();
-        let end = offset.checked_add(length).ok_or((
-            "TypeError",
-            "Uint8Array buffer is detached or out of bounds",
-        ))?;
         let slice = store.get(offset..end).ok_or((
             "TypeError",
             "Uint8Array buffer is detached or out of bounds",
@@ -540,8 +568,8 @@ fn op_neo_http_static_resolve<'s>(
         return obj.into();
     }
 
-    let body = if head_only {
-        Vec::new()
+    let (body, actual_size) = if head_only {
+        (Vec::new(), resolved.size)
     } else {
         let Ok(file) = File::open(&resolved.path) else {
             let obj = response_obj(scope);
@@ -591,7 +619,8 @@ fn op_neo_http_static_resolve<'s>(
             set_string(scope, obj, "message", "Payload Too Large");
             return obj.into();
         }
-        buf
+        let actual_len = buf.len() as u64;
+        (buf, actual_len)
     };
 
     let Some(v8_bytes) = bytes_to_v8(scope, body) else {
@@ -605,7 +634,7 @@ fn op_neo_http_static_resolve<'s>(
     let obj = response_obj(scope);
     set_bool(scope, obj, "ok", true);
     set_string(scope, obj, "mimeType", resolved.mime_type);
-    set_number(scope, obj, "size", resolved.size as f64);
+    set_number(scope, obj, "size", actual_size as f64);
     set(scope, obj, "body", v8_bytes);
     obj.into()
 }
@@ -1014,6 +1043,7 @@ fn op_neo_http_listen<'s>(
 
     let (req_tx, req_rx) = mpsc::channel::<IncomingRequest>(REQUEST_CHANNEL_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let conn_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
 
     let accept_driver = driver.clone();
     let accept_shutdown = shutdown_rx.clone();
@@ -1023,6 +1053,7 @@ fn op_neo_http_listen<'s>(
         accept_shutdown,
         accept_driver,
         max_body,
+        conn_semaphore,
     ));
 
     let inner = Arc::new(ServerInner {
@@ -1056,11 +1087,26 @@ async fn run_accept_loop(
     mut shutdown_rx: watch::Receiver<bool>,
     driver: tokio::runtime::Handle,
     max_body_bytes: usize,
+    conn_semaphore: Arc<Semaphore>,
 ) {
     loop {
         if *shutdown_rx.borrow() {
             break;
         }
+        let permit = tokio::select! {
+            biased;
+            res = shutdown_rx.changed() => {
+                if res.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+                continue;
+            }
+            res = Arc::clone(&conn_semaphore).acquire_owned() => match res {
+                Ok(permit) => permit,
+                Err(_) => break,
+            },
+        };
+
         let accepted = tokio::select! {
             biased;
             res = shutdown_rx.changed() => {
@@ -1075,6 +1121,7 @@ async fn run_accept_loop(
         let (stream, remote_addr) = match accepted {
             Ok(pair) => pair,
             Err(_) => {
+                drop(permit);
                 if *shutdown_rx.borrow() {
                     break;
                 }
@@ -1085,13 +1132,10 @@ async fn run_accept_loop(
 
         let conn_tx = req_tx.clone();
         let conn_shutdown = shutdown_rx.clone();
-        driver.spawn(serve_connection(
-            stream,
-            remote_addr,
-            conn_tx,
-            conn_shutdown,
-            max_body_bytes,
-        ));
+        driver.spawn(async move {
+            let _permit = permit;
+            serve_connection(stream, remote_addr, conn_tx, conn_shutdown, max_body_bytes).await;
+        });
     }
     drop(listener);
 }
@@ -1142,6 +1186,7 @@ async fn handle_hyper_request(
     max_body_bytes: usize,
 ) -> Result<HttpLibResponse<Full<Bytes>>, std::convert::Infallible> {
     let method = req.method().as_str().to_owned();
+    let is_head = *req.method() == hyper::Method::HEAD;
     let url = req
         .uri()
         .path_and_query()
@@ -1185,12 +1230,14 @@ async fn handle_hyper_request(
         headers.push((name_str, value_str.to_owned()));
     }
 
-    let collected = match Limited::new(req.into_body(), max_body_bytes)
-        .collect()
-        .await
+    let collected = match tokio::time::timeout(
+        DEFAULT_BODY_READ_TIMEOUT,
+        Limited::new(req.into_body(), max_body_bytes).collect(),
+    )
+    .await
     {
-        Ok(collected) => collected,
-        Err(err) => {
+        Ok(Ok(collected)) => collected,
+        Ok(Err(err)) => {
             if err.downcast_ref::<LengthLimitError>().is_some() {
                 return Ok(plain_response(
                     StatusCode::PAYLOAD_TOO_LARGE,
@@ -1199,12 +1246,19 @@ async fn handle_hyper_request(
             }
             return Ok(plain_response(StatusCode::BAD_REQUEST, "Bad Request"));
         }
+        Err(_) => {
+            return Ok(plain_response(
+                StatusCode::REQUEST_TIMEOUT,
+                "Request Timeout",
+            ));
+        }
     };
     let body = collected.to_bytes().to_vec();
 
     let (resp_tx, resp_rx) = oneshot::channel::<HttpResponseData>();
     let incoming = IncomingRequest {
         method,
+        is_head,
         url,
         path,
         remote_addr: remote_addr.to_string(),
@@ -1239,13 +1293,51 @@ fn plain_response(status: StatusCode, text: &'static str) -> HttpLibResponse<Ful
     resp
 }
 
+fn sanitize_response_headers(
+    headers: Vec<(String, String)>,
+    status: u16,
+    body_len: usize,
+    is_head: bool,
+) -> Vec<(String, String)> {
+    let allow_custom_head_cl =
+        is_head && body_len == 0 && status >= 200 && status != 204 && status != 304;
+    let forbid_cl = status < 200 || status == 204 || status == 304;
+    let mut out = Vec::with_capacity(headers.len());
+    let mut kept_cl = false;
+
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            if forbid_cl || kept_cl {
+                continue;
+            }
+            let trimmed = value.trim();
+            if !trimmed.is_empty()
+                && trimmed.bytes().all(|b| b.is_ascii_digit())
+                && let Ok(parsed) = trimmed.parse::<u64>()
+                && (allow_custom_head_cl || parsed == body_len as u64)
+            {
+                kept_cl = true;
+                out.push((name, trimmed.to_owned()));
+            }
+            continue;
+        }
+        out.push((name, value));
+    }
+    out
+}
+
 fn build_hyper_response(data: HttpResponseData) -> HttpLibResponse<Full<Bytes>> {
     let Ok(status) = StatusCode::from_u16(data.status) else {
         return plain_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
     };
+    let headers =
+        sanitize_response_headers(data.headers, data.status, data.body.len(), data.is_head);
     let mut resp = HttpLibResponse::new(Full::new(Bytes::from(data.body)));
     *resp.status_mut() = status;
-    for (name, value) in data.headers {
+    for (name, value) in headers {
         if validate_header_name(&name).is_err() || validate_header_value(&value).is_err() {
             return plain_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
         }
@@ -1274,33 +1366,58 @@ async fn op_neo_http_next_request(
     };
 
     let mut shutdown_rx = inner.shutdown_rx.clone();
-    let incoming = {
-        let mut rx = inner.rx.lock().await;
-        tokio::select! {
-            biased;
-            _ = wait_for_shutdown(&mut shutdown_rx) => None,
-            req = rx.recv() => req,
+    loop {
+        let incoming = {
+            let mut rx = inner.rx.lock().await;
+            tokio::select! {
+                biased;
+                _ = wait_for_shutdown(&mut shutdown_rx) => None,
+                req = rx.recv() => req,
+            }
+        };
+
+        let Some(req) = incoming else {
+            return -1.0;
+        };
+
+        let prev = inner
+            .counts
+            .pending_requests
+            .fetch_add(1, Ordering::Relaxed);
+        if prev >= MAX_PENDING_REQUESTS {
+            inner
+                .counts
+                .pending_requests
+                .fetch_sub(1, Ordering::Relaxed);
+            let _ = req.resp_tx.send(HttpResponseData {
+                status: 503,
+                is_head: req.is_head,
+                headers: vec![(
+                    "content-type".to_owned(),
+                    "text/plain; charset=utf-8".to_owned(),
+                )],
+                body: b"Service Unavailable".to_vec(),
+            });
+            continue;
         }
-    };
 
-    let Some(req) = incoming else {
-        return -1.0;
-    };
-
-    let res = IncomingRequestResource {
-        data: RefCell::new(Some(IncomingRequestData {
-            method: req.method,
-            url: req.url,
-            path: req.path,
-            remote_addr: req.remote_addr,
-            headers: req.headers,
-            body: req.body,
-        })),
-        resp_tx: RefCell::new(Some(req.resp_tx)),
-    };
-    let mut state = state.borrow_mut();
-    let rid = state.resource_table.add(res);
-    f64::from(rid)
+        let res = IncomingRequestResource {
+            is_head: req.is_head,
+            data: RefCell::new(Some(IncomingRequestData {
+                method: req.method,
+                url: req.url,
+                path: req.path,
+                remote_addr: req.remote_addr,
+                headers: req.headers,
+                body: req.body,
+            })),
+            resp_tx: RefCell::new(Some(req.resp_tx)),
+            counts: Arc::clone(&inner.counts),
+        };
+        let mut state = state.borrow_mut();
+        let rid = state.resource_table.add(res);
+        return f64::from(rid);
+    }
 }
 
 #[op2]
@@ -1356,16 +1473,16 @@ fn op_neo_http_respond<'s>(
     headers: v8::Local<'s, v8::Value>,
     body: v8::Local<'s, v8::Value>,
 ) -> v8::Local<'s, v8::Value> {
-    let Ok(res) = state
-        .resource_table
-        .take::<IncomingRequestResource>(req_rid)
-    else {
-        return failure(
-            scope,
-            "Error",
-            Some("NEO_HTTP_CLOSED"),
-            "request already responded or closed",
-        );
+    let is_head = {
+        let Ok(res) = state.resource_table.get::<IncomingRequestResource>(req_rid) else {
+            return failure(
+                scope,
+                "Error",
+                Some("NEO_HTTP_CLOSED"),
+                "request already responded or closed",
+            );
+        };
+        res.is_head
     };
 
     let Ok(status_num) = v8::Local::<v8::Number>::try_from(status) else {
@@ -1465,10 +1582,26 @@ fn op_neo_http_respond<'s>(
         }
     };
 
+    let sanitized_headers =
+        sanitize_response_headers(parsed_headers, status_u16, body_bytes.len(), is_head);
+
+    let Ok(res) = state
+        .resource_table
+        .take::<IncomingRequestResource>(req_rid)
+    else {
+        return failure(
+            scope,
+            "Error",
+            Some("NEO_HTTP_CLOSED"),
+            "request already responded or closed",
+        );
+    };
+
     if let Some(resp_tx) = res.resp_tx.borrow_mut().take() {
         let _ = resp_tx.send(HttpResponseData {
             status: status_u16,
-            headers: parsed_headers,
+            is_head,
+            headers: sanitized_headers,
             body: body_bytes,
         });
     }

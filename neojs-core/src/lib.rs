@@ -60,10 +60,11 @@
 //! allowed, and remote code is not sandboxed.
 //!
 //! It provides the `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `fs`,
-//! `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`, and `uuid` built-in
-//! modules through `Neo.getBuiltInModule("neo:name")` and through the canonical
-//! module specifiers `neo:age`, `neo:assert`, `neo:chars`, `neo:console`,
-//! `neo:cron`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:path`, `neo:slices`,
+//! `http` (when `neo-http` is enabled), `os`, `path`, `slices`, `ssh`, `stdio`,
+//! `strings`, `test`, and `uuid` built-in modules through
+//! `Neo.getBuiltInModule("neo:name")` and through the canonical module
+//! specifiers `neo:age`, `neo:assert`, `neo:chars`, `neo:console`, `neo:cron`,
+//! `neo:crypto`, `neo:fs`, `neo:http`, `neo:os`, `neo:path`, `neo:slices`,
 //! `neo:ssh`, `neo:stdio`, `neo:strings`, `neo:test`, `neo:uuid`,
 //! `neo:uuid/v4`, and `neo:uuid/v7`. A bare name is not a built-in module specifier and does not
 //! resolve. The `uuid/v4` and `uuid/v7` subpaths are thin modules whose named
@@ -300,13 +301,13 @@
 //! provenance contracts.
 //!
 //! An ES module namespace object is not the registry object. For `age`,
-//! `assert`, `chars`, `cron`, `crypto`, `os`, `path`, `slices`, `ssh`,
-//! `stdio`, and `strings`, both paths expose the same classes, functions, and
-//! shared stream objects;
+//! `assert`, `chars`, `cron`, `crypto`, `fs`, `http` (under `neo-http`),
+//! `os`, `path`, `slices`, `ssh`, `stdio`, and `strings`, both paths expose the
+//! same classes, functions, and shared stream objects;
 //! the
-//! namespace is a separate container over them. `chars`, `strings`, and
-//! `slices` are present only when the `neo-chars`, `neo-strings`, and
-//! `neo-slices` features are enabled; a default V8 build enables all three, and
+//! namespace is a separate container over them. `chars`, `http`, `strings`, and
+//! `slices` are present only when the `neo-chars`, `neo-http`, `neo-strings`, and
+//! `neo-slices` features are enabled; a default V8 build enables all four, and
 //! `neo-slices` implies `neo-chars`. For
 //! `assert`, the registry
 //! object is the callable function, and the module also has a default export

@@ -28,12 +28,14 @@
     const makeUint8Array = Uint8Array;
     const freeze = Object.freeze;
     const defineProperty = Object.defineProperty;
+    const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+    const getPrototypeOf = Object.getPrototypeOf;
     const hasOwn = Object.hasOwn;
     const objectEntries = Object.entries;
     const objectCreate = Object.create;
     const arrayIsArray = Array.isArray;
+    const arrayFrom = Array.from;
     const isInteger = Number.isInteger;
-    const promiseResolve = Promise.resolve.bind(Promise);
     const promiseAllSettled = Promise.allSettled.bind(Promise);
     const jsonStringify = JSON.stringify;
     const jsonParse = JSON.parse;
@@ -41,13 +43,75 @@
     const stringToUpperCase = Function.prototype.call.bind(String.prototype.toUpperCase);
     const stringTrim = Function.prototype.call.bind(String.prototype.trim);
     const stringSlice = Function.prototype.call.bind(String.prototype.slice);
+    const stringSplit = Function.prototype.call.bind(String.prototype.split);
     const stringIndexOf = Function.prototype.call.bind(String.prototype.indexOf);
     const stringIncludes = Function.prototype.call.bind(String.prototype.includes);
     const stringStartsWith = Function.prototype.call.bind(String.prototype.startsWith);
     const stringEndsWith = Function.prototype.call.bind(String.prototype.endsWith);
+
+    const typedArrayProto = getPrototypeOf(Uint8Array.prototype);
     const typedArraySet = Function.prototype.call.bind(Uint8Array.prototype.set);
+    const typedArrayIndexOf = Function.prototype.call.bind(typedArrayProto.indexOf);
+    const typedArrayToStringTag = Function.prototype.call.bind(
+        getOwnPropertyDescriptor(typedArrayProto, Symbol.toStringTag).get,
+    );
+    const typedArrayByteLength = Function.prototype.call.bind(
+        getOwnPropertyDescriptor(typedArrayProto, "byteLength").get,
+    );
+
+    const makeSet = Set;
+    const setAdd = Function.prototype.call.bind(Set.prototype.add);
+    const setDelete = Function.prototype.call.bind(Set.prototype.delete);
+    const setSize = Function.prototype.call.bind(
+        getOwnPropertyDescriptor(Set.prototype, "size").get,
+    );
+    const setValues = Function.prototype.call.bind(Set.prototype.values);
+
+    const makeWeakMap = WeakMap;
+    const weakMapGet = Function.prototype.call.bind(WeakMap.prototype.get);
+    const weakMapSet = Function.prototype.call.bind(WeakMap.prototype.set);
+    const weakMapHas = Function.prototype.call.bind(WeakMap.prototype.has);
+
+    const responseState = new makeWeakMap();
+    const muxState = new makeWeakMap();
 
     const DEFAULT_MAX_BODY_BYTES = opDefaultMaxBodyBytes();
+
+    function ownField(obj, key) {
+        return hasOwn(obj, key) ? obj[key] : undefined;
+    }
+
+    function defineOwn(target, key, value, enumerable = true) {
+        defineProperty(target, key, {
+            __proto__: null,
+            value,
+            writable: true,
+            enumerable,
+            configurable: true,
+        });
+    }
+
+    function assertGenuineUint8Array(value, message) {
+        let tag;
+        try {
+            tag = typedArrayToStringTag(value);
+        } catch {
+            throw new makeTypeError(message);
+        }
+        if (tag !== "Uint8Array") {
+            throw new makeTypeError(message);
+        }
+        // Validates attached & in-bounds (including ResizableArrayBuffer views) in O(1).
+        typedArrayIndexOf(value, 0, 1 / 0);
+    }
+
+    function copyBytes(bytes) {
+        assertGenuineUint8Array(bytes, "value must be a Uint8Array");
+        const len = typedArrayByteLength(bytes);
+        const copy = new makeUint8Array(len);
+        typedArraySet(copy, bytes);
+        return copy;
+    }
 
     function throwFailure(result) {
         let err;
@@ -58,11 +122,11 @@
         } else {
             err = new makeError(result.message);
             if (result.name) {
-                err.name = result.name;
+                defineOwn(err, "name", result.name, false);
             }
         }
         if (result.code !== undefined) {
-            err.code = result.code;
+            defineOwn(err, "code", result.code, true);
         }
         throw err;
     }
@@ -72,12 +136,6 @@
             throwFailure(result || { name: "Error", message: "HTTP host operation failed" });
         }
         return result;
-    }
-
-    function copyBytes(bytes) {
-        const copy = new makeUint8Array(bytes.byteLength);
-        typedArraySet(copy, bytes);
-        return copy;
     }
 
     function encodeUtf8(str) {
@@ -93,39 +151,24 @@
     }
 
     function buildSafeRecord(pairs) {
-        const record = {};
+        const record = objectCreate(null);
         for (let i = 0; i < pairs.length; i++) {
             const pair = pairs[i];
-            defineProperty(record, pair[0], {
-                value: pair[1],
-                writable: true,
-                enumerable: true,
-                configurable: true,
-            });
+            defineOwn(record, pair[0], pair[1], true);
         }
         return freeze(record);
     }
 
     function buildCollapsedHeadersRecord(pairs) {
-        const record = {};
+        const record = objectCreate(null);
         for (let i = 0; i < pairs.length; i++) {
             const name = stringToLowerCase(pairs[i][0]);
             const val = pairs[i][1];
             if (hasOwn(record, name)) {
                 const sep = name === "cookie" ? "; " : ", ";
-                defineProperty(record, name, {
-                    value: record[name] + sep + val,
-                    writable: true,
-                    enumerable: true,
-                    configurable: true,
-                });
+                defineOwn(record, name, record[name] + sep + val, true);
             } else {
-                defineProperty(record, name, {
-                    value: val,
-                    writable: true,
-                    enumerable: true,
-                    configurable: true,
-                });
+                defineOwn(record, name, val, true);
             }
         }
         return freeze(record);
@@ -169,16 +212,16 @@
             }
             const msg = message !== undefined ? String(message) : defaultStatusText(status);
             super(msg);
-            this.name = "HttpError";
-            this.status = status;
+            defineOwn(this, "name", "HttpError", false);
+            defineOwn(this, "status", status, true);
             if (code !== undefined) {
                 if (typeof code !== "string") {
                     throw new makeTypeError("HttpError code must be a string");
                 }
-                this.code = code;
+                defineOwn(this, "code", code, true);
             }
             if (details !== undefined) {
-                this.details = details;
+                defineOwn(this, "details", details, true);
             }
         }
     }
@@ -224,7 +267,9 @@
             if (cleaned.length > 0) {
                 const allowHeader = cleaned.join(", ");
                 validateHeader("allow", allowHeader);
-                err.headers = freeze({ allow: allowHeader });
+                const allowObj = objectCreate(null);
+                defineOwn(allowObj, "allow", allowHeader, true);
+                defineOwn(err, "headers", freeze(allowObj), true);
             }
         }
         return err;
@@ -356,14 +401,14 @@
         }
         const res = unwrap(
             opFormatSetCookie(
-                cookie.name,
-                cookie.value,
-                cookie.path,
-                cookie.domain,
-                cookie.maxAge,
-                cookie.httpOnly,
-                cookie.secure,
-                cookie.sameSite,
+                ownField(cookie, "name"),
+                ownField(cookie, "value"),
+                ownField(cookie, "path"),
+                ownField(cookie, "domain"),
+                ownField(cookie, "maxAge"),
+                ownField(cookie, "httpOnly"),
+                ownField(cookie, "secure"),
+                ownField(cookie, "sameSite"),
             ),
         );
         return res.value;
@@ -409,9 +454,6 @@
         throw new makeTypeError("headers must be a plain object or [name, value][] array");
     }
 
-    const RESPONSE_RAW_HEADERS = Symbol("neoHttpResponseRawHeaders");
-    const RESPONSE_RAW_BODY = Symbol("neoHttpResponseRawBody");
-
     class HttpResponse {
         #status;
         #headersList;
@@ -423,6 +465,10 @@
             this.#headersList = headersList;
             this.#headersRecord = buildCollapsedHeadersRecord(headersList);
             this.#bodyBytes = bodyBytes;
+            weakMapSet(responseState, this, {
+                headersList,
+                bodyBytes,
+            });
             freeze(this);
         }
 
@@ -471,28 +517,29 @@
         json() {
             return jsonParse(this.text());
         }
+    }
 
-        [RESPONSE_RAW_HEADERS]() {
-            return this.#headersList;
+    function getResponseInternal(res) {
+        const state = weakMapGet(responseState, res);
+        if (!state) {
+            throw new makeTypeError("handler must return an HttpResponse");
         }
-
-        [RESPONSE_RAW_BODY]() {
-            return this.#bodyBytes;
-        }
+        return state;
     }
 
     function cloneResponseWithExtraHeaders(res, extraPairs) {
-        if (!(res instanceof HttpResponse)) {
+        const state = weakMapGet(responseState, res);
+        if (!state) {
             throw new makeTypeError("res must be an HttpResponse");
         }
-        const merged = [...res[RESPONSE_RAW_HEADERS]()];
+        const merged = [...state.headersList];
         for (let i = 0; i < extraPairs.length; i++) {
             const name = stringToLowerCase(extraPairs[i][0]);
             const value = extraPairs[i][1];
             validateHeader(name, value);
             merged.push([name, value]);
         }
-        return new HttpResponse(res.status, merged, res[RESPONSE_RAW_BODY]());
+        return new HttpResponse(res.status, merged, state.bodyBytes);
     }
 
     function setHeaderIfAbsent(headersList, name, value) {
@@ -527,32 +574,60 @@
         return next;
     }
 
+    function ensureVaryOrigin(headersList) {
+        const next = [];
+        let found = false;
+        for (let i = 0; i < headersList.length; i++) {
+            const name = headersList[i][0];
+            const val = headersList[i][1];
+            if (name === "vary") {
+                found = true;
+                const tokens = stringSplit(val, ",");
+                let hasOrigin = false;
+                for (let j = 0; j < tokens.length; j++) {
+                    const tok = stringToLowerCase(stringTrim(tokens[j]));
+                    if (tok === "origin" || tok === "*") {
+                        hasOrigin = true;
+                        break;
+                    }
+                }
+                next.push([name, hasOrigin ? val : `${val}, Origin`]);
+            } else {
+                next.push(headersList[i]);
+            }
+        }
+        if (!found) {
+            next.push(["vary", "Origin"]);
+        }
+        return next;
+    }
+
     function response(body, init) {
         if (init !== undefined && (init === null || typeof init !== "object" || arrayIsArray(init))) {
             throw new makeTypeError("ResponseInit must be an object");
         }
-        const status = init && init.status !== undefined ? init.status : 200;
+        const statusOpt = init ? ownField(init, "status") : undefined;
+        const status = statusOpt !== undefined ? statusOpt : 200;
         if (!isInteger(status) || status < 100 || status > 599) {
             throw new makeRangeError("response status must be an integer between 100 and 599");
         }
-        const headersList = normalizeHeadersInput(init ? init.headers : undefined);
+        const headersList = normalizeHeadersInput(init ? ownField(init, "headers") : undefined);
         let bodyBytes;
         if (body === undefined || body === null) {
             bodyBytes = new makeUint8Array(0);
         } else if (typeof body === "string") {
             bodyBytes = encodeUtf8(body);
-        } else if (body instanceof makeUint8Array) {
-            bodyBytes = copyBytes(body);
         } else {
-            throw new makeTypeError("response body must be a string, Uint8Array, null, or undefined");
+            bodyBytes = copyBytes(body);
         }
         return new HttpResponse(status, headersList, bodyBytes);
     }
 
     function responseWithDefaultContentType(body, contentType, init) {
         const res = response(body, init);
-        const headersList = setHeaderIfAbsent(res[RESPONSE_RAW_HEADERS](), "content-type", contentType);
-        return new HttpResponse(res.status, headersList, res[RESPONSE_RAW_BODY]());
+        const state = getResponseInternal(res);
+        const headersList = setHeaderIfAbsent(state.headersList, "content-type", contentType);
+        return new HttpResponse(res.status, headersList, state.bodyBytes);
     }
 
     function json(data, init) {
@@ -598,7 +673,10 @@
         if (init !== undefined && (init === null || typeof init !== "object" || arrayIsArray(init))) {
             throw new makeTypeError("ResponseInit must be an object");
         }
-        return response(null, { headers: init ? init.headers : undefined, status: 204 });
+        return response(null, {
+            headers: init ? ownField(init, "headers") : undefined,
+            status: 204,
+        });
     }
 
     function setCookie(res, cookie) {
@@ -677,7 +755,7 @@
     function buildHttpRequest(raw, paramsPairs) {
         const headersRecord = buildCollapsedHeadersRecord(raw.headers);
         const paramsRecord = buildSafeRecord(paramsPairs || []);
-        let cookiesRecord = freeze({});
+        let cookiesRecord = freeze(objectCreate(null));
         if (hasOwn(headersRecord, "cookie")) {
             const parsed = opParseCookies(headersRecord.cookie);
             if (parsed && parsed.ok === true) {
@@ -700,23 +778,30 @@
     }
 
     function errorToResponse(err, req) {
+        const rawStatus = ownField(err, "status");
+        const status = isInteger(rawStatus) && rawStatus >= 100 && rawStatus <= 599 ? rawStatus : 500;
+        const msg = String(ownField(err, "message") ?? defaultStatusText(status));
+        const code = ownField(err, "code");
+        const details = ownField(err, "details");
+        const errHeaders = ownField(err, "headers");
+
         const accept = req && typeof req.header === "function" ? req.header("accept") || "" : "";
         const wantsJson = stringIncludes(stringToLowerCase(accept), "application/json");
-        const init = err.headers ? { status: err.status, headers: err.headers } : { status: err.status };
+        const init = errHeaders ? { status, headers: errHeaders } : { status };
         if (wantsJson) {
             const payload = {
-                error: err.message,
-                status: err.status,
+                error: msg,
+                status,
             };
-            if (err.code !== undefined) {
-                payload.code = err.code;
+            if (code !== undefined) {
+                payload.code = code;
             }
-            if (err.details !== undefined) {
-                payload.details = err.details;
+            if (details !== undefined) {
+                payload.details = details;
             }
             return json(payload, init);
         }
-        return text(err.message, init);
+        return text(msg, init);
     }
 
     function internalServerErrorResponse(req) {
@@ -750,7 +835,7 @@
         if (options !== undefined && (options === null || typeof options !== "object" || arrayIsArray(options))) {
             throw new makeTypeError("recover options must be an object");
         }
-        const onError = options && options.onError;
+        const onError = options ? ownField(options, "onError") : undefined;
         if (onError !== undefined && typeof onError !== "function") {
             throw new makeTypeError("recover options.onError must be a function");
         }
@@ -799,14 +884,15 @@
         if (options !== undefined && (options === null || typeof options !== "object" || arrayIsArray(options))) {
             throw new makeTypeError("requestId options must be an object");
         }
-        const headerName = options && options.headerName !== undefined ? options.headerName : "x-request-id";
+        const headerNameOpt = options ? ownField(options, "headerName") : undefined;
+        const headerName = headerNameOpt !== undefined ? headerNameOpt : "x-request-id";
         if (typeof headerName !== "string") {
             throw new makeTypeError("requestId options.headerName must be a string");
         }
         const lowerHeader = stringToLowerCase(headerName);
         validateHeader(lowerHeader, "id");
 
-        const generator = options && options.generator;
+        const generator = options ? ownField(options, "generator") : undefined;
         if (generator !== undefined && typeof generator !== "function") {
             throw new makeTypeError("requestId options.generator must be a function");
         }
@@ -823,11 +909,9 @@
                     ctx.state.requestId = id;
                 }
                 const res = await next(req, ctx);
-                if (!(res instanceof HttpResponse)) {
-                    throw new makeTypeError("handler must return an HttpResponse");
-                }
-                const nextHeaders = replaceOrAppendHeader(res[RESPONSE_RAW_HEADERS](), lowerHeader, id);
-                return new HttpResponse(res.status, nextHeaders, res[RESPONSE_RAW_BODY]());
+                const resState = getResponseInternal(res);
+                const nextHeaders = replaceOrAppendHeader(resState.headersList, lowerHeader, id);
+                return new HttpResponse(res.status, nextHeaders, resState.bodyBytes);
             };
         };
     }
@@ -836,7 +920,7 @@
         if (options !== undefined && (options === null || typeof options !== "object" || arrayIsArray(options))) {
             throw new makeTypeError("logger options must be an object");
         }
-        const sink = options && options.sink;
+        const sink = options ? ownField(options, "sink") : undefined;
         if (sink !== undefined && typeof sink !== "function") {
             throw new makeTypeError("logger options.sink must be a function");
         }
@@ -846,7 +930,7 @@
                 let status = 500;
                 try {
                     const res = await next(req, ctx);
-                    if (res instanceof HttpResponse) {
+                    if (weakMapHas(responseState, res)) {
                         status = res.status;
                     }
                     return res;
@@ -882,23 +966,13 @@
         if (options !== undefined && (options === null || typeof options !== "object" || arrayIsArray(options))) {
             throw new makeTypeError("securityHeaders options must be an object");
         }
+        const cto = options ? ownField(options, "contentTypeOptions") : undefined;
+        const fo = options ? ownField(options, "frameOptions") : undefined;
+        const rp = options ? ownField(options, "referrerPolicy") : undefined;
         const defaults = [
-            [
-                "x-content-type-options",
-                options && options.contentTypeOptions !== undefined
-                    ? options.contentTypeOptions
-                    : "nosniff",
-            ],
-            [
-                "x-frame-options",
-                options && options.frameOptions !== undefined ? options.frameOptions : "DENY",
-            ],
-            [
-                "referrer-policy",
-                options && options.referrerPolicy !== undefined
-                    ? options.referrerPolicy
-                    : "no-referrer",
-            ],
+            ["x-content-type-options", cto !== undefined ? cto : "nosniff"],
+            ["x-frame-options", fo !== undefined ? fo : "DENY"],
+            ["referrer-policy", rp !== undefined ? rp : "no-referrer"],
         ];
         const enabled = [];
         for (let i = 0; i < defaults.length; i++) {
@@ -917,14 +991,12 @@
         return function securityHeadersMiddleware(next) {
             return async function securityHeadersHandler(req, ctx) {
                 const res = await next(req, ctx);
-                if (!(res instanceof HttpResponse)) {
-                    throw new makeTypeError("handler must return an HttpResponse");
-                }
-                let nextHeaders = res[RESPONSE_RAW_HEADERS]();
+                const resState = getResponseInternal(res);
+                let nextHeaders = resState.headersList;
                 for (let i = 0; i < enabled.length; i++) {
                     nextHeaders = setHeaderIfAbsent(nextHeaders, enabled[i][0], enabled[i][1]);
                 }
-                return new HttpResponse(res.status, nextHeaders, res[RESPONSE_RAW_BODY]());
+                return new HttpResponse(res.status, nextHeaders, resState.bodyBytes);
             };
         };
     }
@@ -933,19 +1005,44 @@
         if (options !== undefined && (options === null || typeof options !== "object" || arrayIsArray(options))) {
             throw new makeTypeError("cors options must be an object");
         }
-        const originOpt = options && options.origin !== undefined ? options.origin : "*";
+        const originRaw = options ? ownField(options, "origin") : undefined;
+        const methodsRaw = options ? ownField(options, "methods") : undefined;
+        const allowHeadersRaw = options ? ownField(options, "allowHeaders") : undefined;
+        const exposeHeadersRaw = options ? ownField(options, "exposeHeaders") : undefined;
+        const credentialsRaw = options ? ownField(options, "credentials") : undefined;
+        const maxAgeRaw = options ? ownField(options, "maxAge") : undefined;
+
+        const originOpt = originRaw !== undefined ? originRaw : "*";
         const methodsOpt =
-            options && options.methods !== undefined
-                ? options.methods
+            methodsRaw !== undefined
+                ? methodsRaw
                 : ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
         const allowHeadersOpt =
-            options && options.allowHeaders !== undefined
-                ? options.allowHeaders
-                : ["Content-Type", "Authorization"];
-        const exposeHeadersOpt = options && options.exposeHeaders !== undefined ? options.exposeHeaders : [];
-        const credentials = options && options.credentials === true;
-        const maxAge = options && options.maxAge !== undefined ? options.maxAge : 86400;
+            allowHeadersRaw !== undefined ? allowHeadersRaw : ["Content-Type", "Authorization"];
+        const exposeHeadersOpt = exposeHeadersRaw !== undefined ? exposeHeadersRaw : [];
+        if (credentialsRaw !== undefined && typeof credentialsRaw !== "boolean") {
+            throw new makeTypeError("cors options.credentials must be a boolean");
+        }
+        const credentials = credentialsRaw === true;
+        const maxAge = maxAgeRaw !== undefined ? maxAgeRaw : 86400;
 
+        if (originOpt === "*" && credentials) {
+            throw new makeTypeError("cors cannot combine origin '*' with credentials: true");
+        }
+        if (
+            typeof originOpt !== "string" &&
+            !arrayIsArray(originOpt) &&
+            typeof originOpt !== "function"
+        ) {
+            throw new makeTypeError("cors options.origin must be a string, string[], or function");
+        }
+        if (arrayIsArray(originOpt)) {
+            for (let i = 0; i < originOpt.length; i++) {
+                if (typeof originOpt[i] !== "string") {
+                    throw new makeTypeError("cors options.origin array entries must be strings");
+                }
+            }
+        }
         if (!arrayIsArray(methodsOpt)) {
             throw new makeTypeError("cors options.methods must be an array of strings");
         }
@@ -966,12 +1063,11 @@
         if (allowHeadersStr) validateHeader("access-control-allow-headers", allowHeadersStr);
         if (exposeHeadersStr) validateHeader("access-control-expose-headers", exposeHeadersStr);
 
+        const dynamicOrigin = originOpt !== "*";
+
         function resolveAllowedOrigin(reqOrigin, req) {
             if (typeof originOpt === "string") {
                 if (originOpt === "*") {
-                    if (credentials && reqOrigin) {
-                        return reqOrigin;
-                    }
                     return "*";
                 }
                 return reqOrigin === originOpt ? originOpt : null;
@@ -985,14 +1081,11 @@
                 }
                 return null;
             }
-            if (typeof originOpt === "function") {
-                if (!reqOrigin) return null;
-                const decision = originOpt(reqOrigin, req);
-                if (decision === true) return reqOrigin;
-                if (typeof decision === "string" && decision.length > 0) return decision;
-                return null;
-            }
-            throw new makeTypeError("cors options.origin must be a string, string[], or function");
+            if (!reqOrigin) return null;
+            const decision = originOpt(reqOrigin, req);
+            if (decision === true) return reqOrigin;
+            if (typeof decision === "string" && decision.length > 0) return decision;
+            return null;
         }
 
         return function corsMiddleware(next) {
@@ -1001,13 +1094,13 @@
                 const allowedOrigin = resolveAllowedOrigin(reqOrigin, req);
 
                 if (req.method === "OPTIONS" && (req.header("access-control-request-method") || reqOrigin)) {
-                    const preflightHeaders = [];
+                    let preflightHeaders = [];
                     if (allowedOrigin !== null) {
                         validateHeader("access-control-allow-origin", allowedOrigin);
                         preflightHeaders.push(["access-control-allow-origin", allowedOrigin]);
-                        if (allowedOrigin !== "*") {
-                            preflightHeaders.push(["vary", "Origin"]);
-                        }
+                    }
+                    if (dynamicOrigin || (allowedOrigin !== null && allowedOrigin !== "*")) {
+                        preflightHeaders = ensureVaryOrigin(preflightHeaders);
                     }
                     if (credentials && allowedOrigin !== null) {
                         preflightHeaders.push(["access-control-allow-credentials", "true"]);
@@ -1023,24 +1116,34 @@
                 }
 
                 const res = await next(req, ctx);
-                if (!(res instanceof HttpResponse)) {
-                    throw new makeTypeError("handler must return an HttpResponse");
-                }
-                let nextHeaders = res[RESPONSE_RAW_HEADERS]();
+                const resState = getResponseInternal(res);
+                let nextHeaders = resState.headersList;
                 if (allowedOrigin !== null) {
                     validateHeader("access-control-allow-origin", allowedOrigin);
-                    nextHeaders = replaceOrAppendHeader(nextHeaders, "access-control-allow-origin", allowedOrigin);
-                    if (allowedOrigin !== "*") {
-                        nextHeaders = setHeaderIfAbsent(nextHeaders, "vary", "Origin");
-                    }
+                    nextHeaders = replaceOrAppendHeader(
+                        nextHeaders,
+                        "access-control-allow-origin",
+                        allowedOrigin,
+                    );
+                }
+                if (dynamicOrigin || (allowedOrigin !== null && allowedOrigin !== "*")) {
+                    nextHeaders = ensureVaryOrigin(nextHeaders);
                 }
                 if (credentials && allowedOrigin !== null) {
-                    nextHeaders = replaceOrAppendHeader(nextHeaders, "access-control-allow-credentials", "true");
+                    nextHeaders = replaceOrAppendHeader(
+                        nextHeaders,
+                        "access-control-allow-credentials",
+                        "true",
+                    );
                 }
                 if (exposeHeadersStr) {
-                    nextHeaders = replaceOrAppendHeader(nextHeaders, "access-control-expose-headers", exposeHeadersStr);
+                    nextHeaders = replaceOrAppendHeader(
+                        nextHeaders,
+                        "access-control-expose-headers",
+                        exposeHeadersStr,
+                    );
                 }
-                return new HttpResponse(res.status, nextHeaders, res[RESPONSE_RAW_BODY]());
+                return new HttpResponse(res.status, nextHeaders, resState.bodyBytes);
             };
         };
     }
@@ -1084,8 +1187,6 @@
         return methodPrefix + prefix + rawPath;
     }
 
-    const MUX_DISPATCH = Symbol("neoHttpMuxDispatch");
-
     class ServeMux {
         #core;
         #prefix;
@@ -1106,6 +1207,7 @@
                 this.#localMiddlewares = [];
                 this.#pendingRoutes = null;
                 this.#sealed = false;
+                weakMapSet(muxState, this, () => this.#getDispatch());
             } else {
                 this.#core = core;
                 this.#prefix = prefix;
@@ -1130,13 +1232,12 @@
                 this.#pendingRoutes.push({
                     pattern: fullPattern,
                     handler,
-                    middlewares: this.#localMiddlewares,
                 });
                 return this;
             }
             const handlerId = this.#core.handlers.length;
-            this.#core.handlers.push(handler);
             unwrap(opRouterAdd(this.#core.routerRid, fullPattern, handlerId));
+            this.#core.handlers.push(handler);
             return this;
         }
 
@@ -1209,22 +1310,22 @@
             fn(sub);
             sub.#sealed = true;
 
+            // Snapshot group middlewares after `fn(sub)` returns so `.use(...)` in any order
+            // within the group applies cleanly, and validate `opRouterAdd` before pushing handlers.
+            const groupStack = [...localCopy];
             for (let i = 0; i < pending.length; i++) {
                 const entry = pending[i];
                 const wrapped =
-                    entry.middlewares.length > 0
-                        ? compose(...entry.middlewares)(entry.handler)
-                        : entry.handler;
+                    groupStack.length > 0 ? compose(...groupStack)(entry.handler) : entry.handler;
                 if (this.#pendingRoutes !== null) {
                     this.#pendingRoutes.push({
                         pattern: entry.pattern,
                         handler: wrapped,
-                        middlewares: [],
                     });
                 } else {
                     const handlerId = this.#core.handlers.length;
-                    this.#core.handlers.push(wrapped);
                     unwrap(opRouterAdd(this.#core.routerRid, entry.pattern, handlerId));
+                    this.#core.handlers.push(wrapped);
                 }
             }
             return this;
@@ -1242,12 +1343,13 @@
             }
             let indexFile = "index.html";
             let hasIndex = true;
-            if (options && options.index !== undefined) {
-                if (options.index === null) {
+            const indexOpt = options ? ownField(options, "index") : undefined;
+            if (indexOpt !== undefined) {
+                if (indexOpt === null) {
                     indexFile = "";
                     hasIndex = false;
-                } else if (typeof options.index === "string") {
-                    indexFile = options.index;
+                } else if (typeof indexOpt === "string") {
+                    indexFile = indexOpt;
                     hasIndex = true;
                 } else {
                     throw new makeTypeError("static options.index must be a string or null");
@@ -1314,9 +1416,7 @@
             const handler = this.#core.handlers[matched.handlerId];
             try {
                 const result = await handler(boundReq, boundCtx);
-                if (!(result instanceof HttpResponse)) {
-                    throw new makeTypeError("route handler must return an HttpResponse");
-                }
+                getResponseInternal(result);
                 return result;
             } catch (err) {
                 if (err instanceof HttpError) {
@@ -1326,7 +1426,7 @@
             }
         }
 
-        [MUX_DISPATCH]() {
+        #getDispatch() {
             if (!this.#core.composedDispatch) {
                 const base = (req, ctx) => this.#dispatchCore(req, ctx);
                 this.#core.composedDispatch =
@@ -1347,14 +1447,19 @@
             if (typeof input === "string") {
                 url = input;
             } else if (input !== null && typeof input === "object" && !arrayIsArray(input)) {
-                if (typeof input.url !== "string" || input.url.length === 0) {
+                const inputUrl = ownField(input, "url");
+                if (typeof inputUrl !== "string" || inputUrl.length === 0) {
                     throw new makeTypeError("FetchInput.url must be a non-empty string");
                 }
-                url = input.url;
-                if (input.method !== undefined) method = input.method;
-                if (input.headers !== undefined) headersInit = input.headers;
-                if (input.body !== undefined) bodyInit = input.body;
-                if (input.remoteAddr !== undefined) remoteAddr = input.remoteAddr;
+                url = inputUrl;
+                const m = ownField(input, "method");
+                const h = ownField(input, "headers");
+                const b = ownField(input, "body");
+                const r = ownField(input, "remoteAddr");
+                if (m !== undefined) method = m;
+                if (h !== undefined) headersInit = h;
+                if (b !== undefined) bodyInit = b;
+                if (r !== undefined) remoteAddr = r;
             } else {
                 throw new makeTypeError("fetch input must be a URL path string or FetchInput object");
             }
@@ -1363,10 +1468,14 @@
                 if (init === null || typeof init !== "object" || arrayIsArray(init)) {
                     throw new makeTypeError("FetchInit must be an object");
                 }
-                if (init.method !== undefined) method = init.method;
-                if (init.headers !== undefined) headersInit = init.headers;
-                if (init.body !== undefined) bodyInit = init.body;
-                if (init.remoteAddr !== undefined) remoteAddr = init.remoteAddr;
+                const m = ownField(init, "method");
+                const h = ownField(init, "headers");
+                const b = ownField(init, "body");
+                const r = ownField(init, "remoteAddr");
+                if (m !== undefined) method = m;
+                if (h !== undefined) headersInit = h;
+                if (b !== undefined) bodyInit = b;
+                if (r !== undefined) remoteAddr = r;
             }
 
             if (typeof method !== "string" || method.length === 0) {
@@ -1385,10 +1494,8 @@
                 bodyBytes = new makeUint8Array(0);
             } else if (typeof bodyInit === "string") {
                 bodyBytes = encodeUtf8(bodyInit);
-            } else if (bodyInit instanceof makeUint8Array) {
-                bodyBytes = copyBytes(bodyInit);
             } else {
-                throw new makeTypeError("request body must be a string, Uint8Array, null, or undefined");
+                bodyBytes = copyBytes(bodyInit);
             }
 
             const split = splitUrlTarget(url);
@@ -1408,12 +1515,10 @@
                 state: objectCreate(null),
                 remoteAddr: req.remoteAddr,
             };
-            const dispatch = this[MUX_DISPATCH]();
+            const dispatch = this.#getDispatch();
             try {
                 const res = await dispatch(req, ctx);
-                if (!(res instanceof HttpResponse)) {
-                    throw new makeTypeError("handler must return an HttpResponse");
-                }
+                getResponseInternal(res);
                 return res;
             } catch (err) {
                 if (err instanceof HttpError) {
@@ -1431,22 +1536,36 @@
     function serve(optionsOrHandler, maybeHandler) {
         let options;
         let handlerOrMux;
-        if (maybeHandler === undefined && (typeof optionsOrHandler === "function" || optionsOrHandler instanceof ServeMux)) {
-            options = {};
-            handlerOrMux = optionsOrHandler;
+        if (arguments.length === 1) {
+            if (typeof optionsOrHandler === "function" || weakMapHas(muxState, optionsOrHandler)) {
+                options = objectCreate(null);
+                handlerOrMux = optionsOrHandler;
+            } else {
+                throw new makeTypeError("serve requires a Handler function or ServeMux instance");
+            }
         } else {
-            options = optionsOrHandler || {};
+            if (optionsOrHandler === undefined) {
+                options = objectCreate(null);
+            } else if (
+                optionsOrHandler === null ||
+                typeof optionsOrHandler !== "object" ||
+                arrayIsArray(optionsOrHandler)
+            ) {
+                throw new makeTypeError("serve options must be an object");
+            } else {
+                options = optionsOrHandler;
+            }
             handlerOrMux = maybeHandler;
         }
 
-        if (options === null || typeof options !== "object" || arrayIsArray(options)) {
-            throw new makeTypeError("serve options must be an object");
-        }
-        const host = options.host !== undefined ? options.host : "127.0.0.1";
-        const port = options.port !== undefined ? options.port : 8080;
-        const maxBodyBytes =
-            options.maxBodyBytes !== undefined ? options.maxBodyBytes : DEFAULT_MAX_BODY_BYTES;
-        const signal = options.signal;
+        const hostOpt = ownField(options, "host");
+        const portOpt = ownField(options, "port");
+        const maxBodyOpt = ownField(options, "maxBodyBytes");
+        const signal = ownField(options, "signal");
+
+        const host = hostOpt !== undefined ? hostOpt : "127.0.0.1";
+        const port = portOpt !== undefined ? portOpt : 8080;
+        const maxBodyBytes = maxBodyOpt !== undefined ? maxBodyOpt : DEFAULT_MAX_BODY_BYTES;
 
         if (signal !== undefined) {
             if (signal === null || typeof signal !== "object" || typeof signal.addEventListener !== "function") {
@@ -1457,8 +1576,8 @@
         let dispatchFn;
         if (typeof handlerOrMux === "function") {
             dispatchFn = handlerOrMux;
-        } else if (handlerOrMux instanceof ServeMux) {
-            dispatchFn = handlerOrMux[MUX_DISPATCH]();
+        } else if (weakMapHas(muxState, handlerOrMux)) {
+            dispatchFn = weakMapGet(muxState, handlerOrMux)();
         } else {
             throw new makeTypeError("serve requires a Handler function or ServeMux instance");
         }
@@ -1467,11 +1586,15 @@
         const serverRid = bound.serverRid;
         let closed = false;
         let closingPromise = null;
-        const inFlight = new Set();
+        const inFlight = new makeSet();
 
         function detachSignal() {
             if (signal && typeof signal.removeEventListener === "function") {
-                signal.removeEventListener("abort", onAbort);
+                try {
+                    signal.removeEventListener("abort", onAbort);
+                } catch {
+                    // Best-effort cleanup on hostile signal objects.
+                }
             }
         }
 
@@ -1480,6 +1603,16 @@
         }
 
         async function dispatchOne(reqRid) {
+            let responded = false;
+            function sendReply(status, headersList, bodyBytes) {
+                if (responded) return;
+                const res = opRespond(reqRid, status, headersList, bodyBytes);
+                if (!res || res.ok !== true) {
+                    throwFailure(res || { name: "Error", message: "opRespond failed" });
+                }
+                responded = true;
+            }
+
             let req;
             try {
                 const raw = unwrap(opTakeRequest(reqRid));
@@ -1490,21 +1623,35 @@
                     remoteAddr: req.remoteAddr,
                 };
                 const res = await dispatchFn(req, ctx);
-                if (!(res instanceof HttpResponse)) {
-                    throw new makeTypeError("handler must return an HttpResponse");
-                }
-                opRespond(reqRid, res.status, res[RESPONSE_RAW_HEADERS](), res[RESPONSE_RAW_BODY]());
+                const resState = getResponseInternal(res);
+                sendReply(res.status, resState.headersList, resState.bodyBytes);
             } catch (err) {
-                const fallback =
-                    err instanceof HttpError
-                        ? errorToResponse(err, req)
-                        : internalServerErrorResponse(req);
-                opRespond(
-                    reqRid,
-                    fallback.status,
-                    fallback[RESPONSE_RAW_HEADERS](),
-                    fallback[RESPONSE_RAW_BODY](),
-                );
+                if (!responded) {
+                    try {
+                        const fallback =
+                            err instanceof HttpError
+                                ? errorToResponse(err, req)
+                                : internalServerErrorResponse(req);
+                        const fbState = getResponseInternal(fallback);
+                        sendReply(fallback.status, fbState.headersList, fbState.bodyBytes);
+                    } catch {
+                        // Fall through to finally safety reply.
+                    }
+                }
+            } finally {
+                if (!responded) {
+                    try {
+                        opRespond(
+                            reqRid,
+                            500,
+                            [["content-type", "text/plain; charset=utf-8"]],
+                            "Internal Server Error",
+                        );
+                    } catch {
+                        // Last-resort guard.
+                    }
+                    responded = true;
+                }
             }
         }
 
@@ -1516,14 +1663,14 @@
                         break;
                     }
                     const task = dispatchOne(reqRid);
-                    inFlight.add(task);
+                    setAdd(inFlight, task);
                     task.finally(() => {
-                        inFlight.delete(task);
+                        setDelete(inFlight, task);
                     });
                 }
             } finally {
-                if (inFlight.size > 0) {
-                    await promiseAllSettled(Array.from(inFlight));
+                if (setSize(inFlight) > 0) {
+                    await promiseAllSettled(arrayFrom(setValues(inFlight)));
                 }
                 detachSignal();
             }
@@ -1542,12 +1689,17 @@
             return closingPromise;
         }
 
-        if (signal) {
-            if (signal.aborted) {
-                void close();
-            } else {
-                signal.addEventListener("abort", onAbort, { once: true });
+        try {
+            if (signal) {
+                if (signal.aborted) {
+                    void close();
+                } else {
+                    signal.addEventListener("abort", onAbort, { once: true });
+                }
             }
+        } catch (err) {
+            void close();
+            throw err;
         }
 
         const server = {
@@ -1560,6 +1712,7 @@
         };
         if (typeof Symbol === "function" && Symbol.asyncDispose) {
             defineProperty(server, Symbol.asyncDispose, {
+                __proto__: null,
                 value: close,
                 enumerable: false,
                 configurable: true,

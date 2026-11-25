@@ -17,10 +17,10 @@ cargo tree --locked -p neojs-dts -e normal
 
 * `Profile::V8` (`neojs`, `Neo.engine === "neo"`):
   * `console`: `log`, `debug`, `info`, `warn`, `error`
-  * 17 `neo:*` built-in modules: `neo:age`, `neo:assert`, `neo:chars`,
-    `neo:console`, `neo:cron`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:path`,
-    `neo:slices`, `neo:ssh`, `neo:stdio`, `neo:strings`, `neo:test`, `neo:uuid`,
-    `neo:uuid/v4`, `neo:uuid/v7`
+  * 18 `neo:*` built-in modules: `neo:age`, `neo:assert`, `neo:chars`,
+    `neo:console`, `neo:cron`, `neo:crypto`, `neo:fs`, `neo:http`, `neo:os`,
+    `neo:path`, `neo:slices`, `neo:ssh`, `neo:stdio`, `neo:strings`, `neo:test`,
+    `neo:uuid`, `neo:uuid/v4`, `neo:uuid/v7`
 * `Profile::Lite` (`neojs-lite`, `Neo.engine === "neo-lite"`):
   * `console`: `log`, `debug`, `info`, `warn`, `error`
   * 14 `neo:*` built-in modules: `neo:assert`, `neo:chars`, `neo:console`,
