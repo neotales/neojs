@@ -9,8 +9,13 @@ repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 
+[features]
+default = ["neo-template"]
+# Enables `neo:template` in `neojs-core`. Opt-outable with `--no-default-features`.
+neo-template = ["neojs-core/neo-template"]
+
 [dependencies]
-neojs-core = { version = "0.0.0-alpha.0", path = "../neojs-core" }
+neojs-core = { version = "0.0.0-alpha.0", path = "../neojs-core", default-features = false, features = ["neo-chars", "neo-slices", "neo-strings"] }
 neojs-dts.workspace = true
 neojs-manifest.workspace = true
 # Deterministic shell-style expansion for `neojs test`.

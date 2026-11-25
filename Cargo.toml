@@ -102,6 +102,9 @@ neojs-remote = { version = "0.0.0-alpha.0", path = "neojs-remote" }
 # Engine-neutral synchronous SSH core for `neo:ssh`. Has no JS engine or Tokio
 # dependency; wraps `neotales-ssh` with mandatory host trust and bounded execution.
 neojs-ssh-core = { version = "0.0.0-alpha.0", path = "neojs-ssh-core" }
+# Engine-neutral Go text/template and Sprig core for `neo:template`. Has no JS
+# engine or Tokio dependency.
+neojs-template-core = { version = "0.0.0-alpha.0", path = "neojs-template-core" }
 base64 = "0.22.1"
 flate2 = "1.1.11"
 indexmap = { version = "2.14.2", features = ["serde"] }

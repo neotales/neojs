@@ -191,3 +191,64 @@ if (imported) throw new Error("neo:strings was importable while disabled");
 "#)
     .expect("strings absent");
 }
+
+#[test]
+#[cfg(feature = "neo-template")]
+fn template_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:template")) {
+    throw new Error(`template is missing from the list: ${JSON.stringify(list)}`);
+}
+if (list.includes("template")) {
+    throw new Error(`a bare template name is listed: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:template");
+if (registry === undefined || typeof registry !== "object" || !Object.isFrozen(registry)) {
+    throw new Error("the template registry object is missing or unfrozen");
+}
+if (Neo.getBuiltInModule("template") !== undefined) {
+    throw new Error("the registry accepted a bare template name");
+}
+const namespace = await import("neo:template");
+if (namespace === registry) {
+    throw new Error("the ES module namespace must be distinct from the registry object");
+}
+if (namespace.default !== registry) {
+    throw new Error("the default export must mirror the template registry object");
+}
+if (namespace.render !== registry.render) {
+    throw new Error("the namespace export is not the registry function");
+}
+if (namespace.render("Hello {{.name}}!", { name: "Neo" }) !== "Hello Neo!") {
+    throw new Error("template did not render");
+}
+"#)
+    .expect("template feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-template"))]
+fn template_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:template") || list.includes("template")) {
+    throw new Error(`template is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:template") !== undefined) {
+    throw new Error("the canonical template registry object is still present");
+}
+if (Neo.getBuiltInModule("template") !== undefined) {
+    throw new Error("a bare template name returned a module");
+}
+let imported = false;
+try {
+    await import("neo:template");
+    imported = true;
+} catch {
+    // Expected: the loader has no template entry.
+}
+if (imported) throw new Error("neo:template was importable while disabled");
+"#)
+    .expect("template absent");
+}

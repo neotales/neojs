@@ -411,6 +411,8 @@ mod ssh;
 mod stdio;
 #[cfg(feature = "neo-strings")]
 mod strings;
+#[cfg(feature = "neo-template")]
+mod template;
 mod typescript;
 mod uuid;
 

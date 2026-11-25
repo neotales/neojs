@@ -178,6 +178,12 @@ const SLICES_IMPL_TOKEN: &str = "// __NEO_SLICES_IMPL__";
 /// The marker replaced with the `slices` registry entry.
 const SLICES_REGISTRY_TOKEN: &str = "// __NEO_SLICES_REGISTRY_ENTRY__";
 
+/// The marker replaced with the `template` implementation source.
+const TEMPLATE_IMPL_TOKEN: &str = "// __NEO_TEMPLATE_IMPL__";
+
+/// The marker replaced with the `template` registry entry.
+const TEMPLATE_REGISTRY_TOKEN: &str = "// __NEO_TEMPLATE_REGISTRY_ENTRY__";
+
 /// Returns the shim with the build target's `os` constants substituted and the
 /// selected built-in source and registration spliced in.
 ///
@@ -239,6 +245,15 @@ pub(crate) fn neo_shim() -> String {
         .replace(SLICES_IMPL_TOKEN, "")
         .replace(SLICES_REGISTRY_TOKEN, "");
 
+    #[cfg(feature = "neo-template")]
+    let shim = shim
+        .replace(TEMPLATE_IMPL_TOKEN, include_str!("builtins/template.js"))
+        .replace(TEMPLATE_REGISTRY_TOKEN, "[\"neo:template\", template],");
+    #[cfg(not(feature = "neo-template"))]
+    let shim = shim
+        .replace(TEMPLATE_IMPL_TOKEN, "")
+        .replace(TEMPLATE_REGISTRY_TOKEN, "");
+
     debug_assert!(!shim.contains(ASSERT_IMPL_TOKEN));
     debug_assert!(!shim.contains(PATH_IMPL_TOKEN));
     debug_assert!(!shim.contains(TEST_IMPL_TOKEN));
@@ -246,6 +261,8 @@ pub(crate) fn neo_shim() -> String {
     debug_assert!(!shim.contains(NATIVE_STRINGS_TOKEN));
     debug_assert!(!shim.contains(SLICES_IMPL_TOKEN));
     debug_assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
+    debug_assert!(!shim.contains(TEMPLATE_IMPL_TOKEN));
+    debug_assert!(!shim.contains(TEMPLATE_REGISTRY_TOKEN));
     shim
 }
 
@@ -473,6 +490,20 @@ const SLICES_MODULE: &str = neojs_builtins::slices::ESM_SOURCE;
 #[cfg(feature = "neo-strings")]
 pub(crate) const STRINGS_SPECIFIER: &str = "neo:strings";
 
+/// The canonical module specifier for the `template` built-in.
+///
+/// Only `neo:template` resolves to this URL. It is the canonical and only
+/// module specifier for this built-in, so the engine caches one module instance
+/// for every importer. It is not a `file:` URL and is never read from disk.
+/// With `neo-template` off, the specifier is absent from the name and source
+/// tables and the loader rejects it.
+#[cfg(feature = "neo-template")]
+pub(crate) const TEMPLATE_SPECIFIER: &str = "neo:template";
+
+/// The ECMAScript module source served for [`TEMPLATE_SPECIFIER`].
+#[cfg(feature = "neo-template")]
+const TEMPLATE_MODULE: &str = include_str!("builtins/template.esm.js");
+
 /// The canonical module specifier for the `test` built-in.
 ///
 /// Only `neo:test` resolves to this URL. It is the canonical and only module
@@ -554,6 +585,8 @@ const BUILTINS: &[(&str, &str)] = &[
     ("stdio", STDIO_SPECIFIER),
     #[cfg(feature = "neo-strings")]
     ("strings", STRINGS_SPECIFIER),
+    #[cfg(feature = "neo-template")]
+    ("template", TEMPLATE_SPECIFIER),
     ("test", TEST_SPECIFIER),
     ("uuid", UUID_SPECIFIER),
     ("uuid/v4", UUID_V4_SPECIFIER),
@@ -620,6 +653,8 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         // native module and never compiles this source.
         #[cfg(feature = "neo-strings")]
         STRINGS_SPECIFIER => Some(""),
+        #[cfg(feature = "neo-template")]
+        TEMPLATE_SPECIFIER => Some(TEMPLATE_MODULE),
         TEST_SPECIFIER => Some(TEST_MODULE),
         UUID_SPECIFIER => Some(UUID_MODULE),
         UUID_V4_SPECIFIER => Some(UUID_V4_MODULE),
@@ -648,7 +683,8 @@ mod tests {
     use super::resolve_name;
     use super::{
         ASSERT_IMPL_TOKEN, NATIVE_ENTRIES_TOKEN, NATIVE_STRINGS_TOKEN, PATH_IMPL_TOKEN,
-        SLICES_IMPL_TOKEN, SLICES_REGISTRY_TOKEN, TEST_IMPL_TOKEN,
+        SLICES_IMPL_TOKEN, SLICES_REGISTRY_TOKEN, TEMPLATE_IMPL_TOKEN, TEMPLATE_REGISTRY_TOKEN,
+        TEST_IMPL_TOKEN,
     };
     use deno_core::url::Url;
 
@@ -704,6 +740,8 @@ mod tests {
         assert!(!shim.contains(NATIVE_STRINGS_TOKEN));
         assert!(!shim.contains(SLICES_IMPL_TOKEN));
         assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
+        assert!(!shim.contains(TEMPLATE_IMPL_TOKEN));
+        assert!(!shim.contains(TEMPLATE_REGISTRY_TOKEN));
         assert!(
             shim.contains(&format!("platform: \"{}\"", std::env::consts::OS)),
             "platform literal is missing from the shim"

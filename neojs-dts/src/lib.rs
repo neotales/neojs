@@ -10,11 +10,11 @@
 //! # Profiles
 //!
 //! * [`Profile::V8`] targets the full `neojs` binary (`Neo.engine === "neo"`,
-//!   `console.{log,debug,info,warn,error}`, and all 17 `neo:*` built-in
+//!   `console.{log,debug,info,warn,error}`, and all 18 `neo:*` built-in
 //!   modules).
 //! * [`Profile::Lite`] targets the `neojs-lite` binary
 //!   (`Neo.engine === "neo-lite"`, `console.{log,debug,info,warn,error}`, and
-//!   the 14 Lite `neo:*` built-in modules).
+//!   the 15 Lite `neo:*` built-in modules).
 //!
 //! # Example
 //!
@@ -44,10 +44,10 @@ use std::path::{Component, Path, PathBuf};
 #[non_exhaustive]
 pub enum Profile {
     /// Full V8-backed `neojs` runtime (`engine: "neo"`, 5 `console` methods,
-    /// and all 17 `neo:*` built-ins).
+    /// and all 18 `neo:*` built-ins).
     V8,
     /// QuickJS-backed `neojs-lite` runtime (`engine: "neo-lite"`,
-    /// `console.{log,debug,info,warn,error}`, and the 14 Lite `neo:*`
+    /// `console.{log,debug,info,warn,error}`, and the 15 Lite `neo:*`
     /// built-ins).
     Lite,
 }
@@ -198,6 +198,7 @@ const NEO_SLICES_DTS: &str = include_str!("../types/neo/slices.d.ts");
 const NEO_SSH_DTS: &str = include_str!("../types/neo/ssh.d.ts");
 const NEO_STDIO_DTS: &str = include_str!("../types/neo/stdio.d.ts");
 const NEO_STRINGS_DTS: &str = include_str!("../types/neo/strings.d.ts");
+const NEO_TEMPLATE_DTS: &str = include_str!("../types/neo/template.d.ts");
 const NEO_TEST_DTS: &str = include_str!("../types/neo/test.d.ts");
 const NEO_UUID_DTS: &str = include_str!("../types/neo/uuid.d.ts");
 const NEO_UUID_V4_DTS: &str = include_str!("../types/neo/uuid/v4.d.ts");
@@ -278,6 +279,11 @@ const V8_FILES: &[DtsFile] = &[
         path: "neo/strings.d.ts",
         specifier: Some("neo:strings"),
         content: NEO_STRINGS_DTS,
+    },
+    DtsFile {
+        path: "neo/template.d.ts",
+        specifier: Some("neo:template"),
+        content: NEO_TEMPLATE_DTS,
     },
     DtsFile {
         path: "neo/test.d.ts",
@@ -361,6 +367,11 @@ const LITE_FILES: &[DtsFile] = &[
         path: "neo/strings.d.ts",
         specifier: Some("neo:strings"),
         content: NEO_STRINGS_DTS,
+    },
+    DtsFile {
+        path: "neo/template.d.ts",
+        specifier: Some("neo:template"),
+        content: NEO_TEMPLATE_DTS,
     },
     DtsFile {
         path: "neo/test.d.ts",
@@ -593,6 +604,12 @@ const STRINGS_EXPORTS: ModuleExports = ModuleExports {
     has_default: false,
 };
 
+const TEMPLATE_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "neo:template",
+    exports: &["render", "compile", "createTemplateSet", "escapeHtml"],
+    has_default: true,
+};
+
 const TEST_EXPORTS: ModuleExports = ModuleExports {
     specifier: "neo:test",
     exports: &["MAX_TESTS", "TestFailureError", "test", "run"],
@@ -631,6 +648,7 @@ const V8_EXPECTED_EXPORTS: &[ModuleExports] = &[
     SSH_EXPORTS,
     STDIO_EXPORTS,
     STRINGS_EXPORTS,
+    TEMPLATE_EXPORTS,
     TEST_EXPORTS,
     UUID_EXPORTS,
     UUID_V4_EXPORTS,
@@ -648,6 +666,7 @@ const LITE_EXPECTED_EXPORTS: &[ModuleExports] = &[
     SLICES_EXPORTS,
     SSH_EXPORTS,
     STRINGS_EXPORTS,
+    TEMPLATE_EXPORTS,
     TEST_EXPORTS,
     UUID_EXPORTS,
     UUID_V4_EXPORTS,

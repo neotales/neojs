@@ -59,6 +59,7 @@ console.log(typeof Neo.getBuiltInModule("neo:path"));
 console.log(typeof Neo.getBuiltInModule("neo:slices"));
 console.log(typeof Neo.getBuiltInModule("neo:ssh"));
 console.log(typeof Neo.getBuiltInModule("neo:strings"));
+console.log(typeof Neo.getBuiltInModule("neo:template"));
 console.log(typeof Neo.getBuiltInModule("neo:uuid"));
 "#,
     );
@@ -68,7 +69,7 @@ console.log(typeof Neo.getBuiltInModule("neo:uuid"));
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        "neo-lite\n14\ntrue\nundefined\nundefined\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\n"
+        "neo-lite\n15\ntrue\nundefined\nundefined\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\n"
     );
     assert_eq!(stderr(&output), "");
 }

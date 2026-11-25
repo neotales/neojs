@@ -33,6 +33,9 @@ fn expected_specifiers() -> String {
     if cfg!(feature = "neo-strings") {
         entries.push("neo:strings");
     }
+    if cfg!(feature = "neo-template") {
+        entries.push("neo:template");
+    }
     entries.extend(["neo:test", "neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]);
     format!(
         "[{}]",

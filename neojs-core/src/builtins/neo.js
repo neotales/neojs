@@ -3000,6 +3000,7 @@
         observePromise: cryptoOps.op_neo_assert_observe_promise,
     });
     // __NEO_SLICES_IMPL__
+    // __NEO_TEMPLATE_IMPL__
 
     const testCore = Deno.core;
     const testHarness = (
@@ -3032,6 +3033,7 @@
         ["neo:ssh", ssh],
         ["neo:stdio", stdio],
         // __NEO_NATIVE_STRINGS_ENTRY__
+        // __NEO_TEMPLATE_REGISTRY_ENTRY__
         ["neo:test", testModule],
         ["neo:uuid", uuid],
         ["neo:uuid/v4", uuidV4Module],

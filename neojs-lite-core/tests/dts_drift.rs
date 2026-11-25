@@ -9,6 +9,7 @@
     feature = "neo-slices",
     feature = "neo-ssh",
     feature = "neo-strings",
+    feature = "neo-template",
     feature = "neo-test",
     feature = "neo-uuid"
 ))]

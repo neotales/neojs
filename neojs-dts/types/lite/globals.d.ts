@@ -39,6 +39,7 @@ interface NeoBuiltInModuleMap {
   "neo:slices": typeof import("neo:slices");
   "neo:ssh": typeof import("neo:ssh");
   "neo:strings": typeof import("neo:strings");
+  "neo:template": Omit<typeof import("neo:template"), "default">;
   "neo:test": Omit<typeof import("neo:test"), "default">;
   "neo:uuid": typeof import("neo:uuid");
   "neo:uuid/v4": typeof import("neo:uuid/v4");

@@ -9,6 +9,7 @@
 /// <reference path="./neo/slices.d.ts" />
 /// <reference path="./neo/ssh.d.ts" />
 /// <reference path="./neo/strings.d.ts" />
+/// <reference path="./neo/template.d.ts" />
 /// <reference path="./neo/test.d.ts" />
 /// <reference path="./neo/uuid.d.ts" />
 /// <reference path="./neo/uuid/v4.d.ts" />

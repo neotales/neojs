@@ -21,7 +21,7 @@ readme = "README.md"
 # advertises. Cargo features are additive and unify across the dependency graph:
 # a feature is present whenever any dependent enables it. Selection is
 # compile-time surface selection, not a sandbox.
-default = ["neo-assert", "neo-chars", "neo-console", "neo-crypto", "neo-fs", "neo-os", "neo-path", "neo-slices", "neo-ssh", "neo-strings", "neo-test", "neo-uuid", "typescript"]
+default = ["neo-assert", "neo-chars", "neo-console", "neo-crypto", "neo-fs", "neo-os", "neo-path", "neo-slices", "neo-ssh", "neo-strings", "neo-template", "neo-test", "neo-uuid", "typescript"]
 # The shared `assert` module and its Promise observation host hooks. This
 # enables the optional `neojs-builtins` dependency and its `assert` module.
 neo-assert = ["dep:neojs-builtins", "neojs-builtins/assert"]
@@ -61,6 +61,9 @@ neo-ssh = ["dep:neojs-ssh-core"]
 # declaration, and introspection list entry. This enables the optional
 # `neojs-builtins` dependency and its `strings` module.
 neo-strings = ["dep:neojs-builtins", "neojs-builtins/strings"]
+# The shared `template` (`neo:template`) Go text/template and Sprig module
+# backed by `neojs-template-core`. `--no-default-features` keeps it out.
+neo-template = ["dep:neojs-template-core", "dep:serde_json"]
 # The shared `test` module, its host hooks, and `Runtime::run_tests`. This
 # enables the optional `neojs-builtins` dependency and its `test` module.
 neo-test = ["dep:neojs-builtins", "neojs-builtins/test"]
@@ -88,10 +91,12 @@ neojs-fs-core = { workspace = true, optional = true }
 neojs-manifest = { workspace = true, optional = true }
 neojs-module-policy = { version = "0.0.0-alpha.0", path = "../neojs-module-policy" }
 neojs-ssh-core = { workspace = true, optional = true }
+neojs-template-core = { workspace = true, optional = true }
 # Pinned: the C API and Rust API change between minor releases. 0.14.0 is the
 # version reviewed for this crate; `loader` supplies the module resolver and
 # loader traits, and `std` supplies filesystem resolution helpers.
 rquickjs = { version = "=0.14.0", default-features = false, features = ["loader", "std"] }
+serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
 url.workspace = true
 

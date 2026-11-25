@@ -156,6 +156,10 @@ impl Resolver for FileResolver {
         if name == neojs_ssh_core::SPECIFIER {
             return Ok(neojs_ssh_core::SPECIFIER.to_owned());
         }
+        #[cfg(feature = "neo-template")]
+        if name == crate::template::SPECIFIER {
+            return Ok(crate::template::SPECIFIER.to_owned());
+        }
         #[cfg(any(
             feature = "neo-assert",
             feature = "neo-chars",
@@ -287,6 +291,10 @@ impl Loader for FileLoader {
         #[cfg(feature = "neo-ssh")]
         if name == neojs_ssh_core::SPECIFIER {
             return Module::declare_def::<crate::ssh::SshModule, _>(ctx.clone(), name);
+        }
+        #[cfg(feature = "neo-template")]
+        if name == crate::template::SPECIFIER {
+            return Module::declare_def::<crate::template::TemplateModule, _>(ctx.clone(), name);
         }
         #[cfg(any(
             feature = "neo-assert",

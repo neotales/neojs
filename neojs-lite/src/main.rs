@@ -709,7 +709,7 @@ Options:
   --               End option parsing, for a file or pattern beginning with `-`
 
 Built-in modules:
-  neo:assert, neo:chars, neo:console, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7
+  neo:assert, neo:chars, neo:console, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:strings, neo:template, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7
 
 Modules are ECMAScript modules, and relative imports resolve from the importing
 file. .js, .mjs, .ts, and .mts run. TypeScript is stripped, not type checked:

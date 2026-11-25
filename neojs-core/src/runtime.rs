@@ -563,6 +563,8 @@ impl Runtime {
             neojs_stdio::init(),
             neojs_uuid::init(),
         ];
+        #[cfg(feature = "neo-template")]
+        extensions.push(crate::template::neojs_template::init());
         #[cfg(feature = "test-support")]
         extensions.push(crate::cron::test_support_extension());
         #[cfg(feature = "test-support")]

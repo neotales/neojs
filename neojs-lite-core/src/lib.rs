@@ -111,7 +111,12 @@ mod chars;
 mod crypto;
 #[cfg(feature = "neo-fs")]
 mod fs;
-#[cfg(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh"))]
+#[cfg(any(
+    feature = "neo-crypto",
+    feature = "neo-fs",
+    feature = "neo-ssh",
+    feature = "neo-template"
+))]
 mod native;
 mod neo;
 #[cfg(feature = "neo-os")]
@@ -122,6 +127,8 @@ mod promise;
 mod ssh;
 #[cfg(feature = "neo-strings")]
 mod strings;
+#[cfg(feature = "neo-template")]
+mod template;
 #[cfg(feature = "neo-uuid")]
 mod uuid;
 

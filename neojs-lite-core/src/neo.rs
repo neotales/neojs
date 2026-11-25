@@ -86,6 +86,24 @@ pub(super) struct NeoState {
     /// string. A replacement made after runtime creation does not change it.
     #[cfg(feature = "neo-strings")]
     pub(super) slice: Option<Persistent<Function<'static>>>,
+    /// The frozen public `neo:template` object, when the feature is selected.
+    #[cfg(feature = "neo-template")]
+    pub(super) template: Option<Persistent<Object<'static>>>,
+    /// Frozen `Template.prototype` for `compile()`.
+    #[cfg(feature = "neo-template")]
+    pub(super) template_proto: Option<Persistent<Object<'static>>>,
+    /// Frozen `TemplateSet.prototype` for `createTemplateSet()`.
+    #[cfg(feature = "neo-template")]
+    pub(super) template_set_proto: Option<Persistent<Object<'static>>>,
+    /// Internal QuickJS class ID for plain/user objects (`JS_CLASS_OBJECT`).
+    #[cfg(feature = "neo-template")]
+    pub(super) object_class_id: rquickjs::qjs::JSClassID,
+    /// Intrinsic `TypeError` constructor captured at installation time.
+    #[cfg(feature = "neo-template")]
+    pub(super) type_error_ctor: Option<Persistent<Function<'static>>>,
+    /// Intrinsic `RangeError` constructor captured at installation time.
+    #[cfg(feature = "neo-template")]
+    pub(super) range_error_ctor: Option<Persistent<Function<'static>>>,
     /// The frozen public `neo:test` object, when the feature is selected.
     #[cfg(feature = "neo-test")]
     pub(super) test: Option<Persistent<Object<'static>>>,
@@ -177,6 +195,28 @@ pub(super) fn install<'js>(
         let function: Function<'js> = prototype.get("slice")?;
         Persistent::save(ctx, function)
     };
+    #[cfg(feature = "neo-template")]
+    let template: Option<Object<'js>> = Some(super::template::object(ctx)?);
+    #[cfg(feature = "neo-template")]
+    let template_proto: Option<Object<'js>> = Some(super::template::build_template_proto(ctx)?);
+    #[cfg(feature = "neo-template")]
+    let template_set_proto: Option<Object<'js>> =
+        Some(super::template::build_template_set_proto(ctx)?);
+    #[cfg(feature = "neo-template")]
+    let object_class_id: rquickjs::qjs::JSClassID = {
+        let obj = Object::new(ctx.clone())?;
+        unsafe { rquickjs::qjs::JS_GetClassID(obj.as_raw()) }
+    };
+    #[cfg(feature = "neo-template")]
+    let type_error_ctor: Persistent<Function<'static>> = {
+        let ctor: Function<'js> = ctx.globals().get("TypeError")?;
+        Persistent::save(ctx, ctor)
+    };
+    #[cfg(feature = "neo-template")]
+    let range_error_ctor: Persistent<Function<'static>> = {
+        let ctor: Function<'js> = ctx.globals().get("RangeError")?;
+        Persistent::save(ctx, ctor)
+    };
     #[cfg(feature = "neo-test")]
     let (test_module, test_ensure_handler) = build_test(ctx, rejections)?;
     #[cfg(feature = "neo-uuid")]
@@ -195,6 +235,7 @@ pub(super) fn install<'js>(
             feature = "neo-slices",
             feature = "neo-ssh",
             feature = "neo-strings",
+            feature = "neo-template",
             feature = "neo-test",
             feature = "neo-uuid"
         )),
@@ -251,6 +292,11 @@ pub(super) fn install<'js>(
         list.set(index, neojs_builtins::strings::SPECIFIER)?;
         index += 1;
     }
+    #[cfg(feature = "neo-template")]
+    if template.is_some() {
+        list.set(index, super::template::SPECIFIER)?;
+        index += 1;
+    }
     #[cfg(feature = "neo-test")]
     {
         list.set(index, neojs_builtins::test::SPECIFIER)?;
@@ -305,6 +351,18 @@ pub(super) fn install<'js>(
         strings: strings.map(|strings| Persistent::save(ctx, strings)),
         #[cfg(feature = "neo-strings")]
         slice: Some(slice),
+        #[cfg(feature = "neo-template")]
+        template: template.map(|template| Persistent::save(ctx, template)),
+        #[cfg(feature = "neo-template")]
+        template_proto: template_proto.map(|proto| Persistent::save(ctx, proto)),
+        #[cfg(feature = "neo-template")]
+        template_set_proto: template_set_proto.map(|proto| Persistent::save(ctx, proto)),
+        #[cfg(feature = "neo-template")]
+        object_class_id,
+        #[cfg(feature = "neo-template")]
+        type_error_ctor: Some(type_error_ctor),
+        #[cfg(feature = "neo-template")]
+        range_error_ctor: Some(range_error_ctor),
         #[cfg(feature = "neo-test")]
         test: Some(Persistent::save(ctx, test_module)),
         #[cfg(feature = "neo-test")]
@@ -511,6 +569,13 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
         };
         return Ok(strings.clone().restore(&ctx)?.into_value());
     }
+    #[cfg(feature = "neo-template")]
+    if name == super::template::SPECIFIER {
+        let Some(template) = state.template.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(template.clone().restore(&ctx)?.into_value());
+    }
     #[cfg(feature = "neo-test")]
     if name == neojs_builtins::test::SPECIFIER {
         if let Some(ensure) = state.test_ensure_handler.as_ref() {
@@ -560,6 +625,7 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
         feature = "neo-slices",
         feature = "neo-ssh",
         feature = "neo-strings",
+        feature = "neo-template",
         feature = "neo-test",
         feature = "neo-uuid"
     )))]

@@ -9,9 +9,10 @@ use std::mem::MaybeUninit;
 
 #[cfg(feature = "neo-crypto")]
 use rquickjs::Array;
+#[cfg(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh"))]
+use rquickjs::TypedArray;
 use rquickjs::{
-    Ctx, Exception, Function, Object, Result, String as JsString, TypedArray, Value,
-    object::Property, qjs,
+    Ctx, Exception, Function, Object, Result, String as JsString, Value, object::Property, qjs,
 };
 
 struct PropertyEnumGuard {
@@ -125,6 +126,7 @@ fn own_data_property_by_atom<'js>(
 }
 
 /// Reads an own getter function from `object` without invoking user traps.
+#[cfg(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh"))]
 pub(super) fn own_getter<'js>(
     ctx: &Ctx<'js>,
     object: qjs::JSValue,
@@ -195,7 +197,7 @@ pub(super) fn throw_coded_error(
 /// Validates a `Uint8Array` view (including resizable-`ArrayBuffer` views) and
 /// passes its live byte slice to `f` without executing JavaScript while the
 /// slice is alive.
-#[cfg_attr(not(any(feature = "neo-fs", feature = "neo-ssh")), allow(dead_code))]
+#[cfg(any(feature = "neo-fs", feature = "neo-ssh"))]
 pub(super) fn with_uint8_array_bytes<'js, T>(
     ctx: &Ctx<'js>,
     value: &Value<'js>,
@@ -215,6 +217,7 @@ pub(super) fn with_uint8_array_bytes<'js, T>(
 /// reports detached/OOB views via `on_detached_or_oob`, and passes its live
 /// byte slice and `is_shared` flag (`SharedArrayBuffer`-backed) to `f` without
 /// executing JavaScript while the slice is alive.
+#[cfg(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh"))]
 pub(super) fn with_uint8_array_bytes_ex<'js, T>(
     ctx: &Ctx<'js>,
     value: &Value<'js>,
