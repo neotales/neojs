@@ -75,8 +75,14 @@ pub struct BuiltinModule {
 pub mod assert;
 #[cfg(feature = "chars")]
 pub mod chars;
+#[cfg(feature = "console")]
+pub mod console;
 #[cfg(feature = "os")]
 pub mod os;
+#[cfg(feature = "path")]
+pub mod path;
+#[cfg(feature = "slices")]
+pub mod slices;
 #[cfg(feature = "strings")]
 pub mod strings;
 #[cfg(feature = "test")]
@@ -90,8 +96,14 @@ pub static MODULES: &[BuiltinModule] = &[
     assert::MODULE,
     #[cfg(feature = "chars")]
     chars::MODULE,
+    #[cfg(feature = "console")]
+    console::MODULE,
     #[cfg(feature = "os")]
     os::MODULE,
+    #[cfg(feature = "path")]
+    path::MODULE,
+    #[cfg(feature = "slices")]
+    slices::MODULE,
     #[cfg(feature = "strings")]
     strings::MODULE,
     #[cfg(feature = "test")]
@@ -157,6 +169,24 @@ mod tests {
             assert!(module("neo:chars").is_none());
         }
 
+        #[cfg(feature = "console")]
+        {
+            assert_eq!(
+                module("neo:console").map(|builtin| builtin.specifier),
+                Some("neo:console")
+            );
+            assert!(module("console").is_none());
+            assert!(module("NEO:console").is_none());
+            assert!(module("neo:console?x").is_none());
+            assert!(module("neo:console#x").is_none());
+            assert_eq!(console::MODULE.specifier, "neo:console");
+            assert_eq!(console::MODULE.backend, Backend::Ecmascript);
+        }
+        #[cfg(not(feature = "console"))]
+        {
+            assert!(module("neo:console").is_none());
+        }
+
         #[cfg(feature = "os")]
         {
             assert_eq!(
@@ -173,6 +203,42 @@ mod tests {
         #[cfg(not(feature = "os"))]
         {
             assert!(module("neo:os").is_none());
+        }
+
+        #[cfg(feature = "path")]
+        {
+            assert_eq!(
+                module("neo:path").map(|builtin| builtin.specifier),
+                Some("neo:path")
+            );
+            assert!(module("path").is_none());
+            assert!(module("NEO:path").is_none());
+            assert!(module("neo:path?x").is_none());
+            assert!(module("neo:path#x").is_none());
+            assert_eq!(path::MODULE.specifier, "neo:path");
+            assert_eq!(path::MODULE.backend, Backend::Ecmascript);
+        }
+        #[cfg(not(feature = "path"))]
+        {
+            assert!(module("neo:path").is_none());
+        }
+
+        #[cfg(feature = "slices")]
+        {
+            assert_eq!(
+                module("neo:slices").map(|builtin| builtin.specifier),
+                Some("neo:slices")
+            );
+            assert!(module("slices").is_none());
+            assert!(module("NEO:slices").is_none());
+            assert!(module("neo:slices?x").is_none());
+            assert!(module("neo:slices#x").is_none());
+            assert_eq!(slices::MODULE.specifier, "neo:slices");
+            assert_eq!(slices::MODULE.backend, Backend::Ecmascript);
+        }
+        #[cfg(not(feature = "slices"))]
+        {
+            assert!(module("neo:slices").is_none());
         }
 
         #[cfg(feature = "strings")]
@@ -246,7 +312,10 @@ mod tests {
         #[cfg(not(any(
             feature = "assert",
             feature = "chars",
+            feature = "console",
             feature = "os",
+            feature = "path",
+            feature = "slices",
             feature = "strings",
             feature = "test",
             feature = "uuid"
@@ -264,7 +333,9 @@ mod tests {
                 | "neo:uuid/v7" => {
                     assert_eq!(builtin.backend, Backend::Rust)
                 }
-                "neo:assert" | "neo:test" => assert_eq!(builtin.backend, Backend::Ecmascript),
+                "neo:assert" | "neo:console" | "neo:path" | "neo:slices" | "neo:test" => {
+                    assert_eq!(builtin.backend, Backend::Ecmascript)
+                }
                 other => panic!("unexpected built-in module: {other}"),
             }
         }

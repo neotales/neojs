@@ -162,6 +162,9 @@ const NATIVE_STRINGS_TOKEN: &str = "// __NEO_NATIVE_STRINGS_ENTRY__";
 /// The marker replaced with the shared `neo:assert` factory source.
 const ASSERT_IMPL_TOKEN: &str = "// __NEO_ASSERT_IMPL__";
 
+/// The marker replaced with the shared `neo:path` factory source.
+const PATH_IMPL_TOKEN: &str = "// __NEO_PATH_IMPL__";
+
 /// The marker replaced with the shared `neo:test` factory source.
 const TEST_IMPL_TOKEN: &str = "// __NEO_TEST_IMPL__";
 
@@ -171,10 +174,6 @@ const TEST_IMPL_TOKEN: &str = "// __NEO_TEST_IMPL__";
 /// only when `neo-slices` is enabled, so a disabled build does not carry its
 /// bytes.
 const SLICES_IMPL_TOKEN: &str = "// __NEO_SLICES_IMPL__";
-
-/// The `slices` implementation, compiled only when `neo-slices` is enabled.
-#[cfg(feature = "neo-slices")]
-const SLICES_IMPL_SOURCE: &str = include_str!("builtins/slices.impl.js");
 
 /// The marker replaced with the `slices` registry entry.
 const SLICES_REGISTRY_TOKEN: &str = "// __NEO_SLICES_REGISTRY_ENTRY__";
@@ -204,6 +203,7 @@ pub(crate) fn neo_shim() -> String {
         )
         .replace(OS_ARCH_TOKEN, &js_string(neojs_builtins::os::arch()))
         .replace(ASSERT_IMPL_TOKEN, neojs_builtins::assert::FACTORY_SOURCE)
+        .replace(PATH_IMPL_TOKEN, neojs_builtins::path::FACTORY_SOURCE)
         .replace(TEST_IMPL_TOKEN, neojs_builtins::test::FACTORY_SOURCE);
 
     #[cfg(feature = "neo-chars")]
@@ -224,7 +224,14 @@ pub(crate) fn neo_shim() -> String {
 
     #[cfg(feature = "neo-slices")]
     let shim = shim
-        .replace(SLICES_IMPL_TOKEN, SLICES_IMPL_SOURCE)
+        .replace(
+            SLICES_IMPL_TOKEN,
+            &format!(
+                "const slices = (\n{}\n)(globalThis.{}.find((entry) => entry[0] === \"neo:chars\")[1]);",
+                neojs_builtins::slices::FACTORY_SOURCE,
+                crate::chars::NATIVE_ENTRIES_GLOBAL,
+            ),
+        )
         .replace(SLICES_REGISTRY_TOKEN, "[\"neo:slices\", slices],");
     #[cfg(not(feature = "neo-slices"))]
     let shim = shim
@@ -232,6 +239,7 @@ pub(crate) fn neo_shim() -> String {
         .replace(SLICES_REGISTRY_TOKEN, "");
 
     debug_assert!(!shim.contains(ASSERT_IMPL_TOKEN));
+    debug_assert!(!shim.contains(PATH_IMPL_TOKEN));
     debug_assert!(!shim.contains(TEST_IMPL_TOKEN));
     debug_assert!(!shim.contains(NATIVE_ENTRIES_TOKEN));
     debug_assert!(!shim.contains(NATIVE_STRINGS_TOKEN));
@@ -311,7 +319,7 @@ pub(crate) const CHARS_SPECIFIER: &str = "neo:chars";
 /// Only `neo:console` resolves to this URL. It is the canonical and only module
 /// specifier for this built-in, so the engine caches one module instance for
 /// every importer. It is not a `file:` URL and is never read from disk.
-pub(crate) const CONSOLE_SPECIFIER: &str = "neo:console";
+pub(crate) const CONSOLE_SPECIFIER: &str = neojs_builtins::console::SPECIFIER;
 
 /// The ECMAScript module source served for [`CONSOLE_SPECIFIER`].
 ///
@@ -319,7 +327,7 @@ pub(crate) const CONSOLE_SPECIFIER: &str = "neo:console";
 /// and its five neojs-defined method values as named exports. The method values
 /// are read when the module is evaluated, so a replacement made before then is
 /// captured. The ES module namespace is a separate object from the registry.
-const CONSOLE_MODULE: &str = include_str!("builtins/console.esm.js");
+const CONSOLE_MODULE: &str = neojs_builtins::console::ESM_SOURCE;
 
 /// The canonical module specifier for the `cron` built-in.
 ///
@@ -418,7 +426,7 @@ const STDIO_MODULE: &str = include_str!("builtins/stdio.esm.js");
 /// Only `neo:path` resolves to this URL. It is the canonical and only module
 /// specifier for this built-in, so the engine caches one module instance for
 /// every importer. It is not a `file:` URL and is never read from disk.
-pub(crate) const PATH_SPECIFIER: &str = "neo:path";
+pub(crate) const PATH_SPECIFIER: &str = neojs_builtins::path::SPECIFIER;
 
 /// The ECMAScript module source served for [`PATH_SPECIFIER`].
 ///
@@ -427,7 +435,7 @@ pub(crate) const PATH_SPECIFIER: &str = "neo:path";
 /// and `Neo.getBuiltInModule("neo:path")` share identity. The functions are
 /// lexical; their host ops report the build dialect and the process working
 /// directory, the latter only when an operation lacks an explicit absolute base.
-const PATH_MODULE: &str = include_str!("builtins/path.esm.js");
+const PATH_MODULE: &str = neojs_builtins::path::ESM_SOURCE;
 
 /// The canonical module specifier for the `slices` built-in.
 ///
@@ -438,7 +446,7 @@ const PATH_MODULE: &str = include_str!("builtins/path.esm.js");
 /// read from disk. With `neo-slices` off, the specifier is absent from the name
 /// and source tables and the loader rejects it.
 #[cfg(feature = "neo-slices")]
-pub(crate) const SLICES_SPECIFIER: &str = "neo:slices";
+pub(crate) const SLICES_SPECIFIER: &str = neojs_builtins::slices::SPECIFIER;
 
 /// The ECMAScript module source served for [`SLICES_SPECIFIER`].
 ///
@@ -450,7 +458,7 @@ pub(crate) const SLICES_SPECIFIER: &str = "neo:slices";
 /// array; they are not copies, a sandbox, or a cross-realm/cross-thread
 /// zero-copy mechanism.
 #[cfg(feature = "neo-slices")]
-const SLICES_MODULE: &str = include_str!("builtins/slices.esm.js");
+const SLICES_MODULE: &str = neojs_builtins::slices::ESM_SOURCE;
 
 /// The canonical module specifier for the `strings` built-in.
 ///
@@ -638,8 +646,8 @@ mod tests {
     use super::resolve;
     use super::resolve_name;
     use super::{
-        ASSERT_IMPL_TOKEN, NATIVE_ENTRIES_TOKEN, NATIVE_STRINGS_TOKEN, SLICES_IMPL_TOKEN,
-        SLICES_REGISTRY_TOKEN, TEST_IMPL_TOKEN,
+        ASSERT_IMPL_TOKEN, NATIVE_ENTRIES_TOKEN, NATIVE_STRINGS_TOKEN, PATH_IMPL_TOKEN,
+        SLICES_IMPL_TOKEN, SLICES_REGISTRY_TOKEN, TEST_IMPL_TOKEN,
     };
     use deno_core::url::Url;
 
@@ -689,6 +697,7 @@ mod tests {
         assert!(!shim.contains(OS_PLATFORM_TOKEN));
         assert!(!shim.contains(OS_ARCH_TOKEN));
         assert!(!shim.contains(ASSERT_IMPL_TOKEN));
+        assert!(!shim.contains(PATH_IMPL_TOKEN));
         assert!(!shim.contains(TEST_IMPL_TOKEN));
         assert!(!shim.contains(NATIVE_ENTRIES_TOKEN));
         assert!(!shim.contains(NATIVE_STRINGS_TOKEN));
@@ -768,7 +777,7 @@ mod tests {
         #[cfg(feature = "neo-slices")]
         {
             assert!(
-                shim.contains("const slices = (() => {"),
+                shim.contains("function createNeoSlices(host)"),
                 "the slices implementation is missing"
             );
             assert!(
@@ -779,7 +788,7 @@ mod tests {
         #[cfg(not(feature = "neo-slices"))]
         {
             assert!(
-                !shim.contains("const slices = (() => {"),
+                !shim.contains("function createNeoSlices(host)"),
                 "the disabled slices implementation is present"
             );
             assert!(

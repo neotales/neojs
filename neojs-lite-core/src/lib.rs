@@ -49,12 +49,15 @@
 //!   active). A rejection handled later in the queue is not an error. Entry and
 //!   rejection diagnostics never invoke getters, proxy traps, `toString`, or
 //!   `String`.
-//! * `console.log` and `console.error` write to the process streams.
+//! * `console.{log, debug, info, warn, error}` write formatted arguments to
+//!   stdout/stderr (when `neo-console` is enabled; minimal `log`/`error` when
+//!   opted out).
 //! * A minimal `Neo` global reports `engine` `"neo-lite"`. With the default
-//!   `neo-assert`, `neo-chars`, `neo-crypto`, `neo-fs`, `neo-os`, `neo-ssh`,
-//!   `neo-strings`, `neo-test`, and `neo-uuid` features the registry contains
-//!   the canonical shared modules `neo:assert`, `neo:chars`, `neo:crypto`,
-//!   `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`,
+//!   `neo-assert`, `neo-chars`, `neo-console`, `neo-crypto`, `neo-fs`, `neo-os`,
+//!   `neo-path`, `neo-slices`, `neo-ssh`, `neo-strings`, `neo-test`, and
+//!   `neo-uuid` features the registry contains the canonical shared modules
+//!   `neo:assert`, `neo:chars`, `neo:console`, `neo:crypto`, `neo:fs`, `neo:os`,
+//!   `neo:path`, `neo:slices`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`,
 //!   `neo:uuid/v4`, and `neo:uuid/v7`.
 //!   `Neo.getBuiltInModulesList()` returns one frozen array of canonical
 //!   specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
@@ -64,8 +67,9 @@
 //!   `TypeError`. With `default-features = false` the registry and list are
 //!   empty and no module source is compiled in. The implementations come from
 //!   `neojs-builtins` (`chars`, `os`, `strings`, and `uuid` bound as native
-//!   QuickJS modules, `assert` and `test` evaluated from the shared ECMAScript
-//!   factories with native QuickJS Promise and queue hooks), `neojs-crypto-core`
+//!   QuickJS modules; `assert`, `console`, `path`, `slices`, and `test`
+//!   evaluated from the shared ECMAScript factories with native QuickJS host
+//!   hooks), `neojs-crypto-core`
 //!   (`crypto` synchronous exports bound as a native QuickJS module),
 //!   `neojs-fs-core` (`fs` bound as a native QuickJS module), and
 //!   `neojs-ssh-core` (`ssh` bound as a native QuickJS module).
@@ -83,12 +87,13 @@
 //!   loop beyond QuickJS's own job queue. A top-level `await` that depends on
 //!   an external event fails with an error instead of hanging, and
 //!   `test(..., { timeout })` is rejected explicitly.
-//! * **Most built-in `neo:` modules are absent.** With their features enabled
-//!   this crate implements the shared `neo:assert`, `neo:chars`, `neo:crypto`
-//!   (13 synchronous exports only), `neo:fs`, `neo:os`, `neo:ssh`,
-//!   `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`
-//!   modules only. Other V8 modules (and `*Async` crypto helpers) are not
-//!   importable here, and the `Neo` list does not claim them.
+//! * **Most V8-only async/platform `neo:` modules are absent.** With their
+//!   features enabled this crate implements the shared `neo:assert`, `neo:chars`,
+//!   `neo:console`, `neo:crypto` (13 synchronous exports only), `neo:fs`,
+//!   `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`, `neo:strings`, `neo:test`,
+//!   `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` modules only. Other V8
+//!   modules (`neo:age`, `neo:cron`, `neo:stdio`, and `*Async` crypto helpers)
+//!   are not importable here, and the `Neo` list does not claim them.
 //! * **No sandbox.** Permissions, host capabilities, and isolation are not
 //!   implemented.
 //!

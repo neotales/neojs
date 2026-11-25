@@ -1,19 +1,25 @@
 // Global runtime declarations for the `neojs-lite` (QuickJS) profile.
-// Declares only `Neo` and `console` (`log` and `error`); V8-only modules and
-// browser/legacy host globals are absent.
+// Declares only `Neo` and `console`; V8-only modules and browser/legacy host
+// globals are absent.
 
 /**
- * Minimal console output methods installed on `globalThis.console` in the
+ * Standard console output methods installed on `globalThis.console` in the
  * `neojs-lite` (QuickJS) runtime.
  *
- * Only `log` (stdout) and `error` (stderr) exist; `debug`, `info`, and `warn`
- * are absent. Arguments are stringified with JavaScript `String(value)` and
- * joined with single spaces.
+ * `log`, `debug`, and `info` write to stdout; `warn` and `error` write to
+ * stderr. Strings print unchanged, typed arrays print their type and up to
+ * ten elements, and objects are formatted as indented JSON when serializable.
  */
 interface NeoConsole {
-  /** Write arguments converted via `String(value)` separated by spaces to stdout, followed by a newline. */
+  /** Write formatted arguments separated by spaces to stdout, followed by a newline. */
   log(...args: unknown[]): void;
-  /** Write arguments converted via `String(value)` separated by spaces to stderr, followed by a newline. */
+  /** Write formatted arguments separated by spaces to stdout, followed by a newline. */
+  debug(...args: unknown[]): void;
+  /** Write formatted arguments separated by spaces to stdout, followed by a newline. */
+  info(...args: unknown[]): void;
+  /** Write formatted arguments separated by spaces to stderr, followed by a newline. */
+  warn(...args: unknown[]): void;
+  /** Write formatted arguments separated by spaces to stderr, followed by a newline. */
   error(...args: unknown[]): void;
 }
 
@@ -25,9 +31,12 @@ interface NeoConsole {
 interface NeoBuiltInModuleMap {
   "neo:assert": typeof import("neo:assert")["default"];
   "neo:chars": typeof import("neo:chars");
+  "neo:console": typeof import("neo:console")["default"];
   "neo:crypto": typeof import("neo:crypto");
   "neo:fs": typeof import("neo:fs");
   "neo:os": typeof import("neo:os");
+  "neo:path": typeof import("neo:path");
+  "neo:slices": typeof import("neo:slices");
   "neo:ssh": typeof import("neo:ssh");
   "neo:strings": typeof import("neo:strings");
   "neo:test": Omit<typeof import("neo:test"), "default">;

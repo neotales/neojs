@@ -3,8 +3,9 @@
 //! The registry, the module list, and the native `neo:chars`, `neo:crypto`,
 //! `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, and `neo:uuid` (`neo:uuid`,
 //! `neo:uuid/v4`, `neo:uuid/v7`) objects are Rust values. Shared ECMAScript
-//! modules (`neo:assert` and `neo:test`) are constructed once per context from
-//! their shared factories in `neojs-builtins` with native QuickJS host hooks.
+//! modules (`neo:assert`, `neo:console`, `neo:path`, `neo:slices`, and
+//! `neo:test`) are constructed once per context from their shared factories in
+//! `neojs-builtins` with native QuickJS host hooks.
 
 #[cfg(any(feature = "neo-crypto", feature = "neo-test", feature = "neo-ssh"))]
 use std::cell::RefCell;
@@ -28,6 +29,10 @@ pub(super) struct NeoState {
     /// The frozen public `neo:chars` object, when the feature is selected.
     #[cfg(feature = "neo-chars")]
     pub(super) chars: Option<Persistent<Object<'static>>>,
+    /// The live `globalThis.console` object captured at installation time, when
+    /// `neo-console` is selected.
+    #[cfg(feature = "neo-console")]
+    pub(super) console: Option<Persistent<Object<'static>>>,
     /// The frozen public `neo:crypto` object, when the feature is selected.
     #[cfg(feature = "neo-crypto")]
     pub(super) crypto: Option<Persistent<Object<'static>>>,
@@ -59,6 +64,12 @@ pub(super) struct NeoState {
     /// The frozen public `neo:os` object, when the feature is selected.
     #[cfg(feature = "neo-os")]
     pub(super) os: Option<Persistent<Object<'static>>>,
+    /// The frozen public `neo:path` object, when the feature is selected.
+    #[cfg(feature = "neo-path")]
+    pub(super) path: Option<Persistent<Object<'static>>>,
+    /// The frozen public `neo:slices` object, when the feature is selected.
+    #[cfg(feature = "neo-slices")]
+    pub(super) slices: Option<Persistent<Object<'static>>>,
     /// The frozen public `neo:ssh` object, when the feature is selected.
     #[cfg(feature = "neo-ssh")]
     pub(super) ssh: Option<Persistent<Object<'static>>>,
@@ -117,6 +128,8 @@ pub(super) fn install<'js>(
     let assert: Option<Value<'js>> = Some(build_assert(ctx)?);
     #[cfg(feature = "neo-chars")]
     let chars: Option<Object<'js>> = Some(super::chars::object(ctx)?);
+    #[cfg(feature = "neo-console")]
+    let console: Option<Object<'js>> = Some(ctx.globals().get("console")?);
     #[cfg(feature = "neo-crypto")]
     let crypto: Option<Object<'js>> = Some(super::crypto::object(ctx)?);
     #[cfg(feature = "neo-crypto")]
@@ -146,6 +159,13 @@ pub(super) fn install<'js>(
     };
     #[cfg(feature = "neo-os")]
     let os: Option<Object<'js>> = Some(super::os::object(ctx)?);
+    #[cfg(feature = "neo-path")]
+    let path: Option<Object<'js>> = Some(build_path(ctx)?);
+    #[cfg(feature = "neo-slices")]
+    let slices: Option<Object<'js>> = {
+        let chars_obj = chars.as_ref().ok_or(rquickjs::Error::Unknown)?;
+        Some(build_slices(ctx, chars_obj)?)
+    };
     #[cfg(feature = "neo-ssh")]
     let ssh: Option<Object<'js>> = Some(super::ssh::object(ctx)?);
     #[cfg(feature = "neo-strings")]
@@ -167,9 +187,12 @@ pub(super) fn install<'js>(
         not(any(
             feature = "neo-assert",
             feature = "neo-chars",
+            feature = "neo-console",
             feature = "neo-crypto",
             feature = "neo-fs",
             feature = "neo-os",
+            feature = "neo-path",
+            feature = "neo-slices",
             feature = "neo-ssh",
             feature = "neo-strings",
             feature = "neo-test",
@@ -188,6 +211,11 @@ pub(super) fn install<'js>(
         list.set(index, neojs_builtins::chars::SPECIFIER)?;
         index += 1;
     }
+    #[cfg(feature = "neo-console")]
+    if console.is_some() {
+        list.set(index, neojs_builtins::console::SPECIFIER)?;
+        index += 1;
+    }
     #[cfg(feature = "neo-crypto")]
     if crypto.is_some() {
         list.set(index, super::crypto::SPECIFIER)?;
@@ -201,6 +229,16 @@ pub(super) fn install<'js>(
     #[cfg(feature = "neo-os")]
     if os.is_some() {
         list.set(index, neojs_builtins::os::SPECIFIER)?;
+        index += 1;
+    }
+    #[cfg(feature = "neo-path")]
+    if path.is_some() {
+        list.set(index, neojs_builtins::path::SPECIFIER)?;
+        index += 1;
+    }
+    #[cfg(feature = "neo-slices")]
+    if slices.is_some() {
+        list.set(index, neojs_builtins::slices::SPECIFIER)?;
         index += 1;
     }
     #[cfg(feature = "neo-ssh")]
@@ -235,6 +273,8 @@ pub(super) fn install<'js>(
         assert: assert.map(|value| Persistent::save(ctx, value)),
         #[cfg(feature = "neo-chars")]
         chars: chars.map(|chars| Persistent::save(ctx, chars)),
+        #[cfg(feature = "neo-console")]
+        console: console.map(|console| Persistent::save(ctx, console)),
         #[cfg(feature = "neo-crypto")]
         crypto: crypto.map(|crypto| Persistent::save(ctx, crypto)),
         #[cfg(feature = "neo-crypto")]
@@ -253,6 +293,10 @@ pub(super) fn install<'js>(
         typed_array_byte_length: Some(typed_array_byte_length),
         #[cfg(feature = "neo-os")]
         os: os.map(|os| Persistent::save(ctx, os)),
+        #[cfg(feature = "neo-path")]
+        path: path.map(|path| Persistent::save(ctx, path)),
+        #[cfg(feature = "neo-slices")]
+        slices: slices.map(|slices| Persistent::save(ctx, slices)),
         #[cfg(feature = "neo-ssh")]
         ssh: ssh.map(|ssh| Persistent::save(ctx, ssh)),
         #[cfg(feature = "neo-ssh")]
@@ -304,6 +348,34 @@ fn build_assert<'js>(ctx: &Ctx<'js>) -> Result<Value<'js>> {
     factory.call((host,))
 }
 
+#[cfg(feature = "neo-path")]
+fn build_path<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
+    let factory: Function<'js> = ctx.eval(neojs_builtins::path::FACTORY_SOURCE)?;
+    let host = Object::new(ctx.clone())?;
+    host.set("isWindows", neojs_builtins::path::is_windows())?;
+    host.set("readCwd", Function::new(ctx.clone(), path_read_cwd)?)?;
+    factory.call((host,))
+}
+
+#[cfg(feature = "neo-path")]
+fn path_read_cwd<'js>(ctx: Ctx<'js>) -> Result<Value<'js>> {
+    match neojs_builtins::path::current_dir() {
+        Some(text) => Ok(JsString::from_str(ctx, &text)?.into_value()),
+        None => Ok(Value::new_null(ctx)),
+    }
+}
+
+#[cfg(feature = "neo-slices")]
+fn build_slices<'js>(ctx: &Ctx<'js>, chars: &Object<'js>) -> Result<Object<'js>> {
+    let factory: Function<'js> = ctx.eval(neojs_builtins::slices::FACTORY_SOURCE)?;
+    let host = Object::new(ctx.clone())?;
+    let to_upper: Value<'js> = chars.get("toUpper")?;
+    let to_lower: Value<'js> = chars.get("toLower")?;
+    host.set("toUpper", to_upper)?;
+    host.set("toLower", to_lower)?;
+    factory.call((host,))
+}
+
 #[cfg(feature = "neo-test")]
 fn build_test<'js>(
     ctx: &Ctx<'js>,
@@ -319,7 +391,10 @@ fn build_test<'js>(
         "observePromise",
         Function::new(ctx.clone(), crate::promise::observe_promise)?,
     )?;
-    host.set("print", Function::new(ctx.clone(), test_print)?)?;
+    host.set(
+        "print",
+        Function::new(ctx.clone(), crate::runtime::host_print)?,
+    )?;
     host.set(
         "setUnhandledRejectionHandler",
         Function::new(ctx.clone(), test_set_rejection_handler)?,
@@ -339,24 +414,6 @@ fn build_test<'js>(
     let module: Object<'js> = harness.get("module")?;
     let ensure_handler: Function<'js> = harness.get("ensureHandler")?;
     Ok((module, ensure_handler))
-}
-
-#[cfg(feature = "neo-test")]
-fn test_print(text: Opt<Value<'_>>, is_error: Opt<Value<'_>>) -> Result<()> {
-    let Some(text) = text.0.and_then(|value| value.into_string()) else {
-        return Ok(());
-    };
-    let text = text.to_string()?;
-    let is_error = is_error
-        .0
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-    if is_error {
-        eprint!("{text}");
-    } else {
-        print!("{text}");
-    }
-    Ok(())
 }
 
 #[cfg(feature = "neo-test")]
@@ -398,6 +455,13 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
         };
         return Ok(chars.clone().restore(&ctx)?.into_value());
     }
+    #[cfg(feature = "neo-console")]
+    if name == neojs_builtins::console::SPECIFIER {
+        let Some(console) = state.console.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(console.clone().restore(&ctx)?.into_value());
+    }
     #[cfg(feature = "neo-crypto")]
     if name == super::crypto::SPECIFIER {
         let Some(crypto) = state.crypto.as_ref() else {
@@ -418,6 +482,20 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
             return Ok(Value::new_undefined(ctx.clone()));
         };
         return Ok(os.clone().restore(&ctx)?.into_value());
+    }
+    #[cfg(feature = "neo-path")]
+    if name == neojs_builtins::path::SPECIFIER {
+        let Some(path) = state.path.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(path.clone().restore(&ctx)?.into_value());
+    }
+    #[cfg(feature = "neo-slices")]
+    if name == neojs_builtins::slices::SPECIFIER {
+        let Some(slices) = state.slices.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(slices.clone().restore(&ctx)?.into_value());
     }
     #[cfg(feature = "neo-ssh")]
     if name == neojs_ssh_core::SPECIFIER {
@@ -474,9 +552,12 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
     #[cfg(not(any(
         feature = "neo-assert",
         feature = "neo-chars",
+        feature = "neo-console",
         feature = "neo-crypto",
         feature = "neo-fs",
         feature = "neo-os",
+        feature = "neo-path",
+        feature = "neo-slices",
         feature = "neo-ssh",
         feature = "neo-strings",
         feature = "neo-test",

@@ -39,6 +39,9 @@ fn expected_list() -> (String, usize) {
     if cfg!(feature = "neo-chars") {
         entries.push(r#""neo:chars""#);
     }
+    if cfg!(feature = "neo-console") {
+        entries.push(r#""neo:console""#);
+    }
     if cfg!(feature = "neo-crypto") {
         entries.push(r#""neo:crypto""#);
     }
@@ -47,6 +50,12 @@ fn expected_list() -> (String, usize) {
     }
     if cfg!(feature = "neo-os") {
         entries.push(r#""neo:os""#);
+    }
+    if cfg!(feature = "neo-path") {
+        entries.push(r#""neo:path""#);
+    }
+    if cfg!(feature = "neo-slices") {
+        entries.push(r#""neo:slices""#);
     }
     if cfg!(feature = "neo-ssh") {
         entries.push(r#""neo:ssh""#);

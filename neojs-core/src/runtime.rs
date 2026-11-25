@@ -57,45 +57,20 @@ use neojs_remote::display_url;
 use neojs_remote::github_url;
 use neojs_remote::validate_url;
 
-/// Installs the five console methods neojs supports.
+/// Builds the shim script that installs the five formatted console methods
+/// from `neojs_builtins::console` onto V8's `globalThis.console`.
 ///
 /// deno_core's built-in console sends every method to stdout, drops
-/// `console.info`, and joins `null` and `undefined` as empty strings. This shim
-/// gives all five methods one formatter: strings print unchanged, objects print
-/// as JSON, typed arrays print their type and first ten elements, and `warn` and
-/// `error` write to stderr. Only the displayed elements are read from a typed
-/// array.
-const CONSOLE_SHIM: &str = r#"
-(() => {
-    const format = (value) => {
-        if (typeof value === "string") return value;
-        if (typeof value === "bigint") return `${value}n`;
-        if (typeof value === "symbol" || typeof value === "function") return String(value);
-        if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
-            const count = Math.min(value.length, 10);
-            const elements = [];
-            for (let index = 0; index < count; index += 1) {
-                elements.push(value[index]);
-            }
-            return `${value.constructor.name}(${value.length}) [${elements.join(", ")}]`;
-        }
-        try {
-            const json = JSON.stringify(value, null, 2);
-            return json === undefined ? String(value) : json;
-        } catch {
-            return String(value);
-        }
-    };
-    const writer = (isError) => (...args) => {
-        Deno.core.print(`${args.map(format).join(" ")}\n`, isError);
-    };
-    globalThis.console.log = writer(false);
-    globalThis.console.debug = writer(false);
-    globalThis.console.info = writer(false);
-    globalThis.console.warn = writer(true);
-    globalThis.console.error = writer(true);
-})();
-"#;
+/// `console.info`, and joins `null` and `undefined` as empty strings. The
+/// shared installer gives all five methods one formatter: strings print
+/// unchanged, objects print as JSON, typed arrays print their type and first
+/// ten elements, and `warn` and `error` write to stderr.
+fn console_shim() -> String {
+    format!(
+        "(\n{}\n)({{ print: Deno.core.print, target: globalThis.console }});",
+        neojs_builtins::console::INSTALLER_SOURCE
+    )
+}
 
 /// An ECMAScript runtime with a local-file module loader and optional HTTPS
 /// and JSR module loading.
@@ -253,7 +228,7 @@ impl Runtime {
     /// which indicates a broken embedded script. V8 creates its isolate on a
     /// single thread; create one `Runtime` per thread and per entry module.
     pub fn new() -> Result<Self, Error> {
-        Self::with_shims(CONSOLE_SHIM, neo_shim())
+        Self::with_shims(console_shim(), neo_shim())
     }
 
     /// Creates a runtime that can also load modules from `https:` URLs.
@@ -419,7 +394,7 @@ impl Runtime {
     /// [`ImportResolver`] without implicit filesystem manifest discovery.
     pub fn with_options(options: RuntimeOptions) -> Result<Self, Error> {
         let remote = options.remote.map(RemoteClient::new);
-        Self::build(CONSOLE_SHIM, neo_shim(), remote, options.import_resolver)
+        Self::build(console_shim(), neo_shim(), remote, options.import_resolver)
     }
 
     /// Creates a runtime over an injected remote transport.
@@ -443,7 +418,7 @@ impl Runtime {
     {
         let transport = neojs_remote::test_transport(fetch);
         Self::build(
-            CONSOLE_SHIM,
+            console_shim(),
             neo_shim(),
             Some(RemoteClient::with_transport(options, transport)),
             None,
@@ -475,7 +450,7 @@ impl Runtime {
     {
         let transport = neojs_remote::test_transport(fetch);
         Self::build(
-            CONSOLE_SHIM,
+            console_shim(),
             neo_shim(),
             Some(RemoteClient::with_transport(options, transport)),
             Some(resolver),
@@ -493,7 +468,7 @@ impl Runtime {
     /// error path drops the isolate first and then stops the driver through
     /// [`Runtime`]'s `Drop`, which does not block. Building the runtimes is the
     /// only failure before a `Runtime` exists.
-    fn with_shims(console: &'static str, builtins: String) -> Result<Self, Error> {
+    fn with_shims(console: impl Into<String>, builtins: String) -> Result<Self, Error> {
         Self::with_module_loader(
             console,
             builtins,
@@ -508,11 +483,11 @@ impl Runtime {
     /// crate-private; [`Runtime::with_remote`] is the public constructor that
     /// enables remote and `jsr:` loading.
     fn with_module_loader(
-        console: &'static str,
+        console: impl Into<String>,
         builtins: String,
         module_loader: Rc<dyn deno_core::ModuleLoader>,
     ) -> Result<Self, Error> {
-        Self::assemble(console, builtins, module_loader, None, None)
+        Self::assemble(console.into(), builtins, module_loader, None, None)
     }
 
     /// Creates a runtime with an optional remote client and optional import
@@ -523,7 +498,7 @@ impl Runtime {
     /// enabled, the loader is a [`JsrModuleLoader`] so `jsr:` imports resolve
     /// through the same transport, cache, and limits.
     fn build(
-        console: &'static str,
+        console: impl Into<String>,
         builtins: String,
         remote: Option<RemoteClient>,
         import_resolver: Option<ImportResolver>,
@@ -537,12 +512,12 @@ impl Runtime {
             )),
             None => files.clone(),
         };
-        Self::assemble(console, builtins, module_loader, Some(files), remote)
+        Self::assemble(console.into(), builtins, module_loader, Some(files), remote)
     }
 
     /// Builds the runtimes, isolate, extensions, and shims.
     fn assemble(
-        console: &'static str,
+        console: String,
         builtins: String,
         module_loader: Rc<dyn deno_core::ModuleLoader>,
         loader: Option<Rc<FileModuleLoader>>,
@@ -639,7 +614,7 @@ impl Runtime {
         limits: crate::jsr_loader::Limits,
     ) -> Result<Self, Error> {
         let loader = crate::jsr_loader::JsrModuleLoader::with_limits(registry, limits);
-        Self::with_module_loader(CONSOLE_SHIM, neo_shim(), Rc::new(loader))
+        Self::with_module_loader(console_shim(), neo_shim(), Rc::new(loader))
     }
 
     /// Runs one entry module to completion and blocks until it finishes.
@@ -1169,8 +1144,8 @@ fn prepare_url_entry(remote: &RemoteClient, url: &str) -> Result<PreparedEntry, 
 
 #[cfg(test)]
 mod tests {
-    use super::CONSOLE_SHIM;
     use super::Runtime;
+    use super::console_shim;
     use crate::Error;
     use crate::builtins::neo_shim;
     use std::rc::Rc;
@@ -1239,12 +1214,12 @@ mod tests {
         caller.block_on(async {
             let cases = [
                 (
-                    "throw new Error(\"console shim failed\");",
+                    "throw new Error(\"console shim failed\");".to_string(),
                     neo_shim(),
                     "console shim failed",
                 ),
                 (
-                    CONSOLE_SHIM,
+                    console_shim(),
                     "throw new Error(\"builtin shim failed\");".to_string(),
                     "builtin shim failed",
                 ),

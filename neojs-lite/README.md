@@ -31,8 +31,8 @@ discover `neo.jsonc` upward for `imports` and `workspaces` (including
 enclosing workspace roots when running inside a member directory) unless
 `--config <path>` or `--no-config` is passed; remote `https:`, `gh:`, `jsr:`,
 and `npm:` targets are rejected because remote loading is not supported in
-`neojs-lite`. `console.log` writes to standard output and `console.error` to
-standard error.
+`neojs-lite`. `console.log`, `console.debug`, and `console.info` write to standard
+output and `console.warn` and `console.error` to standard error.
 
 The command maps module and job failures to exit 1 and preflight, argument, or
 invalid/missing manifest failures to exit 2, matching the V8 `neojs` command's
@@ -72,11 +72,12 @@ This command does **not** claim parity with `neojs` (V8):
   loop beyond QuickJS's own job queue. A top-level `await` works only when
   QuickJS's own job queue can settle it, and `test(..., { timeout })` is
   rejected explicitly.
-* **Most built-in `neo:` modules are absent.** Only the shared `neo:assert`,
-  `neo:chars`, `neo:crypto` (13 synchronous exports; no `*Async` helpers),
-  `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`,
-  `neo:uuid/v4`, and `neo:uuid/v7` modules are implemented. Other V8 modules are
-  not importable, and the `Neo` list does not claim them.
+* **Most V8-only async/platform `neo:` modules are absent.** Only the shared
+  `neo:assert`, `neo:chars`, `neo:console`, `neo:crypto` (13 synchronous exports;
+  no `*Async` helpers), `neo:fs`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`,
+  `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`
+  modules are implemented. Other V8 modules (`neo:age`, `neo:cron`, `neo:stdio`)
+  are not importable, and the `Neo` list does not claim them.
 * **No permissions or sandbox.** None are implemented.
 
 Both runtimes share `neojs-module-policy` for executable-extension decisions and
@@ -86,12 +87,13 @@ WebAssembly, and native addons are the same.
 
 ## Build features
 
-The command selects `manifest`, `neo-assert`, `neo-chars`, `neo-crypto`,
-`neo-fs`, `neo-os`, `neo-ssh`, `neo-strings`, `neo-test`, `neo-uuid`, and
-`typescript` explicitly from `neojs-lite-core` with `default-features = false`,
-so its advertised surface is a command decision and does not drift with the
-library defaults. The library default enables the nine built-in module features
-and `typescript` (`manifest` is opt-in), and a library consumer can opt out
+The command selects `manifest`, `neo-assert`, `neo-chars`, `neo-console`,
+`neo-crypto`, `neo-fs`, `neo-os`, `neo-path`, `neo-slices`, `neo-ssh`,
+`neo-strings`, `neo-test`, `neo-uuid`, and `typescript` explicitly from
+`neojs-lite-core` with `default-features = false`, so its advertised surface is a
+command decision and does not drift with the library defaults. The library
+default enables the twelve built-in module features and `typescript` (`manifest`
+is opt-in), and a library consumer can opt out
 completely with `default-features = false` (which removes `deno_ast` as well as
 the built-in module dependencies). Cargo features are additive and unify across
 the dependency graph: a build that any dependent enables the feature for

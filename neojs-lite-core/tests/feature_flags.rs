@@ -20,6 +20,9 @@ fn expected_list() -> String {
     if cfg!(feature = "neo-chars") {
         entries.push(r#""neo:chars""#);
     }
+    if cfg!(feature = "neo-console") {
+        entries.push(r#""neo:console""#);
+    }
     if cfg!(feature = "neo-crypto") {
         entries.push(r#""neo:crypto""#);
     }
@@ -28,6 +31,12 @@ fn expected_list() -> String {
     }
     if cfg!(feature = "neo-os") {
         entries.push(r#""neo:os""#);
+    }
+    if cfg!(feature = "neo-path") {
+        entries.push(r#""neo:path""#);
+    }
+    if cfg!(feature = "neo-slices") {
+        entries.push(r#""neo:slices""#);
     }
     if cfg!(feature = "neo-ssh") {
         entries.push(r#""neo:ssh""#);
@@ -604,4 +613,153 @@ fn run_tests_returns_error_when_test_feature_is_disabled() {
         matches!(error, neojs_lite_core::Error::TestRunner(ref message) if message.contains("neo-test")),
         "{error:?}"
     );
+}
+
+#[test]
+#[cfg(feature = "neo-console")]
+fn console_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:console") || list.includes("console")) {
+    throw new Error(`unexpected console list entries: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:console");
+if (registry !== globalThis.console || Object.isFrozen(registry)) {
+    throw new Error("neo:console registry must be the live mutable global console");
+}
+if (Neo.getBuiltInModule("console") !== undefined) {
+    throw new Error("the registry accepted a bare console name");
+}
+const namespace = await import("neo:console");
+if (namespace === registry || namespace.default !== registry) {
+    throw new Error("neo:console namespace/default contract mismatch");
+}
+for (const method of ["log", "debug", "info", "warn", "error"]) {
+    if (namespace[method] !== registry[method]) {
+        throw new Error(`neo:console.${method} mismatch`);
+    }
+}
+"#)
+    .expect("console feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-console"))]
+fn console_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:console") || list.includes("console")) {
+    throw new Error(`console is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:console") !== undefined || Neo.getBuiltInModule("console") !== undefined) {
+    throw new Error("console registry entry is still present");
+}
+let imported = false;
+try {
+    await import("neo:console");
+    imported = true;
+} catch {
+    // Expected: the loader has no console entry.
+}
+if (imported) throw new Error("neo:console was importable while disabled");
+"#)
+    .expect("console absent");
+}
+
+#[test]
+#[cfg(feature = "neo-path")]
+fn path_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:path") || list.includes("path")) {
+    throw new Error(`unexpected path list entries: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:path");
+if (!registry || typeof registry !== "object" || !Object.isFrozen(registry)) {
+    throw new Error("the path registry object is missing or unfrozen");
+}
+if (Neo.getBuiltInModule("path") !== undefined) {
+    throw new Error("the registry accepted a bare path name");
+}
+const namespace = await import("neo:path");
+if (namespace === registry || namespace.join !== registry.join) {
+    throw new Error("neo:path namespace/registry mismatch");
+}
+if (namespace.posix.join("a", "b") !== "a/b") {
+    throw new Error("neo:path.posix.join failed");
+}
+"#)
+    .expect("path feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-path"))]
+fn path_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:path") || list.includes("path")) {
+    throw new Error(`path is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:path") !== undefined || Neo.getBuiltInModule("path") !== undefined) {
+    throw new Error("path registry entry is still present");
+}
+let imported = false;
+try {
+    await import("neo:path");
+    imported = true;
+} catch {
+    // Expected: the loader has no path entry.
+}
+if (imported) throw new Error("neo:path was importable while disabled");
+"#)
+    .expect("path absent");
+}
+
+#[test]
+#[cfg(feature = "neo-slices")]
+fn slices_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:slices") || list.includes("slices")) {
+    throw new Error(`unexpected slices list entries: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:slices");
+if (!registry || typeof registry !== "object" || !Object.isFrozen(registry)) {
+    throw new Error("the slices registry object is missing or unfrozen");
+}
+if (Neo.getBuiltInModule("slices") !== undefined) {
+    throw new Error("the registry accepted a bare slices name");
+}
+const namespace = await import("neo:slices");
+if (namespace === registry || namespace.slice !== registry.slice) {
+    throw new Error("neo:slices namespace/registry mismatch");
+}
+if (namespace.CharSlice.fromString("ab").toUpper().toString() !== "AB") {
+    throw new Error("neo:slices.CharSlice failed");
+}
+"#)
+    .expect("slices feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-slices"))]
+fn slices_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:slices") || list.includes("slices")) {
+    throw new Error(`slices is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:slices") !== undefined || Neo.getBuiltInModule("slices") !== undefined) {
+    throw new Error("slices registry entry is still present");
+}
+let imported = false;
+try {
+    await import("neo:slices");
+    imported = true;
+} catch {
+    // Expected: the loader has no slices entry.
+}
+if (imported) throw new Error("neo:slices was importable while disabled");
+"#)
+    .expect("slices absent");
 }

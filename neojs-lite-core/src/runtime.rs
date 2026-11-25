@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use neojs_module_policy::{ModuleFormat, module_format};
+#[cfg(feature = "neo-console")]
+use rquickjs::Object;
+#[cfg(any(feature = "neo-console", feature = "neo-test"))]
+use rquickjs::function::Opt;
 use rquickjs::{
     CatchResultExt, CaughtError, Context, Ctx, Function, Module, Persistent, Value, qjs,
 };
@@ -24,19 +28,48 @@ use crate::loader::{FileLoader, FileResolver};
 /// startup and still fails closed on a nonconverging loop.
 const JOB_BUDGET: usize = 100_000;
 
-/// Loads the `console` object and the one host function it calls.
+/// Minimal fallback `console` shim used only when `neo-console` is disabled.
 ///
-/// The shim stringifies arguments with JavaScript's `String`, so numbers,
-/// booleans, `null`, and objects all print something. It is not a full console:
-/// there is no `debug`, `warn`, `info`, grouping, formatting placeholders, or
-/// inspection of object contents. `console.log` writes to standard output and
-/// `console.error` to standard error.
-const CONSOLE_SHIM: &str = r#"
-globalThis.console = Object.freeze({
-    log: (...args) => globalThis.__neojsLiteWrite("out", args.map((value) => String(value)).join(" ")),
-    error: (...args) => globalThis.__neojsLiteWrite("err", args.map((value) => String(value)).join(" ")),
-});
+/// With `neo-console` enabled, [`Runtime::build`] installs the shared
+/// `neojs-builtins` console formatter (`log`, `debug`, `info`, `warn`, `error`)
+/// onto a mutable `globalThis.console` object. When `neo-console` is opted out
+/// (`--no-default-features`), only basic `log`/`error` remain without pulling in
+/// `neojs-builtins`.
+#[cfg(not(feature = "neo-console"))]
+const FALLBACK_CONSOLE_SHIM: &str = r#"
+(function (write) {
+    globalThis.console = Object.freeze({
+        log: (...args) => write("out", args.map((value) => String(value)).join(" ")),
+        error: (...args) => write("err", args.map((value) => String(value)).join(" ")),
+    });
+})
 "#;
+
+/// Writes text to stdout or stderr without an added newline and flushes.
+///
+/// Used by both `neo:console` and `neo:test` host hooks so output ordering and
+/// flush behavior match V8's `Deno.core.print`.
+#[cfg(any(feature = "neo-console", feature = "neo-test"))]
+pub(super) fn host_print(text: Opt<Value<'_>>, is_error: Opt<Value<'_>>) -> rquickjs::Result<()> {
+    use std::io::Write;
+
+    let Some(text) = text.0.and_then(|value| value.into_string()) else {
+        return Ok(());
+    };
+    let text = text.to_string()?;
+    let is_error = is_error
+        .0
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if is_error {
+        eprint!("{text}");
+        let _ = std::io::stderr().flush();
+    } else {
+        print!("{text}");
+        let _ = std::io::stdout().flush();
+    }
+    Ok(())
+}
 
 /// Unhandled promise rejections recorded by QuickJS's host rejection tracker.
 #[derive(Default)]
@@ -490,15 +523,28 @@ impl Runtime {
         })?;
         context
             .with(|ctx| -> rquickjs::Result<()> {
-                let write =
-                    Function::new(ctx.clone(), |stream: String, text: String| {
+                #[cfg(feature = "neo-console")]
+                {
+                    let console_obj = Object::new(ctx.clone())?;
+                    ctx.globals().set("console", console_obj.clone())?;
+                    let installer: Function<'_> =
+                        ctx.eval(neojs_builtins::console::INSTALLER_SOURCE)?;
+                    let host = Object::new(ctx.clone())?;
+                    host.set("print", Function::new(ctx.clone(), host_print)?)?;
+                    host.set("target", console_obj)?;
+                    let _: Value<'_> = installer.call((host,))?;
+                }
+                #[cfg(not(feature = "neo-console"))]
+                {
+                    let write = Function::new(ctx.clone(), |stream: String, text: String| {
                         match stream.as_str() {
                             "err" => eprintln!("{text}"),
                             _ => println!("{text}"),
                         }
                     })?;
-                ctx.globals().set("__neojsLiteWrite", write)?;
-                ctx.eval::<(), _>(CONSOLE_SHIM)?;
+                    let installer: Function<'_> = ctx.eval(FALLBACK_CONSOLE_SHIM)?;
+                    let _: Value<'_> = installer.call((write,))?;
+                }
                 crate::neo::install(
                     &ctx,
                     #[cfg(feature = "neo-test")]

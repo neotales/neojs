@@ -159,7 +159,10 @@ impl Resolver for FileResolver {
         #[cfg(any(
             feature = "neo-assert",
             feature = "neo-chars",
+            feature = "neo-console",
             feature = "neo-os",
+            feature = "neo-path",
+            feature = "neo-slices",
             feature = "neo-strings",
             feature = "neo-test",
             feature = "neo-uuid"
@@ -271,8 +274,8 @@ impl Loader for FileLoader {
         // `neo:chars`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:ssh`,
         // `neo:strings`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` are native
         // QuickJS modules (`declare_def`) with no ECMAScript source;
-        // `neo:assert` and `neo:test` declare the shared `.esm.js` re-export
-        // wrappers from `neojs-builtins`.
+        // `neo:assert`, `neo:console`, `neo:path`, `neo:slices`, and `neo:test`
+        // declare the shared `.esm.js` re-export wrappers from `neojs-builtins`.
         #[cfg(feature = "neo-crypto")]
         if name == crate::crypto::SPECIFIER {
             return Module::declare_def::<crate::crypto::CryptoModule, _>(ctx.clone(), name);
@@ -288,7 +291,10 @@ impl Loader for FileLoader {
         #[cfg(any(
             feature = "neo-assert",
             feature = "neo-chars",
+            feature = "neo-console",
             feature = "neo-os",
+            feature = "neo-path",
+            feature = "neo-slices",
             feature = "neo-strings",
             feature = "neo-test",
             feature = "neo-uuid"
@@ -303,9 +309,21 @@ impl Loader for FileLoader {
                 neojs_builtins::chars::SPECIFIER => {
                     return Module::declare_def::<crate::chars::CharsModule, _>(ctx.clone(), name);
                 }
+                #[cfg(feature = "neo-console")]
+                neojs_builtins::console::SPECIFIER => {
+                    return Module::declare(ctx.clone(), name, neojs_builtins::console::ESM_SOURCE);
+                }
                 #[cfg(feature = "neo-os")]
                 neojs_builtins::os::SPECIFIER => {
                     return Module::declare_def::<crate::os::OsModule, _>(ctx.clone(), name);
+                }
+                #[cfg(feature = "neo-path")]
+                neojs_builtins::path::SPECIFIER => {
+                    return Module::declare(ctx.clone(), name, neojs_builtins::path::ESM_SOURCE);
+                }
+                #[cfg(feature = "neo-slices")]
+                neojs_builtins::slices::SPECIFIER => {
+                    return Module::declare(ctx.clone(), name, neojs_builtins::slices::ESM_SOURCE);
                 }
                 #[cfg(feature = "neo-strings")]
                 neojs_builtins::strings::SPECIFIER => {
