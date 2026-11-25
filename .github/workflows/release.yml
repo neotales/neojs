@@ -161,17 +161,11 @@ jobs:
             archive: zip
           - slug: windows-arm64
             target: aarch64-pc-windows-msvc
-            os: windows-2022
+            os: windows-11-arm
             archive: zip
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
-
-      - name: Configure MSVC ARM64 cross-compilation environment
-        if: matrix.slug == 'windows-arm64'
-        uses: ilammy/msvc-dev-cmd@v1 # TODO(ci): pin to full 40-char commit SHA once online
-        with:
-          arch: amd64_arm64
 
       - name: Install pinned Rust toolchain and target
         shell: bash
@@ -188,9 +182,31 @@ jobs:
 
       - name: Build release binaries
         shell: bash
+        env:
+          MATRIX_SLUG: ${{ matrix.slug }}
+          MATRIX_TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          cargo build --release --locked --target "${{ matrix.target }}" -p neojs -p neojs-lite
+          log_file=$(mktemp)
+          trap 'rm -f "${log_file}"' EXIT
+
+          set +e
+          cargo build --release --locked --target "${MATRIX_TARGET}" -p neojs -p neojs-lite 2>&1 | tee "${log_file}"
+          build_rc=${PIPESTATUS[0]}
+          set -e
+
+          if [ "${build_rc}" -ne 0 ]; then
+            summary=$(
+              sed -E $'s/\x1B\\[[0-9;]*[[:alpha:]]//g' "${log_file}" \
+                | awk 'NF' \
+                | tail -n 25 \
+                | tr '\r\n' '  ' \
+                | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' \
+                | cut -c1-1000
+            )
+            echo "::error title=Build failed (${MATRIX_SLUG})::${summary:-cargo build exited ${build_rc}}"
+            exit "${build_rc}"
+          fi
 
       - name: Download canonical TypeScript declarations
         uses: actions/download-artifact@v4 # TODO(ci): pin to full 40-char commit SHA once online
@@ -372,56 +388,43 @@ jobs:
             if (-not (Test-Path $neojsBin -PathType Leaf)) { throw "Missing $neojsBin" }
             if (-not (Test-Path $liteBin -PathType Leaf)) { throw "Missing $liteBin" }
 
-            if ($slug -eq "windows-arm64") {
-              foreach ($bin in @($neojsBin, $liteBin)) {
-                $headers = & dumpbin /headers $bin | Out-String
-                if ($LASTEXITCODE -ne 0) {
-                  throw "dumpbin /headers failed for $bin (exit $LASTEXITCODE)"
-                }
-                if ($headers -notmatch "AA64 machine \(ARM64\)") {
-                  throw "Expected AA64 machine (ARM64) header in $bin"
-                }
-              }
-              Write-Host "Verified ARM64 PE headers, LICENSE.md, and types/index.d.ts for $slug."
-            } else {
-              $sharedTests = @(
-                Get-ChildItem -Path "tests/js/shared" -File |
-                  Where-Object { $_.Name -like "*.test.js" -or $_.Name -like "*.test.ts" } |
-                  Sort-Object FullName |
-                  ForEach-Object { $_.FullName }
-              )
-              if ($sharedTests.Count -eq 0) {
-                throw "No shared JS/TS tests found under tests/js/shared/*.test.{js,ts}"
+            $sharedTests = @(
+              Get-ChildItem -Path "tests/js/shared" -File |
+                Where-Object { $_.Name -like "*.test.js" -or $_.Name -like "*.test.ts" } |
+                Sort-Object FullName |
+                ForEach-Object { $_.FullName }
+            )
+            if ($sharedTests.Count -eq 0) {
+              throw "No shared JS/TS tests found under tests/js/shared/*.test.{js,ts}"
+            }
+
+            foreach ($entry in @(
+              @{ Bin = $neojsBin; Name = "neojs" },
+              @{ Bin = $liteBin; Name = "neojs-lite" }
+            )) {
+              $ver = (& $entry.Bin --version | Out-String).Trim()
+              if ($LASTEXITCODE -ne 0 -or $ver -ne "$($entry.Name) $tagVersion") {
+                throw "$($entry.Name) --version returned '$ver' (exit $LASTEXITCODE), expected '$($entry.Name) $tagVersion'"
               }
 
-              foreach ($entry in @(
-                @{ Bin = $neojsBin; Name = "neojs" },
-                @{ Bin = $liteBin; Name = "neojs-lite" }
-              )) {
-                $ver = (& $entry.Bin --version | Out-String).Trim()
-                if ($LASTEXITCODE -ne 0 -or $ver -ne "$($entry.Name) $tagVersion") {
-                  throw "$($entry.Name) --version returned '$ver' (exit $LASTEXITCODE), expected '$($entry.Name) $tagVersion'"
-                }
+              & $entry.Bin --help | Out-Null
+              if ($LASTEXITCODE -ne 0) {
+                throw "$($entry.Name) --help exited $LASTEXITCODE"
+              }
 
-                & $entry.Bin --help | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                  throw "$($entry.Name) --help exited $LASTEXITCODE"
-                }
+              & $entry.Bin types --help | Out-Null
+              if ($LASTEXITCODE -ne 0) {
+                throw "$($entry.Name) types --help exited $LASTEXITCODE"
+              }
 
-                & $entry.Bin types --help | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                  throw "$($entry.Name) types --help exited $LASTEXITCODE"
-                }
+              $proc = Start-Process -FilePath $entry.Bin -ArgumentList "--unknown-flag" -Wait -NoNewWindow -PassThru -RedirectStandardOutput "$smokeDir/unknown-out.txt" -RedirectStandardError "$smokeDir/unknown-err.txt"
+              if ($proc.ExitCode -ne 2) {
+                throw "$($entry.Name) --unknown-flag exited $($proc.ExitCode), expected 2"
+              }
 
-                $proc = Start-Process -FilePath $entry.Bin -ArgumentList "--unknown-flag" -Wait -NoNewWindow -PassThru -RedirectStandardOutput "$smokeDir/unknown-out.txt" -RedirectStandardError "$smokeDir/unknown-err.txt"
-                if ($proc.ExitCode -ne 2) {
-                  throw "$($entry.Name) --unknown-flag exited $($proc.ExitCode), expected 2"
-                }
-
-                & $entry.Bin test @sharedTests
-                if ($LASTEXITCODE -ne 0) {
-                  throw "$($entry.Name) shared JS/TS tests failed (exit $LASTEXITCODE)"
-                }
+              & $entry.Bin test @sharedTests
+              if ($LASTEXITCODE -ne 0) {
+                throw "$($entry.Name) shared JS/TS tests failed (exit $LASTEXITCODE)"
               }
             }
           } finally {

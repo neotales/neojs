@@ -76,13 +76,15 @@ Jobs:
   - `macos-arm64` (`aarch64-apple-darwin` on `macos-15`, `.tar.gz`, native)
   - `macos-amd64` (`x86_64-apple-darwin` on `macos-15`, `.tar.gz`, cross)
   - `windows-amd64` (`x86_64-pc-windows-msvc` on `windows-2022`, `.zip`, native)
-  - `windows-arm64` (`aarch64-pc-windows-msvc` on `windows-2022`, `.zip`, cross via `ilammy/msvc-dev-cmd@v1` with `arch: amd64_arm64`)
-  - Builds `cargo build --release --locked --target <target> -p neojs -p neojs-lite`.
+  - `windows-arm64` (`aarch64-pc-windows-msvc` on `windows-11-arm`, `.zip`, native)
+  - Builds `cargo build --release --locked --target <target> -p neojs -p neojs-lite`
+    and emits a `::error` check-run annotation summarizing the tail of the build
+    log on failure.
   - Downloads `release-types` and stages two archives per target:
     - `neojs-<tag>-<slug>.{tar.gz,zip}`: `neojs` (or `neojs.exe`), `LICENSE.md`, and `types/` (V8 `.d.ts` tree).
     - `neojs-lite-<tag>-<slug>.{tar.gz,zip}`: `neojs-lite` (or `neojs-lite.exe`), `LICENSE.md`, and `types/` (Lite `.d.ts` tree).
   - Extracts each archive into a clean temporary directory and runs smoke checks:
-    - Native targets (`linux-amd64`, `linux-arm64`, `macos-arm64`, `windows-amd64`):
+    - Native targets (`linux-amd64`, `linux-arm64`, `macos-arm64`, `windows-amd64`, `windows-arm64`):
       verifies `LICENSE.md` and `types/index.d.ts`, `--version`, `--help` (exit 0),
       `types --help` (exit 0), `--unknown-flag` (exit 2), and runs all shared JS/TS
       tests (`tests/js/shared/*.test.js` and `tests/js/shared/*.test.ts`) with both
@@ -91,8 +93,6 @@ Jobs:
       verifies `otool -L` contains no `/opt/homebrew` or `/usr/local` dylibs,
       checks `LICENSE.md` and `types/index.d.ts`, and runs the native smoke suite
       under `arch -x86_64` when Rosetta 2 is available.
-    - `windows-arm64`: verifies `LICENSE.md`, `types/index.d.ts`, and `dumpbin /headers`
-      reporting `AA64 machine (ARM64)` for both `neojs.exe` and `neojs-lite.exe`.
   - Uploads `release-archives-<slug>`.
 - **package-checksums (`needs: build`, `ubuntu-24.04`)**:
   - Downloads all 12 archives into `dist/`, asserts exact count `== 12`, generates
@@ -109,9 +109,8 @@ Jobs:
   `# TODO(ci): pin to full 40-char commit SHA once online`; resolve and pin
   40-char commit SHAs once online before cutting public releases.
 - **Cross-compiled target runtime smoke gaps**: If Rosetta 2 is absent on `macos-15`,
-  `macos-amd64` falls back to binary-header/`otool` checks; `windows-arm64` on
-  `windows-2022` checks `AA64 machine (ARM64)` PE headers and still requires a
-  native Windows ARM64 smoke pass before promoting the release.
+  `macos-amd64` falls back to binary-header/`otool` checks and still requires a
+  native macOS x86_64 smoke pass before promoting the release.
 - **Signing & publishing (`system-admin` boundary)**: This workflow never signs
   artifacts, opens GitHub Releases, or publishes crates. Coordinate with
   `system-admin` to pick up `release-bundle-<tag>`, sign/attest `SHA256SUMS.txt`,
