@@ -5,7 +5,7 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use vaeljs_core::{Error, ImportResolver, Runtime, RuntimeOptions};
-use vaeljs_manifest::{DiscoveredManifest, Manifest, PackageName, Workspace};
+use vaeljs_manifest::{DiscoveredManifest, Manifest, PackageName, Workspace, discover_manifest};
 
 fn write(root: &Path, relative: &str, content: &str) -> std::path::PathBuf {
     let path = root.join(relative);
@@ -379,6 +379,37 @@ fn remote_targets_in_imports_fail_closed_without_remote_enabled() {
     );
 }
 
+#[test]
+fn plaintext_http_in_ancestor_manifest_is_rejected_as_unsupported_transport() {
+    let dir = TempDir::new().expect("temp dir");
+    write(
+        dir.path(),
+        "vael.jsonc",
+        r#"{
+            "name": "@test/insecure-http",
+            "imports": {
+                "insecure": "http://cdn.example.test/mod.ts"
+            }
+        }"#,
+    );
+    let nested = write(
+        dir.path(),
+        "apps/nested/sub/main.ts",
+        "import { x } from 'insecure';\nconsole.log(x);\n",
+    );
+
+    let err = discover_manifest(nested.parent().unwrap(), None)
+        .expect_err("plaintext http:// target in ancestor vael.jsonc must fail closed");
+    assert!(
+        matches!(err, vaeljs_manifest::Error::UnsupportedTransport { .. }),
+        "expected UnsupportedTransport, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("https:"),
+        "expected HTTPS-only reason, got: {err}"
+    );
+}
+
 #[cfg(feature = "test-support")]
 mod remote_tests {
     use super::*;
@@ -602,5 +633,394 @@ if (httpsVal !== 42 || ghVal !== "from-gh" || jsrVal !== "from-jsr") {
         assert!(msg.contains("https://example.test/mod.ts"), "{msg}");
         assert!(!msg.contains("supersecret"), "query secret leaked: {msg}");
         assert!(!msg.contains("token="), "query key leaked: {msg}");
+    }
+
+    #[cfg(feature = "npm")]
+    #[test]
+    fn ancestor_import_map_resolves_all_external_schemes_and_persists_lockfile_at_manifest_root() {
+        use std::collections::BTreeMap;
+        use std::io::Write as _;
+        use std::sync::Mutex;
+
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use sha2::Sha512;
+        use vaeljs_npm::Lockfile;
+
+        fn write_tar_header(name: &str, size: usize) -> [u8; 512] {
+            let mut header = [0u8; 512];
+            let name_bytes = name.as_bytes();
+            let copy_len = name_bytes.len().min(100);
+            header[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+            header[100..108].copy_from_slice(b"0000644\0");
+            header[108..116].copy_from_slice(b"0000000\0");
+            header[116..124].copy_from_slice(b"0000000\0");
+            let size_str = format!("{size:011o}\0");
+            header[124..136].copy_from_slice(size_str.as_bytes());
+            header[136..148].copy_from_slice(b"00000000000\0");
+            header[148..156].copy_from_slice(b"        ");
+            header[156] = b'0';
+            header[257..263].copy_from_slice(b"ustar\0");
+            header[263..265].copy_from_slice(b"00");
+            let sum: u32 = header.iter().map(|&b| u32::from(b)).sum();
+            let csum = format!("{sum:06o}\0 ");
+            header[148..156].copy_from_slice(csum.as_bytes());
+            header
+        }
+
+        fn build_tgz(files: &[(&str, &str)]) -> (Vec<u8>, String) {
+            let mut tar_buf = Vec::new();
+            for (rel_path, content) in files {
+                let full = format!("package/{rel_path}");
+                let bytes = content.as_bytes();
+                tar_buf.extend_from_slice(&write_tar_header(&full, bytes.len()));
+                if !bytes.is_empty() {
+                    tar_buf.extend_from_slice(bytes);
+                    let pad = (512 - (bytes.len() % 512)) % 512;
+                    tar_buf.resize(tar_buf.len() + pad, 0);
+                }
+            }
+            tar_buf.resize(tar_buf.len() + 1024, 0);
+            let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+            gz.write_all(&tar_buf).expect("write tar");
+            let tgz = gz.finish().expect("finish gzip");
+            let sri = format!("sha512-{}", BASE64_STANDARD.encode(Sha512::digest(&tgz)));
+            (tgz, sri)
+        }
+
+        fn publish_npm(
+            routes: &mut BTreeMap<String, Vec<u8>>,
+            name: &str,
+            version: &str,
+            pkg_json: &str,
+            files: &[(&str, &str)],
+        ) {
+            let mut all_files = vec![("package.json", pkg_json)];
+            all_files.extend_from_slice(files);
+            let (tgz, sri) = build_tgz(&all_files);
+            let encoded_name = if let Some(rest) = name.strip_prefix('@') {
+                let (scope, pkg) = rest.split_once('/').expect("scoped name");
+                format!("@{scope}%2f{pkg}")
+            } else {
+                name.to_owned()
+            };
+            let tarball_url = format!("https://registry.npmjs.org/{name}/-/{version}.tgz");
+            let packument = serde_json::json!({
+                "name": name,
+                "dist-tags": { "latest": version },
+                "versions": {
+                    version: {
+                        "version": version,
+                        "dependencies": {},
+                        "dist": {
+                            "tarball": tarball_url,
+                            "integrity": sri
+                        }
+                    }
+                }
+            });
+            routes.insert(
+                format!("https://registry.npmjs.org/{encoded_name}"),
+                serde_json::to_vec(&packument).expect("packument json"),
+            );
+            routes.insert(tarball_url, tgz);
+        }
+
+        let dir = TempDir::new().expect("temp dir");
+        let cache = TempDir::new().expect("cache dir");
+
+        write(
+            dir.path(),
+            "vael.jsonc",
+            r#"{
+                "name": "@demo/ancestor-imports",
+                "imports": {
+                    "my-npm": "npm:demo-pkg@^1.0.0",
+                    "my-npm/": "npm:demo-pkg@^1.0.0/",
+                    "my-scoped": "npm:@acme/lib@^1.0.0",
+                    "my-jsr": "jsr:@demo/pkg@^1.0.0",
+                    "my-jsr/": "jsr:@demo/pkg@^1.0.0/",
+                    "my-gh": "gh:acme/repo@v1.0.0/mod.ts",
+                    "my-github": "github:acme/repo@v1.0.0/alt.ts",
+                    "gh-root/": "gh:acme/repo@v1.0.0/",
+                    "gh-src/": "gh:acme/repo@v1.0.0/src/",
+                    "my-https": "https://cdn.example.test/mod.ts",
+                    "my-https/": "https://cdn.example.test/lib/"
+                }
+            }"#,
+        );
+
+        let main_source = r#"
+import { npmVal } from "my-npm";
+import { npmSubVal } from "my-npm/sub";
+import { scopedVal } from "my-scoped";
+import { jsrVal } from "my-jsr";
+import { jsrSubVal } from "my-jsr/sub";
+import { ghVal } from "my-gh";
+import { githubVal } from "my-github";
+import { ghUtil } from "gh-root/util.ts";
+import { ghHelper } from "gh-src/helper.ts";
+import { httpsVal } from "my-https";
+import { httpsSubVal } from "my-https/sub.ts";
+
+const dynNpm = await import("my-npm");
+const dynJsr = await import("my-jsr");
+
+if (npmVal !== "npm-root" || npmSubVal !== "npm-sub" || scopedVal !== "npm-scoped") {
+    throw new Error("npm import-map mismatch");
+}
+if (dynNpm.npmVal !== "npm-root") {
+    throw new Error("dynamic npm import mismatch");
+}
+if (jsrVal !== "jsr-root" || jsrSubVal !== "jsr-sub") {
+    throw new Error("jsr import-map mismatch");
+}
+if (dynJsr.jsrVal !== "jsr-root") {
+    throw new Error("dynamic jsr import mismatch");
+}
+if (
+    ghVal !== "gh-mod" ||
+    githubVal !== "github-alt" ||
+    ghUtil !== "gh-root-util" ||
+    ghHelper !== "gh-src-helper"
+) {
+    throw new Error("gh/github import-map mismatch");
+}
+if (httpsVal !== "https-root" || httpsSubVal !== "https-sub") {
+    throw new Error("https import-map mismatch");
+}
+"#;
+        // Guard against any scheme prefix leaking into the JS/TS source itself.
+        for forbidden in ["npm:", "jsr:", "gh:", "github:", "https:"] {
+            assert!(
+                !main_source.contains(forbidden),
+                "script must use bare specifiers only, found {forbidden}"
+            );
+        }
+
+        let main = write(dir.path(), "apps/nested/sub/main.ts", main_source);
+
+        let mut routes: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        publish_npm(
+            &mut routes,
+            "demo-pkg",
+            "1.0.0",
+            r#"{
+                "name": "demo-pkg",
+                "version": "1.0.0",
+                "type": "module",
+                "exports": {
+                    ".": "./index.ts",
+                    "./sub": "./sub.ts"
+                }
+            }"#,
+            &[
+                ("index.ts", "export const npmVal: string = 'npm-root';\n"),
+                ("sub.ts", "export const npmSubVal: string = 'npm-sub';\n"),
+            ],
+        );
+        publish_npm(
+            &mut routes,
+            "@acme/lib",
+            "1.0.0",
+            r#"{
+                "name": "@acme/lib",
+                "version": "1.0.0",
+                "type": "module",
+                "exports": "./index.ts"
+            }"#,
+            &[(
+                "index.ts",
+                "export const scopedVal: string = 'npm-scoped';\n",
+            )],
+        );
+
+        let jsr_mod_bytes = b"export const jsrVal: string = 'jsr-root';\n";
+        let jsr_sub_bytes = b"export const jsrSubVal: string = 'jsr-sub';\n";
+        routes.insert(
+            "https://jsr.io/@demo/pkg/meta.json".to_owned(),
+            br#"{"scope":"demo","name":"pkg","latest":"1.0.0","versions":{"1.0.0":{}}}"#.to_vec(),
+        );
+        routes.insert(
+            "https://jsr.io/@demo/pkg/1.0.0_meta.json".to_owned(),
+            serde_json::to_vec(&serde_json::json!({
+                "exports": {
+                    ".": "./mod.ts",
+                    "./sub": "./sub.ts"
+                },
+                "manifest": {
+                    "/mod.ts": {
+                        "size": jsr_mod_bytes.len(),
+                        "checksum": format!("sha256-{}", sha256_hex(jsr_mod_bytes))
+                    },
+                    "/sub.ts": {
+                        "size": jsr_sub_bytes.len(),
+                        "checksum": format!("sha256-{}", sha256_hex(jsr_sub_bytes))
+                    }
+                }
+            }))
+            .expect("jsr version meta"),
+        );
+        routes.insert(
+            "https://jsr.io/@demo/pkg/1.0.0/mod.ts".to_owned(),
+            jsr_mod_bytes.to_vec(),
+        );
+        routes.insert(
+            "https://jsr.io/@demo/pkg/1.0.0/sub.ts".to_owned(),
+            jsr_sub_bytes.to_vec(),
+        );
+
+        routes.insert(
+            "https://raw.githubusercontent.com/acme/repo/v1.0.0/mod.ts".to_owned(),
+            b"export const ghVal: string = 'gh-mod';\n".to_vec(),
+        );
+        routes.insert(
+            "https://raw.githubusercontent.com/acme/repo/v1.0.0/alt.ts".to_owned(),
+            b"export const githubVal: string = 'github-alt';\n".to_vec(),
+        );
+        routes.insert(
+            "https://raw.githubusercontent.com/acme/repo/v1.0.0/util.ts".to_owned(),
+            b"export const ghUtil: string = 'gh-root-util';\n".to_vec(),
+        );
+        routes.insert(
+            "https://raw.githubusercontent.com/acme/repo/v1.0.0/src/helper.ts".to_owned(),
+            b"export const ghHelper: string = 'gh-src-helper';\n".to_vec(),
+        );
+
+        routes.insert(
+            "https://cdn.example.test/mod.ts".to_owned(),
+            b"export const httpsVal: string = 'https-root';\n".to_vec(),
+        );
+        routes.insert(
+            "https://cdn.example.test/lib/sub.ts".to_owned(),
+            b"export const httpsSubVal: string = 'https-sub';\n".to_vec(),
+        );
+
+        let routes = Arc::new(routes);
+        let requested_urls = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        let discovered = discover_manifest(main.parent().expect("nested dir"), None)
+            .expect("discover_manifest")
+            .expect("ancestor vael.jsonc must be discovered");
+        let canonical_root_manifest =
+            fs::canonicalize(dir.path().join("vael.jsonc")).expect("canonical manifest");
+        assert_eq!(discovered.path, canonical_root_manifest);
+
+        let resolver = ImportResolver::from_manifest(&discovered);
+
+        // Pass 1: online mock transport fetches npm, jsr, gh/github, and https into CAS + cache
+        // and writes `vael.lock` next to the ancestor `vael.jsonc`.
+        let routes_ref = Arc::clone(&routes);
+        let urls_ref = Arc::clone(&requested_urls);
+        let opts = RuntimeOptions::new()
+            .with_remote(RemoteOptions::new().with_cache_dir(cache.path()))
+            .with_import_resolver(resolver.clone());
+        let mut rt = Runtime::with_options_and_transport(
+            opts,
+            move |url, _timeout, _if_none_match, _if_modified_since| {
+                urls_ref.lock().expect("lock").push(url.to_owned());
+                let body = routes_ref
+                    .get(url)
+                    .cloned()
+                    .ok_or_else(|| format!("unexpected URL {url}"))?;
+                Ok(TestRemoteResponse {
+                    status: 200,
+                    declared_length: Some(body.len() as u64),
+                    cache_control: Some("max-age=3600".to_owned()),
+                    body,
+                    ..TestRemoteResponse::default()
+                })
+            },
+        )
+        .expect("online runtime");
+        rt.run_file(&main)
+            .expect("nested script resolves all four bare import-map types");
+
+        let root_lock_path = dir.path().join("vael.lock");
+        assert!(
+            root_lock_path.exists(),
+            "vael.lock must be persisted next to ancestor vael.jsonc"
+        );
+        assert!(
+            !dir.path().join("apps/nested/sub/vael.lock").exists(),
+            "vael.lock must not be written inside nested script dir"
+        );
+        assert!(!dir.path().join("node_modules").exists());
+        assert!(!dir.path().join("apps/nested/sub/node_modules").exists());
+
+        let lock = Lockfile::read_from_path(&root_lock_path).expect("read vael.lock");
+        assert_eq!(
+            lock.specifiers.get("demo-pkg@^1.0.0").map(String::as_str),
+            Some("demo-pkg@1.0.0")
+        );
+        assert_eq!(
+            lock.specifiers.get("@acme/lib@^1.0.0").map(String::as_str),
+            Some("@acme/lib@1.0.0")
+        );
+        assert!(lock.packages.contains_key("demo-pkg@1.0.0"));
+        assert!(lock.packages.contains_key("@acme/lib@1.0.0"));
+
+        // Pass 2: subsequent offline runtime with NO remote transport succeeds using
+        // the ancestor `vael.lock` and populated CAS (with cold dynamic `import("my-npm")`).
+        let npm_offline_source = r#"
+import { npmSubVal } from "my-npm/sub";
+import { scopedVal } from "my-scoped";
+const dynNpm = await import("my-npm");
+if (
+    npmSubVal !== "npm-sub" ||
+    scopedVal !== "npm-scoped" ||
+    dynNpm.npmVal !== "npm-root"
+) {
+    throw new Error("offline npm import-map mismatch");
+}
+"#;
+        for forbidden in ["npm:", "jsr:", "gh:", "github:", "https:"] {
+            assert!(!npm_offline_source.contains(forbidden));
+        }
+        let npm_offline = write(
+            dir.path(),
+            "apps/nested/sub/npm_offline.ts",
+            npm_offline_source,
+        );
+        let rediscovered = discover_manifest(npm_offline.parent().expect("nested dir"), None)
+            .expect("discover_manifest")
+            .expect("ancestor vael.jsonc");
+        let offline_resolver = ImportResolver::from_manifest(&rediscovered);
+
+        let offline_opts = RuntimeOptions::new()
+            .with_offline(true)
+            .with_frozen_lockfile(true)
+            .with_npm_cache_dir(cache.path())
+            .with_import_resolver(offline_resolver.clone());
+        Runtime::with_options(offline_opts)
+            .expect("offline runtime")
+            .run_file(&npm_offline)
+            .expect("offline runtime must succeed from ancestor vael.lock + CAS");
+
+        // Pass 3: cold dynamic `import("my-jsr")` without a prior static JSR import.
+        let jsr_dyn_only = write(
+            dir.path(),
+            "apps/nested/sub/jsr_dyn.ts",
+            r#"
+const dynJsr = await import("my-jsr");
+if (dynJsr.jsrVal !== "jsr-root") {
+    throw new Error("cold dynamic jsr import mismatch");
+}
+"#,
+        );
+        let jsr_opts = RuntimeOptions::new()
+            .with_remote(RemoteOptions::new().with_cache_dir(cache.path()))
+            .with_import_resolver(offline_resolver);
+        Runtime::with_options_and_transport(
+            jsr_opts,
+            |_url, _timeout, _if_none_match, _if_modified_since| {
+                Err("unexpected network call; should be cached or fail if missed".to_owned())
+            },
+        )
+        .expect("cached jsr runtime")
+        .run_file(&jsr_dyn_only)
+        .expect("cold dynamic import(\"my-jsr\") succeeds from cache");
     }
 }
