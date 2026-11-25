@@ -1,6 +1,6 @@
 //! Command-line entry point for VaelJS Lite on QuickJS.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -10,20 +10,48 @@ use vaeljs_manifest::{
     DiscoveredManifest, MAX_DISCOVERY_DEPTH, Manifest, Workspace, discover_manifest,
 };
 
+/// Default program name shown when `argv[0]` is missing or unusable.
+const DEFAULT_PROG_NAME: &str = "vjs-lite";
 /// Exit code for a module or test that failed while loading or running.
 const EXIT_RUNTIME_FAILURE: u8 = 1;
 /// Exit code for a command vjs-lite could not start.
 const EXIT_STARTUP_FAILURE: u8 = 2;
 
+/// Derives the CLI program name from `argv[0]`, falling back to `default`.
+fn program_name_from_arg0(arg0: Option<&OsStr>, default: &str) -> String {
+    let Some(raw) = arg0 else {
+        return default.to_string();
+    };
+    let Some(file_name) = Path::new(raw).file_name().and_then(OsStr::to_str) else {
+        return default.to_string();
+    };
+    let Some(base) = file_name.rsplit(['/', '\\']).next() else {
+        return default.to_string();
+    };
+    let name = if base.len() >= 4 && base.as_bytes()[base.len() - 4..].eq_ignore_ascii_case(b".exe")
+    {
+        &base[..base.len() - 4]
+    } else {
+        base
+    };
+    if name.is_empty() || name.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+        default.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 fn main() -> ExitCode {
-    let command = match parse_args(std::env::args_os().skip(1).collect()) {
+    let mut args = std::env::args_os();
+    let prog_name = program_name_from_arg0(args.next().as_deref(), DEFAULT_PROG_NAME);
+    let command = match parse_args(args.collect()) {
         Ok(command) => command,
-        Err(message) => return startup_failure(&message),
+        Err(message) => return startup_failure(&prog_name, &message),
     };
 
     match command {
         Command::Help => {
-            print!("{}", help());
+            print!("{}", help(&prog_name));
             ExitCode::SUCCESS
         }
         Command::Version => {
@@ -34,23 +62,23 @@ fn main() -> ExitCode {
             path,
             config,
             node_compat,
-        } => run(&path, &config, node_compat),
+        } => run(&prog_name, &path, &config, node_compat),
         Command::Test {
             patterns,
             config,
             node_compat,
-        } => run_tests(&patterns, &config, node_compat),
-        Command::Types { profile, out_dir } => run_types(profile, out_dir.as_deref()),
+        } => run_tests(&prog_name, &patterns, &config, node_compat),
+        Command::Types { profile, out_dir } => run_types(&prog_name, profile, out_dir.as_deref()),
         Command::TypesHelp => {
-            print!("{}", types_help());
+            print!("{}", types_help(&prog_name));
             ExitCode::SUCCESS
         }
     }
 }
 
-fn startup_failure(message: &str) -> ExitCode {
-    eprintln!("vjs-lite: {message}");
-    eprintln!("Try 'vjs-lite --help'.");
+fn startup_failure(prog_name: &str, message: &str) -> ExitCode {
+    eprintln!("{prog_name}: {message}");
+    eprintln!("Try '{prog_name} --help'.");
     ExitCode::from(EXIT_STARTUP_FAILURE)
 }
 
@@ -495,11 +523,11 @@ fn create_runtime(resolver: Option<ImportResolver>, node_compat: bool) -> Result
     Runtime::with_options(options)
 }
 
-fn run(path: &Path, config: &ConfigChoice, node_compat: bool) -> ExitCode {
+fn run(prog_name: &str, path: &Path, config: &ConfigChoice, node_compat: bool) -> ExitCode {
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
         Err(message) => {
-            eprintln!("vjs-lite: {message}");
+            eprintln!("{prog_name}: {message}");
             return ExitCode::from(EXIT_STARTUP_FAILURE);
         }
     };
@@ -510,7 +538,7 @@ fn run(path: &Path, config: &ConfigChoice, node_compat: bool) -> ExitCode {
     let resolver = match resolver {
         Ok(resolver) => resolver,
         Err(message) => {
-            eprintln!("vjs-lite: {message}");
+            eprintln!("{prog_name}: {message}");
             return ExitCode::from(EXIT_STARTUP_FAILURE);
         }
     };
@@ -518,7 +546,7 @@ fn run(path: &Path, config: &ConfigChoice, node_compat: bool) -> ExitCode {
     let mut runtime = match create_runtime(resolver, node_compat) {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("vjs-lite: {error}");
+            eprintln!("{prog_name}: {error}");
             return ExitCode::from(EXIT_STARTUP_FAILURE);
         }
     };
@@ -532,7 +560,7 @@ fn run(path: &Path, config: &ConfigChoice, node_compat: bool) -> ExitCode {
             }
         }
         Err(error) => {
-            eprintln!("vjs-lite: {error}");
+            eprintln!("{prog_name}: {error}");
             ExitCode::from(exit_code(&error))
         }
     }
@@ -571,18 +599,23 @@ impl TestTotals {
 /// A file that fails to load, fails a test, registers no tests, leaves a test
 /// pending, leaves an unhandled rejection, or leaves unsettled job work makes
 /// the command exit 1. Later files still run in fresh isolated runtimes.
-fn run_tests(patterns: &[String], config: &ConfigChoice, node_compat: bool) -> ExitCode {
+fn run_tests(
+    prog_name: &str,
+    patterns: &[String],
+    config: &ConfigChoice,
+    node_compat: bool,
+) -> ExitCode {
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
         Err(message) => {
-            eprintln!("vjs-lite: {message}");
+            eprintln!("{prog_name}: {message}");
             return ExitCode::from(EXIT_STARTUP_FAILURE);
         }
     };
 
     let files = match vaeljs_module_policy::test_glob::expand(patterns) {
         Ok(files) => files,
-        Err(message) => return startup_failure(&message),
+        Err(message) => return startup_failure(prog_name, &message),
     };
 
     let mut resolvers = Vec::with_capacity(files.len());
@@ -594,7 +627,7 @@ fn run_tests(patterns: &[String], config: &ConfigChoice, node_compat: bool) -> E
         match resolver {
             Ok(resolver) => resolvers.push(resolver),
             Err(message) => {
-                eprintln!("vjs-lite: {message}");
+                eprintln!("{prog_name}: {message}");
                 return ExitCode::from(EXIT_STARTUP_FAILURE);
             }
         }
@@ -607,19 +640,19 @@ fn run_tests(patterns: &[String], config: &ConfigChoice, node_compat: bool) -> E
         let mut runtime = match create_runtime(resolver, node_compat) {
             Ok(runtime) => runtime,
             Err(error) => {
-                eprintln!("vjs-lite: {error}");
+                eprintln!("{prog_name}: {error}");
                 return ExitCode::from(EXIT_STARTUP_FAILURE);
             }
         };
         if let Err(error) = runtime.run_file(file) {
-            eprintln!("vjs-lite: {}: {error}", file.display());
+            eprintln!("{prog_name}: {}: {error}", file.display());
             failed_files += 1;
             continue;
         }
         if let Some(code) = runtime.exit_code()
             && code != 0
         {
-            eprintln!("vjs-lite: {}: exited with code {code}", file.display());
+            eprintln!("{prog_name}: {}: exited with code {code}", file.display());
             failed_files += 1;
             continue;
         }
@@ -628,14 +661,14 @@ fn run_tests(patterns: &[String], config: &ConfigChoice, node_compat: bool) -> E
                 let no_tests = report.total == 0 && report.unhandled == 0;
                 totals.add(&report);
                 if no_tests {
-                    eprintln!("vjs-lite: {}: no tests registered", file.display());
+                    eprintln!("{prog_name}: {}: no tests registered", file.display());
                     failed_files += 1;
                 } else if !report.all_passed() {
                     failed_files += 1;
                 }
             }
             Err(error) => {
-                eprintln!("vjs-lite: {}: {error}", file.display());
+                eprintln!("{prog_name}: {}: {error}", file.display());
                 failed_files += 1;
             }
         }
@@ -680,13 +713,13 @@ fn exit_code(error: &Error) -> u8 {
     }
 }
 
-fn run_types(profile: Profile, out_dir: Option<&Path>) -> ExitCode {
+fn run_types(prog_name: &str, profile: Profile, out_dir: Option<&Path>) -> ExitCode {
     match out_dir {
         Some(dir) => match vaeljs_dts::write_types_dir(profile, dir) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!(
-                    "vjs-lite: cannot write types to `{}`: {error}",
+                    "{prog_name}: cannot write types to `{}`: {error}",
                     dir.display()
                 );
                 ExitCode::from(EXIT_STARTUP_FAILURE)
@@ -703,7 +736,7 @@ fn run_types(profile: Profile, out_dir: Option<&Path>) -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) if error.kind() == ErrorKind::BrokenPipe => ExitCode::SUCCESS,
                 Err(error) => {
-                    eprintln!("vjs-lite: cannot write types to stdout: {error}");
+                    eprintln!("{prog_name}: cannot write types to stdout: {error}");
                     ExitCode::from(EXIT_STARTUP_FAILURE)
                 }
             }
@@ -711,14 +744,14 @@ fn run_types(profile: Profile, out_dir: Option<&Path>) -> ExitCode {
     }
 }
 
-fn types_help() -> String {
+fn types_help(prog_name: &str) -> String {
     format!(
         "\
 vaeljs-lite {}
 Emit TypeScript declarations (.d.ts) for VaelJS globals and `vael:*` built-in modules.
 
 Usage:
-  vjs-lite types [options]
+  {prog_name} types [options]
 
 Options:
   --profile <lite|v8>  runtime profile to emit (`lite` or `v8`, default `lite`)
@@ -726,9 +759,9 @@ Options:
   -h, --help           show this help
 
 Examples:
-  vjs-lite types > vjs-lite.d.ts
-  vjs-lite types --profile v8 > vjs.d.ts
-  vjs-lite types --out-dir ./types
+  {prog_name} types > vjs-lite.d.ts
+  {prog_name} types --profile v8 > vjs.d.ts
+  {prog_name} types --out-dir ./types
 ",
         env!("CARGO_PKG_VERSION")
     )
@@ -744,19 +777,19 @@ const NODE_MODULES_HELP: &str = "\n  node:buffer, node:child_process, node:crypt
 #[cfg(not(feature = "node-compat"))]
 const NODE_MODULES_HELP: &str = "";
 
-fn help() -> String {
+fn help(prog_name: &str) -> String {
     format!(
         "\
 vaeljs-lite {}
 Run an ECMAScript module or erasable TypeScript file on QuickJS, or run test files.
 
 Usage:
-  vjs-lite <file>                    run one module
-  vjs-lite --config <path> <file>
-  vjs-lite --no-config <file>
-  vjs-lite -- <file>
-  vjs-lite test <file-or-glob>...    run test files
-  vjs-lite types [--profile <lite|v8>] [--out-dir <dir>]
+  {prog_name} <file>                    run one module
+  {prog_name} --config <path> <file>
+  {prog_name} --no-config <file>
+  {prog_name} -- <file>
+  {prog_name} test <file-or-glob>...    run test files
+  {prog_name} types [--profile <lite|v8>] [--out-dir <dir>]
                                        emit TypeScript declarations (.d.ts)
 
 Options:
@@ -780,7 +813,7 @@ unless `--config` or `--no-config` is passed. Remote (`https:`, `gh:`, `jsr:`,
 `npm:`) and unsupported `node:*` imports (such as `node:fs/promises`) are not
 supported in `vjs-lite`.
 
-`vjs-lite test` expands each argument as an existing file or a case-sensitive
+`{prog_name} test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
 runtime. There is no default discovery, and a file that registers no tests fails.
 Host timers are not implemented; `test(..., {{ timeout }})` is rejected.
@@ -788,7 +821,7 @@ Host timers are not implemented; `test(..., {{ timeout }})` is rejected.
 Exit codes:
   0  the module finished, or every test file passed
   1  the module or a test failed, or a test file registered no tests
-  2  vjs-lite could not start: bad arguments, an invalid or missing manifest,
+  2  {prog_name} could not start: bad arguments, an invalid or missing manifest,
      an unreadable or unsupported entry file, or a test file or glob that could
      not be expanded
 ",
@@ -800,8 +833,8 @@ Exit codes:
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, ConfigChoice, parse_args};
-    use std::ffi::OsString;
+    use super::{Command, ConfigChoice, DEFAULT_PROG_NAME, parse_args, program_name_from_arg0};
+    use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
     use vaeljs_dts::Profile;
 
@@ -947,5 +980,51 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn program_name_from_arg0_extracts_basename_and_falls_back() {
+        assert_eq!(
+            program_name_from_arg0(Some(OsStr::new("/usr/local/bin/vjs")), DEFAULT_PROG_NAME),
+            "vjs"
+        );
+        assert_eq!(
+            program_name_from_arg0(Some(OsStr::new("./foo/my-vjs")), DEFAULT_PROG_NAME),
+            "my-vjs"
+        );
+        assert_eq!(
+            program_name_from_arg0(Some(OsStr::new("vael")), DEFAULT_PROG_NAME),
+            "vael"
+        );
+        assert_eq!(
+            program_name_from_arg0(Some(OsStr::new(r"C:\bin\vjs.exe")), DEFAULT_PROG_NAME),
+            "vjs"
+        );
+        assert_eq!(
+            program_name_from_arg0(Some(OsStr::new(r"C:\bin\VJS-LITE.EXE")), DEFAULT_PROG_NAME),
+            "VJS-LITE"
+        );
+        assert_eq!(
+            program_name_from_arg0(None, DEFAULT_PROG_NAME),
+            DEFAULT_PROG_NAME
+        );
+        for invalid in ["", "/", r"C:\", ".exe", "my vjs", "vjs\n", "vjs\r", "vjs\0"] {
+            assert_eq!(
+                program_name_from_arg0(Some(OsStr::new(invalid)), DEFAULT_PROG_NAME),
+                DEFAULT_PROG_NAME,
+                "input: {invalid:?}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert_eq!(
+                program_name_from_arg0(
+                    Some(OsStr::from_bytes(b"/tmp/\xff\xfe")),
+                    DEFAULT_PROG_NAME
+                ),
+                DEFAULT_PROG_NAME
+            );
+        }
     }
 }

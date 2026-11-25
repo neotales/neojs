@@ -926,3 +926,74 @@ fn node_compat_disabled_at_compile_time_refuses_node_specifiers() {
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("node:"), "{}", stderr(&output));
 }
+
+#[test]
+#[cfg(unix)]
+fn help_and_usage_use_symlink_program_name() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let symlink_path = dir.path().join("my-vjs");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_vjs-lite"), &symlink_path)
+        .expect("create symlink");
+
+    for args in [
+        &["--help"][..],
+        &["-h"][..],
+        &["test", "--help"][..],
+        &["test", "-h"][..],
+    ] {
+        let output = Command::new(&symlink_path)
+            .args(args)
+            .output()
+            .expect("run symlinked vjs-lite");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        let text = stdout(&output);
+        assert!(text.contains("  my-vjs <file>"), "{args:?}: {text}");
+        assert!(
+            text.contains("  my-vjs test <file-or-glob>..."),
+            "{args:?}: {text}"
+        );
+        assert!(text.contains("`my-vjs test`"), "{args:?}: {text}");
+        assert!(
+            text.contains("  2  my-vjs could not start:"),
+            "{args:?}: {text}"
+        );
+        assert!(!text.contains("  vjs-lite "), "{args:?}: {text}");
+        assert!(!text.contains("`vjs-lite test`"), "{args:?}: {text}");
+    }
+
+    for flag in ["--help", "-h"] {
+        let output = Command::new(&symlink_path)
+            .args(["types", flag])
+            .output()
+            .expect("run symlinked vjs-lite types --help");
+        assert_eq!(output.status.code(), Some(0), "{flag}: {}", stderr(&output));
+        let text = stdout(&output);
+        assert!(text.contains("  my-vjs types [options]"), "{text}");
+        assert!(text.contains("  my-vjs types > vjs-lite.d.ts"), "{text}");
+        assert!(!text.contains("  vjs-lite types"), "{text}");
+    }
+
+    let bad = Command::new(&symlink_path)
+        .output()
+        .expect("run symlinked vjs-lite with no args");
+    assert_eq!(bad.status.code(), Some(2));
+    assert_eq!(
+        stderr(&bad),
+        "my-vjs: no input file\nTry 'my-vjs --help'.\n"
+    );
+
+    let version = Command::new(&symlink_path)
+        .arg("--version")
+        .output()
+        .expect("run symlinked vjs-lite --version");
+    assert_eq!(version.status.code(), Some(0));
+    assert_eq!(
+        stdout(&version),
+        format!("vjs-lite {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}
