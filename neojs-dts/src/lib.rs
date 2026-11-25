@@ -193,6 +193,7 @@ const NEO_CRYPTO_DTS: &str = include_str!("../types/neo/crypto.d.ts");
 const NEO_CRYPTO_LITE_DTS: &str = include_str!("../types/neo/crypto-lite.d.ts");
 const NEO_DB_DTS: &str = include_str!("../types/neo/db.d.ts");
 const NEO_FS_DTS: &str = include_str!("../types/neo/fs.d.ts");
+const NEO_HTTP_DTS: &str = include_str!("../types/neo/http.d.ts");
 const NEO_OS_DTS: &str = include_str!("../types/neo/os.d.ts");
 const NEO_PATH_DTS: &str = include_str!("../types/neo/path.d.ts");
 const NEO_SLICES_DTS: &str = include_str!("../types/neo/slices.d.ts");
@@ -269,6 +270,11 @@ const V8_FILES: &[DtsFile] = &[
         path: "neo/fs.d.ts",
         specifier: Some("neo:fs"),
         content: NEO_FS_DTS,
+    },
+    DtsFile {
+        path: "neo/http.d.ts",
+        specifier: Some("neo:http"),
+        content: NEO_HTTP_DTS,
     },
     DtsFile {
         path: "neo/os.d.ts",
@@ -657,6 +663,41 @@ const FS_EXPORTS: ModuleExports = ModuleExports {
     has_default: false,
 };
 
+const HTTP_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "neo:http",
+    exports: &[
+        "HttpError",
+        "HttpRequest",
+        "HttpResponse",
+        "ServeMux",
+        "createRouter",
+        "response",
+        "json",
+        "html",
+        "text",
+        "redirect",
+        "noContent",
+        "setCookie",
+        "httpError",
+        "badRequest",
+        "unauthorized",
+        "forbidden",
+        "notFound",
+        "conflict",
+        "methodNotAllowed",
+        "recover",
+        "requestId",
+        "logger",
+        "securityHeaders",
+        "cors",
+        "compose",
+        "serve",
+        "parseCookies",
+        "formatSetCookie",
+    ],
+    has_default: false,
+};
+
 const OS_EXPORTS: ModuleExports = ModuleExports {
     specifier: "neo:os",
     exports: &["platform", "arch"],
@@ -966,6 +1007,7 @@ const V8_EXPECTED_EXPORTS: &[ModuleExports] = &[
     CRYPTO_EXPORTS,
     DB_EXPORTS,
     FS_EXPORTS,
+    HTTP_EXPORTS,
     OS_EXPORTS,
     PATH_EXPORTS,
     SLICES_EXPORTS,

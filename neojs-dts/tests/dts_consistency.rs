@@ -38,6 +38,7 @@ const V8_SPECIFIERS: &[&str] = &[
     "neo:crypto",
     "neo:db",
     "neo:fs",
+    "neo:http",
     "neo:os",
     "neo:path",
     "neo:slices",
@@ -90,7 +91,14 @@ const LITE_SPECIFIERS: &[&str] = &[
     "node:url",
 ];
 
-const V8_ONLY_SPECIFIERS: &[&str] = &["neo:age", "neo:cron", "neo:db", "neo:stdio", "node:fs/promises"];
+const V8_ONLY_SPECIFIERS: &[&str] = &[
+    "neo:age",
+    "neo:cron",
+    "neo:db",
+    "neo:http",
+    "neo:stdio",
+    "node:fs/promises",
+];
 
 /// Validates balanced delimiters `{}` / `()` / `[]` and closed comments/strings
 /// across a `.d.ts` source string.
@@ -189,6 +197,15 @@ fn contains_identifier_word(haystack: &str, needle: &str) -> bool {
 }
 
 fn assert_no_forbidden_globals(label: &str, source: &str, is_node_module: bool) {
+    // `ServeMux.fetch` is an instance method on `ServeMux` inside `neo:http`,
+    // not a global `fetch` function. Strip those exact member occurrences
+    // before running the global-identifier word scan.
+    let sanitized = source
+        .replace(
+            "fetch(input: string | FetchInput, init?: FetchInit): Promise<HttpResponse>;",
+            "",
+        )
+        .replace(".fetch(", ".(");
     let list = if is_node_module {
         ALWAYS_FORBIDDEN_GLOBALS
     } else {
@@ -196,7 +213,7 @@ fn assert_no_forbidden_globals(label: &str, source: &str, is_node_module: bool) 
     };
     for forbidden in list {
         assert!(
-            !contains_identifier_word(source, forbidden),
+            !contains_identifier_word(&sanitized, forbidden),
             "{label}: forbidden global identifier `{forbidden}` found"
         );
     }

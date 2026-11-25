@@ -669,7 +669,8 @@ impl Runtime {
         remote: Option<RemoteClient>,
         node_compat: bool,
     ) -> Result<Self, Error> {
-        let driver = tokio::runtime::Builder::new_multi_thread()
+        let mut driver_builder = tokio::runtime::Builder::new_multi_thread();
+        driver_builder
             .worker_threads(1)
             // Bounded pool for `neo:crypto` asynchronous hashing and password
             // work. Four threads
@@ -677,14 +678,16 @@ impl Runtime {
             // unbounded blocking threads.
             .max_blocking_threads(4)
             .enable_time()
-            .thread_name("neojs-v8")
-            .build()
-            .map_err(Error::Executor)?;
-        let ops = match tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .thread_name("neojs-ops")
-            .build()
-        {
+            .thread_name("neojs-v8");
+        #[cfg(feature = "neo-http")]
+        driver_builder.enable_io();
+        let driver = driver_builder.build().map_err(Error::Executor)?;
+
+        let mut ops_builder = tokio::runtime::Builder::new_current_thread();
+        ops_builder.enable_time().thread_name("neojs-ops");
+        #[cfg(feature = "neo-http")]
+        ops_builder.enable_io();
+        let ops = match ops_builder.build() {
             Ok(ops) => ops,
             Err(error) => {
                 // The driver is already built. Shut it down without blocking so
@@ -711,6 +714,8 @@ impl Runtime {
         ];
         #[cfg(feature = "neo-db")]
         extensions.push(neojs_db::init());
+        #[cfg(feature = "neo-http")]
+        extensions.push(crate::http::neojs_http::init());
         #[cfg(feature = "neo-template")]
         extensions.push(crate::template::neojs_template::init());
         #[cfg(feature = "node-compat")]

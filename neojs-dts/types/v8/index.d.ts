@@ -7,6 +7,7 @@
 /// <reference path="./neo/crypto.d.ts" />
 /// <reference path="./neo/db.d.ts" />
 /// <reference path="./neo/fs.d.ts" />
+/// <reference path="./neo/http.d.ts" />
 /// <reference path="./neo/os.d.ts" />
 /// <reference path="./neo/path.d.ts" />
 /// <reference path="./neo/slices.d.ts" />

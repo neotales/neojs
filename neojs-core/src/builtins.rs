@@ -74,7 +74,10 @@
 //! `console` module is the realm's installed console object, not a separate
 //! console or an isolation boundary. `fs` calls fourteen private host ops
 //! registered by [`crate::fs`] and implemented in `neojs-fs-core` for
-//! synchronous filesystem operations. `path` is lexical POSIX and Windows path
+//! synchronous filesystem operations. When `neo-http` is enabled, `http`
+//! (`neo:http`) exposes a Go-style `ServeMux` router, traversal/symlink-safe
+//! static file serving, RFC 6265 cookies, composable middleware, and a live
+//! HTTP/1.1 server backed by `neojs-http-core`, `hyper`, and `tokio`. `path` is lexical POSIX and Windows path
 //! manipulation adapted from NeoLiteJS and `@neotales/path`; its only host read
 //! is the process working directory, through [`crate::path`], and only when a
 //! resolve/relative operation lacks an explicit absolute base. It adds no
@@ -126,11 +129,11 @@ use deno_core::url::Url;
 /// runtime. `Neo.getBuiltInModulesList` returns one frozen array of the
 /// canonical `neo:` specifiers, built from the registry in insertion order;
 /// repeated calls return that same array. The `age`,
-/// `assert`, `chars`, `cron`, `crypto`, `fs`, `os`, `path`, `slices`, `ssh`,
-/// `stdio`, `strings`, `test`, `uuid`,
-/// `uuid/v4`, and `uuid/v7` module objects are frozen and
-/// cached, so repeated `Neo.getBuiltInModule` calls with the canonical
-/// specifier return the same object for each. The `console` module object is
+/// `assert`, `chars`, `cron`, `crypto`, `fs`, `http` (when `neo-http` is
+/// enabled), `os`, `path`, `slices`, `ssh`, `stdio`, `strings`, `test`,
+/// `uuid`, `uuid/v4`, and `uuid/v7` module objects are frozen and cached, so
+/// repeated `Neo.getBuiltInModule` calls with the canonical specifier return
+/// the same object for each. The `console` module object is
 /// the console object the runtime installed, captured after the console shim
 /// runs. At installation time the
 /// registry, the module bindings, and the global console share the same
@@ -190,6 +193,16 @@ const DB_REGISTRY_TOKEN: &str = "// __NEO_DB_REGISTRY_ENTRY__";
 /// Source for the `neo:db` registry object, compiled only when `neo-db` is enabled.
 #[cfg(feature = "neo-db")]
 const DB_IMPL_SOURCE: &str = include_str!("builtins/db.impl.js");
+
+/// The marker replaced with the `http` implementation source.
+const HTTP_IMPL_TOKEN: &str = "// __NEO_HTTP_IMPL__";
+
+/// The marker replaced with the `http` registry entry.
+const HTTP_REGISTRY_TOKEN: &str = "// __NEO_HTTP_REGISTRY_ENTRY__";
+
+/// The `neo:http` factory source, compiled in only when `neo-http` is enabled.
+#[cfg(feature = "neo-http")]
+const HTTP_IMPL_SOURCE: &str = include_str!("builtins/http.js");
 
 /// The marker replaced with the `template` implementation source.
 const TEMPLATE_IMPL_TOKEN: &str = "// __NEO_TEMPLATE_IMPL__";
@@ -267,6 +280,18 @@ pub(crate) fn neo_shim() -> String {
         .replace(DB_IMPL_TOKEN, "")
         .replace(DB_REGISTRY_TOKEN, "");
 
+    #[cfg(feature = "neo-http")]
+    let shim = shim
+        .replace(
+            HTTP_IMPL_TOKEN,
+            &format!("const http = (\n{HTTP_IMPL_SOURCE}\n)({{ ops: Deno.core.ops }});"),
+        )
+        .replace(HTTP_REGISTRY_TOKEN, "[\"neo:http\", http],");
+    #[cfg(not(feature = "neo-http"))]
+    let shim = shim
+        .replace(HTTP_IMPL_TOKEN, "")
+        .replace(HTTP_REGISTRY_TOKEN, "");
+
     #[cfg(feature = "neo-template")]
     let shim = shim
         .replace(TEMPLATE_IMPL_TOKEN, include_str!("builtins/template.js"))
@@ -285,6 +310,8 @@ pub(crate) fn neo_shim() -> String {
     debug_assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
     debug_assert!(!shim.contains(DB_IMPL_TOKEN));
     debug_assert!(!shim.contains(DB_REGISTRY_TOKEN));
+    debug_assert!(!shim.contains(HTTP_IMPL_TOKEN));
+    debug_assert!(!shim.contains(HTTP_REGISTRY_TOKEN));
     debug_assert!(!shim.contains(TEMPLATE_IMPL_TOKEN));
     debug_assert!(!shim.contains(TEMPLATE_REGISTRY_TOKEN));
     shim
@@ -427,6 +454,17 @@ pub(crate) const FS_SPECIFIER: &str = neojs_fs_core::SPECIFIER;
 /// the module and `Neo.getBuiltInModule("neo:fs")` share identity. The functions
 /// call host ops registered by [`crate::fs`].
 const FS_MODULE: &str = include_str!("builtins/fs.esm.js");
+
+/// The canonical module specifier for the `http` built-in.
+///
+/// Only `neo:http` resolves to this URL. With `neo-http` off, the specifier is
+/// absent from the name and source tables and the loader rejects it.
+#[cfg(feature = "neo-http")]
+pub(crate) const HTTP_SPECIFIER: &str = "neo:http";
+
+/// The ECMAScript module source served for [`HTTP_SPECIFIER`].
+#[cfg(feature = "neo-http")]
+const HTTP_MODULE: &str = include_str!("builtins/http.esm.js");
 
 /// The canonical module specifier for the `os` built-in.
 ///
@@ -614,6 +652,8 @@ const BUILTINS: &[(&str, &str)] = &[
     #[cfg(feature = "neo-db")]
     ("db", DB_SPECIFIER),
     ("fs", FS_SPECIFIER),
+    #[cfg(feature = "neo-http")]
+    ("http", HTTP_SPECIFIER),
     ("os", OS_SPECIFIER),
     ("path", PATH_SPECIFIER),
     #[cfg(feature = "neo-slices")]
@@ -680,6 +720,8 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         #[cfg(feature = "neo-db")]
         DB_SPECIFIER => Some(DB_MODULE),
         FS_SPECIFIER => Some(FS_MODULE),
+        #[cfg(feature = "neo-http")]
+        HTTP_SPECIFIER => Some(HTTP_MODULE),
         OS_SPECIFIER => Some(OS_MODULE),
         PATH_SPECIFIER => Some(PATH_MODULE),
         #[cfg(feature = "neo-slices")]

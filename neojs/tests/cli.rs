@@ -1237,8 +1237,11 @@ fn reports_an_unknown_neo_module_and_lists_the_implemented_ones() {
     if cfg!(feature = "neo-db") {
         expected_specifiers.push("neo:db");
     }
+    expected_specifiers.push("neo:fs");
+    if cfg!(feature = "neo-http") {
+        expected_specifiers.push("neo:http");
+    }
     expected_specifiers.extend([
-        "neo:fs",
         "neo:os",
         "neo:path",
         "neo:slices",

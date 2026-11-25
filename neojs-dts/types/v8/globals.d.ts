@@ -35,6 +35,7 @@ interface NeoBuiltInModuleMap {
   "neo:crypto": typeof import("neo:crypto");
   "neo:db": typeof import("neo:db");
   "neo:fs": typeof import("neo:fs");
+  "neo:http": typeof import("neo:http");
   "neo:os": typeof import("neo:os");
   "neo:path": typeof import("neo:path");
   "neo:slices": typeof import("neo:slices");
