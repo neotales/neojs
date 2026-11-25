@@ -13,6 +13,7 @@ members = [
     "neojs-remote",
     "neojs-npm",
     "neojs-ssh-core",
+    "neojs-template-core",
     "neojs-lite-core",
     "neojs-lite",
 ]
@@ -37,6 +38,7 @@ default-members = [
     "neojs-remote",
     "neojs-npm",
     "neojs-ssh-core",
+    "neojs-template-core",
 ]
 
 [workspace.package]
@@ -96,6 +98,9 @@ neojs-remote = { version = "0.0.0-alpha.0", path = "neojs-remote" }
 # Engine-neutral synchronous SSH core for `neo:ssh`. Has no JS engine or Tokio
 # dependency; wraps `neotales-ssh` with mandatory host trust and bounded execution.
 neojs-ssh-core = { version = "0.0.0-alpha.0", path = "neojs-ssh-core" }
+# Engine-neutral Go template + Sprig core for `neo:template`. Has no JS engine
+# or Tokio dependency; wraps `neotales-gotmpl` and `neotales-sprig`.
+neojs-template-core = { version = "0.0.0-alpha.0", path = "neojs-template-core" }
 base64 = "0.22.1"
 flate2 = "1.1.11"
 indexmap = { version = "2.14.2", features = ["serde"] }
@@ -133,6 +138,10 @@ neotales-ssh = "=0.0.0-alpha.1"
 # Both are alpha releases of the same version, so they are pinned exactly.
 neotales-dbapi = "=0.0.0-alpha.0"
 neotales-dbapi-sqlite = "=0.0.0-alpha.0"
+# Pure Go text/template engine and deterministic Sprig helper library. Both are
+# alpha releases with unstable Rust APIs, so they are pinned exactly.
+neotales-gotmpl = "=0.0.0-alpha.1"
+neotales-sprig = "=0.0.0-alpha.1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 tempfile = "3"
