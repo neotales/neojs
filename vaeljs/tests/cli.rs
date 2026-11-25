@@ -4993,3 +4993,70 @@ fn webapp_example_main_serves_live_http_round_trip() {
     let _ = stdout_handle.join();
     let _ = stderr_handle.join();
 }
+
+#[test]
+#[cfg(unix)]
+fn help_and_usage_use_symlink_program_name() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let symlink_path = dir.path().join("my-vjs");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_vjs"), &symlink_path).expect("create symlink");
+
+    let run_symlink = |args: &[&str]| {
+        Command::new(&symlink_path)
+            .env_remove("VAELJS_ALLOW_REMOTE")
+            .args(args)
+            .output()
+            .expect("run symlinked vjs")
+    };
+
+    for args in [
+        &["--help"][..],
+        &["-h"][..],
+        &["test", "--help"][..],
+        &["test", "-h"][..],
+    ] {
+        let output = run_symlink(args);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        let text = stdout(&output);
+        assert!(text.contains("  my-vjs <file>"), "{args:?}: {text}");
+        assert!(
+            text.contains("  my-vjs test <file-or-glob>..."),
+            "{args:?}: {text}"
+        );
+        assert!(text.contains("`my-vjs test`"), "{args:?}: {text}");
+        assert!(
+            text.contains("  2  my-vjs could not start:"),
+            "{args:?}: {text}"
+        );
+        assert!(!text.contains("  vjs "), "{args:?}: {text}");
+        assert!(!text.contains("`vjs test`"), "{args:?}: {text}");
+    }
+
+    for flag in ["--help", "-h"] {
+        let output = run_symlink(&["types", flag]);
+        assert_eq!(output.status.code(), Some(0), "{flag}: {}", stderr(&output));
+        let text = stdout(&output);
+        assert!(text.contains("  my-vjs types [options]"), "{text}");
+        assert!(text.contains("  my-vjs types > vjs.d.ts"), "{text}");
+        assert!(!text.contains("  vjs types"), "{text}");
+    }
+
+    let bad = run_symlink(&[]);
+    assert_eq!(bad.status.code(), Some(2));
+    assert_eq!(
+        stderr(&bad),
+        "my-vjs: no input file\nTry 'my-vjs --help'.\n"
+    );
+
+    let version = run_symlink(&["--version"]);
+    assert_eq!(version.status.code(), Some(0));
+    assert_eq!(
+        stdout(&version),
+        format!("vjs {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}

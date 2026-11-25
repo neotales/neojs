@@ -1,6 +1,6 @@
 //! Command-line entry point for vaeljs.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -17,6 +17,8 @@ use vaeljs_manifest::{
     DiscoveredManifest, MAX_DISCOVERY_DEPTH, Manifest, Workspace, discover_manifest,
 };
 
+/// Default program name shown when `argv[0]` is missing or unusable.
+const DEFAULT_PROG_NAME: &str = "vjs";
 /// Exit code for a module that failed while loading or running.
 const EXIT_RUNTIME_FAILURE: u8 = 1;
 /// Exit code for a command vjs could not start.
@@ -29,15 +31,41 @@ const EXIT_STARTUP_FAILURE: u8 = 2;
 /// no `VAELJS_` variables.
 const ALLOW_REMOTE_ENV: &str = "VAELJS_ALLOW_REMOTE";
 
+/// Derives the CLI program name from `argv[0]`, falling back to `default`.
+fn program_name_from_arg0(arg0: Option<&OsStr>, default: &str) -> String {
+    let Some(raw) = arg0 else {
+        return default.to_string();
+    };
+    let Some(file_name) = Path::new(raw).file_name().and_then(OsStr::to_str) else {
+        return default.to_string();
+    };
+    let Some(base) = file_name.rsplit(['/', '\\']).next() else {
+        return default.to_string();
+    };
+    let name = if base.len() >= 4 && base.as_bytes()[base.len() - 4..].eq_ignore_ascii_case(b".exe")
+    {
+        &base[..base.len() - 4]
+    } else {
+        base
+    };
+    if name.is_empty() || name.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+        default.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 fn main() -> ExitCode {
-    let command = match parse_args(std::env::args_os().skip(1).collect()) {
+    let mut args = std::env::args_os();
+    let prog_name = program_name_from_arg0(args.next().as_deref(), DEFAULT_PROG_NAME);
+    let command = match parse_args(args.collect()) {
         Ok(command) => command,
-        Err(message) => return startup_failure(&message),
+        Err(message) => return startup_failure(&prog_name, &message),
     };
 
     match command {
         Command::Help => {
-            print!("{}", help());
+            print!("{}", help(&prog_name));
             ExitCode::SUCCESS
         }
         Command::Version => {
@@ -51,8 +79,8 @@ fn main() -> ExitCode {
             npm,
             node_compat,
         } => match resolve_allow_remote(allow_remote) {
-            Ok(allow_remote) => run(input, allow_remote, &config, npm, node_compat),
-            Err(message) => startup_failure(&message),
+            Ok(allow_remote) => run(&prog_name, input, allow_remote, &config, npm, node_compat),
+            Err(message) => startup_failure(&prog_name, &message),
         },
         Command::Test {
             patterns,
@@ -61,20 +89,27 @@ fn main() -> ExitCode {
             npm,
             node_compat,
         } => match resolve_allow_remote(allow_remote) {
-            Ok(allow_remote) => run_tests(&patterns, allow_remote, &config, npm, node_compat),
-            Err(message) => startup_failure(&message),
+            Ok(allow_remote) => run_tests(
+                &prog_name,
+                &patterns,
+                allow_remote,
+                &config,
+                npm,
+                node_compat,
+            ),
+            Err(message) => startup_failure(&prog_name, &message),
         },
-        Command::Types { profile, out_dir } => run_types(profile, out_dir.as_deref()),
+        Command::Types { profile, out_dir } => run_types(&prog_name, profile, out_dir.as_deref()),
         Command::TypesHelp => {
-            print!("{}", types_help());
+            print!("{}", types_help(&prog_name));
             ExitCode::SUCCESS
         }
     }
 }
 
-fn startup_failure(message: &str) -> ExitCode {
-    eprintln!("vjs: {message}");
-    eprintln!("Try 'vjs --help'.");
+fn startup_failure(prog_name: &str, message: &str) -> ExitCode {
+    eprintln!("{prog_name}: {message}");
+    eprintln!("Try '{prog_name} --help'.");
     ExitCode::from(EXIT_STARTUP_FAILURE)
 }
 
@@ -738,6 +773,7 @@ fn discover_resolver_for_entry(entry_path: &Path) -> Result<Option<ImportResolve
 }
 
 fn run(
+    prog_name: &str,
     input: Input,
     allow_remote: bool,
     config: &ConfigChoice,
@@ -747,7 +783,7 @@ fn run(
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
         Err(message) => {
-            eprintln!("vjs: {message}");
+            eprintln!("{prog_name}: {message}");
             return ExitCode::from(EXIT_STARTUP_FAILURE);
         }
     };
@@ -760,7 +796,7 @@ fn run(
     let resolver = match resolver {
         Ok(resolver) => resolver,
         Err(message) => {
-            eprintln!("vjs: {message}");
+            eprintln!("{prog_name}: {message}");
             return ExitCode::from(EXIT_STARTUP_FAILURE);
         }
     };
@@ -768,7 +804,7 @@ fn run(
     let mut runtime = match create_runtime(allow_remote, resolver, npm, node_compat) {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("vjs: {error}");
+            eprintln!("{prog_name}: {error}");
             return ExitCode::from(EXIT_STARTUP_FAILURE);
         }
     };
@@ -783,7 +819,7 @@ fn run(
             None => ExitCode::SUCCESS,
         },
         Err(error) => {
-            eprintln!("vjs: {error}");
+            eprintln!("{prog_name}: {error}");
             ExitCode::from(exit_code(&error))
         }
     }
@@ -870,6 +906,7 @@ impl TestTotals {
 /// fresh runtime can also load `https:` modules, with its own default remote
 /// limits and the shared user-profile package cache.
 fn run_tests(
+    prog_name: &str,
     patterns: &[String],
     allow_remote: bool,
     config: &ConfigChoice,
@@ -879,18 +916,14 @@ fn run_tests(
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
         Err(message) => {
-            eprintln!("vjs: {message}");
+            eprintln!("{prog_name}: {message}");
             return ExitCode::from(EXIT_STARTUP_FAILURE);
         }
     };
 
     let files = match vaeljs_module_policy::test_glob::expand(patterns) {
         Ok(files) => files,
-        Err(message) => {
-            eprintln!("vjs: {message}");
-            eprintln!("Try 'vjs --help'.");
-            return ExitCode::from(EXIT_STARTUP_FAILURE);
-        }
+        Err(message) => return startup_failure(prog_name, &message),
     };
 
     let mut resolvers = Vec::with_capacity(files.len());
@@ -902,7 +935,7 @@ fn run_tests(
         match resolver {
             Ok(resolver) => resolvers.push(resolver),
             Err(message) => {
-                eprintln!("vjs: {message}");
+                eprintln!("{prog_name}: {message}");
                 return ExitCode::from(EXIT_STARTUP_FAILURE);
             }
         }
@@ -915,19 +948,19 @@ fn run_tests(
         let mut runtime = match create_runtime(allow_remote, resolver, npm, node_compat) {
             Ok(runtime) => runtime,
             Err(error) => {
-                eprintln!("vjs: {error}");
+                eprintln!("{prog_name}: {error}");
                 return ExitCode::from(EXIT_STARTUP_FAILURE);
             }
         };
         if let Err(error) = runtime.run_file(file) {
-            eprintln!("vjs: {}: {error}", file.display());
+            eprintln!("{prog_name}: {}: {error}", file.display());
             failed_files += 1;
             continue;
         }
         if let Some(code) = runtime.exit_code()
             && code != 0
         {
-            eprintln!("vjs: {}: exited with code {code}", file.display());
+            eprintln!("{prog_name}: {}: exited with code {code}", file.display());
             failed_files += 1;
             continue;
         }
@@ -936,14 +969,14 @@ fn run_tests(
                 let no_tests = report.total == 0 && report.unhandled == 0;
                 totals.add(&report);
                 if no_tests {
-                    eprintln!("vjs: {}: no tests registered", file.display());
+                    eprintln!("{prog_name}: {}: no tests registered", file.display());
                     failed_files += 1;
                 } else if !report.all_passed() {
                     failed_files += 1;
                 }
             }
             Err(error) => {
-                eprintln!("vjs: {}: {error}", file.display());
+                eprintln!("{prog_name}: {}: {error}", file.display());
                 failed_files += 1;
             }
         }
@@ -967,12 +1000,15 @@ fn run_tests(
     }
 }
 
-fn run_types(profile: Profile, out_dir: Option<&Path>) -> ExitCode {
+fn run_types(prog_name: &str, profile: Profile, out_dir: Option<&Path>) -> ExitCode {
     match out_dir {
         Some(dir) => match vaeljs_dts::write_types_dir(profile, dir) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("vjs: cannot write types to `{}`: {error}", dir.display());
+                eprintln!(
+                    "{prog_name}: cannot write types to `{}`: {error}",
+                    dir.display()
+                );
                 ExitCode::from(EXIT_STARTUP_FAILURE)
             }
         },
@@ -987,7 +1023,7 @@ fn run_types(profile: Profile, out_dir: Option<&Path>) -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) if error.kind() == ErrorKind::BrokenPipe => ExitCode::SUCCESS,
                 Err(error) => {
-                    eprintln!("vjs: cannot write types to stdout: {error}");
+                    eprintln!("{prog_name}: cannot write types to stdout: {error}");
                     ExitCode::from(EXIT_STARTUP_FAILURE)
                 }
             }
@@ -995,14 +1031,14 @@ fn run_types(profile: Profile, out_dir: Option<&Path>) -> ExitCode {
     }
 }
 
-fn types_help() -> String {
+fn types_help(prog_name: &str) -> String {
     format!(
         "\
 vaeljs {}
 Emit TypeScript declarations (.d.ts) for VaelJS globals and `vael:*` built-in modules.
 
 Usage:
-  vjs types [options]
+  {prog_name} types [options]
 
 Options:
   --profile <v8|lite>  runtime profile to emit (`v8` or `lite`, default `v8`)
@@ -1010,21 +1046,21 @@ Options:
   -h, --help           show this help
 
 Examples:
-  vjs types > vjs.d.ts
-  vjs types --profile lite > vjs-lite.d.ts
-  vjs types --out-dir ./types
+  {prog_name} types > vjs.d.ts
+  {prog_name} types --profile lite > vjs-lite.d.ts
+  {prog_name} types --out-dir ./types
 ",
         env!("CARGO_PKG_VERSION")
     )
 }
 
-/// The default `--help` text, shared by `vjs --help` and `vjs test --help`.
+/// The default `--help` text, shared by `<prog_name> --help` and `<prog_name> test --help`.
 ///
 /// This stays short on purpose: the built-in module surfaces, remote limits,
 /// unsupported features, and test-runner limits are documented in the README,
 /// which the last line points at. The options and every remote-flag placement
 /// must stay in step with the current dev parser.
-fn help() -> String {
+fn help(prog_name: &str) -> String {
     #[cfg(feature = "npm")]
     let npm_options = "\
   --allow-remote   allow https:, gh:, and github: entry and imports, and
@@ -1061,14 +1097,14 @@ vaeljs {}
 Run an ECMAScript module or erasable TypeScript file, or run test files.
 
 Usage:
-  vjs <file>                    run one module
-  vjs --allow-remote <file-or-url>
-  vjs --no-allow-remote <file>
-  vjs test <file-or-glob>...    run test files
-  vjs test --allow-remote <file-or-glob>...
-  vjs test --no-allow-remote <file-or-glob>...
-  vjs --allow-remote test <file-or-glob>...
-  vjs types [--profile <v8|lite>] [--out-dir <dir>]
+  {prog_name} <file>                    run one module
+  {prog_name} --allow-remote <file-or-url>
+  {prog_name} --no-allow-remote <file>
+  {prog_name} test <file-or-glob>...    run test files
+  {prog_name} test --allow-remote <file-or-glob>...
+  {prog_name} test --no-allow-remote <file-or-glob>...
+  {prog_name} --allow-remote test <file-or-glob>...
+  {prog_name} types [--profile <v8|lite>] [--out-dir <dir>]
                                   emit TypeScript declarations (.d.ts)
 
 Options:
@@ -1112,7 +1148,7 @@ allowlist, and not a sandbox. Downloads are cached under `vaeljs/packages` in th
 `vael.jsonc` upward for `imports` and `workspaces` unless `--config` or
 `--no-config` is passed.
 
-`vjs test` expands each argument as an existing file or a case-sensitive
+`{prog_name} test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
 runtime. There is no default discovery, and a file that registers no tests fails.
 Remote loading follows the flag or setting for every selected file.
@@ -1121,7 +1157,7 @@ Unsupported `node:` specifiers (such as `node:test`) are rejected.
 Exit codes:
   0  the module finished, or every test file passed
   1  the module or a test failed, or a test file registered no tests
-  2  vjs could not start: bad arguments, an invalid or missing manifest,
+  2  {prog_name} could not start: bad arguments, an invalid or missing manifest,
      an unreadable or unsupported entry file, or a test file or glob that could
      not be expanded
 
@@ -1137,9 +1173,11 @@ mod tests {
     use super::AllowRemote;
     use super::Command;
     use super::ConfigChoice;
+    use super::DEFAULT_PROG_NAME;
     use super::NpmFlags;
     use super::parse_args;
     use super::parse_boolean_env;
+    use super::program_name_from_arg0;
     use std::ffi::OsStr;
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -1512,5 +1550,51 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn program_name_from_arg0_extracts_basename_and_falls_back() {
+        assert_eq!(
+            program_name_from_arg0(Some(OsStr::new("/usr/local/bin/vjs")), DEFAULT_PROG_NAME),
+            "vjs"
+        );
+        assert_eq!(
+            program_name_from_arg0(Some(OsStr::new("./foo/my-vjs")), DEFAULT_PROG_NAME),
+            "my-vjs"
+        );
+        assert_eq!(
+            program_name_from_arg0(Some(OsStr::new("vael")), DEFAULT_PROG_NAME),
+            "vael"
+        );
+        assert_eq!(
+            program_name_from_arg0(Some(OsStr::new(r"C:\bin\vjs.exe")), DEFAULT_PROG_NAME),
+            "vjs"
+        );
+        assert_eq!(
+            program_name_from_arg0(Some(OsStr::new(r"C:\bin\VJS.EXE")), DEFAULT_PROG_NAME),
+            "VJS"
+        );
+        assert_eq!(
+            program_name_from_arg0(None, DEFAULT_PROG_NAME),
+            DEFAULT_PROG_NAME
+        );
+        for invalid in ["", "/", r"C:\", ".exe", "my vjs", "vjs\n", "vjs\r", "vjs\0"] {
+            assert_eq!(
+                program_name_from_arg0(Some(OsStr::new(invalid)), DEFAULT_PROG_NAME),
+                DEFAULT_PROG_NAME,
+                "input: {invalid:?}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert_eq!(
+                program_name_from_arg0(
+                    Some(OsStr::from_bytes(b"/tmp/\xff\xfe")),
+                    DEFAULT_PROG_NAME
+                ),
+                DEFAULT_PROG_NAME
+            );
+        }
     }
 }
