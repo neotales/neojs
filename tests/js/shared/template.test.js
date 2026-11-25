@@ -1,7 +1,7 @@
-import test from "neo:test";
-import assert from "neo:assert";
-import templateDefault, * as templateNs from "neo:template";
-import { compile, createTemplateSet, escapeHtml, render } from "neo:template";
+import test from "vael:test";
+import assert from "vael:assert";
+import templateDefault, * as templateNs from "vael:template";
+import { compile, createTemplateSet, escapeHtml, render } from "vael:template";
 
 function expectTemplateError(fn, expectedCode) {
     let caught = null;
@@ -21,20 +21,20 @@ function expectTemplateError(fn, expectedCode) {
     return caught;
 }
 
-test("neo:template registry, named exports, and default export share frozen identity", async () => {
-    const list = Neo.getBuiltInModulesList();
-    assert.ok(list.includes("neo:template"), "neo:template missing from Neo.getBuiltInModulesList()");
+test("vael:template registry, named exports, and default export share frozen identity", async () => {
+    const list = Vael.getBuiltInModulesList();
+    assert.ok(list.includes("vael:template"), "vael:template missing from Vael.getBuiltInModulesList()");
     assert.ok(!list.includes("template"), "bare template must not be listed");
-    assert.strictEquals(Neo.getBuiltInModule("template"), undefined);
+    assert.strictEquals(Vael.getBuiltInModule("template"), undefined);
 
-    const registry = Neo.getBuiltInModule("neo:template");
+    const registry = Vael.getBuiltInModule("vael:template");
     assert.ok(registry !== undefined && typeof registry === "object" && registry !== null);
-    assert.strictEquals(Neo.getBuiltInModule("neo:template"), registry);
+    assert.strictEquals(Vael.getBuiltInModule("vael:template"), registry);
     assert.strictEquals(Object.isFrozen(registry), true);
     assert.strictEquals(templateDefault, registry);
     assert.ok(templateNs !== registry, "module namespace must be distinct from registry");
 
-    const dyn = await import("neo:template");
+    const dyn = await import("vael:template");
     assert.strictEquals(dyn, templateNs);
 
     const expected = ["compile", "createTemplateSet", "escapeHtml", "render"];
@@ -52,7 +52,7 @@ test("neo:template registry, named exports, and default export share frozen iden
 });
 
 test("render supports Go template syntax (dot paths, if, range, with, pipes)", () => {
-    assert.strictEquals(render("Hello, {{.name}}!", { name: "Neo" }), "Hello, Neo!");
+    assert.strictEquals(render("Hello, {{.name}}!", { name: "Vael" }), "Hello, Vael!");
     assert.strictEquals(render("Static"), "Static");
 
     const tpl = "{{if .ok}}YES{{else}}NO{{end}}:[{{range .items}}{{.}},{{end}}]:{{with .user}}{{.name}}{{end}}";
@@ -168,8 +168,8 @@ test("createTemplateSet composes layouts and partials with chainable add and sor
     assert.strictEquals(chained, set, "add() must return the TemplateSet for chaining");
     assert.equals(set.names(), ["home", "layout", "partial"]);
     assert.strictEquals(
-        set.render("home", { name: "Neo", tag: "v1" }),
-        "<html><title>Home</title><body><h1>Hi Neo</h1><span>v1</span></body></html>",
+        set.render("home", { name: "Vael", tag: "v1" }),
+        "<html><title>Home</title><body><h1>Hi Vael</h1><span>v1</span></body></html>",
     );
 
     assert.throws(() => set.add.call({}, "a", "b"), TypeError);

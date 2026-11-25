@@ -1,7 +1,7 @@
-import test from "neo:test";
-import assert from "neo:assert";
-import { platform } from "neo:os";
-import * as path from "neo:path";
+import test from "vael:test";
+import assert from "vael:assert";
+import { platform } from "vael:os";
+import * as path from "vael:path";
 import {
     DELIMITER,
     SEPARATOR,
@@ -20,7 +20,7 @@ import {
     resolve,
     toNamespacedPath,
     win32,
-} from "neo:path";
+} from "vael:path";
 
 function expectPathError(fn, expectedCode) {
     let caught;
@@ -35,21 +35,21 @@ function expectPathError(fn, expectedCode) {
     return caught;
 }
 
-test("neo:path registry, namespaces, and host constants share frozen identity", async () => {
-    const list = Neo.getBuiltInModulesList();
-    assert.ok(list.includes("neo:path"), `neo:path missing from list: ${JSON.stringify(list)}`);
+test("vael:path registry, namespaces, and host constants share frozen identity", async () => {
+    const list = Vael.getBuiltInModulesList();
+    assert.ok(list.includes("vael:path"), `vael:path missing from list: ${JSON.stringify(list)}`);
     assert.ok(!list.includes("path"), "bare path must not be listed");
 
-    const registry = Neo.getBuiltInModule("neo:path");
+    const registry = Vael.getBuiltInModule("vael:path");
     assert.ok(registry !== undefined && typeof registry === "object");
-    assert.strictEquals(Neo.getBuiltInModule("neo:path"), registry);
+    assert.strictEquals(Vael.getBuiltInModule("vael:path"), registry);
     assert.strictEquals(Object.isFrozen(registry), true);
     assert.strictEquals(Object.isFrozen(path.posix), true);
     assert.strictEquals(Object.isFrozen(path.win32), true);
     assert.strictEquals(Object.isExtensible(path), false);
-    assert.ok(!("default" in path), "neo:path must not have a default export");
+    assert.ok(!("default" in path), "vael:path must not have a default export");
 
-    const dynamic = await import("neo:path");
+    const dynamic = await import("vael:path");
     assert.strictEquals(dynamic, path);
     assert.ok(path !== registry, "module namespace must be distinct from registry");
 
@@ -89,10 +89,10 @@ test("neo:path registry, namespaces, and host constants share frozen identity", 
     assert.strictEquals(win32.sep, "\\");
     assert.strictEquals(win32.delimiter, ";");
 
-    assert.strictEquals(Neo.getBuiltInModule("path"), undefined);
+    assert.strictEquals(Vael.getBuiltInModule("path"), undefined);
     await assert.rejects(() => import("path"));
 
-    for (const leaked of ["path", "posix", "win32", "SEPARATOR", "DELIMITER", "__neoPath", "__neoPathCwd"]) {
+    for (const leaked of ["path", "posix", "win32", "SEPARATOR", "DELIMITER", "__vaelPath", "__vaelPathCwd"]) {
         assert.ok(!(leaked in globalThis), `${leaked} leaked onto globalThis`);
     }
 
@@ -111,7 +111,7 @@ test("neo:path registry, namespaces, and host constants share frozen identity", 
     assert.strictEquals(second.base, "b.txt");
 });
 
-test("neo:path.posix lexical operations match contract", () => {
+test("vael:path.posix lexical operations match contract", () => {
     assert.strictEquals(posix.normalize(""), ".");
     assert.strictEquals(posix.normalize("//"), "/");
     assert.strictEquals(posix.normalize("/a//b/./c/.."), "/a/b");
@@ -181,7 +181,7 @@ test("neo:path.posix lexical operations match contract", () => {
     assert.strictEquals(posix.toNamespacedPath("/a"), "/a");
 });
 
-test("neo:path.win32 lexical operations match contract", () => {
+test("vael:path.win32 lexical operations match contract", () => {
     assert.strictEquals(win32.normalize("C:/foo/.."), "C:\\");
     assert.strictEquals(win32.normalize("C:"), "C:.");
     assert.strictEquals(win32.normalize("C:..\\foo"), "C:..\\foo");
@@ -245,7 +245,7 @@ test("neo:path.win32 lexical operations match contract", () => {
     assert.strictEquals(win32.toNamespacedPath("\\\\?\\C:\\foo"), "\\\\?\\C:\\foo");
 });
 
-test("neo:path validates arguments, error codes, cwd dialects, and resists intrinsic tampering", () => {
+test("vael:path validates arguments, error codes, cwd dialects, and resists intrinsic tampering", () => {
     for (const value of [undefined, null, 1, true, {}, [], new String("a"), Symbol("a")]) {
         assert.throws(() => posix.normalize(value), TypeError);
         assert.throws(() => win32.normalize(value), TypeError);
@@ -329,7 +329,7 @@ test("neo:path validates arguments, error codes, cwd dialects, and resists intri
         assert.strictEquals(posix.normalize("/a//b/../c"), "/a/c");
         assert.strictEquals(posix.common(["/a/b", "/a/c"]), "/a/");
         assert.strictEquals(win32.relative("C:\\Base", "c:\\base\\File"), "File");
-        assert.strictEquals(Neo.getBuiltInModule("neo:path"), Neo.getBuiltInModule("neo:path"));
+        assert.strictEquals(Vael.getBuiltInModule("vael:path"), Vael.getBuiltInModule("vael:path"));
     } finally {
         String.prototype.charCodeAt = originalCharCodeAt;
         String.prototype.split = originalSplit;

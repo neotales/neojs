@@ -1,7 +1,7 @@
-import test from "neo:test";
-import assert from "neo:assert";
-import * as os from "neo:os";
-import { arch, platform } from "neo:os";
+import test from "vael:test";
+import assert from "vael:assert";
+import * as os from "vael:os";
+import { arch, platform } from "vael:os";
 
 // Documented Rust std::env::consts::OS and std::env::consts::ARCH values.
 const RUST_OS_VOCABULARY = new Set([
@@ -48,23 +48,23 @@ const RUST_ARCH_VOCABULARY = new Set([
     "sparc64",
 ]);
 
-test("neo:os registry, list, and module namespace share frozen identity", async () => {
-    const list = Neo.getBuiltInModulesList();
-    assert.ok(list.includes("neo:os"), `neo:os missing from list: ${JSON.stringify(list)}`);
+test("vael:os registry, list, and module namespace share frozen identity", async () => {
+    const list = Vael.getBuiltInModulesList();
+    assert.ok(list.includes("vael:os"), `vael:os missing from list: ${JSON.stringify(list)}`);
     assert.ok(!list.includes("os"), "bare os must not be listed");
 
-    const registry = Neo.getBuiltInModule("neo:os");
-    const dynamic = await import("neo:os");
-    const again = await import("neo:os");
+    const registry = Vael.getBuiltInModule("vael:os");
+    const dynamic = await import("vael:os");
+    const again = await import("vael:os");
 
     assert.ok(registry !== undefined && typeof registry === "object");
-    assert.strictEquals(Neo.getBuiltInModule("neo:os"), registry);
+    assert.strictEquals(Vael.getBuiltInModule("vael:os"), registry);
     assert.strictEquals(Object.isFrozen(registry), true);
     assert.strictEquals(Object.isExtensible(os), false);
     assert.ok(os !== registry, "module namespace must be distinct from registry");
     assert.strictEquals(dynamic, again);
     assert.strictEquals(dynamic, os);
-    assert.ok(!("default" in os), "neo:os must not have a default export");
+    assert.ok(!("default" in os), "vael:os must not have a default export");
 
     const exported = Object.keys(os).sort();
     const registered = Object.keys(registry).sort();
@@ -77,7 +77,7 @@ test("neo:os registry, list, and module namespace share frozen identity", async 
     assert.strictEquals(os.arch, registry.arch);
 });
 
-test("neo:os exposes non-empty strings in Rust target vocabulary", () => {
+test("vael:os exposes non-empty strings in Rust target vocabulary", () => {
     assert.strictEquals(typeof os.platform, "string");
     assert.strictEquals(typeof os.arch, "string");
     assert.ok(os.platform.length > 0, "platform must not be empty");
@@ -90,8 +90,8 @@ test("neo:os exposes non-empty strings in Rust target vocabulary", () => {
     assert.ok(RUST_ARCH_VOCABULARY.has(os.arch), `unexpected Rust ARCH constant: ${os.arch}`);
 });
 
-test("neo:os resists mutation and rejects bare specifiers", async () => {
-    const registry = Neo.getBuiltInModule("neo:os");
+test("vael:os resists mutation and rejects bare specifiers", async () => {
+    const registry = Vael.getBuiltInModule("vael:os");
 
     for (const name of ["platform", "arch"]) {
         assert.throws(() => {
@@ -102,10 +102,10 @@ test("neo:os resists mutation and rejects bare specifiers", async () => {
         }, TypeError);
     }
 
-    assert.strictEquals(Neo.getBuiltInModule("os"), undefined);
+    assert.strictEquals(Vael.getBuiltInModule("os"), undefined);
     await assert.rejects(() => import("os"));
 
-    for (const name of ["os", "__neoOs", "__NEO_OS_PLATFORM__", "__NEO_OS_ARCH__"]) {
+    for (const name of ["os", "__vaelOs", "__VAEL_OS_PLATFORM__", "__VAEL_OS_ARCH__"]) {
         assert.ok(!(name in globalThis), `${name} leaked onto globalThis`);
     }
 });

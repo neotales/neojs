@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Measure release-profile neojs and neojs-lite binaries and append the result
+# Measure release-profile vaeljs and vaeljs-lite binaries and append the result
 # to the size ledger.
 #
 # The script does not copy, strip, compress or install the binary. It reports
@@ -26,11 +26,11 @@ Usage: eng/size/measure.sh [options]
 
 Measures release-profile workspace binaries and records one JSON object per
 artifact in eng/size/measurements.jsonl (or --ledger). The default packages
-are neojs and neojs-lite.
+are vaeljs and vaeljs-lite.
 
 Options:
   --package NAME          Measure NAME; repeat for more than one package.
-                          Default: neojs and neojs-lite.
+                          Default: vaeljs and vaeljs-lite.
   --target TRIPLE         Cargo target triple. Default: the rustc host.
   --toolchain NAME        rustup toolchain. Default: eng/size/toolchain.
   --features LIST         Comma-separated Cargo features to enable.
@@ -53,7 +53,7 @@ Exit status: 0 success, 1 configuration/build/validation error, 2 usage error,
 USAGE
 }
 
-PACKAGES=(neojs neojs-lite)
+PACKAGES=(vaeljs vaeljs-lite)
 LEDGER=$DEFAULT_LEDGER
 TARGET_DIR=$DEFAULT_TARGET_DIR
 TOOLCHAIN=""
@@ -72,7 +72,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --package)
             [ "$#" -ge 2 ] || { usage >&2; exit 2; }
-            if [ "${PACKAGES[*]:-}" = "neojs neojs-lite" ]; then
+            if [ "${PACKAGES[*]:-}" = "vaeljs vaeljs-lite" ]; then
                 PACKAGES=()
             fi
             PACKAGES+=("$2")
@@ -472,7 +472,7 @@ make_record() {
 }
 
 # RUSTY_V8_ARCHIVE is an environment input only for a package whose dependency
-# graph actually contains V8. Recording it for neojs-lite would claim an input
+# graph actually contains V8. Recording it for vaeljs-lite would claim an input
 # the artifact never used and would split an otherwise identical series.
 package_uses_v8() {
     local package=$1 tree

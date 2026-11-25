@@ -1,16 +1,16 @@
-import test from "neo:test";
-import assert from "neo:assert";
-import * as strings from "neo:strings";
+import test from "vael:test";
+import assert from "vael:assert";
+import * as strings from "vael:strings";
 
-test("neo:strings registry and module namespace share frozen exports", async () => {
-    const registry = Neo.getBuiltInModule("neo:strings");
-    const dynamic = await import("neo:strings");
+test("vael:strings registry and module namespace share frozen exports", async () => {
+    const registry = Vael.getBuiltInModule("vael:strings");
+    const dynamic = await import("vael:strings");
 
     assert.ok(registry !== undefined && typeof registry === "object");
     assert.strictEquals(Object.isFrozen(registry), true);
-    assert.strictEquals(Neo.getBuiltInModule("neo:strings"), registry);
+    assert.strictEquals(Vael.getBuiltInModule("vael:strings"), registry);
     assert.ok(strings !== registry, "namespace must be distinct from registry");
-    assert.ok(!("default" in strings), "neo:strings must not have a default export");
+    assert.ok(!("default" in strings), "vael:strings must not have a default export");
     assert.strictEquals(dynamic.equalFold, strings.equalFold);
 
     const expected = [

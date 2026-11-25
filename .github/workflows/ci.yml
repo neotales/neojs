@@ -1,4 +1,4 @@
-# Continuous integration for neojs.
+# Continuous integration for vaeljs.
 #
 # All GitHub Actions are pinned to immutable 40-char commit SHAs (Node 24).
 
@@ -62,51 +62,58 @@ jobs:
       - name: Clippy default workspace (V8 + shared crates)
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Clippy neojs-core standalone
-        run: cargo clippy --locked -p neojs-core --all-targets -- -D warnings
+      - name: Clippy vaeljs-core standalone
+        run: cargo clippy --locked -p vaeljs-core --all-targets -- -D warnings
 
-      - name: Clippy neojs-builtins (all features)
-        run: cargo clippy --locked -p neojs-builtins --all-features --all-targets -- -D warnings
+      - name: Clippy vaeljs (--no-default-features)
+        run: cargo clippy --locked -p vaeljs-core -p vaeljs --no-default-features --all-targets -- -D warnings
 
-      - name: Clippy neojs-module-policy (all features)
-        run: cargo clippy --locked -p neojs-module-policy --all-features --all-targets -- -D warnings
+      - name: Clippy vaeljs-builtins (all features)
+        run: cargo clippy --locked -p vaeljs-builtins --all-features --all-targets -- -D warnings
 
-      - name: Clippy neojs-crypto-core (all features)
-        run: cargo clippy --locked -p neojs-crypto-core --all-features --all-targets -- -D warnings
+      - name: Clippy vaeljs-module-policy (all features)
+        run: cargo clippy --locked -p vaeljs-module-policy --all-features --all-targets -- -D warnings
 
-      - name: Clippy neojs-remote (no default features)
-        run: cargo clippy --locked -p neojs-remote --no-default-features --all-targets -- -D warnings
+      - name: Clippy vaeljs-crypto-core (all features)
+        run: cargo clippy --locked -p vaeljs-crypto-core --all-features --all-targets -- -D warnings
 
-      - name: Clippy neojs-npm (all features)
-        run: cargo clippy --locked -p neojs-npm --all-features --all-targets -- -D warnings
+      - name: Clippy vaeljs-remote (no default features)
+        run: cargo clippy --locked -p vaeljs-remote --no-default-features --all-targets -- -D warnings
 
-      - name: Clippy neojs-lite (default features)
-        run: cargo clippy --locked -p neojs-lite-core -p neojs-lite --all-targets -- -D warnings
+      - name: Clippy vaeljs-npm (all features)
+        run: cargo clippy --locked -p vaeljs-npm --all-features --all-targets -- -D warnings
 
-      - name: Clippy neojs-lite (CLI --no-default-features)
-        run: cargo clippy --locked -p neojs-lite-core -p neojs-lite --no-default-features --all-targets -- -D warnings
+      - name: Clippy vaeljs-lite (default features)
+        run: cargo clippy --locked -p vaeljs-lite-core -p vaeljs-lite --all-targets -- -D warnings
 
-      - name: Clippy neojs-lite-core (--no-default-features)
-        run: cargo clippy --locked -p neojs-lite-core --no-default-features --all-targets -- -D warnings
+      - name: Clippy vaeljs-lite (CLI --no-default-features)
+        run: cargo clippy --locked -p vaeljs-lite-core -p vaeljs-lite --no-default-features --all-targets -- -D warnings
+
+      - name: Clippy vaeljs-lite-core (--no-default-features)
+        run: cargo clippy --locked -p vaeljs-lite-core --no-default-features --all-targets -- -D warnings
 
       - name: Verify rustdoc builds cleanly (-D warnings)
         run: |
           set -euo pipefail
           RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps \
-            -p neojs-crypto-core \
-            -p neojs-dbapi \
-            -p neojs-dts \
-            -p neojs-fs-core \
-            -p neojs-manifest \
-            -p neojs-module-policy \
-            -p neojs-npm \
-            -p neojs-ssh-core \
-            -p neojs-lite-core \
-            -p neojs-lite
+            -p vaeljs-http-core \
+            -p vaeljs-node-core \
+            -p vaeljs-template-core \
+            -p vaeljs-dbapi \
+            -p vaeljs-npm \
+            -p vaeljs-dts \
+            -p vaeljs-fs-core \
+            -p vaeljs-ssh-core \
+            -p vaeljs-crypto-core \
+            -p vaeljs-manifest \
+            -p vaeljs-module-policy \
+            -p vaeljs-remote \
+            -p vaeljs-lite-core \
+            -p vaeljs-lite
           RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps \
-            -p neojs-remote --no-default-features
+            -p vaeljs-remote --no-default-features
           RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps \
-            -p neojs-module-policy --all-features
+            -p vaeljs-module-policy --all-features
 
       - name: Lint size-tracking shell scripts
         run: shellcheck -x -P eng/size eng/size/*.sh
@@ -131,7 +138,10 @@ jobs:
       - name: Run V8 workspace tests
         run: cargo test --locked
 
-      - name: Run shared JS/TS tests on neojs
+      - name: Test vaeljs-core and vaeljs (--no-default-features)
+        run: cargo test --locked -p vaeljs-core -p vaeljs --no-default-features
+
+      - name: Run shared JS/TS tests on vjs
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -140,7 +150,10 @@ jobs:
             echo "ERROR: no shared JS/TS tests found under tests/js/shared/*.test.{js,ts}" >&2
             exit 1
           fi
-          cargo run --locked -p neojs -- test "${shared_tests[@]}"
+          cargo run --locked -p vaeljs --bin vjs -- test "${shared_tests[@]}"
+
+      - name: Run webapp example tests on vjs
+        run: cargo run --locked -p vaeljs --bin vjs -- test examples/webapp/app.test.ts
 
   test-lite:
     name: Test Lite Runtime and Shared Crates
@@ -159,37 +172,45 @@ jobs:
       - name: Cache Cargo dependencies and build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - name: Test neojs-builtins (all features)
-        run: cargo test --locked -p neojs-builtins --all-features
+      - name: Test vaeljs-builtins (all features)
+        run: cargo test --locked -p vaeljs-builtins --all-features
 
-      - name: Test neojs-builtins (no default features)
-        run: cargo test --locked -p neojs-builtins --no-default-features
+      - name: Test vaeljs-builtins (no default features)
+        run: cargo test --locked -p vaeljs-builtins --no-default-features
 
-      - name: Test neojs-crypto-core (all features)
-        run: cargo test --locked -p neojs-crypto-core --all-features
+      - name: Test vaeljs-crypto-core (all features)
+        run: cargo test --locked -p vaeljs-crypto-core --all-features
 
-      - name: Test neojs-remote (no default features)
-        run: cargo test --locked -p neojs-remote --no-default-features
+      - name: Test vaeljs-remote (no default features)
+        run: cargo test --locked -p vaeljs-remote --no-default-features
 
-      - name: Test neojs-npm (all features)
-        run: cargo test --locked -p neojs-npm --all-features
+      - name: Test vaeljs-npm (all features)
+        run: cargo test --locked -p vaeljs-npm --all-features
 
-      - name: Test neojs-module-policy (no default features and all features)
+      - name: Test vaeljs-module-policy (no default features and all features)
         run: |
           set -euo pipefail
-          cargo test --locked -p neojs-module-policy --no-default-features
-          cargo test --locked -p neojs-module-policy --all-features
+          cargo test --locked -p vaeljs-module-policy --no-default-features
+          cargo test --locked -p vaeljs-module-policy --all-features
 
-      - name: Test neojs-lite-core and neojs-lite (default features)
-        run: cargo test --locked -p neojs-lite-core -p neojs-lite
+      - name: Test engine-neutral core crates
+        run: |
+          cargo test --locked \
+            -p vaeljs-http-core \
+            -p vaeljs-node-core \
+            -p vaeljs-template-core \
+            -p vaeljs-dbapi
 
-      - name: Test neojs-lite-core and neojs-lite (CLI --no-default-features)
-        run: cargo test --locked -p neojs-lite-core -p neojs-lite --no-default-features
+      - name: Test vaeljs-lite-core and vaeljs-lite (default features)
+        run: cargo test --locked -p vaeljs-lite-core -p vaeljs-lite
 
-      - name: Test neojs-lite-core (--no-default-features)
-        run: cargo test --locked -p neojs-lite-core --no-default-features
+      - name: Test vaeljs-lite-core and vaeljs-lite (CLI --no-default-features)
+        run: cargo test --locked -p vaeljs-lite-core -p vaeljs-lite --no-default-features
 
-      - name: Run shared JS/TS tests on neojs-lite
+      - name: Test vaeljs-lite-core (--no-default-features)
+        run: cargo test --locked -p vaeljs-lite-core --no-default-features
+
+      - name: Run shared JS/TS tests on vjs-lite
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -198,7 +219,7 @@ jobs:
             echo "ERROR: no shared JS/TS tests found under tests/js/shared/*.test.{js,ts}" >&2
             exit 1
           fi
-          cargo run --locked -p neojs-lite -- test "${shared_tests[@]}"
+          cargo run --locked -p vaeljs-lite --bin vjs-lite -- test "${shared_tests[@]}"
 
   engine-isolation:
     name: Engine Graph Isolation
@@ -227,44 +248,52 @@ jobs:
             exit 1
           fi
 
-          neojs_tree=$(cargo tree --locked -p neojs --prefix none)
-          if grep -Eq '^rquickjs(-core|-sys)? v' <<<"${neojs_tree}"; then
-            echo "ERROR: neojs graph unexpectedly contains rquickjs" >&2
-            grep -E '^rquickjs(-core|-sys)? v' <<<"${neojs_tree}" >&2
+          vaeljs_tree=$(cargo tree --locked -p vaeljs --prefix none)
+          if grep -Eq '^rquickjs(-core|-sys)? v' <<<"${vaeljs_tree}"; then
+            echo "ERROR: vaeljs graph unexpectedly contains rquickjs" >&2
+            grep -E '^rquickjs(-core|-sys)? v' <<<"${vaeljs_tree}" >&2
             exit 1
           fi
 
       - name: Verify QuickJS graph excludes V8 and deno_core
         run: |
           set -euo pipefail
-          lite_tree=$(cargo tree --locked -p neojs-lite --prefix none)
+          lite_tree=$(cargo tree --locked -p vaeljs-lite --prefix none)
           if grep -Eq '^(deno_core|deno_v8|v8) v' <<<"${lite_tree}"; then
-            echo "ERROR: neojs-lite graph unexpectedly contains V8 or deno_core" >&2
+            echo "ERROR: vaeljs-lite graph unexpectedly contains V8 or deno_core" >&2
             grep -E '^(deno_core|deno_v8|v8) v' <<<"${lite_tree}" >&2
             exit 1
           fi
 
-      - name: Verify zero normal dependencies in neojs-dts and neojs-module-policy
+      - name: Verify zero normal dependencies in vaeljs-dts and vaeljs-module-policy
         run: |
           set -euo pipefail
-          dts_tree=$(cargo tree --locked -e normal -p neojs-dts --prefix none)
+          dts_tree=$(cargo tree --locked -e normal -p vaeljs-dts --prefix none)
           if [ "$(grep -c . <<<"${dts_tree}")" -ne 1 ]; then
-            echo "ERROR: neojs-dts must have 0 normal dependencies" >&2
+            echo "ERROR: vaeljs-dts must have 0 normal dependencies" >&2
             echo "${dts_tree}" >&2
             exit 1
           fi
 
-          policy_tree=$(cargo tree --locked -e normal -p neojs-module-policy --no-default-features --prefix none)
+          policy_tree=$(cargo tree --locked -e normal -p vaeljs-module-policy --no-default-features --prefix none)
           if [ "$(grep -c . <<<"${policy_tree}")" -ne 1 ]; then
-            echo "ERROR: neojs-module-policy --no-default-features must have 0 normal dependencies" >&2
+            echo "ERROR: vaeljs-module-policy --no-default-features must have 0 normal dependencies" >&2
             echo "${policy_tree}" >&2
             exit 1
           fi
 
-      - name: Verify neojs-ssh-core and neojs-crypto-core exclude engines and tokio
+      - name: Verify engine-neutral shared crates exclude engines and tokio
         run: |
           set -euo pipefail
-          for pkg in neojs-ssh-core neojs-crypto-core; do
+          for pkg in \
+            vaeljs-builtins \
+            vaeljs-crypto-core \
+            vaeljs-dbapi \
+            vaeljs-fs-core \
+            vaeljs-http-core \
+            vaeljs-node-core \
+            vaeljs-ssh-core \
+            vaeljs-template-core; do
             tree=$(cargo tree --locked -e normal -p "${pkg}" --prefix none)
             if grep -Eq '^(deno_core|deno_v8|v8|rquickjs|rquickjs-core|rquickjs-sys|tokio) v' <<<"${tree}"; then
               echo "ERROR: ${pkg} normal graph unexpectedly contains a JS engine or tokio" >&2
@@ -273,30 +302,30 @@ jobs:
             fi
           done
 
-      - name: Verify offline neojs-remote and neojs-npm exclude ureq and engines
+      - name: Verify offline vaeljs-remote and vaeljs-npm exclude ureq and engines
         run: |
           set -euo pipefail
-          remote_offline_tree=$(cargo tree --locked -e normal -p neojs-remote --no-default-features --prefix none)
+          remote_offline_tree=$(cargo tree --locked -e normal -p vaeljs-remote --no-default-features --prefix none)
           if grep -Eq '^(ureq|deno_core|deno_v8|v8|rquickjs|rquickjs-core|rquickjs-sys) v' <<<"${remote_offline_tree}"; then
-            echo "ERROR: neojs-remote --no-default-features normal graph unexpectedly contains ureq or a JS engine" >&2
+            echo "ERROR: vaeljs-remote --no-default-features normal graph unexpectedly contains ureq or a JS engine" >&2
             grep -E '^(ureq|deno_core|deno_v8|v8|rquickjs|rquickjs-core|rquickjs-sys) v' <<<"${remote_offline_tree}" >&2
             exit 1
           fi
 
-          npm_default_tree=$(cargo tree --locked -e normal -p neojs-npm --prefix none)
+          npm_default_tree=$(cargo tree --locked -e normal -p vaeljs-npm --prefix none)
           if grep -Eq '^(ureq|deno_core|deno_v8|v8|rquickjs|rquickjs-core|rquickjs-sys) v' <<<"${npm_default_tree}"; then
-            echo "ERROR: neojs-npm normal graph unexpectedly contains ureq or a JS engine" >&2
+            echo "ERROR: vaeljs-npm normal graph unexpectedly contains ureq or a JS engine" >&2
             grep -E '^(ureq|deno_core|deno_v8|v8|rquickjs|rquickjs-core|rquickjs-sys) v' <<<"${npm_default_tree}" >&2
             exit 1
           fi
 
-      - name: Verify minimal neojs-lite-core excludes optional runtime crates
+      - name: Verify minimal vaeljs-lite-core excludes optional runtime crates
         run: |
           set -euo pipefail
-          lite_core_minimal_tree=$(cargo tree --locked -e normal -p neojs-lite-core --no-default-features --prefix none)
-          forbidden='^(deno_ast|deno_core|deno_v8|v8|neojs-builtins|neojs-fs-core|neojs-ssh-core|neojs-crypto-core|neojs-manifest|neojs-dts) v'
+          lite_core_minimal_tree=$(cargo tree --locked -e normal -p vaeljs-lite-core --no-default-features --prefix none)
+          forbidden='^(deno_ast|deno_core|deno_v8|v8|vaeljs-builtins|vaeljs-crypto-core|vaeljs-dts|vaeljs-fs-core|vaeljs-manifest|vaeljs-node-core|vaeljs-ssh-core|vaeljs-template-core) v'
           if grep -Eq "${forbidden}" <<<"${lite_core_minimal_tree}"; then
-            echo "ERROR: neojs-lite-core --no-default-features normal graph unexpectedly contains excluded crates" >&2
+            echo "ERROR: vaeljs-lite-core --no-default-features normal graph unexpectedly contains excluded crates" >&2
             grep -E "${forbidden}" <<<"${lite_core_minimal_tree}" >&2
             exit 1
           fi

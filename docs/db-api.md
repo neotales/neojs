@@ -1,6 +1,6 @@
-# neojs database API
+# vaeljs database API
 
-`neojs-dbapi` is a new workspace crate. It gives Rust and a future JavaScript surface one SQL
+`vaeljs-dbapi` is a new workspace crate. It gives Rust and a future JavaScript surface one SQL
 shape: strict JSON configuration, named `@name` or positional `?` parameters, bound values, and
 driver-neutral rows.
 
@@ -27,11 +27,11 @@ runtime, so an async caller must already have one.
   placeholder forms are implemented and unit-tested, but `Db::open` returns
   `ErrorKind::DriverUnavailable` and opens no socket. A configuration name is not a supported
   driver.
-- **No JavaScript/Node adapter.** This was deliberately not stubbed. The neojs built-in surface
+- **No JavaScript/Node adapter.** This was deliberately not stubbed. The vaeljs built-in surface
   is a synchronous extension loaded into the V8 realm; database calls are asynchronous and need a
   Promise bridge and a lifecycle that survives the isolate. A half-built binding would be a
   provider that appears supported and is not. The next step is a separate crate that depends on
-  `neojs-core` and `neojs-dbapi`, exposes JSON in/out, and adds no Node dependency to this crate's
+  `vaeljs-core` and `vaeljs-dbapi`, exposes JSON in/out, and adds no Node dependency to this crate's
   default graph.
 
 ## Why the upstream contract is reused
@@ -122,8 +122,8 @@ use `map_write_error`, and whose `COMMIT` failure maps to `CommitOutcomeUnknown`
 
 ```sh
 cargo fmt --check
-cargo clippy -p neojs-dbapi --all-targets --all-features -- -D warnings
-cargo test -p neojs-dbapi
-cargo test -p neojs-dbapi --no-default-features
-cargo tree -p neojs-dbapi --no-default-features   # no Node/V8 dependency
+cargo clippy -p vaeljs-dbapi --all-targets --all-features -- -D warnings
+cargo test -p vaeljs-dbapi
+cargo test -p vaeljs-dbapi --no-default-features
+cargo tree -p vaeljs-dbapi --no-default-features   # no Node/V8 dependency
 ```

@@ -1,7 +1,7 @@
-import assert from "neo:assert";
-import { type LogEntry, serve, type Server } from "neo:http";
-import { dirname, join } from "neo:path";
-import test from "neo:test";
+import assert from "vael:assert";
+import { type LogEntry, serve, type Server } from "vael:http";
+import { dirname, join } from "vael:path";
+import test from "vael:test";
 import { fileURLToPath } from "node:url";
 import { createApp } from "./app.ts";
 import { openTaskDb, type Task } from "./db.ts";
@@ -37,7 +37,7 @@ test("SSR GET / renders layout, Sprig helpers, and escapes XSS payloads", async 
       "text/html; charset=utf-8",
     );
     const emptyHtml = emptyRes.text();
-    assert.ok(emptyHtml.includes("Neojs Task Board"));
+    assert.ok(emptyHtml.includes("Vaeljs Task Board"));
     assert.ok(emptyHtml.includes("FILTER: ALL (0)"));
     assert.ok(emptyHtml.includes('href="/assets/style.css"'));
 
@@ -188,18 +188,18 @@ test("JSON REST API full CRUD lifecycle and error handling", async () => {
   try {
     const health = await app.mux.fetch("/api/health");
     assert.strictEquals(health.status, 200);
-    assert.equals(health.json(), { ok: true, runtime: "neojs" });
+    assert.equals(health.json(), { ok: true, runtime: "vaeljs" });
 
     // POST /api/tasks -> 201
     const createdRes = await app.mux.fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "  Write NeoJS docs  " }),
+      body: JSON.stringify({ title: "  Write VaelJS docs  " }),
     });
     assert.strictEquals(createdRes.status, 201);
     const created = createdRes.json<Task>();
     assert.ok(UUID_V7_RE.test(created.id));
-    assert.strictEquals(created.title, "Write NeoJS docs");
+    assert.strictEquals(created.title, "Write VaelJS docs");
     assert.strictEquals(created.done, false);
 
     // GET /api/tasks
@@ -218,11 +218,11 @@ test("JSON REST API full CRUD lifecycle and error handling", async () => {
     const patchRes = await app.mux.fetch(`/api/tasks/${created.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "Published NeoJS docs", done: true }),
+      body: JSON.stringify({ title: "Published VaelJS docs", done: true }),
     });
     assert.strictEquals(patchRes.status, 200);
     const updated = patchRes.json<Task>();
-    assert.strictEquals(updated.title, "Published NeoJS docs");
+    assert.strictEquals(updated.title, "Published VaelJS docs");
     assert.strictEquals(updated.done, true);
 
     // DELETE /api/tasks/{id} -> 204

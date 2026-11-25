@@ -1,9 +1,9 @@
-import test from "neo:test";
-import assert from "neo:assert";
-import * as uuid from "neo:uuid";
-import { v4, v7 } from "neo:uuid";
-import v4Default, { v4 as namedV4 } from "neo:uuid/v4";
-import v7Default, { v7 as namedV7 } from "neo:uuid/v7";
+import test from "vael:test";
+import assert from "vael:assert";
+import * as uuid from "vael:uuid";
+import { v4, v7 } from "vael:uuid";
+import v4Default, { v4 as namedV4 } from "vael:uuid/v4";
+import v7Default, { v7 as namedV7 } from "vael:uuid/v7";
 
 const CANONICAL = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const VERSION_4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -14,26 +14,26 @@ function timestampOf(value) {
     return Number.parseInt(hex, 16);
 }
 
-test("neo:uuid and subpaths share frozen objects and function identity", async () => {
-    const list = Neo.getBuiltInModulesList();
-    for (const specifier of ["neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]) {
+test("vael:uuid and subpaths share frozen objects and function identity", async () => {
+    const list = Vael.getBuiltInModulesList();
+    for (const specifier of ["vael:uuid", "vael:uuid/v4", "vael:uuid/v7"]) {
         assert.ok(list.includes(specifier), `${specifier} missing from list`);
-        assert.ok(!list.includes(specifier.slice("neo:".length)), `bare ${specifier} listed`);
+        assert.ok(!list.includes(specifier.slice("vael:".length)), `bare ${specifier} listed`);
     }
 
-    const regUuid = Neo.getBuiltInModule("neo:uuid");
-    const regV4 = Neo.getBuiltInModule("neo:uuid/v4");
-    const regV7 = Neo.getBuiltInModule("neo:uuid/v7");
-    const dynUuid = await import("neo:uuid");
-    const dynV4 = await import("neo:uuid/v4");
-    const dynV7 = await import("neo:uuid/v7");
+    const regUuid = Vael.getBuiltInModule("vael:uuid");
+    const regV4 = Vael.getBuiltInModule("vael:uuid/v4");
+    const regV7 = Vael.getBuiltInModule("vael:uuid/v7");
+    const dynUuid = await import("vael:uuid");
+    const dynV4 = await import("vael:uuid/v4");
+    const dynV7 = await import("vael:uuid/v7");
 
     assert.ok(regUuid !== undefined && typeof regUuid === "object");
     assert.ok(regV4 !== undefined && typeof regV4 === "object");
     assert.ok(regV7 !== undefined && typeof regV7 === "object");
-    assert.strictEquals(Neo.getBuiltInModule("neo:uuid"), regUuid);
-    assert.strictEquals(Neo.getBuiltInModule("neo:uuid/v4"), regV4);
-    assert.strictEquals(Neo.getBuiltInModule("neo:uuid/v7"), regV7);
+    assert.strictEquals(Vael.getBuiltInModule("vael:uuid"), regUuid);
+    assert.strictEquals(Vael.getBuiltInModule("vael:uuid/v4"), regV4);
+    assert.strictEquals(Vael.getBuiltInModule("vael:uuid/v7"), regV7);
 
     assert.strictEquals(Object.isFrozen(regUuid), true);
     assert.strictEquals(Object.isFrozen(regV4), true);
@@ -41,7 +41,7 @@ test("neo:uuid and subpaths share frozen objects and function identity", async (
     assert.strictEquals(Object.isExtensible(uuid), false);
     assert.ok(uuid !== regUuid, "namespace must be distinct from registry");
     assert.strictEquals(dynUuid, uuid);
-    assert.ok(!("default" in uuid), "neo:uuid must not have a default export");
+    assert.ok(!("default" in uuid), "vael:uuid must not have a default export");
 
     assert.equals(Object.keys(uuid).sort(), ["v4", "v7"]);
     assert.equals(Object.keys(regUuid).sort(), ["v4", "v7"]);
@@ -137,7 +137,7 @@ test("v4 and v7 enforce zero-argument arity and frozen modules resist replacemen
     }
     assert.strictEquals(called, false, "callback argument must not be invoked");
 
-    const regUuid = Neo.getBuiltInModule("neo:uuid");
+    const regUuid = Vael.getBuiltInModule("vael:uuid");
     assert.throws(() => regUuid.v4(undefined), TypeError);
     assert.throws(() => regUuid.v7(undefined, undefined), TypeError);
 
@@ -149,11 +149,11 @@ test("v4 and v7 enforce zero-argument arity and frozen modules resist replacemen
     }, TypeError);
 
     for (const bare of ["uuid", "uuid/v4", "uuid/v7"]) {
-        assert.strictEquals(Neo.getBuiltInModule(bare), undefined);
+        assert.strictEquals(Vael.getBuiltInModule(bare), undefined);
         await assert.rejects(() => import(bare));
     }
 
-    for (const name of ["uuid", "__neoUuidV4", "__neoUuidV7", "__neoUUID"]) {
+    for (const name of ["uuid", "__vaelUuidV4", "__vaelUuidV7", "__vaelUUID"]) {
         assert.ok(!(name in globalThis), `${name} leaked onto globalThis`);
     }
 });

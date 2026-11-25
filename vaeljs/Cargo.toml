@@ -1,0 +1,48 @@
+[package]
+name = "vaeljs"
+description = "Command-line ECMAScript and erasable TypeScript runtime built on vaeljs-core"
+default-run = "vjs"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "vjs"
+path = "src/main.rs"
+
+[features]
+default = ["vael-db", "vael-http", "vael-template", "node-compat", "npm"]
+# Enables `vael:db` in `vaeljs-core`. Opt-outable with `--no-default-features`.
+vael-db = ["vaeljs-core/vael-db"]
+# Enables `vael:http` in `vaeljs-core`. Opt-outable with `--no-default-features`.
+vael-http = ["vaeljs-core/vael-http"]
+# Enables `vael:template` in `vaeljs-core`. Opt-outable with `--no-default-features`.
+vael-template = ["vaeljs-core/vael-template"]
+# Enables `node:*` compatibility modules in `vaeljs-core`. Opt-outable with `--no-default-features`.
+node-compat = ["vaeljs-core/node-compat"]
+# Opt-outable `npm:` and `package.json` CAS-backed module resolution.
+npm = ["vaeljs-core/npm"]
+
+[dependencies]
+vaeljs-core = { version = "0.0.0-alpha.0", path = "../vaeljs-core", default-features = false, features = ["vael-chars", "vael-slices", "vael-strings"] }
+vaeljs-dts.workspace = true
+vaeljs-manifest.workspace = true
+# Deterministic shell-style expansion for `vjs test`.
+vaeljs-module-policy = { version = "0.0.0-alpha.0", path = "../vaeljs-module-policy", features = ["test-glob"] }
+
+[dev-dependencies]
+base64.workspace = true
+flate2.workspace = true
+# The duplicate dependency enables the test-only fault injection for this
+# package's tests. A normal `cargo build -p vaeljs` does not include dev-deps.
+vaeljs-core = { version = "0.0.0-alpha.0", path = "../vaeljs-core", default-features = false, features = ["test-support"] }
+vaeljs-npm.workspace = true
+neotales-ssh.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+url.workspace = true

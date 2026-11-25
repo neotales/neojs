@@ -1,17 +1,17 @@
-import test from "neo:test";
-import assert from "neo:assert";
-import * as chars from "neo:chars";
+import test from "vael:test";
+import assert from "vael:assert";
+import * as chars from "vael:chars";
 
-test("neo:chars registry and module namespace share frozen identity", async () => {
-    const registry = Neo.getBuiltInModule("neo:chars");
-    const dynamic = await import("neo:chars");
-    const again = await import("neo:chars");
+test("vael:chars registry and module namespace share frozen identity", async () => {
+    const registry = Vael.getBuiltInModule("vael:chars");
+    const dynamic = await import("vael:chars");
+    const again = await import("vael:chars");
 
     assert.ok(registry !== undefined && typeof registry === "object");
     assert.strictEquals(Object.isFrozen(registry), true);
     assert.ok(chars !== registry, "module namespace must be distinct from registry");
     assert.strictEquals(dynamic, again);
-    assert.ok(!("default" in chars), "neo:chars must not have a default export");
+    assert.ok(!("default" in chars), "vael:chars must not have a default export");
 
     const exported = Object.keys(chars).sort();
     const registered = Object.keys(registry).sort();

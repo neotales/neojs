@@ -1,11 +1,11 @@
-import testDefault, { MAX_TESTS, TestFailureError, run, test } from "neo:test";
-import assert from "neo:assert";
+import testDefault, { MAX_TESTS, TestFailureError, run, test } from "vael:test";
+import assert from "vael:assert";
 
 const executionOrder = [];
 
-test("neo:test exports frozen registry and module bindings", async () => {
-    const registry = Neo.getBuiltInModule("neo:test");
-    const namespace = await import("neo:test");
+test("vael:test exports frozen registry and module bindings", async () => {
+    const registry = Vael.getBuiltInModule("vael:test");
+    const namespace = await import("vael:test");
 
     assert.strictEquals(Object.isFrozen(registry), true);
     assert.strictEquals(test, registry.test);
@@ -67,11 +67,11 @@ function* topLevelGenerator() {
     yield 1;
 }
 const genErr = assert.throws(() => test("generator", topLevelGenerator), TypeError);
-assert.strictEquals(genErr.code, "NEO_TEST_UNSUPPORTED");
+assert.strictEquals(genErr.code, "VAEL_TEST_UNSUPPORTED");
 
-test("registering a test while tests are running throws NEO_TEST_DURING_RUN", () => {
+test("registering a test while tests are running throws VAEL_TEST_DURING_RUN", () => {
     const duringRun = assert.throws(() => test("nested registration", () => {}), Error);
-    assert.strictEquals(duringRun.code, "NEO_TEST_DURING_RUN");
+    assert.strictEquals(duringRun.code, "VAEL_TEST_DURING_RUN");
 });
 
 const awaitedValue = await Promise.resolve("after-tla");

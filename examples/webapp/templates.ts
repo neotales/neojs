@@ -1,4 +1,4 @@
-import { createTemplateSet, type TemplateSet } from "neo:template";
+import { createTemplateSet, type TemplateSet } from "vael:template";
 import type { Task, TaskFilter } from "./db.ts";
 
 /** View model passed to the `home` SSR template. */
@@ -15,7 +15,7 @@ const LAYOUT_TEMPLATE = `{{define "layout"}}<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{block "title" .}}NeoJS Tasks{{end}}</title>
+  <title>{{block "title" .}}VaelJS Tasks{{end}}</title>
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
@@ -40,12 +40,12 @@ const TASK_ITEM_PARTIAL = `<li class="task-item{{if .done}} is-done{{end}}">
   </div>
 </li>`;
 
-const HOME_TEMPLATE = `{{define "title"}}{{.heading | default "neojs task board" | trim | title}} · NeoJS{{end}}
+const HOME_TEMPLATE = `{{define "title"}}{{.heading | default "vaeljs task board" | trim | title}} · VaelJS{{end}}
 {{define "content"}}
 <header class="page-header">
   <div>
-    <p class="eyebrow">ZERO-FRAMEWORK NEOJS SSR</p>
-    <h1>{{.heading | default "neojs task board" | trim | title}}</h1>
+    <p class="eyebrow">ZERO-FRAMEWORK VAELJS SSR</p>
+    <h1>{{.heading | default "vaeljs task board" | trim | title}}</h1>
   </div>
   <span class="status-pill" data-filter="{{.filter | default "all" | trim | upper}}">FILTER: {{.filter | default "all" | trim | upper}} ({{.totalCount}})</span>
 </header>

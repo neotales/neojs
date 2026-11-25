@@ -14,33 +14,38 @@ are never cancelled.
 Jobs:
 - **fmt-and-lint**: Verifies `eng/size/toolchain` matches `RUST_TOOLCHAIN` (`1.100.0`),
   checks `rustfmt`, runs `clippy -D warnings` across the default workspace,
-  standalone `neojs-core`, `neojs-builtins --all-features`, `neojs-module-policy --all-features`,
-  `neojs-crypto-core --all-features`, `neojs-remote --no-default-features`,
-  `neojs-npm --all-features`, and `neojs-lite-core`/`neojs-lite` feature
+  standalone `vaeljs-core`, `vaeljs --no-default-features`,
+  `vaeljs-builtins --all-features`, `vaeljs-module-policy --all-features`,
+  `vaeljs-crypto-core --all-features`, `vaeljs-remote --no-default-features`,
+  `vaeljs-npm --all-features`, and `vaeljs-lite-core`/`vaeljs-lite` feature
   combinations; checks `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps`
-  across the 10 engine-neutral/Lite crates (`neojs-crypto-core`, `neojs-dbapi`,
-  `neojs-dts`, `neojs-fs-core`, `neojs-manifest`, `neojs-module-policy`,
-  `neojs-npm`, `neojs-ssh-core`, `neojs-lite-core`, `neojs-lite`) plus
-  `neojs-remote --no-default-features` and `neojs-module-policy --all-features`;
+  across the 14 engine-neutral/Lite crates (`vaeljs-http-core`, `vaeljs-node-core`,
+  `vaeljs-template-core`, `vaeljs-dbapi`, `vaeljs-npm`, `vaeljs-dts`,
+  `vaeljs-fs-core`, `vaeljs-ssh-core`, `vaeljs-crypto-core`, `vaeljs-manifest`,
+  `vaeljs-module-policy`, `vaeljs-remote`, `vaeljs-lite-core`, `vaeljs-lite`) plus
+  `vaeljs-remote --no-default-features` and `vaeljs-module-policy --all-features`;
   and runs `shellcheck` on `eng/size/*.sh`.
 - **test-v8**: Runs `cargo test --locked` across the default V8 and shared workspace
-  crates and runs `cargo run --locked -p neojs -- test` over
-  `tests/js/shared/*.test.js` and `tests/js/shared/*.test.ts`.
-- **test-lite**: Runs `cargo test --locked` for `neojs-builtins` (`--all-features`
-  and `--no-default-features`), `neojs-crypto-core --all-features`,
-  `neojs-remote --no-default-features`, `neojs-npm --all-features`,
-  `neojs-module-policy` (`--no-default-features` and `--all-features`), and
-  `neojs-lite-core`/`neojs-lite` across default and `--no-default-features`
-  configurations, plus `cargo run --locked -p neojs-lite -- test` over
+  crates, runs `cargo test --locked -p vaeljs-core -p vaeljs --no-default-features`,
+  runs `cargo run --locked -p vaeljs --bin vjs -- test` over
+  `tests/js/shared/*.test.js` and `tests/js/shared/*.test.ts`, and runs
+  `cargo run --locked -p vaeljs --bin vjs -- test examples/webapp/app.test.ts`.
+- **test-lite**: Runs `cargo test --locked` for `vaeljs-builtins` (`--all-features`
+  and `--no-default-features`), `vaeljs-crypto-core --all-features`,
+  `vaeljs-remote --no-default-features`, `vaeljs-npm --all-features`,
+  `vaeljs-module-policy` (`--no-default-features` and `--all-features`),
+  `vaeljs-http-core`, `vaeljs-node-core`, `vaeljs-template-core`, `vaeljs-dbapi`,
+  and `vaeljs-lite-core`/`vaeljs-lite` across default and `--no-default-features`
+  configurations, plus `cargo run --locked -p vaeljs-lite --bin vjs-lite -- test` over
   `tests/js/shared/*.test.js` and `tests/js/shared/*.test.ts`.
 - **engine-isolation**: Verifies via `cargo tree --locked` that:
-  1. Default workspace and `neojs` graphs exclude `rquickjs` (`rquickjs`, `rquickjs-core`, `rquickjs-sys`).
-  2. `neojs-lite` excludes `deno_core`, `deno_v8`, and `v8`.
-  3. `neojs-dts` has zero normal dependencies.
-  4. `neojs-module-policy --no-default-features` has zero normal dependencies.
-  5. `neojs-ssh-core` and `neojs-crypto-core` normal graphs exclude JS engines and `tokio`.
-  6. `neojs-remote --no-default-features` and `neojs-npm` normal graphs exclude `ureq` and JS engines.
-  7. `neojs-lite-core --no-default-features` normal graph excludes `deno_ast`, `deno_core`, `deno_v8`, `v8`, `neojs-builtins`, `neojs-fs-core`, `neojs-ssh-core`, `neojs-crypto-core`, `neojs-manifest`, and `neojs-dts`.
+  1. Default workspace and `vaeljs` graphs exclude `rquickjs` (`rquickjs`, `rquickjs-core`, `rquickjs-sys`).
+  2. `vaeljs-lite` excludes `deno_core`, `deno_v8`, and `v8`.
+  3. `vaeljs-dts` has zero normal dependencies.
+  4. `vaeljs-module-policy --no-default-features` has zero normal dependencies.
+  5. `vaeljs-builtins`, `vaeljs-crypto-core`, `vaeljs-dbapi`, `vaeljs-fs-core`, `vaeljs-http-core`, `vaeljs-node-core`, `vaeljs-ssh-core`, and `vaeljs-template-core` normal graphs exclude JS engines and `tokio`.
+  6. `vaeljs-remote --no-default-features` and `vaeljs-npm` normal graphs exclude `ureq` and JS engines.
+  7. `vaeljs-lite-core --no-default-features` normal graph excludes `deno_ast`, `deno_core`, `deno_v8`, `v8`, `vaeljs-builtins`, `vaeljs-crypto-core`, `vaeljs-dts`, `vaeljs-fs-core`, `vaeljs-manifest`, `vaeljs-node-core`, `vaeljs-ssh-core`, and `vaeljs-template-core`.
 - **size-gate**: Populates Cargo metadata (`cargo fetch --locked`) and runs
   `bash eng/size/check.sh`.
 
@@ -51,8 +56,8 @@ Jobs:
 - **Offline size-gate failure (`cargo tree failed`)**: `eng/size/measure.sh`
   invokes `cargo tree --offline`; `cargo fetch --locked` must run (or be restored
   from cache) before `bash eng/size/check.sh`.
-- **Engine or feature leakage**: Adding an unguarded dependency between `neojs*`
-  (V8) and `neojs-lite*` (QuickJS), or into zero-dep/offline crates, breaks
+- **Engine or feature leakage**: Adding an unguarded dependency between `vaeljs*`
+  (V8) and `vaeljs-lite*` (QuickJS), or into zero-dep/offline crates, breaks
   `engine-isolation`. Inspect `Cargo.toml` feature wiring and run
   `cargo tree -e normal -p <pkg>`.
 - **Rustdoc warning regression**: Broken intra-doc links or bare URLs in the
@@ -76,7 +81,7 @@ Jobs:
     that every workspace package has `.version == "${GITHUB_REF_NAME#v}"` and
     `.publish == []` (`publish = false`).
   - Generates canonical V8 and Lite TypeScript declaration trees once via
-    `cargo run --locked -p neojs-lite -- types --profile v8 --out-dir dist-types/v8`
+    `cargo run --locked -p vaeljs-lite --bin vjs-lite -- types --profile v8 --out-dir dist-types/v8`
     and `--profile lite --out-dir dist-types/lite`, uploading `release-types`.
 - **build (`needs: verify-tag`, `fail-fast: false`, 6 targets)**:
   - `linux-amd64` (`x86_64-unknown-linux-gnu` on `ubuntu-24.04`, `.tar.gz`, native)
@@ -85,12 +90,12 @@ Jobs:
   - `macos-amd64` (`x86_64-apple-darwin` on `macos-15`, `.tar.gz`, cross)
   - `windows-amd64` (`x86_64-pc-windows-msvc` on `windows-2022`, `.zip`, native)
   - `windows-arm64` (`aarch64-pc-windows-msvc` on `windows-11-arm`, `.zip`, native)
-  - Builds `cargo build --release --locked --target <target> -p neojs -p neojs-lite`
+  - Builds `cargo build --release --locked --target <target> -p vaeljs -p vaeljs-lite`
     and emits a `::error` check-run annotation summarizing the tail of the build
     log on failure.
   - Downloads `release-types` and stages two archives per target:
-    - `neojs-<tag>-<slug>.{tar.gz,zip}`: `neojs` (or `neojs.exe`), `LICENSE.md`, and `types/` (V8 `.d.ts` tree).
-    - `neojs-lite-<tag>-<slug>.{tar.gz,zip}`: `neojs-lite` (or `neojs-lite.exe`), `LICENSE.md`, and `types/` (Lite `.d.ts` tree).
+    - `vjs-<tag>-<slug>.{tar.gz,zip}`: `vjs` (or `vjs.exe`), `LICENSE.md`, and `types/` (V8 `.d.ts` tree).
+    - `vjs-lite-<tag>-<slug>.{tar.gz,zip}`: `vjs-lite` (or `vjs-lite.exe`), `LICENSE.md`, and `types/` (Lite `.d.ts` tree).
   - Extracts each archive into a clean temporary directory and runs smoke checks:
     - Native targets (`linux-amd64`, `linux-arm64`, `macos-arm64`, `windows-amd64`, `windows-arm64`):
       verifies `LICENSE.md` and `types/index.d.ts`, `--version`, `--help` (exit 0),

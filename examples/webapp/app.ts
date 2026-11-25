@@ -1,5 +1,5 @@
-import { createHmac, randomBytes } from "neo:crypto";
-import type { Database } from "neo:db";
+import { createHmac, randomBytes } from "vael:crypto";
+import type { Database } from "vael:db";
 import {
   badRequest,
   createRouter,
@@ -16,7 +16,7 @@ import {
   securityHeaders,
   type ServeMux,
   setCookie,
-} from "neo:http";
+} from "vael:http";
 import {
   createTask,
   deleteTask,
@@ -160,7 +160,7 @@ export function createApp({
 
     let res = html(
       renderHomePage(templates, {
-        heading: "neojs task board",
+        heading: "vaeljs task board",
         filter,
         tasks,
         totalCount: tasks.length,
@@ -252,7 +252,7 @@ export function createApp({
       }
     });
 
-    api.get("/health", () => json({ ok: true, runtime: "neojs" }));
+    api.get("/health", () => json({ ok: true, runtime: "vaeljs" }));
 
     api.get("/tasks", async (req) => {
       const filter = parseTaskFilter(req.query.get("status"));

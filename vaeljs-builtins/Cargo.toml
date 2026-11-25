@@ -1,0 +1,60 @@
+[package]
+name = "vaeljs-builtins"
+description = "Engine-independent Vael built-in module implementations shared by the V8 and QuickJS runtimes"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+# The shared `vael:assert` ECMAScript implementation and descriptor. Zero engine
+# dependencies and zero I/O; each engine supplies Promise observation hooks.
+assert = []
+# The shared `vael:chars` Rust implementation and descriptor. The V8 runtime
+# enables it so a default V8 build keeps `chars`; the QuickJS runtime enables it
+# explicitly. Cargo features are additive across the dependency graph, so a
+# module is present whenever any dependent enables it.
+chars = ["dep:unicode-general-category"]
+# The shared `vael:console` ECMAScript installer, ESM wrapper, and descriptor.
+# Zero engine dependencies and zero I/O; each engine supplies a print hook.
+console = []
+# The shared `vael:os` Rust implementation and descriptor. Zero dependencies and
+# zero I/O; exposes the compilation-target `platform` and `arch` constants.
+os = []
+# The shared `vael:path` ECMAScript implementation, ESM wrapper, and Rust host
+# helpers (`is_windows`, `current_dir`). Zero engine dependencies.
+path = []
+# The shared `vael:slices` ECMAScript implementation and ESM wrapper. It depends
+# on `chars` because `CharSlice` captures `chars.toUpper` and `chars.toLower`.
+slices = ["chars"]
+# The shared `vael:strings` Rust implementation and descriptor. The V8 runtime
+# enables it so a default V8 build keeps `strings`; the QuickJS runtime enables
+# it explicitly. It uses the same Unicode General_Category crate for the
+# JavaScript whitespace set that `String.prototype.trim` uses.
+strings = ["dep:unicode-general-category"]
+# The shared `vael:test` ECMAScript implementation and descriptor. Zero engine
+# dependencies and zero I/O; each engine supplies output, Promise, and queue
+# hooks.
+test = []
+# The shared `vael:uuid` (`vael:uuid`, `vael:uuid/v4`, `vael:uuid/v7`) Rust
+# implementation and descriptors. Uses fallible `getrandom` + `uuid::Builder`
+# so CSPRNG failures return typed errors and never panic.
+uuid = ["dep:getrandom", "dep:uuid"]
+
+[dependencies]
+# Operating-system CSPRNG for `uuid`; failures return a typed `Err`.
+getrandom = { workspace = true, optional = true }
+# Unicode General_Category lookup for the `chars` classifier. Version 1.1.0
+# ships the Unicode 16.0 tables and has no dependencies of its own.
+unicode-general-category = { workspace = true, optional = true }
+# RFC 9562 UUID bit layout and formatting through `uuid::Builder` only.
+uuid = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Checks the pinned CaseFolding.txt artifact hash in the exhaustive table test.
+sha2.workspace = true

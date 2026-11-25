@@ -1,4 +1,4 @@
-import { cron, next } from "neo:cron";
+import { cron, next } from "vael:cron";
 
 // `next` is a pure UTC query: it creates no job and keeps nothing alive.
 const upcoming = next("*/5 * * * *");

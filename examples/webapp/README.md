@@ -1,18 +1,18 @@
-# NeoJS Go-Style Web Application Prototype
+# VaelJS Go-Style Web Application Prototype
 
-A complete, zero-framework web application built purely with NeoJS built-in modules:
+A complete, zero-framework web application built purely with VaelJS built-in modules:
 
-- `neo:http` — Go 1.22+ `ServeMux` router, composable middleware (`recover`, `requestId`, `securityHeaders`, `logger`), traversal-safe static file serving, RFC 6265 cookies, and `hyper`/`tokio` HTTP/1.1 `serve()`.
-- `neo:db` — SQLite persistence (`openSqlite`), named (`@id`) and positional (`?`) parameter binding, and atomic `db.transaction(...)`.
-- `neo:template` — Go `text/template` layouts (`define`, `block`, `template`) with Sprig helpers (`title`, `upper`, `trim`, `default`) and automatic HTML XSS escaping.
-- `neo:uuid` — Time-ordered RFC 9562 UUIDv7 primary keys (`v7()`).
-- `neo:crypto` — CSPRNG key generation (`randomBytes`) and HMAC-SHA256 (`createHmac`) for tamper-proof flash cookies.
-- `neo:test` & `neo:assert` — Zero-socket `mux.fetch(...)` and live loopback server integration tests.
+- `vael:http` — Go 1.22+ `ServeMux` router, composable middleware (`recover`, `requestId`, `securityHeaders`, `logger`), traversal-safe static file serving, RFC 6265 cookies, and `hyper`/`tokio` HTTP/1.1 `serve()`.
+- `vael:db` — SQLite persistence (`openSqlite`), named (`@id`) and positional (`?`) parameter binding, and atomic `db.transaction(...)`.
+- `vael:template` — Go `text/template` layouts (`define`, `block`, `template`) with Sprig helpers (`title`, `upper`, `trim`, `default`) and automatic HTML XSS escaping.
+- `vael:uuid` — Time-ordered RFC 9562 UUIDv7 primary keys (`v7()`).
+- `vael:crypto` — CSPRNG key generation (`randomBytes`) and HMAC-SHA256 (`createHmac`) for tamper-proof flash cookies.
+- `vael:test` & `vael:assert` — Zero-socket `mux.fetch(...)` and live loopback server integration tests.
 
 ## Running
 
 ```sh
-neojs examples/webapp/main.ts
+vjs examples/webapp/main.ts
 ```
 
 Environment variables (read via `node:process`):
@@ -24,13 +24,13 @@ Environment variables (read via `node:process`):
 Example with a file-backed SQLite database:
 
 ```sh
-PORT=3000 DB_PATH=./tasks.sqlite neojs examples/webapp/main.ts
+PORT=3000 DB_PATH=./tasks.sqlite vjs examples/webapp/main.ts
 ```
 
 ## Testing
 
 ```sh
-neojs test examples/webapp/app.test.ts
+vjs test examples/webapp/app.test.ts
 ```
 
 ## Architecture (Go-Style, Without Go Boilerplate)

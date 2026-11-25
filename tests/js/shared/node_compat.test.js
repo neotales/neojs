@@ -1,5 +1,5 @@
-import test from "neo:test";
-import assert from "neo:assert";
+import test from "vael:test";
+import assert from "vael:assert";
 
 import pathDefault, {
     join,
@@ -82,10 +82,10 @@ import cryptoDefault, {
     timingSafeEqual,
 } from "node:crypto";
 
-test("node:* stays isolated from neo:* registry, globals, and bare names", async () => {
-    const list = Neo.getBuiltInModulesList();
+test("node:* stays isolated from vael:* registry, globals, and bare names", async () => {
+    const list = Vael.getBuiltInModulesList();
     for (const item of list) {
-        assert.ok(item.startsWith("neo:"), `unexpected non-neo entry in list: ${item}`);
+        assert.ok(item.startsWith("vael:"), `unexpected non-vael entry in list: ${item}`);
     }
 
     for (const nodeSpec of [
@@ -101,9 +101,9 @@ test("node:* stays isolated from neo:* registry, globals, and bare names", async
         "node:crypto",
     ]) {
         assert.strictEquals(
-            Neo.getBuiltInModule(nodeSpec),
+            Vael.getBuiltInModule(nodeSpec),
             undefined,
-            `Neo.getBuiltInModule(${nodeSpec}) must return undefined`,
+            `Vael.getBuiltInModule(${nodeSpec}) must return undefined`,
         );
     }
 
@@ -206,7 +206,7 @@ test("node:process exposes argv, cwd/chdir, env proxy, exitCode, and hrtime", ()
     assert.strictEquals(typeof versions, "object");
 
     const origCwd = cwd();
-    const tmp = mkdtempSync(join(tmpdir(), "neojs-proc-"));
+    const tmp = mkdtempSync(join(tmpdir(), "vaeljs-proc-"));
     try {
         chdir(tmp);
         assert.strictEquals(realpathSync(cwd()), realpathSync(tmp));
@@ -215,12 +215,12 @@ test("node:process exposes argv, cwd/chdir, env proxy, exitCode, and hrtime", ()
         rmSync(tmp, { recursive: true, force: true });
     }
 
-    env.NEOJS_NODE_COMPAT_TEST = "hello";
-    assert.strictEquals(env.NEOJS_NODE_COMPAT_TEST, "hello");
-    assert.ok("NEOJS_NODE_COMPAT_TEST" in env);
-    assert.ok(Object.keys(env).includes("NEOJS_NODE_COMPAT_TEST"));
-    delete env.NEOJS_NODE_COMPAT_TEST;
-    assert.strictEquals(env.NEOJS_NODE_COMPAT_TEST, undefined);
+    env.VAELJS_NODE_COMPAT_TEST = "hello";
+    assert.strictEquals(env.VAELJS_NODE_COMPAT_TEST, "hello");
+    assert.ok("VAELJS_NODE_COMPAT_TEST" in env);
+    assert.ok(Object.keys(env).includes("VAELJS_NODE_COMPAT_TEST"));
+    delete env.VAELJS_NODE_COMPAT_TEST;
+    assert.strictEquals(env.VAELJS_NODE_COMPAT_TEST, undefined);
 
     assert.strictEquals(processDefault.exitCode, undefined);
     processDefault.exitCode = 5;
@@ -242,7 +242,7 @@ test("node:fs sync file operations roundtrip cleanly", () => {
     assert.strictEquals(typeof fsConstants.F_OK, "number");
     assert.strictEquals(typeof fsConstants.COPYFILE_EXCL, "number");
 
-    const dir = mkdtempSync(join(tmpdir(), "neojs-node-fs-"));
+    const dir = mkdtempSync(join(tmpdir(), "vaeljs-node-fs-"));
     try {
         const sub = join(dir, "nested", "sub");
         mkdirSync(sub, { recursive: true });

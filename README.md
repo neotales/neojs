@@ -1,90 +1,90 @@
-# neojs
+# vaeljs
 
 Runs ECMAScript modules and erasable TypeScript on V8 through Deno's Rust bindings.
 
-[![Neotales](https://github.com/neotales/brand/raw/main/assets/logo.png)](https://github.com/neotales/neojs)
+[![Neotales](https://github.com/neotales/brand/raw/main/assets/logo.png)](https://github.com/neotales/vaeljs)
 
 <!-- badges: crates.io, docs.rs, CI. Add once the crate name and first version exist. -->
 
 ## Install
 
 ```sh
-cargo add neojs-core
+cargo add vaeljs-core
 ```
 
 For the opt-in, embeddable QuickJS runtime:
 
 ```sh
-cargo add neojs-lite-core
+cargo add vaeljs-lite-core
 ```
 
-Build the `neojs` command from a checkout:
+Build the `vaeljs` command from a checkout:
 
 ```sh
-cargo install --path neojs
+cargo install --path vaeljs
 ```
 
 ## Command line
 
-`neojs --help` prints a short summary of the command:
+`vjs --help` prints a short summary of the command:
 
 ```text
 Usage:
-  neojs <file>                    run one module
-  neojs --allow-remote <file-or-url>
-  neojs --no-allow-remote <file>
-  neojs test <file-or-glob>...    run test files
-  neojs test --allow-remote <file-or-glob>...
-  neojs test --no-allow-remote <file-or-glob>...
-  neojs --allow-remote test <file-or-glob>...
-  neojs types [--profile <v8|lite>] [--out-dir <dir>]
+  vjs <file>                    run one module
+  vjs --allow-remote <file-or-url>
+  vjs --no-allow-remote <file>
+  vjs test <file-or-glob>...    run test files
+  vjs test --allow-remote <file-or-glob>...
+  vjs test --no-allow-remote <file-or-glob>...
+  vjs --allow-remote test <file-or-glob>...
+  vjs types [--profile <v8|lite>] [--out-dir <dir>]
                                   emit TypeScript declarations (.d.ts)
 
 Options:
   --allow-remote   allow https:, gh:, and github: entry and imports, and
                    jsr: imports; off by default
   --no-allow-remote
-                   force remote loading off, overriding NEOJS_ALLOW_REMOTE
-  --config <path>  use an explicit neo.jsonc manifest instead of discovery
-  --no-config      disable automatic neo.jsonc manifest discovery
+                   force remote loading off, overriding VAELJS_ALLOW_REMOTE
+  --config <path>  use an explicit vael.jsonc manifest instead of discovery
+  --no-config      disable automatic vael.jsonc manifest discovery
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
   -V, --version    show the version; alone, or after `--allow-remote`
   --               end option parsing, for a file or pattern beginning with `-`
 
 Environment:
-  NEOJS_ALLOW_REMOTE  1 or true enables remote loading, 0 or false keeps it off
+  VAELJS_ALLOW_REMOTE  1 or true enables remote loading, 0 or false keeps it off
                       (case-insensitive); an explicit flag overrides a valid
                       setting, and an invalid value is rejected at startup
 ```
 
-With no arguments, `neojs` exits 2 and points at `--help`. `--allow-remote` is off by default and
+With no arguments, `vaeljs` exits 2 and points at `--help`. `--allow-remote` is off by default and
 may appear before the module, or before or after `test`; `--no-allow-remote` forces it off even when
-`NEOJS_ALLOW_REMOTE` enables it. Local modules discover `neo.jsonc` upward for `imports` and
+`VAELJS_ALLOW_REMOTE` enables it. Local modules discover `vael.jsonc` upward for `imports` and
 `workspaces` (including enclosing workspace roots when running inside a workspace member directory)
-unless `--config <path>` or `--no-config` is passed. `neojs types` emits `.d.ts` declarations for
-`Neo`, `console`, and enabled `neo:*` modules (`--profile v8` by default or `--profile lite` for
-`neojs-lite`; pass `--out-dir <dir>` to write the multi-file `types/` layout instead of stdout;
-see `neojs types --help`). The module sections below document each
+unless `--config <path>` or `--no-config` is passed. `vjs types` emits `.d.ts` declarations for
+`Vael`, `console`, and enabled `vael:*` modules (`--profile v8` by default or `--profile lite` for
+`vaeljs-lite`; pass `--out-dir <dir>` to write the multi-file `types/` layout instead of stdout;
+see `vjs types --help`). The module sections below document each
 built-in; [Limits](#limits) lists the unsupported features and the exit codes.
 
 ## What you can do ⚡
 
-**Run a module file.** `neojs` reads the file as an ECMAScript module, evaluates it, and waits
+**Run a module file.** `vaeljs` reads the file as an ECMAScript module, evaluates it, and waits
 for top-level promises.
 
 `hello.js`:
 
 ```js
-const name = "neojs";
+const name = "vaeljs";
 console.log(`hello from ${name}`);
 ```
 
 ```sh
-neojs hello.js
+vjs hello.js
 ```
 
 ```text
-hello from neojs
+hello from vaeljs
 ```
 
 **Import from other files.** Relative paths, absolute paths, and `file:` URLs resolve from the
@@ -155,18 +155,18 @@ spaces, so a stack trace from a `.ts` file points at the original line and colum
 run an `https:` entry or to let a local module import an absolute `https:` URL:
 
 ```sh
-neojs --allow-remote https://example.com/main.js
+vjs --allow-remote https://example.com/main.js
 ```
 
 ```js
-// main.js, run with `neojs --allow-remote main.js`
+// main.js, run with `vjs --allow-remote main.js`
 import { greet } from "https://example.com/greet.js";
 console.log(greet("world"));
 ```
 
-**Persist remote loading with `NEOJS_ALLOW_REMOTE`.** `--allow-remote` is a per-command
-choice. Setting `NEOJS_ALLOW_REMOTE=1` or `NEOJS_ALLOW_REMOTE=true` makes remote loading the
-default for every `neojs` run and `neojs test` in that environment; `0` and `false` keep it off.
+**Persist remote loading with `VAELJS_ALLOW_REMOTE`.** `--allow-remote` is a per-command
+choice. Setting `VAELJS_ALLOW_REMOTE=1` or `VAELJS_ALLOW_REMOTE=true` makes remote loading the
+default for every `vaeljs` run and `vjs test` in that environment; `0` and `false` keep it off.
 The words are case-insensitive, and any other value, including an empty one, is a startup error
 (exit 2) rather than an implicit opt-in. An explicit `--allow-remote` or `--no-allow-remote`
 overrides a valid setting; an invalid value is rejected even when an explicit flag is given, so a
@@ -185,12 +185,12 @@ an arbitrary host (see [Limits](#limits) for `jsr:` resolution). A remote module
 in a GitHub repository:
 
 ```sh
-neojs --allow-remote gh:owner/repo@v1.2.3/src/main.ts
-neojs --allow-remote github:owner/repo@0123456789abcdef0123456789abcdef01234567/src/main.ts
+vjs --allow-remote gh:owner/repo@v1.2.3/src/main.ts
+vjs --allow-remote github:owner/repo@0123456789abcdef0123456789abcdef01234567/src/main.ts
 ```
 
 ```js
-// main.js, run with `neojs --allow-remote main.js`
+// main.js, run with `vjs --allow-remote main.js`
 import { parse } from "gh:owner/repo@v1.2.3/src/parse.ts";
 ```
 
@@ -204,7 +204,7 @@ reference; use a tag or a full commit SHA. The legacy `gh:owner/repo/path/@ref` 
 accepted. Empty segments, `.` and `..` segments, `%` escapes, backslashes, queries, fragments,
 whitespace, and control characters are rejected, as are owner, repository, and reference strings
 outside GitHub's safe character set. A `gh:` entry or import without `--allow-remote` (or
-`NEOJS_ALLOW_REMOTE`) fails with the same disabled message as an HTTPS one. GitHub is not an
+`VAELJS_ALLOW_REMOTE`) fails with the same disabled message as an HTTPS one. GitHub is not an
 allowlist and not a sandbox: a `gh:` specifier is one way to name an HTTPS URL, not a restriction on
 which hosts may be fetched.
 
@@ -213,12 +213,12 @@ alias for it, as in a browser. `import.meta.url` is the final URL, relative impo
 it, and a later import of either spelling reaches the same module instance. Two URLs that differ
 only by query are two module instances. Each redirect is
 checked: the target must be credential-free HTTPS and within the redirect limit, so a downgrade to
-HTTP fails before the target is requested. Cross-origin HTTPS redirects are allowed because neojs
+HTTP fails before the target is requested. Cross-origin HTTPS redirects are allowed because vaeljs
 sends no cookie, authorization header, or referrer, and reads no proxy settings from the
 environment. A URL with a username or password is rejected rather than forwarded.
 
 Downloaded modules are cached automatically in one user-profile package cache:
-`$XDG_CACHE_HOME/neojs/packages`, or `$HOME/.cache/neojs/packages` when `XDG_CACHE_HOME` is unset.
+`$XDG_CACHE_HOME/vaeljs/packages`, or `$HOME/.cache/vaeljs/packages` when `XDG_CACHE_HOME` is unset.
 The cache key is a hash of the canonical URL including its query, so secrets in a query do not
 appear as file names, and two inputs that differ by query are separate entries. Entries are written
 atomically, so concurrent processes cannot publish a half-written module, and each entry records and
@@ -273,10 +273,10 @@ indistinguishable from V8's own text and may be redacted. Do not use module spec
 storage.
 
 Remote loading is a capability switch, not a permission system. It is **not SSRF protection**: there
-is no host allowlist, private-address rejection, or DNS pinning, and neojs fetches whatever HTTPS URL
+is no host allowlist, private-address rejection, or DNS pinning, and vaeljs fetches whatever HTTPS URL
 the program names with the process's network authority. Remote code runs with the same authority as
 local code and is not sandboxed. The body limit, redirect limit, and deadline are resource bounds;
-see [`RemoteOptions`](neojs-core/src/remote.rs).
+see [`RemoteOptions`](vaeljs-core/src/remote.rs).
 
 **Send logs to the right stream.** `console.log`, `console.info`, and `console.debug` write to
 stdout. `console.warn` and `console.error` write to stderr.
@@ -287,20 +287,20 @@ console.error("err");
 ```
 
 **Use the console module.** The `console` built-in exports the console object the runtime installed
-in the realm. A module can import it instead of relying on the global, and `neo:console` is the
-canonical and only module specifier. `Neo.getBuiltInModule("neo:console")` returns that object,
+in the realm. A module can import it instead of relying on the global, and `vael:console` is the
+canonical and only module specifier. `Vael.getBuiltInModule("vael:console")` returns that object,
 and the default export's value is that same object. It is the object `globalThis.console` named
 before user code can replace the whole global property.
 
 ```js
-import console from "neo:console";
-import { warn } from "neo:console";
+import console from "vael:console";
+import { warn } from "vael:console";
 
 console.log("stdout");
 warn("stderr");
 ```
 
-The default export's value is the console object. The named exports are its five neojs-defined
+The default export's value is the console object. The named exports are its five vaeljs-defined
 methods: `log`, `debug`, and `info` write to stdout, and `warn` and `error` write to stderr. The
 runtime installs those five function objects before any module runs. In a realm where nothing
 replaced them, the named exports are those installed functions. They are read from the console
@@ -332,73 +332,73 @@ Identity and mutation semantics:
 - Adding a property to a shared function object is visible through every reference to that function,
   because the references are the same object.
 - The console object also carries whatever other properties the engine's global console has. Those
-  are not part of neojs's documented surface. None of this is a permission, sandbox, or isolation
+  are not part of vaeljs's documented surface. None of this is a permission, sandbox, or isolation
   boundary: the console module writes to the same process streams as the global console and adds no
   new capability.
 
-**Inspect the runtime.** `Neo.engine` names the engine that installed the global. This V8 runtime
-reports `"neo"`. `Neo.getBuiltInModulesList()` returns one frozen array of the canonical `neo:`
+**Inspect the runtime.** `Vael.engine` names the engine that installed the global. This V8 runtime
+reports `"vael"`. `Vael.getBuiltInModulesList()` returns one frozen array of the canonical `vael:`
 specifiers of every implemented built-in module, in registration order. The `uuid/v4` and `uuid/v7`
 subpaths appear as their canonical specifiers too.
 
 ```js
-Neo.engine; // "neo"
-Neo.getBuiltInModulesList();
-// ["neo:age", "neo:assert", "neo:chars", "neo:console",
-//  "neo:cron", "neo:crypto", "neo:db", "neo:fs", "neo:os", "neo:path", "neo:slices",
-//  "neo:ssh", "neo:stdio", "neo:strings", "neo:test", "neo:uuid",
-//  "neo:uuid/v4", "neo:uuid/v7"]
+Vael.engine; // "vael"
+Vael.getBuiltInModulesList();
+// ["vael:age", "vael:assert", "vael:chars", "vael:console",
+//  "vael:cron", "vael:crypto", "vael:db", "vael:fs", "vael:os", "vael:path", "vael:slices",
+//  "vael:ssh", "vael:stdio", "vael:strings", "vael:test", "vael:uuid",
+//  "vael:uuid/v4", "vael:uuid/v7"]
 ```
 
 The list is a snapshot of the current runtime, not a promise of a future module, and it lists no
 Node modules: a `node:` opt-in is not implemented. The same frozen array is returned for every call,
-so a caller cannot change later results; a new `Runtime` allocates a new array. `Neo.getBuiltInModule`
-takes the same canonical `neo:` specifier: `Neo.getBuiltInModule("neo:age")` returns the module, and
-`Neo.getBuiltInModule("age")` returns `undefined`. Imports follow the same rule; the bare name `age`
-is not a built-in module specifier. The V8 build enables the positive `neo-chars`, `neo-db`,
-`neo-slices`, and `neo-strings` features by default; `--no-default-features` removes all four
+so a caller cannot change later results; a new `Runtime` allocates a new array. `Vael.getBuiltInModule`
+takes the same canonical `vael:` specifier: `Vael.getBuiltInModule("vael:age")` returns the module, and
+`Vael.getBuiltInModule("age")` returns `undefined`. Imports follow the same rule; the bare name `age`
+is not a built-in module specifier. The V8 build enables the positive `vael-chars`, `vael-db`,
+`vael-slices`, and `vael-strings` features by default; `--no-default-features` removes all four
 modules, the native `chars` and `strings` registrations, their registry entries, and their loader
 entries. `chars` and `strings` are native Rust bindings; there is no JavaScript implementation or
-ESM facade. `db` and `slices` are separate source files included only when `neo-db` / `neo-slices`
-are enabled, so a disabled build does not embed their bytes. `neo-slices` implies `neo-chars` because `CharSlice`
+ESM facade. `db` and `slices` are separate source files included only when `vael-db` / `vael-slices`
+are enabled, so a disabled build does not embed their bytes. `vael-slices` implies `vael-chars` because `CharSlice`
 captures the native `chars.toUpper`/`chars.toLower` functions. Features are additive across the
 dependency graph and are not a sandbox.
 
-`neo:chars` and `neo:strings` are native V8 Rust modules. Every other V8 built-in module —
-`neo:age`, `neo:assert`, `neo:console`, `neo:cron`, `neo:crypto`, `neo:db`, `neo:fs`, `neo:os`,
-`neo:path`, `neo:slices`, `neo:ssh`, `neo:stdio`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and
-`neo:uuid/v7` — retains an ECMAScript module source or wrapper in V8 (with `neo:assert`,
-`neo:console`, `neo:os`, `neo:path`, `neo:slices`, `neo:test`, and `neo:uuid` delegating their
-shared core logic and sources to `neojs-builtins`, `neo:db` delegating to `neojs-dbapi`, and
-`neo:fs` delegating to `neojs-fs-core`). Some of those
+`vael:chars` and `vael:strings` are native V8 Rust modules. Every other V8 built-in module —
+`vael:age`, `vael:assert`, `vael:console`, `vael:cron`, `vael:crypto`, `vael:db`, `vael:fs`, `vael:os`,
+`vael:path`, `vael:slices`, `vael:ssh`, `vael:stdio`, `vael:test`, `vael:uuid`, `vael:uuid/v4`, and
+`vael:uuid/v7` — retains an ECMAScript module source or wrapper in V8 (with `vael:assert`,
+`vael:console`, `vael:os`, `vael:path`, `vael:slices`, `vael:test`, and `vael:uuid` delegating their
+shared core logic and sources to `vaeljs-builtins`, `vael:db` delegating to `vaeljs-dbapi`, and
+`vael:fs` delegating to `vaeljs-fs-core`). Some of those
 modules call private Rust host ops, but a host op is not a native module.
 
-The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"` and,
-with its default `neo-assert`, `neo-chars`, `neo-console`, `neo-crypto`, `neo-fs`, `neo-os`, `neo-path`, `neo-slices`, `neo-ssh`, `neo-strings`, `neo-test`, and `neo-uuid`
-features, implements the shared built-ins `neo:assert`, `neo:chars`, `neo:console`, `neo:crypto` (13 synchronous exports only), `neo:fs`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`, `neo:strings`,
-`neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`. `Neo.getBuiltInModulesList()` is one
-frozen array of canonical specifiers, and `Neo.getBuiltInModule(specifier)` returns the cached
-registry object (frozen for every module except `neo:console`, which is the live mutable
+The QuickJS runtime installs the same `Vael` shape. It reports `Vael.engine` as `"vael-lite"` and,
+with its default `vael-assert`, `vael-chars`, `vael-console`, `vael-crypto`, `vael-fs`, `vael-os`, `vael-path`, `vael-slices`, `vael-ssh`, `vael-strings`, `vael-test`, and `vael-uuid`
+features, implements the shared built-ins `vael:assert`, `vael:chars`, `vael:console`, `vael:crypto` (13 synchronous exports only), `vael:fs`, `vael:os`, `vael:path`, `vael:slices`, `vael:ssh`, `vael:strings`,
+`vael:test`, `vael:uuid`, `vael:uuid/v4`, and `vael:uuid/v7`. `Vael.getBuiltInModulesList()` is one
+frozen array of canonical specifiers, and `Vael.getBuiltInModule(specifier)` returns the cached
+registry object (frozen for every module except `vael:console`, which is the live mutable
 `globalThis.console` object) whose named exports share identity with the module namespace exports; the
 namespace itself is a distinct object. With `default-features = false` the registry and list are
 empty. A bare name, another scheme, or any other specifier returns `undefined`; a non-string name
 throws `TypeError`. That list is not a claim that another V8 module is planned or available. The
-shared Rust and ECMAScript logic comes from the engine-neutral `neojs-builtins` crate (`chars`,
+shared Rust and ECMAScript logic comes from the engine-neutral `vaeljs-builtins` crate (`chars`,
 `os`, `strings`, and `uuid` bound as native QuickJS modules; `assert`, `console`, `path`, `slices`,
-and `test` evaluated from shared factories with native QuickJS host hooks), `neojs-crypto-core` (`crypto`
-synchronous exports bound as a native QuickJS module), `neojs-fs-core` (`fs` bound as a
-native QuickJS module), and `neojs-ssh-core` (`ssh` bound as a native QuickJS module). See
-`neojs-builtins/README.md`, `neojs-crypto-core/README.md`, `neojs-fs-core/README.md`, and `neojs-ssh-core/README.md` for the
+and `test` evaluated from shared factories with native QuickJS host hooks), `vaeljs-crypto-core` (`crypto`
+synchronous exports bound as a native QuickJS module), `vaeljs-fs-core` (`fs` bound as a
+native QuickJS module), and `vaeljs-ssh-core` (`ssh` bound as a native QuickJS module). See
+`vaeljs-builtins/README.md`, `vaeljs-crypto-core/README.md`, `vaeljs-fs-core/README.md`, and `vaeljs-ssh-core/README.md` for the
 shared contract and its limits.
 
-**Use the stdio built-in.** `Neo.getBuiltInModule("neo:stdio")` returns a frozen module object cached
-for the realm. `neo:stdio` is the canonical and only module specifier. It exports `Readable`,
+**Use the stdio built-in.** `Vael.getBuiltInModule("vael:stdio")` returns a frozen module object cached
+for the realm. `vael:stdio` is the canonical and only module specifier. It exports `Readable`,
 `Writable`, `stdout`, `stderr`, and `MAX_BYTES`; there is no default export. It is a synchronous
 byte-stream foundation, not Node's `stream` or `process` module and not the WHATWG Streams API. No
 Node or Web compatibility is promised.
 
 ```js
-import { Readable, Writable, stdout, stderr } from "neo:stdio";
+import { Readable, Writable, stdout, stderr } from "vael:stdio";
 
 const writer = new Writable();
 writer.writeSync(Uint8Array.from([0x00, 0xff]));
@@ -421,9 +421,9 @@ most `MAX_BYTES`) into reader-owned storage. Mutating, detaching, or resizing th
 afterwards does not change the reader. `readSync(target)` copies at most `target.byteLength` bytes
 and returns the count. It can copy fewer bytes than the target holds, so loop until it returns `0`.
 Exactly `0` means end of file; end of file is not an exception. An empty target throws
-`NEO_STDIO_ARGUMENT` rather than returning an ambiguous zero, even at end of file. `remaining` is the
+`VAEL_STDIO_ARGUMENT` rather than returning an ambiguous zero, even at end of file. `remaining` is the
 unread byte count, `closed` reports `close()`, and `close()` releases the snapshot, is idempotent,
-and never detaches a caller's buffer. Reads after it throw `NEO_STDIO_CLOSED`.
+and never detaches a caller's buffer. Reads after it throw `VAEL_STDIO_CLOSED`.
 
 **Writing.** `new Writable()` creates a memory-backed writer implemented as one coalesced, owned
 buffer whose capacity is bounded by `MAX_BYTES`, rather than a chunk or record per write. An empty
@@ -433,7 +433,7 @@ write retains nothing; growing the buffer may briefly hold the old and new buffe
 without changing the stream, and it never returns a short count. `length` is the retained byte count,
 and `toUint8Array()` copies only the used prefix into a fresh caller-owned array. `end()` retires the
 writer but keeps memory-backed content readable; `close()` is terminal and releases it. Both are
-idempotent. A closed writer reports `length = 0` and throws `NEO_STDIO_CLOSED`.
+idempotent. A closed writer reports `length = 0` and throws `VAEL_STDIO_CLOSED`.
 
 **The process streams.** `stdout` and `stderr` are one shared memory-free `Writable` each, bound to
 the current process's standard output and standard error. Writing to them adds no capability beyond
@@ -443,8 +443,8 @@ loop, has no timeout, and cannot be cancelled. It returns the full byte count on
 mean that a prefix was already written, because a system write can be partially completed before
 failing; there is no rollback or retry. Bytes written by this module and by `console` share the same
 descriptor and are ordered by the calls that ran. `stdout.length` and `stderr.length` are always `0`
-because a host writer retains nothing, and `toUint8Array()` throws `NEO_STDIO_NOT_MEMORY` (or
-`NEO_STDIO_CLOSED` after `close()`). Their
+because a host writer retains nothing, and `toUint8Array()` throws `VAEL_STDIO_NOT_MEMORY` (or
+`VAEL_STDIO_CLOSED` after `close()`). Their
 `kind` is `"stdout"` or `"stderr"`. `end()` and `close()` retire only this wrapper; they do not close
 the process descriptor, so `console` keeps working. Because the object is shared per realm,
 retiring it through any reference is visible through every reference; `console` itself is unaffected
@@ -455,15 +455,15 @@ would block on input and add an input capability this slice does not grant.
 chunk, and a memory writer's retained content. The limit is per stream; there is no aggregate budget
 in this slice, and a `Uint8Array` returned by `toUint8Array()` is JavaScript-owned and outside it. A
 refused copy or append happens before any state changes. Sizes are checked from V8's internal view
-length, not a JavaScript getter. A detached view throws `NEO_STDIO_DETACHED`; a forged, proxied, or
+length, not a JavaScript getter. A detached view throws `VAEL_STDIO_DETACHED`; a forged, proxied, or
 non-view value throws `TypeError`. Offset views are copied from their own byte range; shared and
 resizable backing buffers are accepted because the copy runs without executing JavaScript. Range
 copies are made with V8's native view API, not `subarray`, so replacing
 `Uint8Array[Symbol.species]`, `Uint8Array.prototype.constructor`, or a typed-array prototype method
 cannot run JavaScript, receive the private snapshot buffer, or re-enter the module during a read.
 Other failures are an ordinary `Error` with `name = "StdioError"` and a stable own `code`:
-`NEO_STDIO_ARGUMENT`, `NEO_STDIO_DETACHED`, `NEO_STDIO_LIMIT`, `NEO_STDIO_CLOSED`,
-`NEO_STDIO_ENDED`, `NEO_STDIO_NOT_MEMORY`, or `NEO_STDIO_WRITE`. There is no exported error
+`VAEL_STDIO_ARGUMENT`, `VAEL_STDIO_DETACHED`, `VAEL_STDIO_LIMIT`, `VAEL_STDIO_CLOSED`,
+`VAEL_STDIO_ENDED`, `VAEL_STDIO_NOT_MEMORY`, or `VAEL_STDIO_WRITE`. There is no exported error
 constructor; test `error.name === "StdioError"` and the `code`. Messages never include the rejected
 bytes; a write failure names the stream and the operating-system error. A closed stream reports its
 closed code before validating the argument. Argument counts are strict, and a callback or other
@@ -475,13 +475,13 @@ will be additive, `Promise`-based, and will perform its work on a real asynchron
 no `pipe`, `on`, event, backpressure, or `Buffer` surface, and none is promised. The module is not a
 permission, sandbox, or isolation boundary; `Deno.core` remains reachable, as noted below.
 
-**Use the path built-in.** `Neo.getBuiltInModule("neo:path")` returns a frozen module object cached
-for the realm. `neo:path` is the canonical and only module specifier. It exports frozen `posix` and
+**Use the path built-in.** `Vael.getBuiltInModule("vael:path")` returns a frozen module object cached
+for the realm. `vael:path` is the canonical and only module specifier. It exports frozen `posix` and
 `win32` namespaces plus host-selected functions, so the same code can use an explicit syntax on any
 host.
 
 ```js
-import { posix, win32, SEPARATOR, SEPARATOR_PATTERN } from "neo:path";
+import { posix, win32, SEPARATOR, SEPARATOR_PATTERN } from "vael:path";
 
 posix.join("/srv", "app", "..", "data"); // "/srv/data"
 posix.parse("/srv/data/file.txt");
@@ -547,7 +547,7 @@ no per-drive environment lookup. A failure is an ordinary `Error` with `name = "
 stable own `code`: `PATH_CWD` when the working
 directory is unavailable or not valid UTF-8, `PATH_CWD_DIALECT` when the non-host dialect needs a
 working directory, and `PATH_WINDOWS_ROOT` when Windows cannot establish a matching drive, share, or
-complete namespace root. There is no `PATH_PERMISSION`; neojs has no permission system.
+complete namespace root. There is no `PATH_PERMISSION`; vaeljs has no permission system.
 
 **Scope.** This is lexical string manipulation, not a filesystem, permission, or containment
 boundary. It does not read, write, stat, or authorize a file; resolve symlinks, junctions, drive
@@ -557,16 +557,16 @@ Unicode confusables; or promise that a result stays inside a directory. `normali
 and file URL conversion are deliberately not implemented in this slice. This is not Node's `path`,
 not `@neotales/path`, and not NeoLiteJS `neo:path`; URL inputs, coercion, and those compatibility
 surfaces are not promised. The path algorithms are adapted from NeoLiteJS and `@neotales/path` under
-the MIT license; see [`neojs-core/THIRD_PARTY_NOTICES.md`](neojs-core/THIRD_PARTY_NOTICES.md) for the
+the MIT license; see [`vaeljs-core/THIRD_PARTY_NOTICES.md`](vaeljs-core/THIRD_PARTY_NOTICES.md) for the
 exact revision, adapted files, and notices.
 
-**Use the os built-in.** `Neo.getBuiltInModule("neo:os")` returns a frozen module object that is
-cached for the realm. `neo:os` is the canonical and only module specifier. The named exports are
+**Use the os built-in.** `Vael.getBuiltInModule("vael:os")` returns a frozen module object that is
+cached for the realm. `vael:os` is the canonical and only module specifier. The named exports are
 `platform` and `arch`, and each is the same string as the matching registry property. There is no
-default export, and neojs installs no `os` global.
+default export, and vaeljs installs no `os` global.
 
 ```js
-import { arch, platform } from "neo:os";
+import { arch, platform } from "vael:os";
 
 console.log(platform); // e.g. "linux"
 console.log(arch);     // e.g. "x86_64"
@@ -574,7 +574,7 @@ console.log(arch);     // e.g. "x86_64"
 
 The values are Rust's `std::env::consts::OS` and `std::env::consts::ARCH` for the target the runtime
 was compiled for. They describe that compilation target; they are not a probe of the machine the
-process is running on. The vocabulary is exactly the compiler's, and neojs does not map, normalize,
+process is running on. The vocabulary is exactly the compiler's, and vaeljs does not map, normalize,
 or validate it against a list of its own. `platform` can therefore be `linux`, `macos`, `windows`,
 `freebsd`, `netbsd`, `openbsd`, `dragonfly`, `android`, `ios`, `illumos`, `solaris`, `fuchsia`,
 `haiku`, `redox`, `emscripten`, `wasi`, or another name Rust documents for the target, and `arch`
@@ -590,16 +590,16 @@ sysctl value, file, or process table. It adds no permission and is not a sandbox
 module. Only Linux x86-64 is verified in this repository; values on Windows, macOS, and other
 targets are the compiler's constants but those platforms are unverified.
 
-**Use the character built-in.** The global `Neo` object exposes the modules this runtime ships.
-`Neo.getBuiltInModule("neo:chars")` returns a frozen module object that is cached for the realm, so
+**Use the character built-in.** The global `Vael` object exposes the modules this runtime ships.
+`Vael.getBuiltInModule("vael:chars")` returns a frozen module object that is cached for the realm, so
 repeated lookups return the same object. An unknown name returns `undefined`; a non-string name
 throws `TypeError`.
 
-The same module is importable as an ECMAScript module. `neo:chars` is the canonical and only module
+The same module is importable as an ECMAScript module. `vael:chars` is the canonical and only module
 specifier. Static imports, dynamic imports, and the registry all expose the same function objects.
 
 ```js
-import { isLetter, isDigit, toUpper } from "neo:chars";
+import { isLetter, isDigit, toUpper } from "vael:chars";
 
 console.log(isLetter("λ".codePointAt(0))); // true
 console.log(isDigit("٣".codePointAt(0))); // true
@@ -607,33 +607,33 @@ console.log(toUpper("a".codePointAt(0))); // 65
 ```
 
 ```js
-import { isLetter } from "neo:chars";
+import { isLetter } from "vael:chars";
 
-const registry = Neo.getBuiltInModule("neo:chars");
-const dynamic = await import("neo:chars");
+const registry = Vael.getBuiltInModule("vael:chars");
+const dynamic = await import("vael:chars");
 
 console.log(isLetter === registry.isLetter); // true
-console.log(dynamic === await import("neo:chars")); // true
-console.log(import.meta.resolve("neo:chars")); // neo:chars
+console.log(dynamic === await import("vael:chars")); // true
+console.log(import.meta.resolve("vael:chars")); // vael:chars
 ```
 
 Identity and mutation semantics:
 
 - Every named export is the same function object as the matching property of
-  `Neo.getBuiltInModule("neo:chars")`. They are shared, not copies, so adding a property to an exported
+  `Vael.getBuiltInModule("vael:chars")`. They are shared, not copies, so adding a property to an exported
   function is visible through both paths. The namespace object and the registry object are different
   containers over those shared functions, not the same object.
 - The module object is frozen and the module namespace bindings cannot be assigned, so neither path
   can replace a function. In module code, assigning to a namespace property throws `TypeError`.
 - The module is cached per realm, so every importer in one `Runtime` sees one module namespace. A
   new `Runtime` creates a new realm and new function objects.
-- `Neo.getBuiltInModule` takes the canonical `neo:` specifier: `Neo.getBuiltInModule("neo:chars")`
-  returns the module, and `Neo.getBuiltInModule("chars")` returns `undefined`. The `neo:` scheme is
-  matched case-insensitively, as URL schemes are, so `NEO:chars` imports the same module; the path
+- `Vael.getBuiltInModule` takes the canonical `vael:` specifier: `Vael.getBuiltInModule("vael:chars")`
+  returns the module, and `Vael.getBuiltInModule("chars")` returns `undefined`. The `vael:` scheme is
+  matched case-insensitively, as URL schemes are, so `VAEL:chars` imports the same module; the path
   `chars` is matched exactly. Leading or trailing whitespace and embedded ASCII control characters
   are rejected rather than trimmed by URL parsing. A bare `chars` import is rejected with a message
-  naming `neo:chars`.
-- There is no default export. `import chars from "neo:chars"` fails to link, as does importing a name
+  naming `vael:chars`.
+- There is no default export. `import chars from "vael:chars"` fails to link, as does importing a name
   the module does not export.
 
 Implemented functions:
@@ -661,24 +661,24 @@ or a surrogate (0xD800 through 0xDFFF). Predicates never throw. `toLower` and `t
 and no `...At` helpers in this slice; pass `codePointAt(0)` yourself.
 
 Classification is fixed to the Unicode 16.0 General_Category tables in the engine-neutral
-`neojs-builtins` crate, so V8 and QuickJS classify the same input the same way instead of following
+`vaeljs-builtins` crate, so V8 and QuickJS classify the same input the same way instead of following
 their own engine tables. Case mapping uses the Rust compiler's `char` tables; that release is not
 tied to the category table and can change on a compiler upgrade, so a case mapping can drift even
 when classification does not. Both can differ from the tables used by the previous JavaScript
 implementation. `isSpace` follows Go's `unicode.IsSpace` categories: unlike JavaScript's `\s`, it
 includes U+0085 and U+00A0 but excludes U+FEFF. This module is informed by `@neotales/chars` and the
-QuickJS `neo:chars` module; it does not port their lookup tables, and it does not claim compatibility
+QuickJS `vael:chars` module; it does not port their lookup tables, and it does not claim compatibility
 with either API.
 
-**Use the strings built-in.** `Neo.getBuiltInModule("neo:strings")` returns a frozen module object
-that is cached for the realm. `neo:strings` is the canonical and only module specifier. The named
+**Use the strings built-in.** `Vael.getBuiltInModule("vael:strings")` returns a frozen module object
+that is cached for the realm. `vael:strings` is the canonical and only module specifier. The named
 exports are `equalFold`, `startsWithFold`, `endsWithFold`, `indexOfFold`, `lastIndexOfFold`, `trim`,
 `trimStart`, and `trimEnd`; each is the same function object as the matching registry property, and
-there is no default export. The module is a native Rust binding shared with NeoJS Lite: it calls no
+there is no default export. The module is a native Rust binding shared with VaelJS Lite: it calls no
 host op and adds no capability beyond the strings it is given.
 
 ```js
-import { equalFold, indexOfFold, lastIndexOfFold, trim } from "neo:strings";
+import { equalFold, indexOfFold, lastIndexOfFold, trim } from "vael:strings";
 
 console.log(equalFold("Hello WÖrLD", "hello wörld")); // true
 console.log(indexOfFold("😀a", "A")); // 2 (UTF-16 code units)
@@ -687,9 +687,9 @@ console.log(trim("file.txt...", ".")); // "file.txt"
 ```
 
 Folded matching uses Unicode 16.0 simple case folding from a fixed table in the shared
-`neojs-builtins` crate. The table is generated by a checked-in script from the exact official
+`vaeljs-builtins` crate. The table is generated by a checked-in script from the exact official
 unicode.org `CaseFolding.txt` 16.0.0 artifact; the artifact SHA-256, selection rules, and Unicode
-License V3 notice are in `neojs-builtins/data/unicode/README.md`. It is locale-independent, both
+License V3 notice are in `vaeljs-builtins/data/unicode/README.md`. It is locale-independent, both
 engines classify the same input the same way, and it is not a `toLowerCase()` comparison:
 `equalFold("K", "\u212A")` is `true` (Kelvin sign) and `equalFold("s", "\u017F")` is `true` (long s),
 while `equalFold("I", "\u0131")` is `false` (dotless i) and `equalFold("ss", "ß")` is `false` (that
@@ -710,7 +710,7 @@ to the length).
 
 With no `chars`, `trim`, `trimStart`, and `trimEnd` are exactly `String.prototype.trim`,
 `trimStart`, and `trimEnd`, so they use JavaScript's whitespace set, which includes U+FEFF and
-excludes U+0085. This is deliberately not `neo:chars`' `isSpace`, which follows Go's
+excludes U+0085. This is deliberately not `vael:chars`' `isSpace`, which follows Go's
 `unicode.IsSpace`. With `chars`, the argument is a set of Unicode code points, not a prefix or
 suffix, and every leading or trailing code point in the set is removed: `trim("##a##", "#")` is
 `"a"`, and an empty `chars` string removes nothing.
@@ -719,8 +719,8 @@ Folding and trimming are independent implementations informed by `@neotales/stri
 `@neotales/slices`. They do not port those packages' tables and do not claim compatibility with
 their code point indexing or their `Uint8Array`/`Uint16Array` buffer forms.
 
-**Use the assert built-in.** `Neo.getBuiltInModule("neo:assert")` returns the frozen callable `assert`
-function itself, cached for the realm. `neo:assert` is the canonical and only module specifier. The
+**Use the assert built-in.** `Vael.getBuiltInModule("vael:assert")` returns the frozen callable `assert`
+function itself, cached for the realm. `vael:assert` is the canonical and only module specifier. The
 default export is that function, and the named exports
 `assert`, `AssertionError`, `ok`, `equals`, `notEquals`, `strictEquals`, `notStrictEquals`, `fail`,
 `throws`, `doesNotThrow`, `rejects`, and `doesNotReject` are its own properties. `assert.ok` is the
@@ -728,7 +728,7 @@ callable itself. The module calls one private host op to observe a genuine nativ
 no filesystem, network, environment, or permission capability.
 
 ```js
-import assert, { equals, strictEquals } from "neo:assert";
+import assert, { equals, strictEquals } from "vael:assert";
 
 const value = 1;
 assert(value, "optional message");
@@ -759,8 +759,8 @@ and two distinct objects are never identical. `notEquals` and `notStrictEquals` 
 a string. Argument counts are strict, and arguments are not coerced.
 
 Every failed assertion throws `AssertionError`, an `Error` subclass. It has `name`
-`"AssertionError"`, a stable own `code` of `"NEO_ASSERT"`, an `operator` naming the failed
-assertion, and `actual` and `expected` when the assertion had them. The code is neojs-specific; it
+`"AssertionError"`, a stable own `code` of `"VAEL_ASSERT"`, an `operator` naming the failed
+assertion, and `actual` and `expected` when the assertion had them. The code is vaeljs-specific; it
 is not Node's `ERR_ASSERTION`.
 
 `throws(callback[, expected[, message]])` throws unless `callback` throws, and returns the thrown
@@ -809,15 +809,15 @@ for tests but not for huge collections. `Error` `cause` and `AggregateError.erro
 non-enumerable and are not compared. Proxies can run their traps during comparison and formatting;
 this is a test helper in the caller's realm, not an isolation boundary.
 
-**Use the slices built-in.** `Neo.getBuiltInModule("neo:slices")` returns a frozen module object that
-is cached for the realm. `neo:slices` is the canonical and only module specifier. The exports are
+**Use the slices built-in.** `Vael.getBuiltInModule("vael:slices")` returns a frozen module object that
+is cached for the realm. `vael:slices` is the canonical and only module specifier. The exports are
 `Slice`, `ReadOnlySlice`, `CharSlice`, `ReadOnlyCharSlice`, `slice`, `readonlySlice`, `charSlice`,
 and `readonlyCharSlice`; each class or function is the same object as the matching registry
 property, and there is no default export. The module is plain ECMAScript: it calls no host op, adds
 no capability, and is not a sandbox or a cross-realm or cross-thread zero-copy bridge.
 
 ```js
-import { slice, readonlySlice } from "neo:slices";
+import { slice, readonlySlice } from "vael:slices";
 
 const base = [0, 1, 2, 3, 4];
 const view = slice(base, 1, 5); // [1, 2, 3, 4] as a live view
@@ -877,7 +877,7 @@ argument list; it allocates the result string and chunk temporaries, not a strin
 `slice` allocates only a view/state object and no character buffer. The in-place
 `toUpper`/`toLower` transforms allocate no new character buffer, but their simple case mapping may
 allocate a temporary string per mapped code point; they avoid converting the whole buffer to a
-string. The transforms apply the same simple case mapping as `neo:chars`, so `ß` stays `ß` rather
+string. The transforms apply the same simple case mapping as `vael:chars`, so `ß` stays `ß` rather
 than expanding to `SS`; lone surrogates and values outside the Unicode range are left unchanged.
 `set` writes one code point through to the buffer. `toArray()` returns an independent `Uint32Array`
 snapshot. `ReadOnlyCharSlice` has no `set` or in-place transform: make a `CharSlice` over the same
@@ -898,12 +898,12 @@ reference's `ReadonlyCharSlice` spelling and some method names differ; there is 
 `slices.Slice`-compatible `map`/`update`/`replace` surface in this slice. Views are aliases within
 one realm, not a Rust zero-copy bridge.
 
-**Use the cron built-in.** `Neo.getBuiltInModule("neo:cron")` returns a frozen module object cached for
-the realm. The canonical `neo:cron` import and the registry expose the same `cron`, `next`, and
+**Use the cron built-in.** `Vael.getBuiltInModule("vael:cron")` returns a frozen module object cached for
+the realm. The canonical `vael:cron` import and the registry expose the same `cron`, `next`, and
 `CronError` values.
 
 ```js
-import { cron, next } from "neo:cron";
+import { cron, next } from "vael:cron";
 
 console.log(next("*/5 * * * *", new Date("2024-01-01T00:00:00Z")).toISOString());
 // 2024-01-01T00:05:00.000Z
@@ -967,7 +967,7 @@ All times are UTC. There is no local-time interpretation, DST handling, time-zon
 field, or `@daily`-style nickname. The scheduler uses the runtime's Tokio timer rather than a
 JavaScript fake-timer surface: a synchronous callback blocks the isolate and delays every timer, and
 a callback that only awaits an ordinary Promise does not keep the process alive by itself. In a
-`neojs test` file, dispose every job: an undisposed job is pending event-loop work and makes the
+`vjs test` file, dispose every job: an undisposed job is pending event-loop work and makes the
 settle check fail. This is
 not Deno's `Deno.cron`, Bun's `Bun.cron`, `node-cron`, or a compatibility layer for any of them.
 The deterministic clock used by the tests is compiled only with the off-by-default `test-support`
@@ -981,17 +981,17 @@ and if it passes the following occurrence the normal `missed` rule discards the 
 replaying a backlog. A large jump can therefore skip occurrences, and these rechecks bound the effect
 of a clock change rather than making scheduling monotonic.
 
-**Run tests.** `neojs test` takes one or more files or shell-style globs, expands them
+**Run tests.** `vjs test` takes one or more files or shell-style globs, expands them
 deterministically, sorts the selected files by canonical path, removes duplicates, and runs each
-file in a fresh runtime. Only `neo:test` is a module specifier; the bare name `test` is rejected.
+file in a fresh runtime. Only `vael:test` is a module specifier; the bare name `test` is rejected.
 `test(name, fn)` accepts a synchronous or async callback; `test(name)` registers a
 pending test, which fails the run.
 
 `math.test.js`:
 
 ```js
-import test from "neo:test";
-import assert from "neo:assert";
+import test from "vael:test";
+import assert from "vael:assert";
 
 test("adds", () => {
     assert.equals(1 + 1, 2);
@@ -1004,7 +1004,7 @@ test("adds asynchronously", async () => {
 ```
 
 ```sh
-neojs test "tests/**/*.test.js" "tests/smoke.test.js"
+vjs test "tests/**/*.test.js" "tests/smoke.test.js"
 ```
 
 ```text
@@ -1017,18 +1017,18 @@ ok 2 - adds asynchronously
 
 Remote loading is disabled for test files too. Give `--allow-remote` before or after `test` to let
 every selected file import absolute `https:` modules; `--no-allow-remote` forces it off, and
-`NEOJS_ALLOW_REMOTE` selects the default for every selected file unless a flag overrides a valid
+`VAELJS_ALLOW_REMOTE` selects the default for every selected file unless a flag overrides a valid
 setting:
 
 ```sh
-neojs --allow-remote test "tests/**/*.test.js"
-neojs test --allow-remote "tests/**/*.test.js"
-neojs test --no-allow-remote "tests/**/*.test.js"
+vjs --allow-remote test "tests/**/*.test.js"
+vjs test --allow-remote "tests/**/*.test.js"
+vjs test --no-allow-remote "tests/**/*.test.js"
 ```
 
 Each file still gets a fresh runtime, so each has its own default remote request, module, byte, and
 redirect limits. The user-profile package cache is shared across those fresh runtimes and with
-`neojs --allow-remote <file>`, because it is keyed by URL rather than by runtime. `--` ends option
+`vjs --allow-remote <file>`, because it is keyed by URL rather than by runtime. `--` ends option
 parsing, so a file literally named `--allow-remote` or `--no-allow-remote` can still be selected
 after it. The remote rules are the same as for a run: only credential-free `https:` is accepted,
 relative imports inside a remote module stay remote, and the cache behavior described above applies.
@@ -1036,13 +1036,13 @@ relative imports inside a remote module stay remote, and the cache behavior desc
 The runner is registration-based, not Node's `node:test`. The CLI runs it after the entry module
 settles, so a test registered after a top-level `await` is included. A file that registers no tests
 fails. Remote loading stays off unless `--allow-remote`, `--no-allow-remote`, or
-`NEOJS_ALLOW_REMOTE` selects it, and it applies to every selected file's fresh runtime. A rejected
+`VAELJS_ALLOW_REMOTE` selects it, and it applies to every selected file's fresh runtime. A rejected
 Promise, a rejected thenable, a returned generator object, a pending test, an
 unhandled rejection, a test that does not settle within its timeout, and event-loop work that
 remains after a bounded settle window are failures, so none can look like a pass. The default
 timeout is 30 seconds and can be set per test:
 `test("slow", fn, { timeout: 60_000 })`. `run()` returns cumulative counts and, unless called with
-`{ throwOnFailure: false }`, throws `TestFailureError` (`code: "NEO_TEST_FAILURES"`) whenever that
+`{ throwOnFailure: false }`, throws `TestFailureError` (`code: "VAEL_TEST_FAILURES"`) whenever that
 cumulative report has a failure, including a failure from an earlier call. The host also passes
 `{ settle: true }` for its bounded event-loop check; a user call inside a top-level `await` must
 leave `settle` false because it would see its own pending module evaluation.
@@ -1051,12 +1051,12 @@ Native Promises are observed through the `assert` module's V8 Promise observatio
 their real internal state rather than `then`, `constructor`, or `Symbol.species`; a subclass with
 throwing prototype getters therefore fulfils, rejects, or stays pending according to what actually
 happened. A non-native thenable is read once, called once, and its first settlement wins.
-Nested promises and thenables are assimilated recursively, cycles fail with `NEO_TEST_CYCLE`, and a
-chain longer than 1000 steps fails with `NEO_TEST_CHAIN`. Identity is checked before reading `then`
+Nested promises and thenables are assimilated recursively, cycles fail with `VAEL_TEST_CYCLE`, and a
+chain longer than 1000 steps fails with `VAEL_TEST_CHAIN`. Identity is checked before reading `then`
 again, so a stateful getter is read once and cannot turn its own cycle into a plain value or mask it
 with a later error. The per-test timeout covers the whole
-chain. `NEO_TEST_OBSERVE` means the V8 observer could not inspect a native Promise, and
-`NEO_TEST_NO_TIMER` means timer support was unavailable and the runner failed closed rather than
+chain. `VAEL_TEST_OBSERVE` means the V8 observer could not inspect a native Promise, and
+`VAEL_TEST_NO_TIMER` means timer support was unavailable and the runner failed closed rather than
 hang. A synchronous loop or a thenable that blocks or starves the isolate is still not
 interruptible, and a timeout fails the test without cancelling work that is already running.
 
@@ -1075,14 +1075,14 @@ no retries, no subtests, hooks, mocks, or snapshots, and no full Node compatibil
 run with the process's full filesystem authority; this is not a sandbox. A synchronous callback that
 blocks the isolate forever still hangs the process.
 
-**Use the age built-in.** `Neo.getBuiltInModule("neo:age")` returns a frozen module object that is
-cached for the realm. `neo:age` is the canonical and only module specifier. The named exports are
+**Use the age built-in.** `Vael.getBuiltInModule("vael:age")` returns a frozen module object that is
+cached for the realm. `vael:age` is the canonical and only module specifier. The named exports are
 `generateIdentity`, `identityToRecipient`, `encrypt`, and `decrypt`, and each is the same function
 object as the matching registry property. There is no default export. The module is available in
 every runtime; there is no secure-context or TLS gate.
 
 ```js
-import { decrypt, encrypt, generateIdentity } from "neo:age";
+import { decrypt, encrypt, generateIdentity } from "vael:age";
 
 const pair = generateIdentity(); // { identity, recipient }
 const plaintext = Uint8Array.from([0x68, 0x65, 0x6c, 0x6c, 0x6f]);
@@ -1108,8 +1108,8 @@ recipient. `decrypt(identity, ciphertext)` accepts such a file and returns its p
 supports X25519 identities and recipients and binary age v1 only. It does **not** implement ASCII
 armor, passphrases (scrypt), SSH keys, plugins, tagged HPKE recipients, or post-quantum recipients.
 A valid age key of another kind that fits the 512-byte key-text bound is rejected with
-`NEO_AGE_UNSUPPORTED`; longer key text is refused by that bound, and an armored file is rejected as
-`NEO_AGE_FORMAT`. Do not treat this module as a general `age` command or a compatibility layer for
+`VAEL_AGE_UNSUPPORTED`; longer key text is refused by that bound, and an armored file is rejected as
+`VAEL_AGE_FORMAT`. Do not treat this module as a general `age` command or a compatibility layer for
 those formats.
 
 Argument counts are strict. `generateIdentity` takes no arguments, and the other three functions
@@ -1123,25 +1123,25 @@ the call returns.
 
 Every failure other than a `TypeError` is an `Error` with a stable own `code`:
 
-- `NEO_AGE_IDENTITY` — the identity text is not a valid age X25519 identity.
-- `NEO_AGE_RECIPIENT` — the recipient text is not a valid age X25519 recipient, or its public key
+- `VAEL_AGE_IDENTITY` — the identity text is not a valid age X25519 identity.
+- `VAEL_AGE_RECIPIENT` — the recipient text is not a valid age X25519 recipient, or its public key
   is a low-order X25519 point that cannot produce a usable shared secret.
-- `NEO_AGE_UNSUPPORTED` — the key is valid age but not X25519, and fits the key-text bound.
-- `NEO_AGE_FORMAT` — truncated, malformed, or unsupported file (including a passphrase file or
+- `VAEL_AGE_UNSUPPORTED` — the key is valid age but not X25519, and fits the key-text bound.
+- `VAEL_AGE_FORMAT` — truncated, malformed, or unsupported file (including a passphrase file or
   ASCII armor).
-- `NEO_AGE_IDENTITY_MISMATCH` — no supplied identity matched the file's recipients.
-- `NEO_AGE_AUTH` — a header MAC or payload authentication tag did not verify.
-- `NEO_AGE_LIMIT` — an input or output exceeded a documented bound.
-- `NEO_AGE_RANDOM` — the operating system CSPRNG failed.
-- `NEO_AGE_DETACHED` — a transferred `Uint8Array` view.
-- `NEO_AGE_INTERNAL` — the backend reported an unexpected failure.
+- `VAEL_AGE_IDENTITY_MISMATCH` — no supplied identity matched the file's recipients.
+- `VAEL_AGE_AUTH` — a header MAC or payload authentication tag did not verify.
+- `VAEL_AGE_LIMIT` — an input or output exceeded a documented bound.
+- `VAEL_AGE_RANDOM` — the operating system CSPRNG failed.
+- `VAEL_AGE_DETACHED` — a transferred `Uint8Array` view.
+- `VAEL_AGE_INTERNAL` — the backend reported an unexpected failure.
 
 Messages are fixed text. They never include an identity, a recipient, plaintext, ciphertext, or key
 bytes. A failed `decrypt` never returns partial or unauthenticated plaintext: the header MAC is
 verified before payload decryption, every STREAM chunk is authenticated, and any failure discards the
 working buffer.
 
-Size limits are neojs limits, not age format limits. `encrypt` accepts at most 8 MiB of plaintext
+Size limits are vaeljs limits, not age format limits. `encrypt` accepts at most 8 MiB of plaintext
 and produces at most 8 MiB + 1 MiB. `decrypt` accepts at most 8 MiB + 1 MiB of ciphertext, a header
 of at most 64 KiB, at most 1024 recipient stanzas, a stanza body of at most 64 KiB, and returns at
 most 8 MiB of plaintext. The ciphertext and key-text bounds are checked against the view or string
@@ -1150,7 +1150,7 @@ chunks are written, so the result cannot first grow past the bound. A valid exte
 much larger header is rejected by this policy.
 
 A `Uint8Array` view is read through its own range, so an offset view copies only its bytes. A
-detached view is `NEO_AGE_DETACHED`, not empty input. `SharedArrayBuffer`-backed and resizable
+detached view is `VAEL_AGE_DETACHED`, not empty input. `SharedArrayBuffer`-backed and resizable
 `ArrayBuffer` views are accepted; V8 exposes a view that a shrunk resizable buffer left out of
 bounds as a zero-length view, which is encrypted as empty bytes. V8's internal type check is used,
 so `Symbol.hasInstance`, a `byteLength` getter, or a proxy cannot change validation. The four host
@@ -1164,14 +1164,14 @@ the upstream crate has no public RNG injection point and panics if the CSPRNG fa
 under `panic = "abort"`. The format and X25519 handling are therefore not reimplemented here. Binary
 age v1 files emitted by this module are standard: interop was checked against the `age` 1.3.2
 command-line tool, and the test suite includes a fixture produced by that tool and decrypts it. An
-ignored two-way test, `cargo test -p neojs --test cli -- --ignored age_cli_interop`, runs the same
+ignored two-way test, `cargo test -p vaeljs --test cli -- --ignored age_cli_interop`, runs the same
 roundtrip against `age` or `rage` from `PATH` (or `AGE_BIN`) and fails rather than skipping when the
 tool is missing. The always-on tests cover a wrong identity, every single-bit change, every truncation
 prefix, empty and binary payloads, typed-array views, module identity, the low-order-recipient error,
 and the documented limits. Rejection paths are exercised too: ASCII armor and passphrase-encrypted
-files are refused as `NEO_AGE_FORMAT`, and a post-quantum identity is refused as
-`NEO_AGE_UNSUPPORTED` (its public key exceeds the key-text bound and is refused as
-`NEO_AGE_RECIPIENT`). SSH and plugin inputs are not exercised at all; those formats are not exposed,
+files are refused as `VAEL_AGE_FORMAT`, and a post-quantum identity is refused as
+`VAEL_AGE_UNSUPPORTED` (its public key exceeds the key-text bound and is refused as
+`VAEL_AGE_RECIPIENT`). SSH and plugin inputs are not exercised at all; those formats are not exposed,
 and this slice makes no support claim about them.
 
 This module does not promise zeroization. The identity string, plaintext, ciphertext, and
@@ -1180,8 +1180,8 @@ reclaimed normally but not guaranteed to be erased first. It does not store, der
 or persist keys, and it is not a sandbox or a permission boundary. It performs no filesystem or
 network access.
 
-**Use the crypto built-in.** `Neo.getBuiltInModule("neo:crypto")` returns a frozen module object that
-is cached for the realm. `neo:crypto` is the canonical and only module specifier. The named exports
+**Use the crypto built-in.** `Vael.getBuiltInModule("vael:crypto")` returns a frozen module object that
+is cached for the realm. `vael:crypto` is the canonical and only module specifier. The named exports
 are `generateEnvelopeKey`, `randomBytes`, `encrypt`, `decrypt`, `createHash`, `createHmac`,
 `hashAsync`, `hmacAsync`, `pbkdf2`, `pbkdf2Async`,
 `bcryptHash`, `bcryptHashAsync`, `bcryptVerify`, and `bcryptVerifyAsync`, and each is the same
@@ -1189,7 +1189,7 @@ function object as the matching registry property. There is no default export. T
 available in every runtime; there is no secure-context or TLS gate.
 
 ```js
-import { decrypt, encrypt, generateEnvelopeKey } from "neo:crypto";
+import { decrypt, encrypt, generateEnvelopeKey } from "vael:crypto";
 
 const key = generateEnvelopeKey();
 const plaintext = Uint8Array.from([0x68, 0x65, 0x6c, 0x6c, 0x6f]);
@@ -1211,7 +1211,7 @@ CSPRNG, for salts, IVs, or nonces used by another construction. `length` must be
 through 8 MiB: a non-number throws `TypeError`, and a non-integer, negative, non-finite, or
 too-large value throws `RangeError`. The call is synchronous and returns no `Promise`. There is no
 `Math.random` or time-based fallback; if the operating system refuses entropy, the call throws
-`NEO_CRYPTO_RANDOM` instead of returning predictable bytes. Tests cover length, type, range, and
+`VAEL_CRYPTO_RANDOM` instead of returning predictable bytes. Tests cover length, type, range, and
 error behaviour only; they do not and cannot prove statistical randomness or cryptographic
 security.
 
@@ -1247,24 +1247,24 @@ The crypto host ops are captured before user code runs, so replacing `Deno.core.
 change what the module calls; this is not isolation from code in the same realm.
 
 The module accepts at most 8 MiB of plaintext, 8 MiB of caller associated data, an envelope of
-8 MiB + 34 bytes, and 8 MiB in one `randomBytes` call. These are neojs limits, not intrinsic
+8 MiB + 34 bytes, and 8 MiB in one `randomBytes` call. These are vaeljs limits, not intrinsic
 AES-GCM limits. Sizes are checked against the JavaScript view's byte length before its bytes are
-copied. A detached view is rejected with `NEO_CRYPTO_DETACHED`. Offset views,
+copied. A detached view is rejected with `VAEL_CRYPTO_DETACHED`. Offset views,
 `SharedArrayBuffer`-backed views, and resizable `ArrayBuffer`
 views are accepted; a resizable buffer that shrank until a view is out of bounds is exposed by V8
 as a zero-length view and encrypted as empty bytes. A refused Rust reservation is reported as
-`NEO_CRYPTO_LIMIT`, but V8, the Rust allocator, and the JavaScript heap allocate too, so recovery
+`VAEL_CRYPTO_LIMIT`, but V8, the Rust allocator, and the JavaScript heap allocate too, so recovery
 from out-of-memory is not guaranteed.
 
 An argument that is not a `Uint8Array` throws `TypeError`; a `randomBytes` length that is not a
 number throws `TypeError`, and one that is not an integer or is out of range throws `RangeError`.
-Other failures are `Error` objects with a stable own `code`: `NEO_CRYPTO_KEY` (key length),
-`NEO_CRYPTO_FORMAT` (truncated or unknown envelope), `NEO_CRYPTO_AUTH` (wrong key, wrong
-associated data, or tampering), `NEO_CRYPTO_RANDOM` (OS CSPRNG failure), `NEO_CRYPTO_LIMIT` (an
-input above a documented size bound or a refused allocation), or `NEO_CRYPTO_DETACHED` (a
+Other failures are `Error` objects with a stable own `code`: `VAEL_CRYPTO_KEY` (key length),
+`VAEL_CRYPTO_FORMAT` (truncated or unknown envelope), `VAEL_CRYPTO_AUTH` (wrong key, wrong
+associated data, or tampering), `VAEL_CRYPTO_RANDOM` (OS CSPRNG failure), `VAEL_CRYPTO_LIMIT` (an
+input above a documented size bound or a refused allocation), or `VAEL_CRYPTO_DETACHED` (a
 transferred buffer). Messages never include key, plaintext, or ciphertext bytes.
 
-The envelope is specific to neojs. AES-256-GCM itself is standard (NIST SP 800-38D), and the
+The envelope is specific to vaeljs. AES-256-GCM itself is standard (NIST SP 800-38D), and the
 primitive is tested against published NIST/McGrew–Viega vectors. The envelope has two separately
 reported checks: Rust unit tests compare the envelope path byte-for-byte with two independently
 produced Node/OpenSSL fixtures by supplying each fixture's nonce to the same internal encryption
@@ -1278,7 +1278,7 @@ PLAB compatibility claim.
 `createDecryptor(algorithm, key, iv[, options])` return a synchronous stateful object for
 `aes-256-cbc` or `aes-256-gcm`, compared case-insensitively. The key is exactly 32 bytes. The IV is
 exactly 16 bytes for CBC and 12 bytes for GCM. Other algorithm names, key length, and IV/nonce
-length throw `NEO_CRYPTO_ALGORITHM`, `NEO_CRYPTO_KEY`, or `NEO_CRYPTO_IV`; values are never stretched,
+length throw `VAEL_CRYPTO_ALGORITHM`, `VAEL_CRYPTO_KEY`, or `VAEL_CRYPTO_IV`; values are never stretched,
 truncated, or hashed into shape. The CBC primitive is RustCrypto `cbc` 0.2.1 with `aes` 0.9.4; GCM is
 `aes-gcm` 0.10.3. The caller supplies the IV/nonce and is responsible for it: a GCM 12-byte nonce
 must never repeat under one key, and a CBC 16-byte IV must be unpredictable and unique per key. The
@@ -1300,10 +1300,10 @@ Prefer an established AEAD such as AES-256-GCM for new designs. If CBC interoper
 use encrypt-then-MAC with an independent MAC key: authenticate the IV and ciphertext, verify the MAC
 before decrypting, and reject the message on any MAC failure. Do not use authenticate-then-encrypt.
 Beware padding oracles: exposing whether CBC padding is valid, including through distinct
-`NEO_CRYPTO_PADDING` behavior, can let an attacker decrypt or forge data. PKCS#7 padding is enabled
+`VAEL_CRYPTO_PADDING` behavior, can let an attacker decrypt or forge data. PKCS#7 padding is enabled
 by default and verified strictly at `final()`. Every padding byte must have the padding length; an
 empty ciphertext, a non-16-byte-multiple ciphertext, or an invalid final block throws
-`NEO_CRYPTO_PADDING`. `setAutoPadding(false)` or `options: { padding: false }` disables padding, and
+`VAEL_CRYPTO_PADDING`. `setAutoPadding(false)` or `options: { padding: false }` disables padding, and
 then the plaintext or ciphertext must already be a multiple of 16 bytes.
 
 The factory options policy is strict. `options` is either `undefined` or a non-Proxy object whose
@@ -1321,16 +1321,16 @@ during validation. Unknown own keys such as Node's `autoPadding` name or a missp
 GCM is authenticated. `setAAD(aad)` may be called at most once, before the first `update()` or
 `final()`, and the associated data is authenticated not encrypted. A GCM encryptor's 16-byte tag is
 available from `getAuthTag()` only after `final()`. A GCM decryptor must call `setAuthTag(tag)` with
-exactly 16 bytes before `final()`; a missing tag throws `NEO_CRYPTO_TAG`, and a failed tag, wrong key,
-wrong nonce, wrong AAD, or tampered ciphertext throws `NEO_CRYPTO_AUTH` without returning plaintext.
-`final()` consumes the message; a second `final()` or a later `update()` throws `NEO_CRYPTO_STATE`.
+exactly 16 bytes before `final()`; a missing tag throws `VAEL_CRYPTO_TAG`, and a failed tag, wrong key,
+wrong nonce, wrong AAD, or tampered ciphertext throws `VAEL_CRYPTO_AUTH` without returning plaintext.
+`final()` consumes the message; a second `final()` or a later `update()` throws `VAEL_CRYPTO_STATE`.
 `close()` (alias `dispose()`) releases the native state and is idempotent; a later method throws
-`NEO_CRYPTO_CLOSED`.
+`VAEL_CRYPTO_CLOSED`.
 
 One cipher object accepts at most 8 MiB of input and 8 MiB of GCM associated data. At most 64 cipher
 objects may be open per runtime, and their combined buffered input and associated data may not exceed
-64 MiB; creating past the object cap throws `NEO_CRYPTO_TOO_MANY_OBJECTS` and exceeding the aggregate
-buffer cap throws `NEO_CRYPTO_BUSY`. There is no finalizer, so close objects you abandon. The module
+64 MiB; creating past the object cap throws `VAEL_CRYPTO_TOO_MANY_OBJECTS` and exceeding the aggregate
+buffer cap throws `VAEL_CRYPTO_BUSY`. There is no finalizer, so close objects you abandon. The module
 does not promise zeroization. No asynchronous cipher API is provided: a genuine Promise form for a
 stateful object would need a bounded worker design, and this slice did not add a `Promise.resolve`
 wrapper that would only look asynchronous. The synchronous API works on every executor.
@@ -1338,7 +1338,7 @@ wrapper that would only look asynchronous. The synchronous API works on every ex
 Example with nonsecret test vectors and mandatory disposal:
 
 ```js
-import { createDecryptor, createEncryptor } from "neo:crypto";
+import { createDecryptor, createEncryptor } from "vael:crypto";
 
 const fromHex = (text) => Uint8Array.from(text.match(/../g), (byte) => parseInt(byte, 16));
 const toHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -1385,7 +1385,7 @@ function decryptGcm(tag) {
         decryptor.update(gcmCiphertext);
         return decryptor.final();
     } catch (error) {
-        if (error.code === "NEO_CRYPTO_AUTH") {
+        if (error.code === "VAEL_CRYPTO_AUTH") {
             throw new Error("GCM authentication failed; do not use the message");
         }
         throw error;
@@ -1415,17 +1415,17 @@ try {
 **Hash and HMAC.** `createHash(algorithm)` and `createHmac(algorithm, key)` return a synchronous
 incremental object. The accepted algorithms are `sha256`, `sha384`, and `sha512`, compared
 case-insensitively; other names, including `sha1`, `sha224`, and OpenSSL aliases such as `sha2-256`,
-throw `NEO_CRYPTO_ALGORITHM`. `update(data[, encoding])` accepts a `Uint8Array` of exact bytes or a
+throw `VAEL_CRYPTO_ALGORITHM`. `update(data[, encoding])` accepts a `Uint8Array` of exact bytes or a
 string encoded as UTF-8. A string may name only `utf8`/`utf-8`; a `Uint8Array` may not name an
 encoding. `update` returns the object, so calls chain. `digest()` returns a `Uint8Array`;
 `digest("hex")`, `digest("base64")`, `digest("base64url")`, and `digest("latin1")` (alias `binary`)
 return a string. Algorithm and encoding names are case-insensitive.
 
 `digest` consumes the state. A second `digest`, and any `update` after a successful `digest`, throw
-`NEO_CRYPTO_DIGESTED`. An unsupported digest encoding is rejected before the state is consumed, so
+`VAEL_CRYPTO_DIGESTED`. An unsupported digest encoding is rejected before the state is consumed, so
 the object remains usable. There is no `copy()`. `close()` releases the native state without a
 digest and is idempotent; `dispose()` is its alias. A later `update` or `digest` throws
-`NEO_CRYPTO_CLOSED`. The HMAC key is a `Uint8Array` or UTF-8 string and is copied at construction;
+`VAEL_CRYPTO_CLOSED`. The HMAC key is a `Uint8Array` or UTF-8 string and is copied at construction;
 any length, including zero, is accepted. Input is copied at `update`, so later mutation of the
 caller's view does not change the result.
 
@@ -1442,13 +1442,13 @@ continues to run microtasks while the worker hashes.
 The synchronous object accepts at most 16 MiB of input across all `update` calls; one HMAC key is at
 most 1 MiB; one asynchronous call accepts at most 16 MiB of data; at most 64 asynchronous jobs may be
 pending, even when they are empty; and at most 64 MiB of copied data and HMAC key bytes may be
-pending. A submission over either asynchronous bound rejects with `NEO_CRYPTO_BUSY`. The per-call
+pending. A submission over either asynchronous bound rejects with `VAEL_CRYPTO_BUSY`. The per-call
 byte limits are checked before the bytes are copied, and a rejected update adds no prefix. A refused
-Rust allocation is `NEO_CRYPTO_LIMIT`; allocation failure inside V8 or the JavaScript heap is not
+Rust allocation is `VAEL_CRYPTO_LIMIT`; allocation failure inside V8 or the JavaScript heap is not
 guaranteed to be recoverable.
 
 At most 1024 incremental hash or HMAC objects may be open per runtime. Creating past that throws
-`NEO_CRYPTO_TOO_MANY_OBJECTS`. There is no finalizer: an object that is created and abandoned keeps
+`VAEL_CRYPTO_TOO_MANY_OBJECTS`. There is no finalizer: an object that is created and abandoned keeps
 its slot until `close()`/`dispose()`, `digest()`, or the runtime is dropped. The hard cap bounds
 abandoned objects, and explicit disposal releases a slot deterministically. An asynchronous job's
 job and byte reservations are released when the worker finishes, panics, or fails to start. A job
@@ -1461,7 +1461,7 @@ futures and unjoined resources, aborting only a job that has not started. See th
 paragraph in the PBKDF2 and bcrypt section for the shared lifetime.
 
 Input views use the same typed-array validation as the envelope: a `Proxy`, a lookalike object, or a
-different typed-array kind is a `TypeError`; a detached view is `NEO_CRYPTO_DETACHED`; offset views,
+different typed-array kind is a `TypeError`; a detached view is `VAEL_CRYPTO_DETACHED`; offset views,
 `SharedArrayBuffer` views, and resizable-buffer views are accepted, with only the view's own bytes
 read. There is no `Symbol.hasInstance` or `byteLength` hook. A lone surrogate in a string becomes
 U+FFFD, as it does in Node's UTF-8 encoding.
@@ -1469,18 +1469,18 @@ U+FFFD, as it does in Node's UTF-8 encoding.
 **PBKDF2 and bcrypt.** `pbkdf2(algorithm, password, salt, iterations, length)` derives `length` raw
 bytes synchronously and returns a `Uint8Array`. `password` and `salt` are exact `Uint8Array` bytes or
 strings encoded as UTF-8. The accepted algorithms are `sha256`, `sha384`, and `sha512`, compared
-case-insensitively; SHA-1 and other names throw `NEO_CRYPTO_ALGORITHM`. `iterations` is an integer
+case-insensitively; SHA-1 and other names throw `VAEL_CRYPTO_ALGORITHM`. `iterations` is an integer
 from 1 through 1,000,000, `length` is an integer from 1 through 1024 bytes, and one password or salt
-is at most 1 MiB. These are neojs limits, not PBKDF2 limits. A string is measured by its UTF-8
+is at most 1 MiB. These are vaeljs limits, not PBKDF2 limits. A string is measured by its UTF-8
 length before it is copied. `pbkdf2Async` takes the same arguments and returns a `Promise`; the
 derivation runs on the bounded blocking pool.
 
 `bcryptHash(password[, cost])` returns a 60-character modular-crypt string in the `$2b$` format. The
 password is exact bytes or a UTF-8 string. At most 72 bytes are accepted; a longer input throws
-`NEO_CRYPTO_LIMIT` and is never silently truncated. Exactly 72 bytes are hashed as 72 bytes with no
-added NUL. `cost` is an integer from 4 through 16, defaults to 10, and is bounded above by neojs so
+`VAEL_CRYPTO_LIMIT` and is never silently truncated. Exactly 72 bytes are hashed as 72 bytes with no
+added NUL. `cost` is an integer from 4 through 16, defaults to 10, and is bounded above by vaeljs so
 one call cannot ask for an impractical work factor. The 16-byte salt comes from the operating system
-CSPRNG; an entropy failure is `NEO_CRYPTO_RANDOM` and never falls back to predictable bytes.
+CSPRNG; an entropy failure is `VAEL_CRYPTO_RANDOM` and never falls back to predictable bytes.
 `bcryptVerify(password, hash)` accepts `$2a$`, `$2b$`, and `$2y$` hashes. It returns `false` for a
 malformed string, an unsupported version (`$2x$` included), a cost outside 4 through 16, or a
 password longer than 72 bytes. It does not compute a hash for a malformed or over-cost input, so a
@@ -1491,7 +1491,7 @@ verification runs on a worker, while an oversized password or malformed/over-cos
 
 PBKDF2 and bcrypt jobs share the hash executor and its bounds: the same four-thread blocking pool,
 at most 64 pending jobs, and at most 64 MiB of copied input. A submission over either bound rejects
-with `NEO_CRYPTO_BUSY`. Cancellation is best effort and is not triggered by abandoning the returned
+with `VAEL_CRYPTO_BUSY`. Cancellation is best effort and is not triggered by abandoning the returned
 `Promise`: the wrapper starts the join op immediately, so an unawaited promise still runs the job to
 completion. Dropping only the `run_file_async` entry future stops polling but does not drop the
 runtime's op futures or resources, so it is not cancellation. Tearing down the runtime drops the
@@ -1502,7 +1502,7 @@ discarded if the join future is gone. A worker's random-source, limit, or intern
 is carried through the join buffer rather than flattened into an internal error. `pbkdf2Async`,
 `bcryptHashAsync`, and
 `bcryptVerifyAsync` need a Tokio current-thread runtime to host deno_core's async-op driver, exactly
-like `hashAsync`; any other executor rejects with `NEO_CRYPTO_NO_EXECUTOR` before copying input or
+like `hashAsync`; any other executor rejects with `VAEL_CRYPTO_NO_EXECUTOR` before copying input or
 starting a worker. The synchronous forms work on every executor.
 
 PBKDF2 is tested against RFC 7914's PBKDF2-HMAC-SHA256 vectors and independently reproduced
@@ -1519,10 +1519,10 @@ zeroization promise. Errors never include a password, salt, derived key, or bcry
 
 The primitives are the RustCrypto `sha2` and `hmac` crates, tested against published FIPS 180-4 and
 RFC 4231 vectors, in Rust unit tests and in JavaScript integration tests for one-shot and unevenly
-chunked incremental input. This is a small neojs surface, not Node's `crypto`: it does not implement
+chunked incremental input. This is a small vaeljs surface, not Node's `crypto`: it does not implement
 algorithms outside the three names, `copy()`, callbacks, `createCipheriv`, or WebCrypto's `subtle`.
 It also does not provide Node's `pbkdf2`/`pbkdf2Sync` or a Node bcrypt package API, and its argument
-names, encodings, limits, and Promise forms are neojs-specific. It does not promise complete
+names, encodings, limits, and Promise forms are vaeljs-specific. It does not promise complete
 zeroization: key, input, and digest-state bytes may remain in Rust buffers and the JavaScript heap
 until reclaimed.
 
@@ -1534,19 +1534,19 @@ at most 64 MiB. Field arithmetic uses reduction polynomial `0x11b` with generato
 one-based indexes, so share values interoperate bytewise with the Neotales PLAB .NET and
 rust-libraries Shamir encodings; the JavaScript record shape is not a PLAB wire format. Every
 non-constant coefficient comes from the operating system CSPRNG, and an entropy failure throws
-`NEO_CRYPTO_RANDOM` rather than returning predictable shares. `shamirCombine(shares[, threshold])`
+`VAEL_CRYPTO_RANDOM` rather than returning predictable shares. `shamirCombine(shares[, threshold])`
 interpolates at `x = 0` and returns a new `Uint8Array`; with `threshold` it requires at least that
 many shares, and it always requires at least two. Shares are not authenticated: tampered shares,
 shares mixed from different splits, a wrong index, or fewer than the original threshold reconstruct
 a different byte string, often without an error. Compare the result with an authenticated envelope
 or an out-of-band digest when a wrong reconstruction must be detected. A `SharedArrayBuffer` view is
-rejected with `NEO_CRYPTO_SHAMIR_SHARED` because copying it is not one coherent snapshot.
+rejected with `VAEL_CRYPTO_SHAMIR_SHARED` because copying it is not one coherent snapshot.
 `shamirSplitAsync` and `shamirCombineAsync` are the `Promise` forms: validation and one bounded copy
 run on the isolate thread and the arithmetic runs on the bounded blocking pool, sharing the 64-job
 and 64-MiB budget with `hashAsync`. Both need the same Tokio current-thread runtime as the other
 asynchronous crypto calls.
 
-**Scope of this slice.** This is a neojs-specific AES-256-GCM envelope, bounded stateful
+**Scope of this slice.** This is a vaeljs-specific AES-256-GCM envelope, bounded stateful
 AES-256-CBC/AES-256-GCM cipher, randomness, SHA-2, HMAC, PBKDF2, bcrypt, and GF(256) Shamir secret
 sharing surface, not Node's `crypto` module and not the Web Crypto API. `crypto.subtle` (and with it
 `subtle.encrypt`, `subtle.decrypt`, `subtle.digest`, and `subtle.generateKey`),
@@ -1556,7 +1556,7 @@ PHC/MCF/`crypt(3)` password-string parsing, and a PLAB .NET Crypto-compatible en
 surface are **not implemented**. The envelope key generator is
 `generateEnvelopeKey`. `generateKey` is deliberately **not** exported in this slice: the name is
 reserved for a future Node-compatible surface, whose `generateKey` has different semantics from the
-envelope generator. Asynchronous neojs APIs are `Promise`-based, not callback-based. WebCrypto's
+envelope generator. Asynchronous vaeljs APIs are `Promise`-based, not callback-based. WebCrypto's
 `subtle.generateKey` is also separate. Node-like names such as `createCipheriv`, WebCrypto's
 `subtle`, and any PLAB-compatible surface are additive and separate; do not treat this surface as a
 Node or PLAB compatibility layer. The slice is unreleased, so the names can still be adjusted if the
@@ -1571,23 +1571,23 @@ do real work on the bounded blocking pool, rather than wrapping blocking work in
 already-resolved `Promise` to look nonblocking. Under
 `Runtime::run_file_async`, asynchronous hashing, password hashing, and Shamir work need a Tokio
 current-thread runtime to host deno_core's async-op driver; a non-Tokio executor or a multi-thread
-Tokio runtime gets `NEO_CRYPTO_NO_EXECUTOR` instead. The synchronous API works on every executor.
+Tokio runtime gets `VAEL_CRYPTO_NO_EXECUTOR` instead. The synchronous API works on every executor.
 `Runtime::run_file` drives the async-op driver, so asynchronous hashing works there. There is no
 secure-context or TLS condition: the module is available in every runtime.
 
-**UUID generation.** `Neo.getBuiltInModule("neo:uuid")` returns a frozen module object that is cached
-for the realm. `neo:uuid` is the canonical and only module specifier. The named exports are `v4`
+**UUID generation.** `Vael.getBuiltInModule("vael:uuid")` returns a frozen module object that is cached
+for the realm. `vael:uuid` is the canonical and only module specifier. The named exports are `v4`
 and `v7`, and each is the same function object as the matching registry property. There is no
 default export on the aggregate module.
 
-The subpath modules `neo:uuid/v4` and `neo:uuid/v7` each expose one generator as both the named
+The subpath modules `vael:uuid/v4` and `vael:uuid/v7` each expose one generator as both the named
 export and the default export. Their `v4`/`v7` named value and default
 value are the same function objects as `uuid.v4` and `uuid.v7`, not wrappers:
 
 ```js
-import { v4 as aggregateV4, v7 as aggregateV7 } from "neo:uuid";
-import v4 from "neo:uuid/v4";
-import { v7 } from "neo:uuid/v7";
+import { v4 as aggregateV4, v7 as aggregateV7 } from "vael:uuid";
+import v4 from "vael:uuid/v4";
+import { v7 } from "vael:uuid/v7";
 
 if (v4 !== aggregateV4) throw new Error("v4 identity changed");
 if (v7 !== aggregateV7) throw new Error("v7 identity changed");
@@ -1625,9 +1625,9 @@ a Lamport clock, or an explicit ordering column when the application needs one. 
 payload bits make a same-millisecond collision unlikely, not impossible.
 
 The 48-bit timestamp is a format limit. A current time before the Unix epoch, or at or beyond 2^48
-milliseconds (roughly the year 10889), fails with `NEO_UUID_CLOCK` instead of wrapping, truncating, or
+milliseconds (roughly the year 10889), fails with `VAEL_UUID_CLOCK` instead of wrapping, truncating, or
 clamping. The clock is read before the CSPRNG, so an unrepresentable time consumes no entropy. An
-operating-system CSPRNG failure is `NEO_UUID_RANDOM`; there is no `Math.random`, time-derived, or
+operating-system CSPRNG failure is `VAEL_UUID_RANDOM`; there is no `Math.random`, time-derived, or
 other insecure fallback. Messages are fixed and never include entropy or a clock value. A random
 failure also has a non-enumerable `cause` string built only from a numeric OS error code or one of
 `getrandom`'s fixed categories (for example `getrandom: OS error 5`); the crate's display text,
@@ -1635,7 +1635,7 @@ entropy bytes, UUID bytes, and clock values are not exposed.
 
 The RFC 9562 bit layout, version and variant setting, and formatting come from the MIT OR
 Apache-2.0 `uuid` crate's `Builder`. Its convenience constructors `Uuid::new_v4` and `Uuid::now_v7`
-are deliberately not used because they panic when `getrandom` fails; neojs calls `getrandom::fill`
+are deliberately not used because they panic when `getrandom` fails; vaeljs calls `getrandom::fill`
 itself and passes the bytes to the builder, so an entropy failure is a returned error. The Rust unit
 tests reproduce the RFC 9562 Appendix A.4 version 4 example and Appendix A.7 version 7 example byte
 for byte, check the version and variant fields, and cover the epoch and 48-bit overflow boundaries.
@@ -1649,16 +1649,16 @@ variable, network, or process state beyond the system clock, installs no global,
 sandbox. It is separate from Node's `crypto.randomUUID()`, which has its own API and produces only
 version 4 values.
 
-**Filesystem operations.** `Neo.getBuiltInModule("neo:fs")` returns a frozen module object cached
-for the realm, shared across both V8 (`neojs`) and QuickJS (`neojs-lite`, gated behind the `neo-fs`
-feature). `neo:fs` is the canonical and only module specifier; there is no default export.
+**Filesystem operations.** `Vael.getBuiltInModule("vael:fs")` returns a frozen module object cached
+for the realm, shared across both V8 (`vaeljs`) and QuickJS (`vaeljs-lite`, gated behind the `vael-fs`
+feature). `vael:fs` is the canonical and only module specifier; there is no default export.
 
 ```js
-import { exists, mkdir, readDir, readTextFile, remove, writeFileAtomic } from "neo:fs";
+import { exists, mkdir, readDir, readTextFile, remove, writeFileAtomic } from "vael:fs";
 
 mkdir("/tmp/example", { recursive: true });
-writeFileAtomic("/tmp/example/note.txt", "hello neo:fs");
-console.log(readTextFile("/tmp/example/note.txt")); // "hello neo:fs"
+writeFileAtomic("/tmp/example/note.txt", "hello vael:fs");
+console.log(readTextFile("/tmp/example/note.txt")); // "hello vael:fs"
 console.log(readDir("/tmp/example").map((e) => e.name)); // ["note.txt"]
 remove("/tmp/example", { recursive: true });
 console.log(exists("/tmp/example")); // false
@@ -1668,18 +1668,18 @@ Implemented synchronous exports and options:
 
 - `readFile(path, options?)` -> `Uint8Array` and `readTextFile(path, options?)` -> `string`:
   `options?: { maxBytes?: number }` (non-negative safe integer; `RangeError` if negative, `NaN`,
-  fractional, or above `Number.MAX_SAFE_INTEGER`; `NEO_FS_TOO_LARGE` if the file exceeds `maxBytes`;
-  `NEO_FS_INVALID_UTF8` on invalid UTF-8 in `readTextFile`).
+  fractional, or above `Number.MAX_SAFE_INTEGER`; `VAEL_FS_TOO_LARGE` if the file exceeds `maxBytes`;
+  `VAEL_FS_INVALID_UTF8` on invalid UTF-8 in `readTextFile`).
 - `writeFile(path, data, options?)` (`data: Uint8Array`) and `writeTextFile(path, text, options?)`
   (`text: string`): `options?: { create?: boolean, createNew?: boolean, append?: boolean }`
   (defaults: `create: true`, `createNew: false`, `append: false`; `createNew: true` + `append: true`
-  fails with `NEO_FS_INVALID_ARGUMENT`).
+  fails with `VAEL_FS_INVALID_ARGUMENT`).
 - `writeFileAtomic(path, data, options?)` (`data: Uint8Array | string`):
   `options?: { sync?: boolean, overwrite?: boolean }` (defaults: `sync: true`, `overwrite: true`).
   Writes to a unique sibling temporary file using fallible OS entropy (`getrandom`) and replaces or
-  links atomically (`NEO_FS_ALREADY_EXISTS` when `overwrite: false`).
+  links atomically (`VAEL_FS_ALREADY_EXISTS` when `overwrite: false`).
 - `exists(path)` -> `boolean` (follows symlinks; returns `false` only on `NotFound` and throws
-  `NEO_FS_*` on other errors).
+  `VAEL_FS_*` on other errors).
 - `stat(path)` (follows symlinks) and `lstat(path)` (does not follow symlinks) -> frozen
   `{ isFile, isDirectory, isSymlink, size, modifiedMs, readonly }` where `size` is an IEEE-754
   `number` in bytes, `modifiedMs` is `number | null` (Unix epoch milliseconds), and `readonly` is a
@@ -1693,28 +1693,28 @@ Implemented synchronous exports and options:
   `overwrite: true` treats self-copy as a no-op).
 - `realpath(path)` -> canonical `string`.
 
-Core logic lives in `neojs-fs-core`: paths must be non-empty strings without NUL bytes or unpaired
-surrogates (`NEO_FS_INVALID_PATH`), argument/type/options errors (including unknown option keys,
+Core logic lives in `vaeljs-fs-core`: paths must be non-empty strings without NUL bytes or unpaired
+surrogates (`VAEL_FS_INVALID_PATH`), argument/type/options errors (including unknown option keys,
 non-plain/Proxy/getter/symbol/non-enumerable options objects, and detached or out-of-bounds
 `Uint8Array` views) throw `TypeError` (or `RangeError` for out-of-range `maxBytes`), and
-filesystem errors carry stable `NEO_FS_*` `.code` properties without echoing caller-supplied
+filesystem errors carry stable `VAEL_FS_*` `.code` properties without echoing caller-supplied
 paths. It uses the process's filesystem authority and is not a permission system or sandbox. See
-[`neojs-fs-core/README.md`](neojs-fs-core/README.md) for the full contract.
+[`vaeljs-fs-core/README.md`](vaeljs-fs-core/README.md) for the full contract.
 
 **Planned, not implemented.** The `@neotales/chars` reference also defines the `...At` string-index
 helpers, the `...Unsafe` variants, `equalFold`, `simpleFold`, and character-code constants. The
-QuickJS `neo:chars` module uses the same broad shape without the `Unsafe` variants. None of those
-are implemented here, and other built-in module names are not specified; `Neo.getBuiltInModule`
+QuickJS `vael:chars` module uses the same broad shape without the `Unsafe` variants. None of those
+are implemented here, and other built-in module names are not specified; `Vael.getBuiltInModule`
 returns `undefined` for them rather than promising a future module, and an import of one is an
 error. Import maps, module type attributes, and a default export for the `chars` built-in are also
 not implemented. The `console` built-in does have a default export; see above.
 
-**Embed the runtime.** `neojs_core` exposes the same loader and console to Rust callers.
+**Embed the runtime.** `vaeljs_core` exposes the same loader and console to Rust callers.
 
 ```rust
-use neojs_core::Runtime;
+use vaeljs_core::Runtime;
 
-fn main() -> Result<(), neojs_core::Error> {
+fn main() -> Result<(), vaeljs_core::Error> {
     let mut runtime = Runtime::new()?;
     runtime.run_file("hello.js")?;
     Ok(())
@@ -1730,7 +1730,7 @@ are read and type-stripped synchronously on the thread that polls the future, an
 and evaluation run there too. `crypto`'s `hashAsync`, `hmacAsync`, `pbkdf2Async`,
 `bcryptHashAsync`, and `bcryptVerifyAsync` additionally need a Tokio current-thread runtime to host
 the async-op driver; they work under `run_file`, and under `run_file_async` only when the caller's
-executor is a Tokio current-thread runtime. Otherwise they throw `NEO_CRYPTO_NO_EXECUTOR`; the
+executor is a Tokio current-thread runtime. Otherwise they throw `VAEL_CRYPTO_NO_EXECUTOR`; the
 synchronous hash, HMAC, PBKDF2, and bcrypt API still works.
 `Runtime::run_file` returns `Error::BlockingInAsyncContext` inside a
 Tokio runtime instead of blocking, unless the runtime is already consumed. The module can write to
@@ -1745,31 +1745,31 @@ thread that will use it; it is not `Send`.
 The [ECMAScript npm modules proposal](docs/esm-npm-proposal.md) is a design proposal for review,
 not implemented behavior.
 
-The [`neojs-dbapi` crate](neojs-dbapi/README.md) is the SQLite-only database foundation; other
+The [`vaeljs-dbapi` crate](vaeljs-dbapi/README.md) is the SQLite-only database foundation; other
 database providers and a JavaScript/Node adapter are not yet wired in. See the
 [database API notes](docs/db-api.md) for its scope and design decisions.
 
-The [`neojs-manifest` crate](docs/neo-jsonc.md) implements `neo.jsonc` support: strict JSONC parsing,
+The [`vaeljs-manifest` crate](docs/vael-jsonc.md) implements `vael.jsonc` support: strict JSONC parsing,
 schema validation, canonical import-specifier normalization (`gh:`, `github:`, `npm:`, `jsr:`, and
 `node:`), bounded upward discovery (`discover_manifest`), deterministic workspace expansion
-(`Workspace::load`), and `ImportResolver`. Both `neojs` (V8) and `neojs-lite` (QuickJS) wire
-`neojs-manifest` into their loaders and CLIs (`--config <path>`, `--no-config`, and upward
+(`Workspace::load`), and `ImportResolver`. Both `vaeljs` (V8) and `vaeljs-lite` (QuickJS) wire
+`vaeljs-manifest` into their loaders and CLIs (`--config <path>`, `--no-config`, and upward
 discovery). Only local `file:` referrers consult `ImportResolver`, remote targets in `imports`
-(`https:`, `gh:`, `jsr:`) remain gated by `--allow-remote` in `neojs` (and are rejected in
-`neojs-lite`), `include`/`exclude` matching is not implemented, `npm:` targets work in `neojs`
-when the `npm` feature is enabled (and are rejected in `neojs-lite`), and `node:` remains
+(`https:`, `gh:`, `jsr:`) remain gated by `--allow-remote` in `vaeljs` (and are rejected in
+`vaeljs-lite`), `include`/`exclude` matching is not implemented, `npm:` targets work in `vaeljs`
+when the `npm` feature is enabled (and are rejected in `vaeljs-lite`), and `node:` remains
 rejected at runtime.
 
-### QuickJS runtime: neojs-lite-core
+### QuickJS runtime: vaeljs-lite-core
 
-`neojs-lite-core` is the primary, embeddable QuickJS runtime, with `neojs-lite` as a secondary
+`vaeljs-lite-core` is the primary, embeddable QuickJS runtime, with `vaeljs-lite` as a secondary
 command-line wrapper. They are separate workspace members and are not part of the default build:
 `cargo build` neither compiles QuickJS nor puts `rquickjs` in the V8 dependency graph.
 
 ```rust
-use neojs_lite_core::Runtime;
+use vaeljs_lite_core::Runtime;
 
-fn main() -> Result<(), neojs_lite_core::Error> {
+fn main() -> Result<(), vaeljs_lite_core::Error> {
     let mut runtime = Runtime::new()?;
     runtime.run_file("main.js")
 }
@@ -1778,47 +1778,47 @@ fn main() -> Result<(), neojs_lite_core::Error> {
 Build the embeddable crate or the command explicitly:
 
 ```sh
-cargo build -p neojs-lite-core
-cargo run -p neojs-lite-core --example embed -- examples/hello.js
-cargo build -p neojs-lite
+cargo build -p vaeljs-lite-core
+cargo run -p vaeljs-lite-core --example embed -- examples/hello.js
+cargo build -p vaeljs-lite
 ```
 
 The QuickJS runtime runs `.js`, `.mjs`, extensionless ECMAScript modules, and (with the default
 `typescript` feature enabled) erasable TypeScript in `.ts` and `.mts` files via the shared
-`neojs-module-policy` stripper (preserving line and column numbers for stack traces). It resolves
+`vaeljs-module-policy` stripper (preserving line and column numbers for stack traces). It resolves
 relative imports and `file:` URLs, and awaits top-level `await` that settles from QuickJS's job
 queue. It then drains queued jobs, bounded at 100,000, so trailing `.then` callbacks and unawaited
 dynamic imports still run; a nonconverging job chain or a throwing queued job fails closed, and a
 promise still rejected without a handler when the queue empties is an error; rejection diagnostics use
 primitive values and an Error's own data without invoking getters, proxies, `toString`, or `String`.
 It does **not** implement non-erasable TypeScript (`enum`, `namespace`, parameter properties), JSX/TSX,
-type checking, host asynchrony or timers, most `neo:` built-in modules, permissions, or a sandbox, and
-it does not claim parity with the V8 runtime. It installs a minimal `Neo` global whose engine is
-`"neo-lite"`; with the default `neo-assert`, `neo-chars`, `neo-console`, `neo-crypto`, `neo-fs`, `neo-os`, `neo-path`, `neo-slices`, `neo-ssh`, `neo-strings`,
-`neo-test`, `neo-uuid`, and `typescript` features its built-in module list is the canonical
-`["neo:assert", "neo:chars", "neo:console", "neo:crypto", "neo:fs", "neo:os", "neo:path", "neo:slices", "neo:ssh", "neo:strings", "neo:test", "neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]`.
-`Neo.getBuiltInModule(specifier)` returns the cached registry object (frozen for every module except
-`neo:console`, which is the live mutable `globalThis.console` object) whose named exports share
+type checking, host asynchrony or timers, most `vael:` built-in modules, permissions, or a sandbox, and
+it does not claim parity with the V8 runtime. It installs a minimal `Vael` global whose engine is
+`"vael-lite"`; with the default `vael-assert`, `vael-chars`, `vael-console`, `vael-crypto`, `vael-fs`, `vael-os`, `vael-path`, `vael-slices`, `vael-ssh`, `vael-strings`,
+`vael-test`, `vael-uuid`, and `typescript` features its built-in module list is the canonical
+`["vael:assert", "vael:chars", "vael:console", "vael:crypto", "vael:fs", "vael:os", "vael:path", "vael:slices", "vael:ssh", "vael:strings", "vael:test", "vael:uuid", "vael:uuid/v4", "vael:uuid/v7"]`.
+`Vael.getBuiltInModule(specifier)` returns the cached registry object (frozen for every module except
+`vael:console`, which is the live mutable `globalThis.console` object) whose named exports share
 identity with the module namespace exports; the namespace itself is a distinct object. With
 `default-features = false` the list is empty and `typescript` (along with `deno_ast`) is disabled,
 so `.ts`/`.mts` files are rejected as unsupported entries. A bare name, another scheme, or any other specifier
 returns `undefined`, and a non-string name throws `TypeError`. All shared modules come from the
-engine-neutral `neojs-builtins` crate (`chars`, `os`, `strings`, and `uuid` bound as native QuickJS
+engine-neutral `vaeljs-builtins` crate (`chars`, `os`, `strings`, and `uuid` bound as native QuickJS
 modules; `assert`, `console`, `path`, `slices`, and `test` evaluated from shared ECMAScript factories with native QuickJS host
-hooks), `neojs-crypto-core` (`crypto` synchronous exports bound as a native QuickJS module),
-`neojs-fs-core` (`fs` bound as a native QuickJS module), and `neojs-ssh-core` (`ssh` bound as a native QuickJS module).
-`neojs-lite-core::Runtime::run_tests` and `neojs-lite test <file-or-glob>...` run
-`neo:test` suites on QuickJS using the same `TestReport` contract and deterministic glob expansion
-(`neojs-module-policy`) as `neojs test`, rejecting `test(..., { timeout })` explicitly because
-QuickJS has no host timers. `neojs-lite types` emits `.d.ts` declarations (`--profile lite` by
-default, or `--profile v8` / `--out-dir <dir>`). The `neojs-builtins` crate has no V8 or QuickJS dependency. Both
-runtimes share `neojs-module-policy` for executable-extension decisions and rejection reasons, so
+hooks), `vaeljs-crypto-core` (`crypto` synchronous exports bound as a native QuickJS module),
+`vaeljs-fs-core` (`fs` bound as a native QuickJS module), and `vaeljs-ssh-core` (`ssh` bound as a native QuickJS module).
+`vaeljs-lite-core::Runtime::run_tests` and `vjs-lite test <file-or-glob>...` run
+`vael:test` suites on QuickJS using the same `TestReport` contract and deterministic glob expansion
+(`vaeljs-module-policy`) as `vjs test`, rejecting `test(..., { timeout })` explicitly because
+QuickJS has no host timers. `vjs-lite types` emits `.d.ts` declarations (`--profile lite` by
+default, or `--profile v8` / `--out-dir <dir>`). The `vaeljs-builtins` crate has no V8 or QuickJS dependency. Both
+runtimes share `vaeljs-module-policy` for executable-extension decisions and rejection reasons, so
 `.cjs`, JSX/TSX, declaration files, JSON, WebAssembly, and native addons fail with the same
 explanation in either.
 
 ### Binary size tracking
 
-`eng/size/` measures the release-profile `neojs` and `neojs-lite` executables and
+`eng/size/` measures the release-profile `vaeljs` and `vaeljs-lite` executables and
 appends each result to an append-only JSONL ledger. A record carries the exact
 bytes and SHA-256, the source state, artifact, target, toolchain, requested
 features, Cargo and lockfile inputs, and explicitly labels effective features,
@@ -1836,19 +1836,19 @@ local module loading, opt-in HTTPS module loading with explicit limits, opt-in `
 specifier loading, opt-in `jsr:` resolution
 through the public JSR registry with manifest length and SHA-256 verification, imports of the
 `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `fs`, `os`, `path`, `slices`, `ssh`, `stdio`,
-`strings`, `test`, and `uuid` built-ins by their canonical `neo:` specifiers, console output,
-`neojs test` and `neojs-lite test` over
+`strings`, `test`, and `uuid` built-ins by their canonical `vael:` specifiers, console output,
+`vjs test` and `vjs-lite test` over
 multiple files and globs, bounded in-memory byte streams, live mutable and read-only array and
 typed-array views, mutable and read-only Unicode code point buffers, UTC five-field cron parsing and
 in-process scheduling, writes to the process's stdout and stderr, lexical POSIX and Windows path
 operations, SHA-2 hashing and HMAC (synchronous incremental and Promise-based one-shot), synchronous
 SSH command
 execution with mandatory host-key verification and password, in-memory-key, or explicit Unix-agent
-authentication, the built-in module registry and its `Neo.engine` and `Neo.getBuiltInModulesList`
-introspection, and the embedding API above. The QuickJS runtime (`neojs-lite-core` / `neojs-lite`)
-reports `Neo.engine` `"neo-lite"` and enables erasable TypeScript (`.ts`/`.mts`, opt-outable via
-`--no-default-features`) plus the shared `neo:assert`, `neo:chars`, `neo:console`, `neo:crypto` (13 synchronous exports),
-`neo:fs`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`
+authentication, the built-in module registry and its `Vael.engine` and `Vael.getBuiltInModulesList`
+introspection, and the embedding API above. The QuickJS runtime (`vaeljs-lite-core` / `vaeljs-lite`)
+reports `Vael.engine` `"vael-lite"` and enables erasable TypeScript (`.ts`/`.mts`, opt-outable via
+`--no-default-features`) plus the shared `vael:assert`, `vael:chars`, `vael:console`, `vael:crypto` (13 synchronous exports),
+`vael:fs`, `vael:os`, `vael:path`, `vael:slices`, `vael:ssh`, `vael:strings`, `vael:test`, `vael:uuid`, `vael:uuid/v4`, and `vael:uuid/v7`
 modules by default (or an empty list and no TypeScript stripping with `default-features = false`);
 other V8 modules (and `*Async` crypto helpers) remain absent there.
 Features outside this list are not implemented.
@@ -1860,19 +1860,19 @@ Features outside this list are not implemented.
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
 - `node:`, `http:`, `data:`, and `blob:` imports are rejected. `npm:` specifiers, nearest
-  `package.json` dependencies/`devDependencies`/`#imports`, and `neo.lock` v1 are supported in
-  `neojs` (with the default `npm` feature; opt-outable at compile time via `--no-default-features`
+  `package.json` dependencies/`devDependencies`/`#imports`, and `vael.lock` v1 are supported in
+  `vaeljs` (with the default `npm` feature; opt-outable at compile time via `--no-default-features`
   and at runtime via `--no-npm`) via the verified CAS cache with zero `node_modules` and zero
   install-script execution (`--offline` forbids network fetches; `--frozen-lockfile` requires
-  `neo.lock`). `gh:` and `github:`
-  imports are rejected unless the runtime is created with remote loading enabled (`neojs
-  --allow-remote`, or `NEOJS_ALLOW_REMOTE=1`); when enabled, a validated specifier is rewritten to
+  `vael.lock`). `gh:` and `github:`
+  imports are rejected unless the runtime is created with remote loading enabled (`vaeljs
+  --allow-remote`, or `VAELJS_ALLOW_REMOTE=1`); when enabled, a validated specifier is rewritten to
   one credential-free `https://raw.githubusercontent.com/owner/repo/ref/path` URL and loaded as
   that HTTPS module. The legacy `gh:owner/repo/path/@ref` spelling is accepted. The reference is
   one segment, so a branch name containing `/` cannot be written; use a tag or a full commit SHA.
   GitHub is not an allowlist and not a sandbox. `jsr:` imports are
-  rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`, or
-  `NEOJS_ALLOW_REMOTE=1`); when enabled they resolve through the public JSR registry, and each file
+  rejected unless the runtime is created with remote loading enabled (`vjs --allow-remote`, or
+  `VAELJS_ALLOW_REMOTE=1`); when enabled they resolve through the public JSR registry, and each file
   is checked against the version manifest's length and SHA-256 before it runs. The checksum proves
   consistency with the retrieved metadata, not publisher identity; the cache is mutable local state,
   so an attacker who rewrites both the cached manifest and the cached body can keep them consistent.
@@ -1885,37 +1885,37 @@ Features outside this list are not implemented.
   bypass. JSR support covers
   exported entrypoints and the relative modules they import; `npm:`, `node:`, dist-tags,
   private registries, authentication, lockfiles, offline policy, and publisher signatures are not
-  implemented (nor can a JSR package use a `neo.jsonc` import map). A JSR package that imports one
+  implemented (nor can a JSR package use a `vael.jsonc` import map). A JSR package that imports one
   of those fails at resolution. The first metadata request for a package or version is synchronous and blocks the
   isolate thread. `https:` imports are
-  rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`, or
-  `NEOJS_ALLOW_REMOTE=1`), and `http:` is always rejected. In particular, `node:test` is not an
+  rejected unless the runtime is created with remote loading enabled (`vjs --allow-remote`, or
+  `VAELJS_ALLOW_REMOTE=1`), and `http:` is always rejected. In particular, `node:test` is not an
   alias for the `test` built-in; a Node-module opt-in is not implemented. The built-in modules are
   `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `db`, `fs`, `os`, `path`, `slices`, `ssh`,
   `stdio`, `strings`, `test`, and `uuid`,
-  reached through `Neo.getBuiltInModule("neo:age")`,
-  `Neo.getBuiltInModule("neo:assert")`, `Neo.getBuiltInModule("neo:chars")`,
-  `Neo.getBuiltInModule("neo:console")`, `Neo.getBuiltInModule("neo:cron")`,
-  `Neo.getBuiltInModule("neo:crypto")`, `Neo.getBuiltInModule("neo:db")`,
-  `Neo.getBuiltInModule("neo:fs")`, `Neo.getBuiltInModule("neo:os")`,
-  `Neo.getBuiltInModule("neo:path")`, `Neo.getBuiltInModule("neo:slices")`,
-  `Neo.getBuiltInModule("neo:ssh")`, `Neo.getBuiltInModule("neo:stdio")`,
-  `Neo.getBuiltInModule("neo:strings")`, `Neo.getBuiltInModule("neo:test")`,
-  `Neo.getBuiltInModule("neo:uuid")`,
-  `Neo.getBuiltInModule("neo:uuid/v4")`, and `Neo.getBuiltInModule("neo:uuid/v7")`, or
-  through the import specifiers `neo:age`, `neo:assert`, `neo:chars`, `neo:console`,
-  `neo:cron`, `neo:crypto`, `neo:db`, `neo:fs`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`,
-  `neo:stdio`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`. Other `neo:` modules
+  reached through `Vael.getBuiltInModule("vael:age")`,
+  `Vael.getBuiltInModule("vael:assert")`, `Vael.getBuiltInModule("vael:chars")`,
+  `Vael.getBuiltInModule("vael:console")`, `Vael.getBuiltInModule("vael:cron")`,
+  `Vael.getBuiltInModule("vael:crypto")`, `Vael.getBuiltInModule("vael:db")`,
+  `Vael.getBuiltInModule("vael:fs")`, `Vael.getBuiltInModule("vael:os")`,
+  `Vael.getBuiltInModule("vael:path")`, `Vael.getBuiltInModule("vael:slices")`,
+  `Vael.getBuiltInModule("vael:ssh")`, `Vael.getBuiltInModule("vael:stdio")`,
+  `Vael.getBuiltInModule("vael:strings")`, `Vael.getBuiltInModule("vael:test")`,
+  `Vael.getBuiltInModule("vael:uuid")`,
+  `Vael.getBuiltInModule("vael:uuid/v4")`, and `Vael.getBuiltInModule("vael:uuid/v7")`, or
+  through the import specifiers `vael:age`, `vael:assert`, `vael:chars`, `vael:console`,
+  `vael:cron`, `vael:crypto`, `vael:db`, `vael:fs`, `vael:os`, `vael:path`, `vael:slices`, `vael:ssh`,
+  `vael:stdio`, `vael:strings`, `vael:test`, `vael:uuid`, `vael:uuid/v4`, and `vael:uuid/v7`. Other `vael:` modules
   are rejected by name. Bare module specifiers, including a bare built-in name such as `age`, are
-  rejected unless mapped by an active `neo.jsonc` `imports` map or workspace `@scope/pkg` member;
-  the message names the canonical `neo:` form.
+  rejected unless mapped by an active `vael.jsonc` `imports` map or workspace `@scope/pkg` member;
+  the message names the canonical `vael:` form.
 - Module type attributes are rejected. `with { type: "json" }`, `with { type: "text" }`, `with {
   type: "bytes" }`, and custom types fail with a reason on static and dynamic imports, including for
   built-in modules. Only untyped ECMAScript modules are loaded. Attributes that do not name a type
-  are not interpreted by neojs.
+  are not interpreted by vaeljs.
 - JSON and WebAssembly module files are rejected, both as the entry file and as imports. V8's
   `WebAssembly` global is present but untested.
-- There is no permission system. The loader reads any file the process can read. neojs is not a
+- There is no permission system. The loader reads any file the process can read. vaeljs is not a
   sandbox. `console`, `os`, and `slices` are plain ECMAScript and add no capability beyond the
   globals they expose; `chars` and `strings` are native Rust modules, not ECMAScript, and likewise
   add no capability. `os` holds two build-target constants and reads no host state, the
@@ -1940,7 +1940,7 @@ Features outside this list are not implemented.
   PBKDF2 and bcrypt, and six for GF(256) Shamir secret sharing, including their bounded
   asynchronous paths. `uuid` calls two host ops for RFC 9562 version 4 and version 7 generation;
   both draw from the operating system CSPRNG, and a failed draw returns an error rather than falling
-  back. `fs` calls fourteen synchronous host ops backed by `neojs-fs-core` using the process's
+  back. `fs` calls fourteen synchronous host ops backed by `vaeljs-fs-core` using the process's
   filesystem authority; it provides no permission system or sandbox. `ssh` calls three
   host ops: it performs DNS and outbound TCP, completes the SSH handshake, verifies an explicit
   Ed25519 host-key pin or explicit `known_hosts` text, authenticates with exactly one of a password,
@@ -1970,13 +1970,13 @@ Features outside this list are not implemented.
   `Error::RuntimeConsumed`, including after a load or evaluation failure. Create a new `Runtime` for
   each entry module.
 - There is no timeout or interrupt. A JavaScript loop that never exits hangs the process.
-- neojs defines five console methods. `log`, `info`, and `debug` write to stdout; `warn` and `error`
+- vaeljs defines five console methods. `log`, `info`, and `debug` write to stdout; `warn` and `error`
   write to stderr. Objects print as JSON, typed arrays print their first ten elements, and format
   specifiers such as `%s` are not interpreted. The global console object also carries other methods
-  from `deno_core`; their behaviour is not part of neojs's documented surface.
+  from `deno_core`; their behaviour is not part of vaeljs's documented surface.
 - Exit codes: `0` the module finished, or every selected test file ran with no failures; `1` the
   module failed to compile, resolve imports, link, or run, or a test failed, was pending, left an
-  unhandled rejection or unsettled event-loop work, or registered no tests; `2` neojs could not
+  unhandled rejection or unsettled event-loop work, or registered no tests; `2` vaeljs could not
   start (bad arguments, invalid or missing manifest, unreadable or unsupported entry file, or a test
   file/glob that could not be expanded).
 
@@ -1991,44 +1991,44 @@ Other platforms are unverified.
 
 [MIT](LICENSE.md)
 
-`neojs-core/src/crypto.rs` adapts the envelope and core encryption logic, and several test cases,
+`vaeljs-core/src/crypto.rs` adapts the envelope and core encryption logic, and several test cases,
 from the MIT-licensed `neo:crypto` module in the NeoLiteJS project, Copyright (c) 2026 NeoTales
-contributors. `neojs-core/src/age.rs` adapts the JavaScript-facing surface, limits, and test cases
-from the MIT-licensed `neo:age` module in the same project. The `assert` module adapts comparison,
-cycle tracking, value formatting, and assertion-error structure from the MIT-licensed `neo:assert`
+contributors. `vaeljs-core/src/age.rs` adapts the JavaScript-facing surface, limits, and test cases
+from the MIT-licensed `vael:age` module in the same project. The `assert` module adapts comparison,
+cycle tracking, value formatting, and assertion-error structure from the MIT-licensed `vael:assert`
 module in the same project; the adaptation renames the equality surface, adds identity and Promise
 forms, and changes Map-entry rollback and callback handling. The `test` module adapts the
 registration queue, failure bookkeeping, report shape, and prototype-independent append helpers from
-the MIT-licensed `neo:test` module in the same project; the adaptation adds async callbacks,
+the MIT-licensed `vael:test` module in the same project; the adaptation adds async callbacks,
 per-test timeouts, pending tests, unhandled-rejection capture, a bounded event-loop settle check,
 and the host report. The `stdio`
 module's API shape and error
-conventions are informed by the MIT-licensed `neo:io` and `neo:process` modules in the same project;
+conventions are informed by the MIT-licensed `vael:io` and `vael:process` modules in the same project;
 its implementation and tests are original, so no additional notice is required for it. The `path`
-module adapts lexical algorithms from the MIT-licensed `neo:path` module in NeoLiteJS and from
-`@neotales/path`; `neojs-core/src/builtins/neo.js` removes the glob and file URL helpers, adds the
+module adapts lexical algorithms from the MIT-licensed `vael:path` module in NeoLiteJS and from
+`@neotales/path`; `vaeljs-core/src/builtins/vael.js` removes the glob and file URL helpers, adds the
 two-namespace host-selection shape, validation, the NUL rule, and the cwd policy. The `slices`
 module's API shape is informed by the MIT-licensed `@neotales/slices` package; its implementation
 and tests are original and do not port that package's code, so no additional notice is required for
 it. The exact upstream
-revision, adapted-file list, and MIT notices are in `neojs-core/THIRD_PARTY_NOTICES.md`. The `os`
+revision, adapted-file list, and MIT notices are in `vaeljs-core/THIRD_PARTY_NOTICES.md`. The `os`
 built-in is original; its two constant names are informed by the MIT-licensed NeoLiteJS `neo:os`
 module, but no code is copied and no additional notice is required. The `age` format and X25519
 handling come from the MIT-licensed `neotales-age` crate, Copyright (c) 2026 Neotales and x0craft. The `ssh`
 built-in uses the MIT-licensed `neotales-ssh` crate, Copyright (c) 2026 Neotales and x0craft, for the
-SSH-2 protocol; `neojs-core/src/ssh.rs` adds only the JavaScript-facing slice and policy described in
+SSH-2 protocol; `vaeljs-core/src/ssh.rs` adds only the JavaScript-facing slice and policy described in
 that crate's notice. The `crypto` hash and HMAC primitives use the RustCrypto `sha2` 0.11.1 and
 `hmac` 0.13.0 crates, dual-licensed MIT OR Apache-2.0. PBKDF2 uses the RustCrypto `pbkdf2` 0.13.0
 crate and bcrypt uses the MIT-licensed `bcrypt` 0.19.3 crate (with the RustCrypto `blowfish` 0.10.0
-crate), all already linked transitively or added at reviewed versions; `neojs-core/src/crypto_hash.rs`
+crate), all already linked transitively or added at reviewed versions; `vaeljs-core/src/crypto_hash.rs`
 and its `password` child module add the JavaScript-facing lifecycle, encodings, bounds, work-factor
 policy, and asynchronous executor, and do not modify the crates. The `uuid` built-in uses the
 `uuid` 1.26.1 crate, dual-licensed MIT OR Apache-2.0, for RFC 9562 bit layout, version and variant
-setting, and canonical formatting; `neojs-builtins/src/uuid.rs` (shared by `neojs-core/src/uuid.rs`
-and `neojs-lite-core/src/uuid.rs`) adds the fallible operating-system CSPRNG draw, the 48-bit
-clock policy, the no-monotonicity contract, and the error mapping, and `neojs-core/src/uuid.rs` /
-`neojs-lite-core/src/uuid.rs` add the engine host ops/bindings without modifying the crate. The full upstream MIT copyright and
+setting, and canonical formatting; `vaeljs-builtins/src/uuid.rs` (shared by `vaeljs-core/src/uuid.rs`
+and `vaeljs-lite-core/src/uuid.rs`) adds the fallible operating-system CSPRNG draw, the 48-bit
+clock policy, the no-monotonicity contract, and the error mapping, and `vaeljs-core/src/uuid.rs` /
+`vaeljs-lite-core/src/uuid.rs` add the engine host ops/bindings without modifying the crate. The full upstream MIT copyright and
 permission notices, and the RustCrypto and `uuid` licence references, are reproduced in
-`neojs-core/THIRD_PARTY_NOTICES.md`, which ships with the `neojs-core` package. The project licence remains the MIT licence in `LICENSE.md`,
+`vaeljs-core/THIRD_PARTY_NOTICES.md`, which ships with the `vaeljs-core` package. The project licence remains the MIT licence in `LICENSE.md`,
 Copyright (c) 2026 NeoTales and x0craft; the crate directories carry identical copies so each package
 ships it. No PLAB code is included.

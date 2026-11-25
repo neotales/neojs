@@ -1,9 +1,9 @@
-import test from "neo:test";
-import assert from "neo:assert";
-import { equalFold, trim } from "neo:strings";
-import { v4, v7 } from "neo:uuid";
+import test from "vael:test";
+import assert from "vael:assert";
+import { equalFold, trim } from "vael:strings";
+import { v4, v7 } from "vael:uuid";
 import type { NeverLoaded } from "./never-loaded-at-runtime.d.ts";
-import type * as StringsModule from "neo:strings";
+import type * as StringsModule from "vael:strings";
 
 interface Identifiable {
     readonly id: string;
@@ -75,7 +75,7 @@ test("type annotations, interfaces, type aliases, generics, and import type are 
     assert.equals(items, [10, 20]);
 
     const foldedCheck: typeof StringsModule.equalFold = equalFold;
-    assert.strictEquals(foldedCheck(identity("NeoJS"), "neojs"), true);
+    assert.strictEquals(foldedCheck(identity("VaelJS"), "vaeljs"), true);
 
     const combined = pairWith(formatTag("ok"), formatTag(7));
     assert.equals(combined, ["s:ok", "n:7"]);
@@ -100,7 +100,7 @@ test("as, satisfies, non-null assertions, and runtime non-checking preserve valu
     assert.strictEquals(mismatched as unknown as string, "runtime-string");
 });
 
-test("typed async functions interoperate with neo:uuid, neo:strings, and neo:assert", async () => {
+test("typed async functions interoperate with vael:uuid, vael:strings, and vael:assert", async () => {
     const record: TaggedRecord<Pair<number, string>> = await buildTaggedRecord(
         "..alpha..",
         pairWith(1, "one"),

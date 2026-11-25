@@ -1,6 +1,6 @@
-# Proposal: ECMAScript npm modules for neojs
+# Proposal: ECMAScript npm modules for vaeljs
 
-**Status:** request for design approval, not implemented. Based on neojs `f41970e`.
+**Status:** request for design approval, not implemented. Based on vaeljs `f41970e`.
 The constraints in **Scope** are the request; the policies below are recommendations, not
 decisions already made. No Node.js or npm compatibility percentage is implied.
 
@@ -8,9 +8,9 @@ decisions already made. No Node.js or npm compatibility percentage is implied.
 
 Let a script import compatible ECMAScript packages from the npm registry without a separate
 install command or a project manifest. Automatically download missing packages into a shared
-per-user cache, normally `~/.cache/neojs/packages` on Linux. Like Deno, prefer an explicit
+per-user cache, normally `~/.cache/vaeljs/packages` on Linux. Like Deno, prefer an explicit
 `npm:` namespace; Bun is another useful package-resolution comparison, not a compatibility
-target. Examples below illustrate the requested interface, not current neojs behavior:
+target. Examples below illustrate the requested interface, not current vaeljs behavior:
 
 ```js
 import { value } from "npm:example-esm@1.2.3";
@@ -20,7 +20,7 @@ import { helper } from "npm:@example/tools@^2.0.0/helper";
 Three independent capabilities must not be conflated:
 
 1. **ESM npm packages:** resolution, download and execution of packages whose complete used
-   graph fits neojs's supported ESM and host APIs. This is the first target.
+   graph fits vaeljs's supported ESM and host APIs. This is the first target.
 2. **`node:*` APIs:** separately approved, opt-in compatibility modules, each with an explicit
    tested API subset and permission implications. Package loading does not enable them.
 3. **Project `package.json`:** eventually consider using its dependency declarations and
@@ -35,11 +35,11 @@ JSR is separate and out of scope; npm packages are not JSR packages.
 
 ## Verified baseline and reference behavior
 
-- The [neojs README](../README.md#limits) and `neojs-core/src/loader.rs` at the base commit
+- The [vaeljs README](../README.md#limits) and `vaeljs-core/src/loader.rs` at the base commit
   document a filesystem ESM loader, erasable `.ts`/`.mts`, built-in modules addressed only by
-  canonical `neo:` specifiers, rejected `npm:`/`node:`/`jsr:` specifiers, no JSON module imports,
+  canonical `vael:` specifiers, rejected `npm:`/`node:`/`jsr:` specifiers, no JSON module imports,
   no permission system,
-  and no sandbox. Existing `crypto`, `path`, `os`, etc. are neojs APIs, not automatically
+  and no sandbox. Existing `crypto`, `path`, `os`, etc. are vaeljs APIs, not automatically
   Node-compatible. The loader currently rejects `.cjs`; ordinary `.js` is executed as ESM,
   and unresolved CommonJS globals fail at runtime. Windows is unverified.
 - [Deno vendor documentation](https://docs.deno.com/runtime/fundamentals/node/) describes
@@ -47,17 +47,17 @@ JSR is separate and out of scope; npm packages are not JSR packages.
   It also supports CommonJS and some native addons; those are **not** adopted here.
 - [Bun vendor module-resolution documentation](https://bun.com/docs/runtime/module-resolution)
   describes bare package imports, conditional exports and both module systems. Its extension
-  search and CommonJS behavior are not a specification for neojs.
+  search and CommonJS behavior are not a specification for vaeljs.
 - [Node v26.13.1 package documentation](https://nodejs.org/docs/v26.13.1/api/packages.html)
   specifies package `type`, `exports`, `imports`, and condition ordering. `exports` takes
   precedence over `main` and encapsulates unexported paths; conditional keys are matched in
   manifest order. `.mjs` is ESM, `.cjs` CommonJS, and `.js` depends on the nearest package
-  type; ambiguous cases have Node-specific behavior. Neojs need not claim full Node behavior.
+  type; ambiguous cases have Node-specific behavior. Vaeljs need not claim full Node behavior.
 - [npm CLI v11 package metadata](https://docs.npmjs.com/cli/v11/configuring-npm/package-json/)
   describes dependency ranges, peer/optional dependencies and platform metadata; its
   [lockfile documentation](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/)
   records exact trees, resolved artifacts and integrity. These are vendor documentation, not
-  evidence that neojs currently implements them.
+  evidence that vaeljs currently implements them.
 
 ## Proposed resolution contract
 
@@ -76,10 +76,10 @@ JSR is separate and out of scope; npm packages are not JSR packages.
    module identity: propagate a graph-instance identity including the resolved peer context
    through resolution, and key module instances by that identity and canonical module path.
    The same artifact used with different peer bindings must not share a module instance or
-   resolve imports using the other context. Neo built-ins are addressed only by canonical `neo:`
+   resolve imports using the other context. Vael built-ins are addressed only by canonical `vael:`
    specifiers, so a bare name such as `age` is available to package resolution and never silently
-   selects a built-in. An explicit `npm:` import must never resolve to a neojs built-in, and an
-   explicit `neo:` import must never resolve to a package.
+   selects a built-in. An explicit `npm:` import must never resolve to a vaeljs built-in, and an
+   explicit `vael:` import must never resolve to a package.
 3. Honor package `exports` for root, subpaths, patterns, null exclusions, nested conditions
    and target validation; honor internal `#` imports including mappings to declared external
    packages. Preserve manifest key order. Recommended active conditions: `import` and
@@ -123,9 +123,9 @@ never silently treat a partial npm lock as equivalent. Cache presence alone is n
 
 ## Cache, transport and security
 
-- Default Linux location is `~/.cache/neojs/packages`; honor an explicit cache override and
+- Default Linux location is `~/.cache/vaeljs/packages`; honor an explicit cache override and
   define XDG handling. On Windows use an appropriate per-user local cache directory (proposed
-  `%LOCALAPPDATA%\\neojs\\packages`), not a literal Unix path. Test drive letters, UNC paths,
+  `%LOCALAPPDATA%\\vaeljs\\packages`), not a literal Unix path. Test drive letters, UNC paths,
   case collisions, reserved names and long paths; do not require administrator rights.
 - Partition metadata by registry origin and packages by immutable identity and verified digest.
   A cache hit verifies the executed extracted bytes against a trusted record derived from the
@@ -172,7 +172,7 @@ run reuses verified artifacts; offline locked run succeeds. Export
 conditions honor key order, `#` mappings work, and private/unexported or escaping targets fail.
 `.cjs`, CommonJS-typed `.js`, ambiguous `.js` under the proposed policy, unsupported formats,
 unknown built-ins and unsupported specs fail with package, referrer and reason. Existing
-local imports and neojs built-ins remain unchanged.
+local imports and vaeljs built-ins remain unchanged.
 
 **2. Reproducibility and hardening, required before stable release.** Semver, prerelease and
 tag fixtures, lock update/frozen/offline behavior, peer conflicts and optional/platform cases
@@ -188,8 +188,8 @@ proposals. Each needs compatibility and security review; none unlocks CommonJS i
 
 ## Decisions needed before implementation
 
-- Is the current collision rule final: bare names belong to package resolution, while neojs
-  built-ins are reachable only by canonical `neo:` specifiers? If not, what is the replacement,
+- Is the current collision rule final: bare names belong to package resolution, while vaeljs
+  built-ins are reachable only by canonical `vael:` specifiers? If not, what is the replacement,
   and how are existing scripts migrated from the retired bare built-in names?
 - Which `main` fallback and unsupported package metadata forms are in the first slice?
   How will `npm:` roots supply peers without a project manifest?

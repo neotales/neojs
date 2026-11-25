@@ -1,0 +1,25 @@
+[package]
+name = "vaeljs-ssh-core"
+description = "Engine-neutral synchronous SSH core for vael:ssh shared by V8 and QuickJS runtimes"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[features]
+# Test-only fault injection for the peer-close reply branch. Never enabled by a
+# normal build; `vaeljs-core` enables it only under its own `test-support`
+# feature.
+test-support = []
+
+[dependencies]
+neotales-ssh.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+ed25519-dalek = { version = "3.0.0", features = ["pkcs8"] }

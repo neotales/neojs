@@ -1,4 +1,4 @@
-# Tag-only 6-target release build, packaging, smoke verification, and GitHub Release publishing for neojs.
+# Tag-only 6-target release build, packaging, smoke verification, and GitHub Release publishing for vaeljs.
 #
 # Security & release boundary:
 # - Workflow-level permissions are `contents: read`, so `verify-tag` and all 6
@@ -116,8 +116,8 @@ jobs:
           set -euo pipefail
           rm -rf dist-types
           mkdir -p dist-types/v8 dist-types/lite
-          cargo run --locked -p neojs-lite -- types --profile v8 --out-dir dist-types/v8
-          cargo run --locked -p neojs-lite -- types --profile lite --out-dir dist-types/lite
+          cargo run --locked -p vaeljs-lite --bin vjs-lite -- types --profile v8 --out-dir dist-types/v8
+          cargo run --locked -p vaeljs-lite --bin vjs-lite -- types --profile lite --out-dir dist-types/lite
           test -f dist-types/v8/index.d.ts
           test -f dist-types/lite/index.d.ts
 
@@ -190,7 +190,7 @@ jobs:
           trap 'rm -f "${log_file}"' EXIT
 
           set +e
-          cargo build --release --locked --target "${MATRIX_TARGET}" -p neojs -p neojs-lite 2>&1 | tee "${log_file}"
+          cargo build --release --locked --target "${MATRIX_TARGET}" -p vaeljs -p vaeljs-lite 2>&1 | tee "${log_file}"
           build_rc=${PIPESTATUS[0]}
           set -e
 
@@ -226,17 +226,17 @@ jobs:
           target="${MATRIX_TARGET}"
 
           rm -rf stage dist
-          mkdir -p stage/neojs/types stage/neojs-lite/types dist
+          mkdir -p stage/vjs/types stage/vjs-lite/types dist
 
-          install -m 0755 "target/${target}/release/neojs" "stage/neojs/neojs"
-          install -m 0644 LICENSE.md "stage/neojs/LICENSE.md"
-          cp -R dist-types/v8/. "stage/neojs/types/"
-          tar -C stage/neojs -czf "dist/neojs-${tag}-${slug}.tar.gz" neojs LICENSE.md types
+          install -m 0755 "target/${target}/release/vjs" "stage/vjs/vjs"
+          install -m 0644 LICENSE.md "stage/vjs/LICENSE.md"
+          cp -R dist-types/v8/. "stage/vjs/types/"
+          tar -C stage/vjs -czf "dist/vjs-${tag}-${slug}.tar.gz" vjs LICENSE.md types
 
-          install -m 0755 "target/${target}/release/neojs-lite" "stage/neojs-lite/neojs-lite"
-          install -m 0644 LICENSE.md "stage/neojs-lite/LICENSE.md"
-          cp -R dist-types/lite/. "stage/neojs-lite/types/"
-          tar -C stage/neojs-lite -czf "dist/neojs-lite-${tag}-${slug}.tar.gz" neojs-lite LICENSE.md types
+          install -m 0755 "target/${target}/release/vjs-lite" "stage/vjs-lite/vjs-lite"
+          install -m 0644 LICENSE.md "stage/vjs-lite/LICENSE.md"
+          cp -R dist-types/lite/. "stage/vjs-lite/types/"
+          tar -C stage/vjs-lite -czf "dist/vjs-lite-${tag}-${slug}.tar.gz" vjs-lite LICENSE.md types
 
       - name: Stage and package Windows release archives
         if: matrix.archive == 'zip'
@@ -251,17 +251,17 @@ jobs:
           $target = $env:MATRIX_TARGET
 
           Remove-Item -Recurse -Force -ErrorAction SilentlyContinue stage, dist
-          New-Item -ItemType Directory -Force -Path "stage/neojs", "stage/neojs-lite", "dist" | Out-Null
+          New-Item -ItemType Directory -Force -Path "stage/vjs", "stage/vjs-lite", "dist" | Out-Null
 
-          Copy-Item "target/$target/release/neojs.exe" "stage/neojs/neojs.exe"
-          Copy-Item "LICENSE.md" "stage/neojs/LICENSE.md"
-          Copy-Item -Recurse "dist-types/v8" "stage/neojs/types"
-          Compress-Archive -Path "stage/neojs/*" -DestinationPath "dist/neojs-$tag-$slug.zip" -Force
+          Copy-Item "target/$target/release/vjs.exe" "stage/vjs/vjs.exe"
+          Copy-Item "LICENSE.md" "stage/vjs/LICENSE.md"
+          Copy-Item -Recurse "dist-types/v8" "stage/vjs/types"
+          Compress-Archive -Path "stage/vjs/*" -DestinationPath "dist/vjs-$tag-$slug.zip" -Force
 
-          Copy-Item "target/$target/release/neojs-lite.exe" "stage/neojs-lite/neojs-lite.exe"
-          Copy-Item "LICENSE.md" "stage/neojs-lite/LICENSE.md"
-          Copy-Item -Recurse "dist-types/lite" "stage/neojs-lite/types"
-          Compress-Archive -Path "stage/neojs-lite/*" -DestinationPath "dist/neojs-lite-$tag-$slug.zip" -Force
+          Copy-Item "target/$target/release/vjs-lite.exe" "stage/vjs-lite/vjs-lite.exe"
+          Copy-Item "LICENSE.md" "stage/vjs-lite/LICENSE.md"
+          Copy-Item -Recurse "dist-types/lite" "stage/vjs-lite/types"
+          Compress-Archive -Path "stage/vjs-lite/*" -DestinationPath "dist/vjs-lite-$tag-$slug.zip" -Force
 
       - name: Smoke test extracted Unix archives
         if: matrix.archive == 'tar.gz'
@@ -276,19 +276,19 @@ jobs:
 
           smoke_dir=$(mktemp -d)
           trap 'rm -rf "${smoke_dir}"' EXIT
-          mkdir -p "${smoke_dir}/neojs" "${smoke_dir}/neojs-lite"
+          mkdir -p "${smoke_dir}/vjs" "${smoke_dir}/vjs-lite"
 
-          tar -xzf "dist/neojs-${tag}-${slug}.tar.gz" -C "${smoke_dir}/neojs"
-          tar -xzf "dist/neojs-lite-${tag}-${slug}.tar.gz" -C "${smoke_dir}/neojs-lite"
+          tar -xzf "dist/vjs-${tag}-${slug}.tar.gz" -C "${smoke_dir}/vjs"
+          tar -xzf "dist/vjs-lite-${tag}-${slug}.tar.gz" -C "${smoke_dir}/vjs-lite"
 
-          neojs_bin="${smoke_dir}/neojs/neojs"
-          lite_bin="${smoke_dir}/neojs-lite/neojs-lite"
+          vjs_bin="${smoke_dir}/vjs/vjs"
+          lite_bin="${smoke_dir}/vjs-lite/vjs-lite"
 
-          for dir in "${smoke_dir}/neojs" "${smoke_dir}/neojs-lite"; do
+          for dir in "${smoke_dir}/vjs" "${smoke_dir}/vjs-lite"; do
             test -f "${dir}/LICENSE.md"
             test -f "${dir}/types/index.d.ts"
           done
-          test -x "${neojs_bin}"
+          test -x "${vjs_bin}"
           test -x "${lite_bin}"
 
           shopt -s nullglob
@@ -336,23 +336,23 @@ jobs:
           }
 
           if [ "${slug}" = "macos-amd64" ]; then
-            file "${neojs_bin}" | grep -q 'Mach-O 64-bit executable x86_64'
+            file "${vjs_bin}" | grep -q 'Mach-O 64-bit executable x86_64'
             file "${lite_bin}" | grep -q 'Mach-O 64-bit executable x86_64'
-            otool -L "${neojs_bin}"
+            otool -L "${vjs_bin}"
             otool -L "${lite_bin}"
-            if otool -L "${neojs_bin}" "${lite_bin}" | grep -Eq '(/opt/homebrew|/usr/local)'; then
+            if otool -L "${vjs_bin}" "${lite_bin}" | grep -Eq '(/opt/homebrew|/usr/local)'; then
               echo "ERROR: unexpected non-system library linkage detected in macos-amd64 binary" >&2
               exit 1
             fi
             if arch -x86_64 /usr/bin/true 2>/dev/null; then
-              run_smoke "${neojs_bin}" "neojs" "-x86_64"
-              run_smoke "${lite_bin}" "neojs-lite" "-x86_64"
+              run_smoke "${vjs_bin}" "vjs" "-x86_64"
+              run_smoke "${lite_bin}" "vjs-lite" "-x86_64"
             else
               echo "Rosetta 2 unavailable on runner; verified Mach-O x86_64 headers, otool -L, LICENSE.md, and types/index.d.ts."
             fi
           else
-            run_smoke "${neojs_bin}" "neojs" ""
-            run_smoke "${lite_bin}" "neojs-lite" ""
+            run_smoke "${vjs_bin}" "vjs" ""
+            run_smoke "${lite_bin}" "vjs-lite" ""
           fi
 
       - name: Smoke test extracted Windows archives
@@ -366,17 +366,17 @@ jobs:
           $tagVersion = $tag.Substring(1)
           $slug = $env:MATRIX_SLUG
 
-          $smokeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("neojs-smoke-" + [System.Guid]::NewGuid().ToString("N"))
-          New-Item -ItemType Directory -Force -Path "$smokeDir/neojs", "$smokeDir/neojs-lite" | Out-Null
+          $smokeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("vaeljs-smoke-" + [System.Guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Force -Path "$smokeDir/vjs", "$smokeDir/vjs-lite" | Out-Null
 
           try {
-            Expand-Archive -Path "dist/neojs-$tag-$slug.zip" -DestinationPath "$smokeDir/neojs" -Force
-            Expand-Archive -Path "dist/neojs-lite-$tag-$slug.zip" -DestinationPath "$smokeDir/neojs-lite" -Force
+            Expand-Archive -Path "dist/vjs-$tag-$slug.zip" -DestinationPath "$smokeDir/vjs" -Force
+            Expand-Archive -Path "dist/vjs-lite-$tag-$slug.zip" -DestinationPath "$smokeDir/vjs-lite" -Force
 
-            $neojsBin = "$smokeDir/neojs/neojs.exe"
-            $liteBin = "$smokeDir/neojs-lite/neojs-lite.exe"
+            $vjsBin = "$smokeDir/vjs/vjs.exe"
+            $liteBin = "$smokeDir/vjs-lite/vjs-lite.exe"
 
-            foreach ($dir in @("$smokeDir/neojs", "$smokeDir/neojs-lite")) {
+            foreach ($dir in @("$smokeDir/vjs", "$smokeDir/vjs-lite")) {
               if (-not (Test-Path "$dir/LICENSE.md" -PathType Leaf)) {
                 throw "Missing LICENSE.md in extracted archive: $dir"
               }
@@ -384,7 +384,7 @@ jobs:
                 throw "Missing types/index.d.ts in extracted archive: $dir"
               }
             }
-            if (-not (Test-Path $neojsBin -PathType Leaf)) { throw "Missing $neojsBin" }
+            if (-not (Test-Path $vjsBin -PathType Leaf)) { throw "Missing $vjsBin" }
             if (-not (Test-Path $liteBin -PathType Leaf)) { throw "Missing $liteBin" }
 
             $sharedTests = @(
@@ -398,8 +398,8 @@ jobs:
             }
 
             foreach ($entry in @(
-              @{ Bin = $neojsBin; Name = "neojs" },
-              @{ Bin = $liteBin; Name = "neojs-lite" }
+              @{ Bin = $vjsBin; Name = "vjs" },
+              @{ Bin = $liteBin; Name = "vjs-lite" }
             )) {
               $ver = (& $entry.Bin --version | Out-String).Trim()
               if ($LASTEXITCODE -ne 0 -or $ver -ne "$($entry.Name) $tagVersion") {
@@ -461,7 +461,7 @@ jobs:
           set -euo pipefail
           cd dist
           shopt -s nullglob
-          archives=(neojs-*.tar.gz neojs-*.zip)
+          archives=(vjs-*.tar.gz vjs-*.zip)
           if [ "${#archives[@]}" -ne 12 ]; then
             echo "ERROR: expected exactly 12 release archives in dist/, found ${#archives[@]}" >&2
             ls -la >&2
@@ -529,7 +529,7 @@ jobs:
           fi
 
           shopt -s nullglob
-          assets=(dist/neojs-*.tar.gz dist/neojs-*.zip dist/SHA256SUMS.txt)
+          assets=(dist/vjs-*.tar.gz dist/vjs-*.zip dist/SHA256SUMS.txt)
           if [ "${#assets[@]}" -ne 13 ]; then
             echo "ERROR: expected 13 release assets (12 archives + SHA256SUMS.txt), found ${#assets[@]}" >&2
             ls -la dist/ >&2

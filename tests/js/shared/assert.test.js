@@ -1,4 +1,4 @@
-import test from "neo:test";
+import test from "vael:test";
 import assert, {
     AssertionError,
     assert as namedAssert,
@@ -12,11 +12,11 @@ import assert, {
     rejects,
     strictEquals,
     throws,
-} from "neo:assert";
+} from "vael:assert";
 
-test("neo:assert exports the frozen callable and named assertions", async () => {
-    const registry = Neo.getBuiltInModule("neo:assert");
-    const namespace = await import("neo:assert");
+test("vael:assert exports the frozen callable and named assertions", async () => {
+    const registry = Vael.getBuiltInModule("vael:assert");
+    const namespace = await import("vael:assert");
 
     strictEquals(typeof registry, "function");
     strictEquals(Object.isFrozen(registry), true);
@@ -32,14 +32,14 @@ test("neo:assert exports the frozen callable and named assertions", async () => 
     assert.ok(!("assertEquals" in namespace), "assertEquals export must not exist");
 });
 
-test("AssertionError carries NEO_ASSERT code and comparison details", () => {
+test("AssertionError carries VAEL_ASSERT code and comparison details", () => {
     const thrown = throws(
         () => equals({ a: { b: [0, 1] } }, { a: { b: [0, 2] } }, "parser check"),
         AssertionError,
     );
     assert.ok(thrown instanceof Error);
     strictEquals(thrown.name, "AssertionError");
-    strictEquals(thrown.code, "NEO_ASSERT");
+    strictEquals(thrown.code, "VAEL_ASSERT");
     strictEquals(thrown.operator, "equals");
     strictEquals(thrown.actual.a.b[1], 1);
     strictEquals(thrown.expected.a.b[1], 2);

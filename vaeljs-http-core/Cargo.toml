@@ -1,0 +1,17 @@
+[package]
+name = "vaeljs-http-core"
+description = "Engine-neutral core HTTP routing, static file resolution, cookie, and policy primitives for vael:http"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

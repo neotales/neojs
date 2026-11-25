@@ -1,21 +1,21 @@
-import test from "neo:test";
-import assert from "neo:assert";
-import defaultConsole, { debug, error, info, log, warn } from "neo:console";
-import * as consoleModule from "neo:console";
+import test from "vael:test";
+import assert from "vael:assert";
+import defaultConsole, { debug, error, info, log, warn } from "vael:console";
+import * as consoleModule from "vael:console";
 
-test("neo:console exports the live global console and its five methods", async () => {
-    const list = Neo.getBuiltInModulesList();
-    assert.ok(list.includes("neo:console"), `neo:console missing from list: ${JSON.stringify(list)}`);
+test("vael:console exports the live global console and its five methods", async () => {
+    const list = Vael.getBuiltInModulesList();
+    assert.ok(list.includes("vael:console"), `vael:console missing from list: ${JSON.stringify(list)}`);
     assert.ok(!list.includes("console"), "bare console must not be listed");
 
-    const registry = Neo.getBuiltInModule("neo:console");
+    const registry = Vael.getBuiltInModule("vael:console");
     assert.strictEquals(registry, globalThis.console);
     assert.strictEquals(defaultConsole, globalThis.console);
     assert.strictEquals(consoleModule.default, globalThis.console);
     assert.strictEquals(Object.isFrozen(registry), false);
-    assert.strictEquals(Neo.getBuiltInModule("console"), undefined);
+    assert.strictEquals(Vael.getBuiltInModule("console"), undefined);
 
-    const dynamic = await import("neo:console");
+    const dynamic = await import("vael:console");
     assert.strictEquals(dynamic, consoleModule);
 
     assert.equals(Object.keys(consoleModule).sort(), [
@@ -38,8 +38,8 @@ test("neo:console exports the live global console and its five methods", async (
     await assert.rejects(() => import("console"));
 });
 
-test("neo:console default export is live while named exports capture evaluation-time bindings", () => {
-    const registry = Neo.getBuiltInModule("neo:console");
+test("vael:console default export is live while named exports capture evaluation-time bindings", () => {
+    const registry = Vael.getBuiltInModule("vael:console");
     const original = defaultConsole.log;
     let replacedCalls = 0;
     const replacement = () => {
@@ -74,9 +74,9 @@ test("neo:console default export is live while named exports capture evaluation-
     assert.ok(!("marker" in original));
 });
 
-test("neo:console registry keeps the installed console when globalThis.console is replaced", () => {
+test("vael:console registry keeps the installed console when globalThis.console is replaced", () => {
     const installed = globalThis.console;
-    const registry = Neo.getBuiltInModule("neo:console");
+    const registry = Vael.getBuiltInModule("vael:console");
     const replacement = { log() {}, error() {} };
 
     globalThis.console = replacement;
@@ -84,14 +84,14 @@ test("neo:console registry keeps the installed console when globalThis.console i
         assert.strictEquals(globalThis.console, replacement);
         assert.strictEquals(registry, installed);
         assert.strictEquals(defaultConsole, installed);
-        assert.strictEquals(Neo.getBuiltInModule("neo:console"), installed);
+        assert.strictEquals(Vael.getBuiltInModule("vael:console"), installed);
     } finally {
         globalThis.console = installed;
     }
-    assert.strictEquals(Neo.getBuiltInModule("neo:console"), globalThis.console);
+    assert.strictEquals(Vael.getBuiltInModule("vael:console"), globalThis.console);
 });
 
-test("neo:console methods format all JS value kinds without throwing", () => {
+test("vael:console methods format all JS value kinds without throwing", () => {
     const circular = {};
     circular.self = circular;
 
@@ -117,7 +117,7 @@ test("neo:console methods format all JS value kinds without throwing", () => {
     }
 });
 
-test("neo:console resists hostile prototypes, null-proto circular/typed values, throwing proxies, and lone surrogates", () => {
+test("vael:console resists hostile prototypes, null-proto circular/typed values, throwing proxies, and lone surrogates", () => {
     const circularNull = Object.create(null);
     circularNull.self = circularNull;
 

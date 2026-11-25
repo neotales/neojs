@@ -1,23 +1,23 @@
 [workspace]
 resolver = "3"
 members = [
-    "neojs-builtins",
-    "neojs-core",
-    "neojs-crypto-core",
-    "neojs",
-    "neojs-dbapi",
-    "neojs-dts",
-    "neojs-fs-core",
-    "neojs-http-core",
-    "neojs-manifest",
-    "neojs-module-policy",
-    "neojs-node-core",
-    "neojs-remote",
-    "neojs-npm",
-    "neojs-ssh-core",
-    "neojs-template-core",
-    "neojs-lite-core",
-    "neojs-lite",
+    "vaeljs-builtins",
+    "vaeljs-core",
+    "vaeljs-crypto-core",
+    "vaeljs",
+    "vaeljs-dbapi",
+    "vaeljs-dts",
+    "vaeljs-fs-core",
+    "vaeljs-http-core",
+    "vaeljs-manifest",
+    "vaeljs-module-policy",
+    "vaeljs-node-core",
+    "vaeljs-remote",
+    "vaeljs-npm",
+    "vaeljs-ssh-core",
+    "vaeljs-template-core",
+    "vaeljs-lite-core",
+    "vaeljs-lite",
 ]
 # The vendored crates are path dependencies and standalone packages; they must not
 # inherit this workspace's manifest or lint configuration.
@@ -25,24 +25,24 @@ exclude = ["vendor/deno_core", "vendor/neotales-dbapi"]
 # The V8 runtime is the default build. QuickJS crates are opt-in with `-p`, so
 # `cargo build`, `cargo test`, and `cargo clippy` without a package selection do
 # not compile QuickJS or put `rquickjs` in the default dependency graph.
-# `neojs-builtins` is engine-neutral and has no engine dependency; it is part of
+# `vaeljs-builtins` is engine-neutral and has no engine dependency; it is part of
 # the default test and lint set.
 default-members = [
-    "neojs-builtins",
-    "neojs-core",
-    "neojs-crypto-core",
-    "neojs",
-    "neojs-dbapi",
-    "neojs-dts",
-    "neojs-fs-core",
-    "neojs-http-core",
-    "neojs-manifest",
-    "neojs-module-policy",
-    "neojs-node-core",
-    "neojs-remote",
-    "neojs-npm",
-    "neojs-ssh-core",
-    "neojs-template-core",
+    "vaeljs-builtins",
+    "vaeljs-core",
+    "vaeljs-crypto-core",
+    "vaeljs",
+    "vaeljs-dbapi",
+    "vaeljs-dts",
+    "vaeljs-fs-core",
+    "vaeljs-http-core",
+    "vaeljs-manifest",
+    "vaeljs-module-policy",
+    "vaeljs-node-core",
+    "vaeljs-remote",
+    "vaeljs-npm",
+    "vaeljs-ssh-core",
+    "vaeljs-template-core",
 ]
 
 [workspace.package]
@@ -50,7 +50,7 @@ version = "0.0.0-alpha.0"
 publish = false
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/neotales/neojs"
+repository = "https://github.com/neotales/vaeljs"
 # Verified with rustc 1.100.0. The `neotales-age` dependency requires 1.100.
 # Dependencies can raise this floor; lower it only after a successful build
 # with the lower toolchain.
@@ -66,7 +66,7 @@ authors = ["NeoTales", "x0craft"]
 [patch.crates-io]
 deno_core = { path = "vendor/deno_core" }
 # Pinned copy of `neotales-dbapi` 0.0.0-alpha.0 with `Row::columns` and
-# `Row::column_name` exposed so `neo:db` can materialize JS row objects.
+# `Row::column_name` exposed so `vael:db` can materialize JS row objects.
 # Documented in `vendor/neotales-dbapi/PATCH.md`.
 neotales-dbapi = { path = "vendor/neotales-dbapi" }
 
@@ -86,43 +86,43 @@ bcrypt = { version = "0.19.3" }
 deno_ast = { version = "0.53.3", default-features = false, features = ["type_strip"] }
 deno_core = "0.413.0"
 deno_error = "0.7"
-# Engine-neutral Neo built-in source and metadata. Shared by the V8 and QuickJS
+# Engine-neutral Vael built-in source and metadata. Shared by the V8 and QuickJS
 # runtimes; it has no engine dependency. Each dependent selects modules through
 # its features.
-neojs-builtins = { version = "0.0.0-alpha.0", path = "neojs-builtins" }
-# Engine-neutral synchronous cryptographic core for `neo:crypto`. Has no JS
+vaeljs-builtins = { version = "0.0.0-alpha.0", path = "vaeljs-builtins" }
+# Engine-neutral synchronous cryptographic core for `vael:crypto`. Has no JS
 # engine or Tokio dependency.
-neojs-crypto-core = { version = "0.0.0-alpha.0", path = "neojs-crypto-core" }
+vaeljs-crypto-core = { version = "0.0.0-alpha.0", path = "vaeljs-crypto-core" }
 # Engine-neutral TypeScript declaration (.d.ts) bundles for V8 and QuickJS.
-neojs-dts = { version = "0.0.0-alpha.0", path = "neojs-dts" }
+vaeljs-dts = { version = "0.0.0-alpha.0", path = "vaeljs-dts" }
 # Driver-neutral SQL API with strict JSON configuration and SQLite provider.
-neojs-dbapi = { version = "0.0.0-alpha.0", path = "neojs-dbapi" }
-# Engine-neutral core filesystem operations for `neo:fs`.
-neojs-fs-core = { version = "0.0.0-alpha.0", path = "neojs-fs-core" }
-# Engine-neutral core HTTP primitives for `neo:http`.
-neojs-http-core = { version = "0.0.0-alpha.0", path = "neojs-http-core" }
-# `neo.jsonc` JSONC parsing, bounded upward discovery, workspace expansion, and
+vaeljs-dbapi = { version = "0.0.0-alpha.0", path = "vaeljs-dbapi" }
+# Engine-neutral core filesystem operations for `vael:fs`.
+vaeljs-fs-core = { version = "0.0.0-alpha.0", path = "vaeljs-fs-core" }
+# Engine-neutral core HTTP primitives for `vael:http`.
+vaeljs-http-core = { version = "0.0.0-alpha.0", path = "vaeljs-http-core" }
+# `vael.jsonc` JSONC parsing, bounded upward discovery, workspace expansion, and
 # pure import-map/workspace resolution.
-neojs-manifest = { version = "0.0.0-alpha.0", path = "neojs-manifest" }
+vaeljs-manifest = { version = "0.0.0-alpha.0", path = "vaeljs-manifest" }
 # Engine-neutral shared Rust backend for `node:*` built-in modules.
-neojs-node-core = { version = "0.0.0-alpha.0", path = "neojs-node-core" }
+vaeljs-node-core = { version = "0.0.0-alpha.0", path = "vaeljs-node-core" }
 # Engine-neutral npm specifier, SemVer, package.json, exports, CAS tarball, lockfile,
 # and virtual graph resolver.
-neojs-npm = { version = "0.0.0-alpha.0", path = "neojs-npm" }
+vaeljs-npm = { version = "0.0.0-alpha.0", path = "vaeljs-npm" }
 # Engine-neutral HTTPS transport, global cache, GitHub normalization, and JSR
 # resolution. Has no JS engine dependency; `network` enables `ureq` + `rustls`.
-neojs-remote = { version = "0.0.0-alpha.0", path = "neojs-remote" }
-# Engine-neutral synchronous SSH core for `neo:ssh`. Has no JS engine or Tokio
+vaeljs-remote = { version = "0.0.0-alpha.0", path = "vaeljs-remote" }
+# Engine-neutral synchronous SSH core for `vael:ssh`. Has no JS engine or Tokio
 # dependency; wraps `neotales-ssh` with mandatory host trust and bounded execution.
-neojs-ssh-core = { version = "0.0.0-alpha.0", path = "neojs-ssh-core" }
-# Engine-neutral Go text/template and Sprig core for `neo:template`. Has no JS
+vaeljs-ssh-core = { version = "0.0.0-alpha.0", path = "vaeljs-ssh-core" }
+# Engine-neutral Go text/template and Sprig core for `vael:template`. Has no JS
 # engine or Tokio dependency.
-neojs-template-core = { version = "0.0.0-alpha.0", path = "neojs-template-core" }
+vaeljs-template-core = { version = "0.0.0-alpha.0", path = "vaeljs-template-core" }
 base64 = "0.22.1"
 flate2 = "1.1.11"
 indexmap = { version = "2.14.2", features = ["serde"] }
 libc = "0.2.191"
-# Shell-style test-file expansion for `neojs test`. The crate is already in the
+# Shell-style test-file expansion for `vjs test`. The crate is already in the
 # graph through `deno_ast`; this pins the reviewed 0.3.4 version.
 glob = "0.3.4"
 getrandom = "0.4"
@@ -133,7 +133,7 @@ httpdate = "1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "http1"] }
 # SHA-2 and HMAC are the RustCrypto crates already linked transitively by the
-# neotales age and SSH backends. The `neo:crypto` hash surface uses the same
+# neotales age and SSH backends. The `vael:crypto` hash surface uses the same
 # reviewed versions directly.
 hmac = { version = "0.13.0", default-features = false }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["sha2"] }
@@ -168,7 +168,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sy
 tempfile = "3"
 # RFC 9562 UUID layout, version/variant bit setting, and canonical formatting.
 # The crate's own `new_v4` and `now_v7` helpers panic when the operating system
-# CSPRNG fails, so `neo:uuid` feeds its own fallible `getrandom` bytes to
+# CSPRNG fails, so `vael:uuid` feeds its own fallible `getrandom` bytes to
 # `uuid::Builder` instead and never takes that path. The `v4` and `v7` features
 # are therefore deliberately not enabled. This is the version already present
 # in the lockfile through `deno_ast`, so adding it does not pull a second major.
@@ -178,6 +178,6 @@ uuid = { version = "1.26.1", default-features = false, features = ["std"] }
 # native certificate store, decompression, cookie jar, or environment proxy.
 ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
 url = "2"
-# Unicode General_Category lookup for `neojs-builtins::chars`. The crate ships
+# Unicode General_Category lookup for `vaeljs-builtins::chars`. The crate ships
 # the Unicode 16.0 tables, is `no_std`, and has no dependencies of its own.
 unicode-general-category = "1.1.0"

@@ -1,5 +1,5 @@
-import { serve, type Server } from "neo:http";
-import { dirname, join } from "neo:path";
+import { serve, type Server } from "vael:http";
+import { dirname, join } from "vael:path";
 import { env } from "node:process";
 import { fileURLToPath } from "node:url";
 import { createApp } from "./app.ts";

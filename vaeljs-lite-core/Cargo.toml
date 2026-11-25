@@ -1,0 +1,111 @@
+[package]
+name = "vaeljs-lite-core"
+description = "Small embeddable QuickJS runtime for VaelJS Lite, sharing module policy with vaeljs"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[features]
+# A default Lite build keeps the shared `vael:assert`, `vael:chars`, `vael:console`,
+# `vael:crypto`, `vael:fs`, `vael:os`, `vael:path`, `vael:slices`, `vael:ssh`,
+# `vael:strings`, `vael:test`, and `vael:uuid` (`vael:uuid`, `vael:uuid/v4`,
+# `vael:uuid/v7`) modules plus erasable TypeScript stripping (`typescript`). A
+# stripping (`typescript`). A consumer that wants the smallest QuickJS runtime
+# can disable default features; the CLI below selects the features explicitly
+# so a change to these defaults cannot silently change what the command
+# advertises. Cargo features are additive and unify across the dependency graph:
+# a feature is present whenever any dependent enables it. Selection is
+# compile-time surface selection, not a sandbox.
+default = ["vael-assert", "vael-chars", "vael-console", "vael-crypto", "vael-fs", "vael-os", "vael-path", "vael-slices", "vael-ssh", "vael-strings", "vael-template", "vael-test", "vael-uuid", "node-compat", "typescript"]
+# The shared `assert` module and its Promise observation host hooks. This
+# enables the optional `vaeljs-builtins` dependency and its `assert` module.
+vael-assert = ["dep:vaeljs-builtins", "vaeljs-builtins/assert"]
+# The shared `chars` Rust logic, native registry object, native module
+# declaration, and introspection list entry. This enables the optional
+# `vaeljs-builtins` dependency and its `chars` module.
+vael-chars = ["dep:vaeljs-builtins", "vaeljs-builtins/chars"]
+# The shared `console` (`vael:console`) formatted global console (`log`, `debug`,
+# `info`, `warn`, `error`) and ESM wrapper. Enables `vaeljs-builtins/console`.
+vael-console = ["dep:vaeljs-builtins", "vaeljs-builtins/console"]
+# The shared `crypto` (`vael:crypto`) synchronous cryptographic exports, native
+# registry object, native module declaration, and introspection list entry. This
+# enables the optional `vaeljs-crypto-core` dependency; `--no-default-features`
+# keeps it and all RustCrypto crates out.
+vael-crypto = ["dep:vaeljs-crypto-core"]
+# The shared `fs` (`vael:fs`) core filesystem operations, native registry object,
+# native module declaration, and introspection list entry. This enables the
+# optional `vaeljs-fs-core` dependency (and its fallible `getrandom` dependency);
+# `--no-default-features` keeps all of them out.
+vael-fs = ["dep:vaeljs-fs-core"]
+# The shared `os` Rust constants (`platform`, `arch`), native registry object,
+# native module declaration, and introspection list entry.
+vael-os = ["dep:vaeljs-builtins", "vaeljs-builtins/os"]
+# The shared `path` (`vael:path`) lexical path implementation, host cwd helper,
+# and ESM wrapper. Enables `vaeljs-builtins/path`.
+vael-path = ["dep:vaeljs-builtins", "vaeljs-builtins/path"]
+# The shared `slices` (`vael:slices`) live Array/TypedArray/CharSlice views and
+# ESM wrapper. Requires `vael-chars` because `CharSlice` captures `chars.toUpper`
+# and `chars.toLower`.
+vael-slices = ["dep:vaeljs-builtins", "vaeljs-builtins/slices", "vael-chars"]
+# The shared `ssh` (`vael:ssh`) synchronous SSH client, native registry object,
+# native module declaration, and introspection list entry. This enables the
+# optional `vaeljs-ssh-core` dependency (and `neotales-ssh`);
+# `--no-default-features` keeps all of them out.
+vael-ssh = ["dep:vaeljs-ssh-core"]
+# The shared `strings` Rust logic, native registry object, native module
+# declaration, and introspection list entry. This enables the optional
+# `vaeljs-builtins` dependency and its `strings` module.
+vael-strings = ["dep:vaeljs-builtins", "vaeljs-builtins/strings"]
+# The shared `template` (`vael:template`) Go text/template and Sprig module
+# backed by `vaeljs-template-core`. `--no-default-features` keeps it out.
+vael-template = ["dep:vaeljs-template-core", "dep:serde_json"]
+# The shared `test` module, its host hooks, and `Runtime::run_tests`. This
+# enables the optional `vaeljs-builtins` dependency and its `test` module.
+vael-test = ["dep:vaeljs-builtins", "vaeljs-builtins/test"]
+# The shared `uuid` (`vael:uuid`, `vael:uuid/v4`, `vael:uuid/v7`) Rust logic,
+# native registry objects, native module declarations, and introspection list
+# entries. This enables `vaeljs-builtins/uuid` (and its fallible `getrandom` +
+# `uuid::Builder` dependencies); `--no-default-features` keeps all of them out.
+vael-uuid = ["dep:vaeljs-builtins", "vaeljs-builtins/uuid"]
+# Node.js compatibility modules (`node:path`, `node:os`, `node:process`,
+# `node:fs`, `node:child_process`, `node:buffer`, `node:url`, `node:crypto`).
+# Enables `vaeljs-node-core` (`--no-default-features` keeps it out).
+node-compat = ["dep:vaeljs-node-core"]
+# `vael.jsonc` `ImportResolver` integration for local `imports` and workspace
+# packages. Opt-in so `--no-default-features` stays free of manifest/glob deps.
+manifest = ["dep:vaeljs-manifest"]
+# Erasable TypeScript (`.ts` and `.mts`) stripping shared with `vaeljs-core`
+# through `vaeljs-module-policy/typescript` (`deno_ast`). `--no-default-features`
+# keeps `deno_ast` and its parser dependencies out of minimal builds.
+typescript = ["vaeljs-module-policy/typescript"]
+# Test-only streaming-read counters for the bounded text access tests. Never
+# enabled by a normal build.
+test-support = []
+
+[dependencies]
+# The shared `vael:chars` Rust logic is enabled by the `vael-chars` feature.
+vaeljs-builtins = { workspace = true, optional = true }
+vaeljs-crypto-core = { workspace = true, optional = true }
+vaeljs-fs-core = { workspace = true, optional = true }
+vaeljs-manifest = { workspace = true, optional = true }
+vaeljs-module-policy = { version = "0.0.0-alpha.0", path = "../vaeljs-module-policy" }
+vaeljs-node-core = { workspace = true, optional = true }
+vaeljs-ssh-core = { workspace = true, optional = true }
+vaeljs-template-core = { workspace = true, optional = true }
+# Pinned: the C API and Rust API change between minor releases. 0.14.0 is the
+# version reviewed for this crate; `loader` supplies the module resolver and
+# loader traits, and `std` supplies filesystem resolution helpers.
+rquickjs = { version = "=0.14.0", default-features = false, features = ["loader", "std"] }
+serde_json = { workspace = true, optional = true }
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+vaeljs-dts.workspace = true
+neotales-ssh.workspace = true
+tempfile.workspace = true

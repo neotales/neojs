@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared functions for the neojs binary size tracker.
+# Shared functions for the vaeljs binary size tracker.
 #
 # Sourced by measure.sh, validate.sh, report.sh and test.sh. Bash 4+ is
 # required for arrays and `mapfile`; jq, sha256sum and flock are the only
@@ -271,7 +271,7 @@ size_validate_ledger() {
         size_die "ledger is empty: $ledger"
     fi
 
-    keys_file=$(mktemp "${TMPDIR:-/tmp}/neojs-size-keys.XXXXXX")
+    keys_file=$(mktemp "${TMPDIR:-/tmp}/vaeljs-size-keys.XXXXXX")
     while IFS= read -r line || [ -n "$line" ]; do
         line_no=$((line_no + 1))
         if [ -z "$line" ]; then
@@ -330,7 +330,7 @@ size_validate_ledger() {
     rm -f "$keys_file"
 
     if [ "$errors" -eq 0 ]; then
-        conflict_error=$(mktemp "${TMPDIR:-/tmp}/neojs-size-conflict.XXXXXX")
+        conflict_error=$(mktemp "${TMPDIR:-/tmp}/vaeljs-size-conflict.XXXXXX")
         if ! conflicts=$(jq -s -r -L "$(dirname -- "${BASH_SOURCE[0]}")" \
             -f "$(dirname -- "${BASH_SOURCE[0]}")/conflict_check.jq" \
             "$ledger" 2>"$conflict_error"); then
@@ -442,7 +442,7 @@ size_cargo_config_json() {
     local entries_file
     local files_json
 
-    entries_file=$(mktemp "${TMPDIR:-/tmp}/neojs-size-cargo-config.XXXXXX")
+    entries_file=$(mktemp "${TMPDIR:-/tmp}/vaeljs-size-cargo-config.XXXXXX")
 
     add_cargo_config() {
         local scope=$1 file=$2

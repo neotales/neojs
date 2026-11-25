@@ -1,6 +1,6 @@
-import test from "neo:test";
-import assert from "neo:assert";
-import * as slices from "neo:slices";
+import test from "vael:test";
+import assert from "vael:assert";
+import * as slices from "vael:slices";
 import {
     CharSlice,
     ReadOnlyCharSlice,
@@ -10,22 +10,22 @@ import {
     readonlyCharSlice,
     readonlySlice,
     slice,
-} from "neo:slices";
+} from "vael:slices";
 
-test("neo:slices registry and module namespace share frozen identity", async () => {
-    const list = Neo.getBuiltInModulesList();
-    assert.ok(list.includes("neo:slices"), `neo:slices missing from list: ${JSON.stringify(list)}`);
+test("vael:slices registry and module namespace share frozen identity", async () => {
+    const list = Vael.getBuiltInModulesList();
+    assert.ok(list.includes("vael:slices"), `vael:slices missing from list: ${JSON.stringify(list)}`);
     assert.ok(!list.includes("slices"), "bare slices must not be listed");
 
-    const registry = Neo.getBuiltInModule("neo:slices");
+    const registry = Vael.getBuiltInModule("vael:slices");
     assert.ok(registry !== undefined && typeof registry === "object");
-    assert.strictEquals(Neo.getBuiltInModule("neo:slices"), registry);
+    assert.strictEquals(Vael.getBuiltInModule("vael:slices"), registry);
     assert.strictEquals(Object.isFrozen(registry), true);
     assert.strictEquals(Object.isExtensible(slices), false);
-    assert.ok(!("default" in slices), "neo:slices must not have a default export");
-    assert.strictEquals(Neo.getBuiltInModule("slices"), undefined);
+    assert.ok(!("default" in slices), "vael:slices must not have a default export");
+    assert.strictEquals(Vael.getBuiltInModule("slices"), undefined);
 
-    const dynamic = await import("neo:slices");
+    const dynamic = await import("vael:slices");
     assert.strictEquals(dynamic, slices);
     assert.ok(slices !== registry, "module namespace must be distinct from registry");
 

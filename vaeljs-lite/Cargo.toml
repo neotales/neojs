@@ -1,0 +1,51 @@
+[package]
+name = "vaeljs-lite"
+description = "Command-line ECMAScript runtime for VaelJS Lite, built on QuickJS"
+default-run = "vjs-lite"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[[bin]]
+name = "vjs-lite"
+path = "src/main.rs"
+
+[features]
+default = ["vael-template", "node-compat"]
+# Enables `vael:template` in `vaeljs-lite-core`. Opt-outable with `--no-default-features`.
+vael-template = ["vaeljs-lite-core/vael-template"]
+# Enables `node:*` compatibility modules in `vaeljs-lite-core`. Opt-outable with `--no-default-features`.
+node-compat = ["vaeljs-lite-core/node-compat"]
+
+[dependencies]
+# The command's module bundle is explicit rather than inherited from
+# `vaeljs-lite-core` defaults, so a change to the library defaults cannot
+# silently change what the command advertises. This is not a sandbox.
+vaeljs-lite-core = { version = "0.0.0-alpha.0", path = "../vaeljs-lite-core", default-features = false, features = [
+    "manifest",
+    "vael-assert",
+    "vael-chars",
+    "vael-console",
+    "vael-crypto",
+    "vael-fs",
+    "vael-os",
+    "vael-path",
+    "vael-slices",
+    "vael-ssh",
+    "vael-strings",
+    "vael-test",
+    "vael-uuid",
+    "typescript",
+] }
+vaeljs-dts.workspace = true
+vaeljs-manifest.workspace = true
+# Deterministic shell-style expansion for `vjs-lite test`.
+vaeljs-module-policy = { version = "0.0.0-alpha.0", path = "../vaeljs-module-policy", features = ["test-glob"] }
+
+[dev-dependencies]
+tempfile.workspace = true

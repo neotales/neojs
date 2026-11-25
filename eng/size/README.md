@@ -1,6 +1,6 @@
 # Binary size tracking
 
-`neojs` and `neojs-lite` are different runtimes, and their binaries answer
+`vaeljs` and `vaeljs-lite` are different runtimes, and their binaries answer
 different questions. A size number without the artifact, target, toolchain and
 feature set beside it is not a measurement; it is a rumour that will be
 compared with an unrelated number six months later.
@@ -13,7 +13,7 @@ before anyone quotes it.
 
 | Field | Meaning |
 |---|---|
-| Artifact | The `[[bin]]` target of a workspace package. Default packages: `neojs`, `neojs-lite`. |
+| Artifact | The `[[bin]]` target of a workspace package. Default packages: `vaeljs`, `vaeljs-lite`. |
 | Profile | `--release` only. Debug builds are not tracked here. |
 | Value | `st_size` of the executable Cargo wrote, in bytes. |
 | Digest | SHA-256 of the same file. |
@@ -140,7 +140,7 @@ eng/size/measure.sh --no-record
 eng/size/measure.sh
 
 # One artifact, an explicit target and feature set.
-eng/size/measure.sh --package neojs-lite \
+eng/size/measure.sh --package vaeljs-lite \
     --target x86_64-unknown-linux-gnu \
     --features some,feature
 
@@ -183,7 +183,7 @@ recorded cooperative lock is never labelled a strict comparison.
 
 ### Missing artifacts
 
-`neojs-lite` is present at the base commit this tracker was added to, so the
+`vaeljs-lite` is present at the base commit this tracker was added to, so the
 first baseline covers both binaries. A branch that removes it (or builds a
 subset) is still handled explicitly:
 
@@ -237,7 +237,7 @@ point of the record.
 Example (abridged; real records have every field):
 
 ```json
-{"schema":3,"status":"ok","artifact":{"package":"neojs","bin":"neojs","kind":"release-binary","path":"neojs"},"source":{"git_commit":"...","git_dirty":false,"git_canonical":true,"git_tags":[],"kind":"commit","state_status":"captured","state_sha256":"..."},"platform":{"target":"x86_64-unknown-linux-gnu","host":"x86_64-unknown-linux-gnu","os":"Linux","arch":"x86_64"},"toolchain":{"requested":"1.100.0","rustc":"rustc 1.100.0 (...)","cargo":"cargo 1.100.0 (...)","cc":"cc (GCC) 16.2.1"},"build":{"profile":"release","requested_features":[],"requested_no_default_features":false,"effective_features":{"status":"not-captured"},"effective_linker":{"status":"not-captured"},"offline":true,"locked":true,"cargo_lock_sha256":"...","workspace_path_sha256":"...","cargo_config":{"status":"captured","files":[{"scope":"cargo-home","sha256":"..."}]},"env_overrides":{},"target_specific_env":{"status":"absent","names":[]},"target_dir":{"lock":"cooperating-measure-script-only","ownership":"exclusive-required","external_writer_safety":"not-claimed"},"v8_archive_status":"supplied-provenance-unknown","v8_archive":{"name":"...","sha256":"...","archive_sha256":"...","provenance":"operator-supplied-local-file","authenticated":false}},"measurement":{"method":"file-length-bytes","bytes":12345678,"sha256":"..."},"missing_reason":null,"measured_at":"2026-11-22T00:00:00Z","notes":null,"series_id":"...","family_id":"...","key":"..."}
+{"schema":3,"status":"ok","artifact":{"package":"vaeljs","bin":"vjs","kind":"release-binary","path":"vjs"},"source":{"git_commit":"...","git_dirty":false,"git_canonical":true,"git_tags":[],"kind":"commit","state_status":"captured","state_sha256":"..."},"platform":{"target":"x86_64-unknown-linux-gnu","host":"x86_64-unknown-linux-gnu","os":"Linux","arch":"x86_64"},"toolchain":{"requested":"1.100.0","rustc":"rustc 1.100.0 (...)","cargo":"cargo 1.100.0 (...)","cc":"cc (GCC) 16.2.1"},"build":{"profile":"release","requested_features":[],"requested_no_default_features":false,"effective_features":{"status":"not-captured"},"effective_linker":{"status":"not-captured"},"offline":true,"locked":true,"cargo_lock_sha256":"...","workspace_path_sha256":"...","cargo_config":{"status":"captured","files":[{"scope":"cargo-home","sha256":"..."}]},"env_overrides":{},"target_specific_env":{"status":"absent","names":[]},"target_dir":{"lock":"cooperating-measure-script-only","ownership":"exclusive-required","external_writer_safety":"not-claimed"},"v8_archive_status":"supplied-provenance-unknown","v8_archive":{"name":"...","sha256":"...","archive_sha256":"...","provenance":"operator-supplied-local-file","authenticated":false}},"measurement":{"method":"file-length-bytes","bytes":12345678,"sha256":"..."},"missing_reason":null,"measured_at":"2026-11-22T00:00:00Z","notes":null,"series_id":"...","family_id":"...","key":"..."}
 ```
 
 Rules:

@@ -1,6 +1,6 @@
-import test from "neo:test";
-import assert from "neo:assert";
-import * as cryptoNs from "neo:crypto";
+import test from "vael:test";
+import assert from "vael:assert";
+import * as cryptoNs from "vael:crypto";
 import {
     bcryptHash,
     bcryptVerify,
@@ -15,7 +15,7 @@ import {
     randomBytes,
     shamirCombine,
     shamirSplit,
-} from "neo:crypto";
+} from "vael:crypto";
 
 const SYNC_EXPORTS = [
     "bcryptHash",
@@ -70,21 +70,21 @@ function expectCryptoError(fn, expectedCode) {
     assert.strictEquals(caught.code, expectedCode);
 }
 
-test("neo:crypto exposes frozen module and identical synchronous function references", async () => {
-    const list = Neo.getBuiltInModulesList();
-    assert.ok(list.includes("neo:crypto"), "neo:crypto missing from Neo.getBuiltInModulesList()");
+test("vael:crypto exposes frozen module and identical synchronous function references", async () => {
+    const list = Vael.getBuiltInModulesList();
+    assert.ok(list.includes("vael:crypto"), "vael:crypto missing from Vael.getBuiltInModulesList()");
     assert.ok(!list.includes("crypto"), "bare crypto must not be listed");
-    assert.strictEquals(Neo.getBuiltInModule("crypto"), undefined);
+    assert.strictEquals(Vael.getBuiltInModule("crypto"), undefined);
 
-    const reg = Neo.getBuiltInModule("neo:crypto");
+    const reg = Vael.getBuiltInModule("vael:crypto");
     assert.ok(reg !== undefined && typeof reg === "object" && reg !== null);
-    assert.strictEquals(Neo.getBuiltInModule("neo:crypto"), reg);
+    assert.strictEquals(Vael.getBuiltInModule("vael:crypto"), reg);
     assert.strictEquals(Object.isFrozen(reg), true);
     assert.ok(cryptoNs !== reg, "module namespace must be distinct from registry");
 
-    const dyn = await import("neo:crypto");
+    const dyn = await import("vael:crypto");
     assert.strictEquals(dyn, cryptoNs);
-    assert.ok(!("default" in cryptoNs), "neo:crypto must not have a default export");
+    assert.ok(!("default" in cryptoNs), "vael:crypto must not have a default export");
     assert.ok(!("generateKey" in reg) && !("generateKey" in cryptoNs));
 
     const namedMap = {
@@ -109,12 +109,12 @@ test("neo:crypto exposes frozen module and identical synchronous function refere
         assert.strictEquals(namedMap[name], reg[name], `${name} named import identity mismatch`);
     }
 
-    if (Neo.engine === "neo-lite") {
+    if (Vael.engine === "vael-lite") {
         assert.equals(Object.keys(reg).sort(), SYNC_EXPORTS);
         assert.equals(Object.keys(cryptoNs).sort(), SYNC_EXPORTS);
         for (const asyncName of ASYNC_EXPORTS) {
-            assert.ok(!(asyncName in reg), `${asyncName} must not be on neo-lite registry`);
-            assert.ok(!(asyncName in cryptoNs), `${asyncName} must not be on neo-lite namespace`);
+            assert.ok(!(asyncName in reg), `${asyncName} must not be on vael-lite registry`);
+            assert.ok(!(asyncName in cryptoNs), `${asyncName} must not be on vael-lite namespace`);
         }
     }
 });
@@ -147,12 +147,12 @@ test("generateEnvelopeKey, randomBytes, encrypt, and decrypt roundtrip and rejec
     // Tampered tag, wrong AAD, wrong key, malformed header, bad key length
     const badTag = env.slice();
     badTag[badTag.length - 1] ^= 0x01;
-    expectCryptoError(() => decrypt(key, badTag, aad), "NEO_CRYPTO_AUTH");
-    expectCryptoError(() => decrypt(key, env, Uint8Array.from([1])), "NEO_CRYPTO_AUTH");
-    expectCryptoError(() => decrypt(generateEnvelopeKey(), env, aad), "NEO_CRYPTO_AUTH");
-    expectCryptoError(() => decrypt(key, env.slice(0, 10)), "NEO_CRYPTO_FORMAT");
-    expectCryptoError(() => encrypt(new Uint8Array(31), plaintext), "NEO_CRYPTO_KEY");
-    expectCryptoError(() => decrypt(new Uint8Array(31), env), "NEO_CRYPTO_KEY");
+    expectCryptoError(() => decrypt(key, badTag, aad), "VAEL_CRYPTO_AUTH");
+    expectCryptoError(() => decrypt(key, env, Uint8Array.from([1])), "VAEL_CRYPTO_AUTH");
+    expectCryptoError(() => decrypt(generateEnvelopeKey(), env, aad), "VAEL_CRYPTO_AUTH");
+    expectCryptoError(() => decrypt(key, env.slice(0, 10)), "VAEL_CRYPTO_FORMAT");
+    expectCryptoError(() => encrypt(new Uint8Array(31), plaintext), "VAEL_CRYPTO_KEY");
+    expectCryptoError(() => decrypt(new Uint8Array(31), env), "VAEL_CRYPTO_KEY");
 
     // Validation errors
     assert.throws(() => generateEnvelopeKey(1), TypeError);
@@ -180,14 +180,14 @@ test("createEncryptor and createDecryptor support AES-256-CBC and AES-256-GCM", 
         enc.update(cbcPlain.subarray(5));
         const ct = enc.final();
         assert.strictEquals(toHex(ct), cbcExpected);
-        expectCryptoError(() => enc.update(new Uint8Array(1)), "NEO_CRYPTO_STATE");
-        expectCryptoError(() => enc.final(), "NEO_CRYPTO_STATE");
-        expectCryptoError(() => enc.setAAD(new Uint8Array(1)), "NEO_CRYPTO_STATE");
+        expectCryptoError(() => enc.update(new Uint8Array(1)), "VAEL_CRYPTO_STATE");
+        expectCryptoError(() => enc.final(), "VAEL_CRYPTO_STATE");
+        expectCryptoError(() => enc.setAAD(new Uint8Array(1)), "VAEL_CRYPTO_STATE");
     } finally {
         enc.close();
         enc.dispose();
     }
-    expectCryptoError(() => enc.final(), "NEO_CRYPTO_CLOSED");
+    expectCryptoError(() => enc.final(), "VAEL_CRYPTO_CLOSED");
 
     const dec = createDecryptor("AES-256-CBC", cbcKey, cbcIv);
     try {
@@ -229,7 +229,7 @@ test("createEncryptor and createDecryptor support AES-256-CBC and AES-256-GCM", 
     let gcmTag;
     try {
         assert.strictEquals(gcmEnc.setAAD(gcmAad), gcmEnc);
-        expectCryptoError(() => gcmEnc.getAuthTag(), "NEO_CRYPTO_STATE");
+        expectCryptoError(() => gcmEnc.getAuthTag(), "VAEL_CRYPTO_STATE");
         gcmEnc.update(gcmPlain);
         gcmCt = gcmEnc.final();
         gcmTag = gcmEnc.getAuthTag();
@@ -257,7 +257,7 @@ test("createEncryptor and createDecryptor support AES-256-CBC and AES-256-GCM", 
         badGcm.setAAD(gcmAad);
         badGcm.setAuthTag(wrongTag);
         badGcm.update(gcmCt);
-        expectCryptoError(() => badGcm.final(), "NEO_CRYPTO_AUTH");
+        expectCryptoError(() => badGcm.final(), "VAEL_CRYPTO_AUTH");
     } finally {
         badGcm.close();
     }
@@ -265,15 +265,15 @@ test("createEncryptor and createDecryptor support AES-256-CBC and AES-256-GCM", 
     const noTag = createDecryptor("aes-256-gcm", cbcKey, gcmIv);
     try {
         noTag.update(gcmCt);
-        expectCryptoError(() => noTag.final(), "NEO_CRYPTO_TAG");
+        expectCryptoError(() => noTag.final(), "VAEL_CRYPTO_TAG");
     } finally {
         noTag.close();
     }
 
-    expectCryptoError(() => createEncryptor("aes-128-cbc", cbcKey, cbcIv), "NEO_CRYPTO_ALGORITHM");
-    expectCryptoError(() => createEncryptor("aes-256-cbc", new Uint8Array(16), cbcIv), "NEO_CRYPTO_KEY");
-    expectCryptoError(() => createEncryptor("aes-256-cbc", cbcKey, new Uint8Array(12)), "NEO_CRYPTO_IV");
-    expectCryptoError(() => createEncryptor("aes-256-gcm", cbcKey, new Uint8Array(16)), "NEO_CRYPTO_IV");
+    expectCryptoError(() => createEncryptor("aes-128-cbc", cbcKey, cbcIv), "VAEL_CRYPTO_ALGORITHM");
+    expectCryptoError(() => createEncryptor("aes-256-cbc", new Uint8Array(16), cbcIv), "VAEL_CRYPTO_KEY");
+    expectCryptoError(() => createEncryptor("aes-256-cbc", cbcKey, new Uint8Array(12)), "VAEL_CRYPTO_IV");
+    expectCryptoError(() => createEncryptor("aes-256-gcm", cbcKey, new Uint8Array(16)), "VAEL_CRYPTO_IV");
     assert.throws(() => createEncryptor("aes-256-gcm", cbcKey, gcmIv, { padding: false }), TypeError);
     assert.throws(() => createEncryptor("aes-256-cbc", cbcKey, cbcIv, { unknown: true }), TypeError);
 
@@ -333,16 +333,16 @@ test("createHash and createHmac support sha256/sha384/sha512 and all encodings",
     );
 
     // Lifecycle & errors
-    expectCryptoError(() => createHash("sha1"), "NEO_CRYPTO_ALGORITHM");
-    expectCryptoError(() => createHmac("md5", "k"), "NEO_CRYPTO_ALGORITHM");
-    expectCryptoError(() => h.digest("hex"), "NEO_CRYPTO_DIGESTED");
-    expectCryptoError(() => h.update("x"), "NEO_CRYPTO_DIGESTED");
+    expectCryptoError(() => createHash("sha1"), "VAEL_CRYPTO_ALGORITHM");
+    expectCryptoError(() => createHmac("md5", "k"), "VAEL_CRYPTO_ALGORITHM");
+    expectCryptoError(() => h.digest("hex"), "VAEL_CRYPTO_DIGESTED");
+    expectCryptoError(() => h.update("x"), "VAEL_CRYPTO_DIGESTED");
 
     const closable = createHash("sha256");
     closable.close();
     closable.dispose();
-    expectCryptoError(() => closable.update("a"), "NEO_CRYPTO_CLOSED");
-    expectCryptoError(() => closable.digest("hex"), "NEO_CRYPTO_CLOSED");
+    expectCryptoError(() => closable.update("a"), "VAEL_CRYPTO_CLOSED");
+    expectCryptoError(() => closable.digest("hex"), "VAEL_CRYPTO_CLOSED");
 
     const HashCtor = Object.getPrototypeOf(closable).constructor;
     assert.strictEquals(HashCtor.name, "Hash");
@@ -368,7 +368,7 @@ test("pbkdf2, bcryptHash, and bcryptVerify match vectors and validate bounds", (
         "60d38d8523b876fa767fb807eec4c919d8c75512bb89ad7954bc0328812eb4cc",
     );
 
-    expectCryptoError(() => pbkdf2("sha1", "p", "s", 1, 16), "NEO_CRYPTO_ALGORITHM");
+    expectCryptoError(() => pbkdf2("sha1", "p", "s", 1, 16), "VAEL_CRYPTO_ALGORITHM");
     assert.throws(() => pbkdf2("sha256", "p", "s", 0, 16), RangeError);
     assert.throws(() => pbkdf2("sha256", "p", "s", 1000001, 16), RangeError);
     assert.throws(() => pbkdf2("sha256", "p", "s", 1, 0), RangeError);
@@ -388,7 +388,7 @@ test("pbkdf2, bcryptHash, and bcryptVerify match vectors and validate bounds", (
         false,
     );
 
-    expectCryptoError(() => bcryptHash("a".repeat(73), 4), "NEO_CRYPTO_LIMIT");
+    expectCryptoError(() => bcryptHash("a".repeat(73), 4), "VAEL_CRYPTO_LIMIT");
     assert.throws(() => bcryptHash("pw", 3), RangeError);
     assert.throws(() => bcryptHash("pw", 17), RangeError);
     assert.throws(() => bcryptVerify("pw", 123), TypeError);
@@ -418,11 +418,11 @@ test("shamirSplit and shamirCombine split, reconstruct, and enforce validation",
 
     expectCryptoError(
         () => shamirCombine([shares[0], { index: 1, value: shares[1].value }]),
-        "NEO_CRYPTO_SHAMIR_DUPLICATE",
+        "VAEL_CRYPTO_SHAMIR_DUPLICATE",
     );
     expectCryptoError(
         () => shamirCombine([shares[0], { index: 2, value: Uint8Array.of(1) }]),
-        "NEO_CRYPTO_SHAMIR_LENGTH",
+        "VAEL_CRYPTO_SHAMIR_LENGTH",
     );
 });
 
@@ -452,24 +452,24 @@ test("Uint8Array RAB views, detached buffers, and hostile prototypes are handled
     const envEmpty = encrypt(key, validEmpty);
     assert.equals(Array.from(decrypt(key, envEmpty)), []);
 
-    // OOB RAB view on QuickJS rejects cleanly with NEO_CRYPTO_DETACHED
-    if (Neo.engine === "neo-lite") {
+    // OOB RAB view on QuickJS rejects cleanly with VAEL_CRYPTO_DETACHED
+    if (Vael.engine === "vael-lite") {
         rab.resize(8);
         const oob = new Uint8Array(rab, 4, 4);
         rab.resize(2);
-        expectCryptoError(() => encrypt(key, oob), "NEO_CRYPTO_DETACHED");
+        expectCryptoError(() => encrypt(key, oob), "VAEL_CRYPTO_DETACHED");
     }
 
-    // Detached Uint8Array throws NEO_CRYPTO_DETACHED across operations
+    // Detached Uint8Array throws VAEL_CRYPTO_DETACHED across operations
     const ab = new ArrayBuffer(8);
     const detached = new Uint8Array(ab);
     ab.transfer();
-    expectCryptoError(() => encrypt(key, detached), "NEO_CRYPTO_DETACHED");
-    expectCryptoError(() => decrypt(key, detached), "NEO_CRYPTO_DETACHED");
-    expectCryptoError(() => createHash("sha256").update(detached), "NEO_CRYPTO_DETACHED");
-    expectCryptoError(() => pbkdf2("sha256", detached, "s", 1, 16), "NEO_CRYPTO_DETACHED");
-    expectCryptoError(() => bcryptHash(detached, 4), "NEO_CRYPTO_DETACHED");
-    expectCryptoError(() => shamirSplit(detached, 2, 3), "NEO_CRYPTO_DETACHED");
+    expectCryptoError(() => encrypt(key, detached), "VAEL_CRYPTO_DETACHED");
+    expectCryptoError(() => decrypt(key, detached), "VAEL_CRYPTO_DETACHED");
+    expectCryptoError(() => createHash("sha256").update(detached), "VAEL_CRYPTO_DETACHED");
+    expectCryptoError(() => pbkdf2("sha256", detached, "s", 1, 16), "VAEL_CRYPTO_DETACHED");
+    expectCryptoError(() => bcryptHash(detached, 4), "VAEL_CRYPTO_DETACHED");
+    expectCryptoError(() => shamirSplit(detached, 2, 3), "VAEL_CRYPTO_DETACHED");
 
     // Hostile Error.prototype.code & Object.prototype.code cannot hijack coded errors
     const origErrCode = Object.getOwnPropertyDescriptor(Error.prototype, "code");
@@ -491,8 +491,8 @@ test("Uint8Array RAB views, detached buffers, and hostile prototypes are handled
                 traps += 1;
             },
         });
-        expectCryptoError(() => createHash("sha1"), "NEO_CRYPTO_ALGORITHM");
-        expectCryptoError(() => encrypt(new Uint8Array(1), new Uint8Array(1)), "NEO_CRYPTO_KEY");
+        expectCryptoError(() => createHash("sha1"), "VAEL_CRYPTO_ALGORITHM");
+        expectCryptoError(() => encrypt(new Uint8Array(1), new Uint8Array(1)), "VAEL_CRYPTO_KEY");
         assert.strictEquals(traps, 0);
     } finally {
         if (origErrCode) Object.defineProperty(Error.prototype, "code", origErrCode);
@@ -505,7 +505,7 @@ test("Uint8Array RAB views, detached buffers, and hostile prototypes are handled
 test("regression guards: verify length >60, huge shamir array, Object.prototype setters, invalid receivers, and SharedArrayBuffer", async () => {
     // 1. bcryptVerify with hash length != 60 returns false cleanly with no dangling exception
     assert.strictEquals(bcryptVerify("pw", "x".repeat(61)), false);
-    const fsMod = await import("neo:fs");
+    const fsMod = await import("vael:fs");
     assert.strictEquals(typeof fsMod.readTextFile, "function");
 
     // 2. shamirCombine rejects arrays with length >= 2^31 cleanly without panicking
@@ -556,10 +556,10 @@ test("regression guards: verify length >60, huge shamir array, Object.prototype 
     const sab = new SharedArrayBuffer(4);
     const sharedView = new Uint8Array(sab);
     sharedView.set([1, 2, 3, 4]);
-    expectCryptoError(() => shamirSplit(sharedView, 2, 3), "NEO_CRYPTO_SHAMIR_SHARED");
+    expectCryptoError(() => shamirSplit(sharedView, 2, 3), "VAEL_CRYPTO_SHAMIR_SHARED");
     const shares = shamirSplit(Uint8Array.of(1, 2, 3, 4), 2, 3);
     expectCryptoError(
         () => shamirCombine([shares[0], { index: shares[1].index, value: sharedView }]),
-        "NEO_CRYPTO_SHAMIR_SHARED",
+        "VAEL_CRYPTO_SHAMIR_SHARED",
     );
 });

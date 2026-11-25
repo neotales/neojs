@@ -1,8 +1,8 @@
-import test from "neo:test";
-import assert from "neo:assert";
-import { platform } from "neo:os";
-import { v4 } from "neo:uuid";
-import * as fsMod from "neo:fs";
+import test from "vael:test";
+import assert from "vael:assert";
+import { platform } from "vael:os";
+import { v4 } from "vael:uuid";
+import * as fsMod from "vael:fs";
 import {
     copyFile,
     exists,
@@ -18,7 +18,7 @@ import {
     writeFile,
     writeFileAtomic,
     writeTextFile,
-} from "neo:fs";
+} from "vael:fs";
 
 const EXPECTED_EXPORTS = [
     "copyFile",
@@ -44,7 +44,7 @@ function joinPath(a, b) {
 
 function withTempDir(fn) {
     const base = platform === "windows" ? "." : "/tmp";
-    const root = joinPath(base, `.neojs-fs-test-${v4()}`);
+    const root = joinPath(base, `.vaeljs-fs-test-${v4()}`);
     mkdir(root, { recursive: true });
     let threw = false;
     try {
@@ -81,20 +81,20 @@ function assertFsError(fn, expectedCode) {
     return caught;
 }
 
-test("neo:fs exposes frozen module object and identical function references", async () => {
-    const list = Neo.getBuiltInModulesList();
-    assert.ok(list.includes("neo:fs"), "neo:fs missing from Neo.getBuiltInModulesList()");
+test("vael:fs exposes frozen module object and identical function references", async () => {
+    const list = Vael.getBuiltInModulesList();
+    assert.ok(list.includes("vael:fs"), "vael:fs missing from Vael.getBuiltInModulesList()");
     assert.ok(!list.includes("fs"), "bare fs must not be listed");
 
-    const reg = Neo.getBuiltInModule("neo:fs");
+    const reg = Vael.getBuiltInModule("vael:fs");
     assert.ok(reg !== undefined && typeof reg === "object");
-    assert.strictEquals(Neo.getBuiltInModule("neo:fs"), reg);
-    assert.strictEquals(Neo.getBuiltInModule("fs"), undefined);
+    assert.strictEquals(Vael.getBuiltInModule("vael:fs"), reg);
+    assert.strictEquals(Vael.getBuiltInModule("fs"), undefined);
     assert.strictEquals(Object.isFrozen(reg), true);
     assert.strictEquals(Object.isExtensible(fsMod), false);
-    assert.ok(!("default" in fsMod), "neo:fs must not have a default export");
+    assert.ok(!("default" in fsMod), "vael:fs must not have a default export");
 
-    const dyn = await import("neo:fs");
+    const dyn = await import("vael:fs");
     assert.strictEquals(dyn, fsMod);
     assert.ok(fsMod !== reg, "namespace must be distinct from registry");
 
@@ -150,45 +150,45 @@ test("readFile, readTextFile, writeFile, writeTextFile, and maxBytes", () => {
 
         // maxBytes boundary
         assert.equals(Array.from(readFile(binPath, { maxBytes: 5 })), [0, 1, 2, 127, 255]);
-        assertFsError(() => readFile(binPath, { maxBytes: 4 }), "NEO_FS_TOO_LARGE");
+        assertFsError(() => readFile(binPath, { maxBytes: 4 }), "VAEL_FS_TOO_LARGE");
 
         const emptyPath = joinPath(dir, "empty.bin");
         writeFile(emptyPath, new Uint8Array(0));
         assert.equals(Array.from(readFile(emptyPath, { maxBytes: 0 })), []);
-        assertFsError(() => readFile(binPath, { maxBytes: 0 }), "NEO_FS_TOO_LARGE");
+        assertFsError(() => readFile(binPath, { maxBytes: 0 }), "VAEL_FS_TOO_LARGE");
 
         // writeTextFile / readTextFile
         const txtPath = joinPath(dir, "note.txt");
         assert.strictEquals(writeTextFile(txtPath, "hello "), undefined);
-        writeTextFile(txtPath, "neo:fs", { append: true });
-        assert.strictEquals(readTextFile(txtPath), "hello neo:fs");
-        assert.strictEquals(readTextFile(txtPath, { maxBytes: 12 }), "hello neo:fs");
-        assertFsError(() => readTextFile(txtPath, { maxBytes: 11 }), "NEO_FS_TOO_LARGE");
+        writeTextFile(txtPath, "vael:fs", { append: true });
+        assert.strictEquals(readTextFile(txtPath), "hello vael:fs");
+        assert.strictEquals(readTextFile(txtPath, { maxBytes: 13 }), "hello vael:fs");
+        assertFsError(() => readTextFile(txtPath, { maxBytes: 12 }), "VAEL_FS_TOO_LARGE");
 
         // create: false on missing vs existing
         const missingPath = joinPath(dir, "missing.txt");
-        assertFsError(() => writeTextFile(missingPath, "x", { create: false }), "NEO_FS_NOT_FOUND");
+        assertFsError(() => writeTextFile(missingPath, "x", { create: false }), "VAEL_FS_NOT_FOUND");
         writeTextFile(txtPath, "replaced", { create: false });
         assert.strictEquals(readTextFile(txtPath), "replaced");
 
         // createNew: true fails if exists
-        assertFsError(() => writeFile(txtPath, bytes, { createNew: true }), "NEO_FS_ALREADY_EXISTS");
-        assertFsError(() => writeTextFile(txtPath, "x", { createNew: true }), "NEO_FS_ALREADY_EXISTS");
+        assertFsError(() => writeFile(txtPath, bytes, { createNew: true }), "VAEL_FS_ALREADY_EXISTS");
+        assertFsError(() => writeTextFile(txtPath, "x", { createNew: true }), "VAEL_FS_ALREADY_EXISTS");
 
         // createNew + append is invalid argument
         assertFsError(
             () => writeFile(missingPath, bytes, { createNew: true, append: true }),
-            "NEO_FS_INVALID_ARGUMENT",
+            "VAEL_FS_INVALID_ARGUMENT",
         );
         assertFsError(
             () => writeTextFile(missingPath, "x", { createNew: true, append: true }),
-            "NEO_FS_INVALID_ARGUMENT",
+            "VAEL_FS_INVALID_ARGUMENT",
         );
 
         // Invalid UTF-8 on readTextFile
         const badUtf8 = joinPath(dir, "bad.bin");
         writeFile(badUtf8, new Uint8Array([0xff, 0xfe, 0xfd]));
-        assertFsError(() => readTextFile(badUtf8), "NEO_FS_INVALID_UTF8");
+        assertFsError(() => readTextFile(badUtf8), "VAEL_FS_INVALID_UTF8");
     });
 });
 
@@ -201,7 +201,7 @@ test("writeFileAtomic handles Uint8Array, string, sync, and overwrite", () => {
         // overwrite: false fails without clobbering
         assertFsError(
             () => writeFileAtomic(cfg, '{"v":2}', { overwrite: false, sync: false }),
-            "NEO_FS_ALREADY_EXISTS",
+            "VAEL_FS_ALREADY_EXISTS",
         );
         assert.strictEquals(readTextFile(cfg), '{"v":1}');
 
@@ -214,9 +214,9 @@ test("writeFileAtomic handles Uint8Array, string, sync, and overwrite", () => {
         writeFileAtomic(fresh, new Uint8Array([9, 8]), { overwrite: false });
         assert.equals(Array.from(readFile(fresh)), [9, 8]);
 
-        // Trailing separator or dot rejected with NEO_FS_INVALID_PATH
-        assertFsError(() => writeFileAtomic(`${dir}/`, "x"), "NEO_FS_INVALID_PATH");
-        assertFsError(() => writeFileAtomic(".", "x"), "NEO_FS_INVALID_PATH");
+        // Trailing separator or dot rejected with VAEL_FS_INVALID_PATH
+        assertFsError(() => writeFileAtomic(`${dir}/`, "x"), "VAEL_FS_INVALID_PATH");
+        assertFsError(() => writeFileAtomic(".", "x"), "VAEL_FS_INVALID_PATH");
     });
 });
 
@@ -224,12 +224,12 @@ test("exists, stat, lstat, readDir, mkdir, remove, rename, copyFile, realpath", 
     withTempDir((dir) => {
         const sub = joinPath(dir, "nested/a/b");
         assert.strictEquals(exists(sub), false);
-        assertFsError(() => mkdir(sub), "NEO_FS_NOT_FOUND");
+        assertFsError(() => mkdir(sub), "VAEL_FS_NOT_FOUND");
         assert.strictEquals(mkdir(sub, { recursive: true }), undefined);
         assert.strictEquals(exists(sub), true);
         // mkdir recursive succeeds if already exists; non-recursive fails
         mkdir(sub, { recursive: true });
-        assertFsError(() => mkdir(sub, { recursive: false }), "NEO_FS_ALREADY_EXISTS");
+        assertFsError(() => mkdir(sub, { recursive: false }), "VAEL_FS_ALREADY_EXISTS");
 
         // stat / lstat on dir and file
         const dStat = stat(sub);
@@ -276,14 +276,14 @@ test("exists, stat, lstat, readDir, mkdir, remove, rename, copyFile, realpath", 
         assert.strictEquals(entries[2].isFile, true);
 
         // readDir on non-directory
-        assertFsError(() => readDir(fileA), "NEO_FS_NOT_ADirectory".replace("ADirectory", "A_DIRECTORY"));
+        assertFsError(() => readDir(fileA), "VAEL_FS_NOT_ADirectory".replace("ADirectory", "A_DIRECTORY"));
 
         // copyFile default overwrite: false vs overwrite: true vs self-copy
         const copied = joinPath(sub, "copy.txt");
         assert.strictEquals(copyFile(fileA, copied), undefined);
         assert.strictEquals(readTextFile(copied), "12345");
-        assertFsError(() => copyFile(fileB, copied), "NEO_FS_ALREADY_EXISTS");
-        assertFsError(() => copyFile(fileB, copied, { overwrite: false }), "NEO_FS_ALREADY_EXISTS");
+        assertFsError(() => copyFile(fileB, copied), "VAEL_FS_ALREADY_EXISTS");
+        assertFsError(() => copyFile(fileB, copied, { overwrite: false }), "VAEL_FS_ALREADY_EXISTS");
         assert.strictEquals(readTextFile(copied), "12345");
 
         copyFile(fileB, copied, { overwrite: true });
@@ -292,7 +292,7 @@ test("exists, stat, lstat, readDir, mkdir, remove, rename, copyFile, realpath", 
         // Self-copy with overwrite: true is a safe no-op
         copyFile(copied, copied, { overwrite: true });
         assert.strictEquals(readTextFile(copied), "12");
-        assertFsError(() => copyFile(childDir, joinPath(sub, "bad")), "NEO_FS_IS_A_DIRECTORY");
+        assertFsError(() => copyFile(childDir, joinPath(sub, "bad")), "VAEL_FS_IS_A_DIRECTORY");
 
         // rename
         const renamed = joinPath(sub, "renamed.txt");
@@ -303,15 +303,15 @@ test("exists, stat, lstat, readDir, mkdir, remove, rename, copyFile, realpath", 
         // realpath
         const viaDot = joinPath(sub, "./renamed.txt");
         assert.strictEquals(realpath(viaDot), realpath(renamed));
-        assertFsError(() => realpath(joinPath(sub, "nope")), "NEO_FS_NOT_FOUND");
+        assertFsError(() => realpath(joinPath(sub, "nope")), "VAEL_FS_NOT_FOUND");
 
         // remove non-empty fails without recursive, succeeds with recursive
         const nestedRoot = joinPath(dir, "nested");
-        assertFsError(() => remove(nestedRoot), "NEO_FS_DIRECTORY_NOT_EMPTY");
-        assertFsError(() => remove(nestedRoot, { recursive: false }), "NEO_FS_DIRECTORY_NOT_EMPTY");
+        assertFsError(() => remove(nestedRoot), "VAEL_FS_DIRECTORY_NOT_EMPTY");
+        assertFsError(() => remove(nestedRoot, { recursive: false }), "VAEL_FS_DIRECTORY_NOT_EMPTY");
         assert.strictEquals(remove(nestedRoot, { recursive: true }), undefined);
         assert.strictEquals(exists(nestedRoot), false);
-        assertFsError(() => remove(nestedRoot), "NEO_FS_NOT_FOUND");
+        assertFsError(() => remove(nestedRoot), "VAEL_FS_NOT_FOUND");
     });
 });
 
@@ -429,9 +429,9 @@ test("argument count, type validation, options validation, and detached Uint8Arr
         }
 
         // Invalid path strings
-        assertFsError(() => exists(""), "NEO_FS_INVALID_PATH");
-        assertFsError(() => exists("bad\0path"), "NEO_FS_INVALID_PATH");
-        assertFsError(() => exists("lone\ud800surrogate"), "NEO_FS_INVALID_PATH");
+        assertFsError(() => exists(""), "VAEL_FS_INVALID_PATH");
+        assertFsError(() => exists("bad\0path"), "VAEL_FS_INVALID_PATH");
+        assertFsError(() => exists("lone\ud800surrogate"), "VAEL_FS_INVALID_PATH");
 
         // Detached Uint8Array buffer
         const ab = new ArrayBuffer(4);
@@ -548,8 +548,8 @@ test("hostile prototypes cannot hijack errors, options, or frozen return values"
                 throw new Error("hijacked freeze");
             };
 
-            const err = assertFsError(() => stat(joinPath(dir, "missing")), "NEO_FS_NOT_FOUND");
-            assert.strictEquals(Object.getOwnPropertyDescriptor(err, "code").value, "NEO_FS_NOT_FOUND");
+            const err = assertFsError(() => stat(joinPath(dir, "missing")), "VAEL_FS_NOT_FOUND");
+            assert.strictEquals(Object.getOwnPropertyDescriptor(err, "code").value, "VAEL_FS_NOT_FOUND");
 
             const info = stat(file);
             assert.strictEquals(info.isFile, true);
@@ -563,7 +563,7 @@ test("hostile prototypes cannot hijack errors, options, or frozen return values"
             // Inherited Object.prototype.recursive must be ignored
             const sub = joinPath(dir, "sub");
             mkdir(sub);
-            assertFsError(() => remove(dir), "NEO_FS_DIRECTORY_NOT_EMPTY");
+            assertFsError(() => remove(dir), "VAEL_FS_DIRECTORY_NOT_EMPTY");
 
             assert.strictEquals(traps, 0, "hostile prototype traps must not fire");
         } finally {

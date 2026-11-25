@@ -65,10 +65,10 @@ fixture() {
       schema: 3,
       status: "ok",
       artifact: {
-        package: "neojs",
-        bin: "neojs",
+        package: "vaeljs",
+        bin: "vjs",
         kind: "release-binary",
-        path: "neojs"
+        path: "vjs"
       },
       source: {
         git_commit: "c68cab512999683fbc14bca557a6647a307f55ac",
@@ -105,7 +105,7 @@ fixture() {
         effective_linker: {status: "not-captured"},
         offline: true,
         locked: true,
-        command: "cargo +1.100.0 build --release --locked --offline --target x86_64-unknown-linux-gnu -p neojs",
+        command: "cargo +1.100.0 build --release --locked --offline --target x86_64-unknown-linux-gnu -p vaeljs",
         cargo_lock_sha256: ("a" * 64),
         workspace_path_sha256: ("b" * 64),
         cargo_config: {status: "captured", files: [{scope: "workspace", sha256: ("f" * 64)}]},
@@ -205,7 +205,7 @@ expect_validation_failure "zero bytes rejected" "$TMP/zero.jsonl"
 printf '%s\n' "$(rewrite_with_ids '.measurement.sha256 = "not-a-sha"' "$VALID")" >"$TMP/bad-sha.jsonl"
 expect_validation_failure "malformed sha256 rejected" "$TMP/bad-sha.jsonl"
 
-printf '%s\n' "$(rewrite_with_ids '.artifact.path = "/tmp/neojs"' "$VALID")" >"$TMP/abs-path.jsonl"
+printf '%s\n' "$(rewrite_with_ids '.artifact.path = "/tmp/vjs"' "$VALID")" >"$TMP/abs-path.jsonl"
 expect_validation_failure "absolute artifact path rejected" "$TMP/abs-path.jsonl"
 
 printf '%s\n' "$(rewrite_with_ids '.build.features = []' "$VALID")" >"$TMP/legacy-features.jsonl"
@@ -239,7 +239,7 @@ fi
 printf '%s\n' "$(rewrite_with_ids '.build.v8_archive.authenticated = true' "$V8")" >"$TMP/v8-auth.jsonl"
 expect_validation_failure "authenticated V8 archive claim rejected" "$TMP/v8-auth.jsonl"
 
-printf '%s\n' "$(rewrite_with_ids '.build.command = "/home/dev/neojs/target/release/neojs"' "$VALID")" >"$TMP/machine-command.jsonl"
+printf '%s\n' "$(rewrite_with_ids '.build.command = "/home/dev/vaeljs/target/release/vjs"' "$VALID")" >"$TMP/machine-command.jsonl"
 expect_validation_failure "machine path in command rejected" "$TMP/machine-command.jsonl"
 
 printf '%s\n' "$(rewrite_with_ids '.build.target_dir.lock = "promised"' "$VALID")" >"$TMP/bad-target-lock.jsonl"
@@ -332,7 +332,7 @@ expect_status 0 "trend labels capture-status changes" \
     bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/capture-trend.jsonl" --trend
 assert_contains "$TMP/stdout" "cargo-config-capture" "trend distinguishes unknown-to-captured config"
 assert_contains "$TMP/stdout" "state-capture" "trend distinguishes unknown-to-captured source state"
-assert_contains "$TMP/stdout" "neojs" "trend includes the package"
+assert_contains "$TMP/stdout" "vaeljs" "trend includes the package"
 assert_contains "$TMP/stdout" "x86_64-unknown-linux-gnu" "trend includes the target"
 
 INCOMPLETE2=$(rewrite_with_ids '
@@ -536,9 +536,9 @@ else
 fi
 
 SECOND=$(jq -c '
-  .artifact.package = "neojs-lite"
-  | .artifact.bin = "neojs-lite"
-  | .artifact.path = "neojs-lite"
+  .artifact.package = "vaeljs-lite"
+  | .artifact.bin = "vjs-lite"
+  | .artifact.path = "vjs-lite"
 ' <<<"$VALID" | finalize)
 size_append_record "$TMP/append.jsonl" "$SECOND" >/dev/null 2>&1
 if [ "$(wc -l <"$TMP/append.jsonl" | tr -d '[:space:]')" -eq 2 ]; then
@@ -610,22 +610,22 @@ fi
 # A relative --target-dir is relative to the caller, then normalized.
 # shellcheck disable=SC2016 # the $1/$2/$3 are arguments to the inner bash
 expect_status 0 "relative target-dir is normalized" \
-    bash -c 'cd "$1" && exec bash "$2" --dry-run --package neojs --target-dir relbuild --ledger "$3"' \
+    bash -c 'cd "$1" && exec bash "$2" --dry-run --package vaeljs --target-dir relbuild --ledger "$3"' \
     _ "$TMP" "$SCRIPT_DIR/measure.sh" "$TMP/dry.jsonl"
 assert_contains "$TMP/stdout" "$TMP/relbuild/" "relative target-dir resolved against the caller"
 
 expect_status 1 "RUSTFLAGS is refused" \
-    env RUSTFLAGS=-Copt-level=0 bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs-lite
+    env RUSTFLAGS=-Copt-level=0 bash "$SCRIPT_DIR/measure.sh" --dry-run --package vaeljs-lite
 assert_contains "$TMP/stderr" "RUSTFLAGS" "RUSTFLAGS refusal names the variable"
 expect_status 0 "RUSTFLAGS is recorded when explicitly allowed" \
-    env RUSTFLAGS=-Copt-level=0 bash "$SCRIPT_DIR/measure.sh" --dry-run --allow-env-overrides --package neojs-lite
+    env RUSTFLAGS=-Copt-level=0 bash "$SCRIPT_DIR/measure.sh" --dry-run --allow-env-overrides --package vaeljs-lite
 expect_status 1 "target-specific env is refused" \
     env CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Copt-level=0 \
-    bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs-lite
+    bash "$SCRIPT_DIR/measure.sh" --dry-run --package vaeljs-lite
 assert_contains "$TMP/stderr" "CARGO_TARGET_" "target-specific refusal names the variable"
 expect_status 0 "target-specific env is recorded when explicitly allowed" \
     env CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Copt-level=0 \
-    bash "$SCRIPT_DIR/measure.sh" --dry-run --allow-env-overrides --package neojs-lite
+    bash "$SCRIPT_DIR/measure.sh" --dry-run --allow-env-overrides --package vaeljs-lite
 
 DRIFT_LEDGER="$TMP/drift-append.jsonl"
 size_append_record "$DRIFT_LEDGER" "$VALID" >/dev/null 2>&1
@@ -638,7 +638,7 @@ fi
 assert_contains "$TMP/drift.log" "same series" "different digest is warned about"
 
 expect_status 0 "dry run succeeds" \
-    bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs --ledger "$TMP/dry.jsonl"
+    bash "$SCRIPT_DIR/measure.sh" --dry-run --package vaeljs --ledger "$TMP/dry.jsonl"
 assert_contains "$TMP/stdout" "--release" "dry run prints the release command"
 assert_contains "$TMP/stdout" "dry run complete" "dry run reports completion"
 if grep -Fq -- "--manifest-path" "$TMP/stdout"; then
@@ -648,7 +648,7 @@ else
 fi
 
 expect_status 0 "dry run honours an explicit target directory" \
-    bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs --target-dir "$TMP/size-build" \
+    bash "$SCRIPT_DIR/measure.sh" --dry-run --package vaeljs --target-dir "$TMP/size-build" \
     --ledger "$TMP/dry.jsonl"
 assert_contains "$TMP/stdout" "$TMP/size-build/" "dry run artifact path uses the dedicated target directory"
 if [ ! -e "$TMP/dry.jsonl" ]; then
@@ -658,16 +658,16 @@ else
 fi
 
 printf 'fake-v8\n' | gzip -c >"$TMP/fake-v8.a.gz"
-expect_status 0 "dry run attributes the V8 archive to neojs" \
+expect_status 0 "dry run attributes the V8 archive to vaeljs" \
     env RUSTY_V8_ARCHIVE="$TMP/fake-v8.a.gz" \
-    bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs --ledger "$TMP/dry.jsonl"
-assert_contains "$TMP/stdout" "v8 archive input: {" "neojs records the V8 archive"
-assert_contains "$TMP/stdout" '"archive_sha256"' "neojs records the wrapper hash for provenance"
+    bash "$SCRIPT_DIR/measure.sh" --dry-run --package vaeljs --ledger "$TMP/dry.jsonl"
+assert_contains "$TMP/stdout" "v8 archive input: {" "vaeljs records the V8 archive"
+assert_contains "$TMP/stdout" '"archive_sha256"' "vaeljs records the wrapper hash for provenance"
 
-expect_status 0 "dry run omits the V8 archive for neojs-lite" \
+expect_status 0 "dry run omits the V8 archive for vaeljs-lite" \
     env RUSTY_V8_ARCHIVE="$TMP/fake-v8.a.gz" \
-    bash "$SCRIPT_DIR/measure.sh" --dry-run --package neojs-lite --ledger "$TMP/dry.jsonl"
-assert_contains "$TMP/stdout" "v8 archive input: null" "neojs-lite does not record an unused V8 archive"
+    bash "$SCRIPT_DIR/measure.sh" --dry-run --package vaeljs-lite --ledger "$TMP/dry.jsonl"
+assert_contains "$TMP/stdout" "v8 archive input: null" "vaeljs-lite does not record an unused V8 archive"
 
 expect_status 3 "missing package exits 3" \
     bash "$SCRIPT_DIR/measure.sh" --dry-run --package not-a-package --ledger "$TMP/missing-dry.jsonl"
@@ -676,40 +676,40 @@ assert_contains "$TMP/stderr" "package-not-in-workspace" "missing package names 
 expect_status 0 "allow-missing accepts a missing package" \
     bash "$SCRIPT_DIR/measure.sh" --dry-run --allow-missing --package not-a-package --ledger "$TMP/missing-dry.jsonl"
 
-# A real workspace with no neojs-lite member exercises the branch that a branch
+# A real workspace with no vaeljs-lite member exercises the branch that a branch
 # without Lite would take, without touching this checkout.
 FAKE="$TMP/fakeroot"
-mkdir -p "$FAKE/eng" "$FAKE/neojs/src"
+mkdir -p "$FAKE/eng" "$FAKE/vaeljs/src"
 cp -a "$SCRIPT_DIR" "$FAKE/eng/size"
 cat >"$FAKE/Cargo.toml" <<'TOML'
 [workspace]
 resolver = "3"
-members = ["neojs"]
+members = ["vaeljs"]
 TOML
-cat >"$FAKE/neojs/Cargo.toml" <<'TOML'
+cat >"$FAKE/vaeljs/Cargo.toml" <<'TOML'
 [package]
-name = "neojs"
+name = "vaeljs"
 version = "0.1.0"
 edition = "2024"
 TOML
-printf 'fn main() {}\n' >"$FAKE/neojs/src/main.rs"
+printf 'fn main() {}\n' >"$FAKE/vaeljs/src/main.rs"
 cargo generate-lockfile --manifest-path "$FAKE/Cargo.toml" --offline >/dev/null 2>&1
 expect_status 3 "fixture workspace without Lite exits 3" \
-    bash "$FAKE/eng/size/measure.sh" --dry-run --package neojs --package neojs-lite \
+    bash "$FAKE/eng/size/measure.sh" --dry-run --package vaeljs --package vaeljs-lite \
     --ledger "$TMP/fake-missing.jsonl"
-assert_contains "$TMP/stderr" "neojs-lite" "fixture missing report names neojs-lite"
+assert_contains "$TMP/stderr" "vaeljs-lite" "fixture missing report names vaeljs-lite"
 assert_contains "$TMP/stderr" "package-not-in-workspace" "fixture missing report names the reason"
-assert_contains "$TMP/stdout" "dry run: neojs" "fixture still measures the present package"
+assert_contains "$TMP/stdout" "dry run: vaeljs" "fixture still measures the present package"
 
 DIRTYROOT="$TMP/dirtyroot"
-make_workspace "$DIRTYROOT" neojs
-printf '// dirty\n' >>"$DIRTYROOT/neojs/src/main.rs"
+make_workspace "$DIRTYROOT" vaeljs
+printf '// dirty\n' >>"$DIRTYROOT/vaeljs/src/main.rs"
 expect_status 1 "dirty canonical measurement is refused" \
-    bash "$DIRTYROOT/eng/size/measure.sh" --no-record --package neojs \
+    bash "$DIRTYROOT/eng/size/measure.sh" --no-record --package vaeljs \
     --target-dir "$TMP/dirty-build" --ledger "$TMP/dirty-ledger.jsonl"
 assert_contains "$TMP/stderr" "source tree is dirty" "dirty refusal explains the state"
 expect_status 0 "dirty measurement is recorded with --allow-dirty" \
-    bash "$DIRTYROOT/eng/size/measure.sh" --no-record --allow-dirty --package neojs \
+    bash "$DIRTYROOT/eng/size/measure.sh" --no-record --allow-dirty --package vaeljs \
     --target-dir "$TMP/dirty-build" --ledger "$TMP/dirty-ledger.jsonl"
 if jq -e '.source.git_dirty == true and .source.git_canonical == false and .source.state_status == "captured"' \
     "$TMP/stdout" >/dev/null 2>&1; then
@@ -719,8 +719,8 @@ else
 fi
 
 CHANGEROOT="$TMP/changeroot"
-make_workspace "$CHANGEROOT" neojs
-cat >"$CHANGEROOT/neojs/build.rs" <<'RS'
+make_workspace "$CHANGEROOT" vaeljs
+cat >"$CHANGEROOT/vaeljs/build.rs" <<'RS'
 fn main() {
     std::fs::write(
         concat!(env!("CARGO_MANIFEST_DIR"), "/../generated.txt"),
@@ -729,16 +729,16 @@ fn main() {
     .unwrap();
 }
 RS
-git -C "$CHANGEROOT" add neojs/build.rs
+git -C "$CHANGEROOT" add vaeljs/build.rs
 git -C "$CHANGEROOT" -c user.name=Test -c user.email=test@example.com commit -q -m build-script
 expect_status 1 "source state change during build is refused" \
-    bash "$CHANGEROOT/eng/size/measure.sh" --no-record --package neojs \
+    bash "$CHANGEROOT/eng/size/measure.sh" --no-record --package vaeljs \
     --target-dir "$TMP/change-build" --ledger "$TMP/change-ledger.jsonl"
 assert_contains "$TMP/stderr" "changed while building" "state-change refusal explains the reason"
 
 RACEROOT="$TMP/raceroot"
-make_workspace "$RACEROOT" neojs
-cat >"$RACEROOT/neojs/build.rs" <<'RS'
+make_workspace "$RACEROOT" vaeljs
+cat >"$RACEROOT/vaeljs/build.rs" <<'RS'
 use std::process::Command;
 
 fn main() {
@@ -755,23 +755,23 @@ fn main() {
     assert!(status.success());
 }
 RS
-git -C "$RACEROOT" add neojs/build.rs
+git -C "$RACEROOT" add vaeljs/build.rs
 git -C "$RACEROOT" -c user.name=Test -c user.email=test@example.com commit -q -m build-script
 git -C "$RACEROOT" -c user.name=Test -c user.email=test@example.com commit --allow-empty -q -m race
 expect_status 1 "checkout race during build is refused" \
-    bash "$RACEROOT/eng/size/measure.sh" --no-record --package neojs \
+    bash "$RACEROOT/eng/size/measure.sh" --no-record --package vaeljs \
     --target-dir "$TMP/race-build" --ledger "$TMP/race-ledger.jsonl"
 assert_contains "$TMP/stderr" "changed while building" "checkout race refusal explains the reason"
 
 CONFIGROOT="$TMP/configroot"
-make_workspace "$CONFIGROOT" neojs
+make_workspace "$CONFIGROOT" vaeljs
 mkdir -p "$CONFIGROOT/.cargo"
 printf '[build]\njobs = 1\n' >"$CONFIGROOT/.cargo/config.toml"
 git -C "$CONFIGROOT" add .cargo/config.toml
 git -C "$CONFIGROOT" -c user.name=Test -c user.email=test@example.com commit -q -m cargo-config
 CONFIG_SHA=$(sha256sum "$CONFIGROOT/.cargo/config.toml" | awk '{print $1}')
 expect_status 0 "workspace Cargo config is captured" \
-    bash "$CONFIGROOT/eng/size/measure.sh" --no-record --package neojs \
+    bash "$CONFIGROOT/eng/size/measure.sh" --no-record --package vaeljs \
     --target-dir "$TMP/config-build" --ledger "$TMP/config-ledger.jsonl"
 if jq -e --arg sha "$CONFIG_SHA" \
     'any(.build.cargo_config.files[]; .scope == "workspace" and .sha256 == $sha)' \
@@ -783,7 +783,7 @@ fi
 
 expect_status 0 "report renders a valid ledger" \
     bash "$SCRIPT_DIR/report.sh" --ledger "$TMP/valid.jsonl"
-assert_contains "$TMP/stdout" "neojs" "report includes the package"
+assert_contains "$TMP/stdout" "vaeljs" "report includes the package"
 assert_contains "$TMP/stdout" "12345678" "report includes the byte count"
 assert_contains "$TMP/stdout" "cooperative" "report shows the cooperative target lock"
 assert_contains "$TMP/stdout" "incomplete" "report shows incomplete controls"
