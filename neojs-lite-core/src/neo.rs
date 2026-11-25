@@ -59,7 +59,12 @@ pub(super) struct NeoState {
     /// Used by `neo:crypto`, `neo:fs`, and `neo:ssh` to read the live byte
     /// length of length-tracking resizable-`ArrayBuffer` `Uint8Array` views
     /// without consulting mutable prototype properties.
-    #[cfg(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh"))]
+    #[cfg(any(
+        feature = "neo-crypto",
+        feature = "neo-fs",
+        feature = "neo-ssh",
+        feature = "node-compat"
+    ))]
     pub(super) typed_array_byte_length: Option<Persistent<Function<'static>>>,
     /// The frozen public `neo:os` object, when the feature is selected.
     #[cfg(feature = "neo-os")]
@@ -167,7 +172,12 @@ pub(super) fn install<'js>(
     };
     #[cfg(feature = "neo-fs")]
     let fs: Option<Object<'js>> = Some(super::fs::object(ctx)?);
-    #[cfg(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh"))]
+    #[cfg(any(
+        feature = "neo-crypto",
+        feature = "neo-fs",
+        feature = "neo-ssh",
+        feature = "node-compat"
+    ))]
     let typed_array_byte_length: Persistent<Function<'static>> = {
         let uint8_ctor: Object<'js> = ctx.globals().get("Uint8Array")?;
         let uint8_proto: Object<'js> = uint8_ctor.get("prototype")?;
@@ -335,7 +345,12 @@ pub(super) fn install<'js>(
         shared_array_buffer_class_id,
         #[cfg(feature = "neo-fs")]
         fs: fs.map(|fs| Persistent::save(ctx, fs)),
-        #[cfg(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh"))]
+        #[cfg(any(
+            feature = "neo-crypto",
+            feature = "neo-fs",
+            feature = "neo-ssh",
+            feature = "node-compat"
+        ))]
         typed_array_byte_length: Some(typed_array_byte_length),
         #[cfg(feature = "neo-os")]
         os: os.map(|os| Persistent::save(ctx, os)),

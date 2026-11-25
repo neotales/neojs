@@ -115,10 +115,13 @@ mod fs;
     feature = "neo-crypto",
     feature = "neo-fs",
     feature = "neo-ssh",
-    feature = "neo-template"
+    feature = "neo-template",
+    feature = "node-compat"
 ))]
 mod native;
 mod neo;
+#[cfg(feature = "node-compat")]
+mod node_compat;
 #[cfg(feature = "neo-os")]
 mod os;
 #[cfg(any(feature = "neo-assert", feature = "neo-test"))]
@@ -134,7 +137,7 @@ mod uuid;
 
 #[cfg(feature = "manifest")]
 pub use neojs_manifest::ImportResolver;
-pub use runtime::{Error, Runtime, TestReport};
+pub use runtime::{Error, Runtime, RuntimeOptions, TestReport};
 
 /// Test-only hooks. Compiled only with the off-by-default `test-support`
 /// feature, which a normal build never enables.

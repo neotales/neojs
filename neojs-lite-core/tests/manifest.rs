@@ -197,12 +197,53 @@ fn resolves_manifest_targets_rejects_remote_and_preserves_builtins() {
         .run_file(&os_entry)
         .expect("neo:os succeeds");
 
-    // `node:fs` stays rejected.
-    let node_entry = write(dir.path(), "node.js", "import 'node:fs';\n");
-    let node_err = Runtime::with_import_resolver(resolver.clone())
+    // `node:fs` must use the built-in (never `./fake-fs.js`), while unsupported
+    // `node:fs/promises` and disabled `node-compat` stay rejected.
+    #[cfg(feature = "node-compat")]
+    {
+        let node_entry = write(
+            dir.path(),
+            "node.js",
+            "import { existsSync } from 'node:fs';\nif (typeof existsSync !== 'function') throw new Error('shadowed');\n",
+        );
+        Runtime::with_import_resolver(resolver.clone())
+            .expect("runtime")
+            .run_file(&node_entry)
+            .expect("node:fs succeeds and is not shadowed");
+
+        let node_disabled_err = Runtime::with_options(
+            neojs_lite_core::RuntimeOptions::new()
+                .with_import_resolver(resolver.clone())
+                .with_node_compat(false),
+        )
         .expect("runtime")
         .run_file(&node_entry)
-        .expect_err("node:fs must fail");
+        .expect_err("node:fs with node_compat disabled must fail");
+        assert!(
+            node_disabled_err.to_string().contains("node:"),
+            "{node_disabled_err}"
+        );
+    }
+
+    #[cfg(not(feature = "node-compat"))]
+    {
+        let node_entry = write(dir.path(), "node.js", "import 'node:fs';\n");
+        let node_err = Runtime::with_import_resolver(resolver.clone())
+            .expect("runtime")
+            .run_file(&node_entry)
+            .expect_err("node:fs without node-compat feature must fail");
+        assert!(node_err.to_string().contains("node:"), "{node_err}");
+    }
+
+    let unsupported_entry = write(
+        dir.path(),
+        "node_promises.js",
+        "import 'node:fs/promises';\n",
+    );
+    let node_err = Runtime::with_import_resolver(resolver.clone())
+        .expect("runtime")
+        .run_file(&unsupported_entry)
+        .expect_err("node:fs/promises must fail on lite");
     assert!(node_err.to_string().contains("node:"), "{node_err}");
 
     // Remote `https:`, `gh:`, `jsr:`, `npm:` targets fail with clear error stating remote loading is not supported.

@@ -49,8 +49,9 @@ fn main() -> ExitCode {
             allow_remote,
             config,
             npm,
+            node_compat,
         } => match resolve_allow_remote(allow_remote) {
-            Ok(allow_remote) => run(input, allow_remote, &config, npm),
+            Ok(allow_remote) => run(input, allow_remote, &config, npm, node_compat),
             Err(message) => startup_failure(&message),
         },
         Command::Test {
@@ -58,8 +59,9 @@ fn main() -> ExitCode {
             allow_remote,
             config,
             npm,
+            node_compat,
         } => match resolve_allow_remote(allow_remote) {
-            Ok(allow_remote) => run_tests(&patterns, allow_remote, &config, npm),
+            Ok(allow_remote) => run_tests(&patterns, allow_remote, &config, npm, node_compat),
             Err(message) => startup_failure(&message),
         },
         Command::Types { profile, out_dir } => run_types(profile, out_dir.as_deref()),
@@ -100,12 +102,14 @@ enum Command {
         allow_remote: AllowRemote,
         config: ConfigChoice,
         npm: NpmFlags,
+        node_compat: bool,
     },
     Test {
         patterns: Vec<String>,
         allow_remote: AllowRemote,
         config: ConfigChoice,
         npm: NpmFlags,
+        node_compat: bool,
     },
     Types {
         profile: Profile,
@@ -227,6 +231,7 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
     let mut config = ConfigChoice::Auto;
     #[cfg_attr(not(feature = "npm"), allow(unused_mut))]
     let mut npm = NpmFlags::default();
+    let mut node_compat = true;
     let mut index = 0;
     while let Some(argument) = args.get(index) {
         match argument.to_str() {
@@ -266,6 +271,10 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
                     npm.offline = true;
                     index += 1;
                 }
+            }
+            Some("--no-node-compat") => {
+                node_compat = false;
+                index += 1;
             }
             Some("--no-config") => {
                 config.set_disabled()?;
@@ -310,13 +319,17 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
                     allow_remote,
                     config,
                     npm,
+                    node_compat,
                 });
             }
-            "test" => return parse_test_args(&rest[1..], allow_remote, config, npm),
+            "test" => return parse_test_args(&rest[1..], allow_remote, config, npm, node_compat),
             "types" => {
-                if allow_remote != AllowRemote::Unspecified || config != ConfigChoice::Auto {
+                if allow_remote != AllowRemote::Unspecified
+                    || config != ConfigChoice::Auto
+                    || !node_compat
+                {
                     return Err(
-                        "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--config`, or `--no-config`"
+                        "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--no-node-compat`, `--config`, or `--no-config`"
                             .to_string(),
                     );
                 }
@@ -343,22 +356,25 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
         allow_remote,
         config,
         npm,
+        node_compat,
     })
 }
 
 /// Parses `neojs test <file-or-glob>...`.
 ///
 /// Every argument is a pattern. `--allow-remote`, `--no-allow-remote`,
-/// `--no-npm`, `--frozen-lockfile`, `--offline`, `--config <path>`, and
-/// `--no-config` may appear before or after `test` and apply to each selected
-/// file's fresh runtime. `--` ends option parsing so a pattern beginning with
-/// `-`, including one named `--allow-remote`, can still be named. The command
-/// requires at least one pattern; discovery defaults are deliberately absent.
+/// `--no-npm`, `--frozen-lockfile`, `--offline`, `--no-node-compat`,
+/// `--config <path>`, and `--no-config` may appear before or after `test` and
+/// apply to each selected file's fresh runtime. `--` ends option parsing so a
+/// pattern beginning with `-`, including one named `--allow-remote`, can still
+/// be named. The command requires at least one pattern; discovery defaults are
+/// deliberately absent.
 fn parse_test_args(
     args: &[OsString],
     mut allow_remote: AllowRemote,
     mut config: ConfigChoice,
     #[cfg_attr(not(feature = "npm"), allow(unused_mut))] mut npm: NpmFlags,
+    mut node_compat: bool,
 ) -> Result<Command, String> {
     if args.len() == 1 && matches!(args[0].to_str(), Some("-h" | "--help")) {
         return Ok(Command::Help);
@@ -417,6 +433,11 @@ fn parse_test_args(
                 continue;
             }
         }
+        if !after_double_dash && value == "--no-node-compat" {
+            node_compat = false;
+            index += 1;
+            continue;
+        }
         if !after_double_dash && value == "--no-config" {
             config.set_disabled()?;
             index += 1;
@@ -455,6 +476,7 @@ fn parse_test_args(
         allow_remote,
         config,
         npm,
+        node_compat,
     })
 }
 
@@ -712,7 +734,13 @@ fn discover_resolver_for_entry(entry_path: &Path) -> Result<Option<ImportResolve
     Ok(Some(ImportResolver::from_manifest(&discovered)))
 }
 
-fn run(input: Input, allow_remote: bool, config: &ConfigChoice, npm: NpmFlags) -> ExitCode {
+fn run(
+    input: Input,
+    allow_remote: bool,
+    config: &ConfigChoice,
+    npm: NpmFlags,
+    node_compat: bool,
+) -> ExitCode {
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
         Err(message) => {
@@ -734,7 +762,7 @@ fn run(input: Input, allow_remote: bool, config: &ConfigChoice, npm: NpmFlags) -
         }
     };
 
-    let mut runtime = match create_runtime(allow_remote, resolver, npm) {
+    let mut runtime = match create_runtime(allow_remote, resolver, npm, node_compat) {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("neojs: {error}");
@@ -747,7 +775,10 @@ fn run(input: Input, allow_remote: bool, config: &ConfigChoice, npm: NpmFlags) -
         Input::Url(url) => runtime.run_url(url),
     };
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => match runtime.exit_code() {
+            Some(code) => ExitCode::from((code & 0xff) as u8),
+            None => ExitCode::SUCCESS,
+        },
         Err(error) => {
             eprintln!("neojs: {error}");
             ExitCode::from(exit_code(&error))
@@ -756,7 +787,8 @@ fn run(input: Input, allow_remote: bool, config: &ConfigChoice, npm: NpmFlags) -
 }
 
 /// Creates a runtime, with remote and JSR loading only when explicitly enabled,
-/// an optional `neo.jsonc` [`ImportResolver`], and npm policy flags.
+/// an optional `neo.jsonc` [`ImportResolver`], npm policy flags, and optional
+/// `node:*` compat.
 ///
 /// Each call gets its own default [`RemoteOptions`], so a fresh runtime also
 /// gets a fresh remote request, module, and byte budget. The default package
@@ -766,8 +798,9 @@ fn create_runtime(
     allow_remote: bool,
     import_resolver: Option<ImportResolver>,
     npm: NpmFlags,
+    node_compat: bool,
 ) -> Result<Runtime, Error> {
-    let mut options = RuntimeOptions::new();
+    let mut options = RuntimeOptions::new().with_node_compat(node_compat);
     if allow_remote {
         options = options.with_remote(RemoteOptions::new());
     }
@@ -838,6 +871,7 @@ fn run_tests(
     allow_remote: bool,
     config: &ConfigChoice,
     npm: NpmFlags,
+    node_compat: bool,
 ) -> ExitCode {
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
@@ -875,7 +909,7 @@ fn run_tests(
     let mut failed_files = 0usize;
     for (file, resolver) in files.iter().zip(resolvers) {
         println!("test {}:", file.display());
-        let mut runtime = match create_runtime(allow_remote, resolver, npm) {
+        let mut runtime = match create_runtime(allow_remote, resolver, npm, node_compat) {
             Ok(runtime) => runtime,
             Err(error) => {
                 eprintln!("neojs: {error}");
@@ -884,6 +918,13 @@ fn run_tests(
         };
         if let Err(error) = runtime.run_file(file) {
             eprintln!("neojs: {}: {error}", file.display());
+            failed_files += 1;
+            continue;
+        }
+        if let Some(code) = runtime.exit_code()
+            && code != 0
+        {
+            eprintln!("neojs: {}: exited with code {code}", file.display());
             failed_files += 1;
             continue;
         }
@@ -1005,11 +1046,11 @@ specifiers, `package.json` dependencies/`#imports`, and `neo.lock` resolve
 without `node_modules` or install scripts via the verified CAS cache
 (offline by default; use `--allow-remote` to fetch missing packages,
 `--frozen-lockfile` to require `neo.lock`, `--offline` to forbid network, or
-`--no-npm` to disable). `node:` is not implemented. Local modules discover";
+`--no-npm` to disable). Local modules discover";
     #[cfg(not(feature = "npm"))]
     let npm_summary = "\
 user cache. JSR metadata and files use the same HTTPS limits and cache. npm:
-and node: are not implemented (npm support was disabled at compile time). Local modules discover";
+is not implemented (npm support was disabled at compile time). Local modules discover";
 
     format!(
         "\
@@ -1029,6 +1070,7 @@ Usage:
 
 Options:
 {npm_options}
+  --no-node-compat disable built-in `node:*` compatibility modules
   --config <path>  use an explicit neo.jsonc manifest instead of discovery
   --no-config      disable automatic neo.jsonc manifest discovery
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -1051,6 +1093,10 @@ including the uuid/v4 and uuid/v7 subpaths. Import one by its canonical `neo:`
 specifier, such as `neo:age` and `neo:test`; a bare name is not a built-in
 module. `Neo.getBuiltInModule` takes the same canonical specifier, such as
 `Neo.getBuiltInModule(\"neo:test\")`; the README lists every specifier.
+Supported `node:*` compatibility modules (`node:path`, `node:os`, `node:process`,
+`node:fs`, `node:fs/promises`, `node:child_process`, `node:buffer`, `node:url`,
+`node:crypto`) are available by canonical `node:` specifier unless
+`--no-node-compat` is passed.
 
 Remote loading is disabled by default. `--allow-remote` enables an https:,
 gh:, or github: entry, absolute https: imports, and
@@ -1067,7 +1113,7 @@ allowlist, and not a sandbox. Downloads are cached under `neojs/packages` in the
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
 runtime. There is no default discovery, and a file that registers no tests fails.
 Remote loading follows the flag or setting for every selected file.
-Node modules (`node:`) are rejected; there is no Node-module opt-in.
+Unsupported `node:` specifiers (such as `node:test`) are rejected.
 
 Exit codes:
   0  the module finished, or every test file passed
@@ -1109,6 +1155,7 @@ mod tests {
                 allow_remote: AllowRemote::Enabled,
                 config: ConfigChoice::Auto,
                 npm: NpmFlags::default(),
+                node_compat: true,
             })
         );
     }
@@ -1122,6 +1169,7 @@ mod tests {
                 allow_remote: AllowRemote::Enabled,
                 config: ConfigChoice::Auto,
                 npm: NpmFlags::default(),
+                node_compat: true,
             })
         );
     }
@@ -1139,6 +1187,7 @@ mod tests {
                     allow_remote: AllowRemote::Disabled,
                     config: ConfigChoice::Auto,
                     npm: NpmFlags::default(),
+                    node_compat: true,
                 })
             );
         }
@@ -1153,6 +1202,7 @@ mod tests {
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Auto,
                 npm: NpmFlags::default(),
+                node_compat: true,
             })
         );
     }
@@ -1169,6 +1219,7 @@ mod tests {
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Auto,
                 npm: NpmFlags::default(),
+                node_compat: true,
             })
         );
     }
@@ -1203,6 +1254,7 @@ mod tests {
                 allow_remote: AllowRemote::Disabled,
                 config: ConfigChoice::Auto,
                 npm: NpmFlags::default(),
+                node_compat: true,
             })
         );
     }
@@ -1226,6 +1278,7 @@ mod tests {
                     frozen_lockfile: true,
                     offline: true,
                 },
+                node_compat: true,
             })
         );
         assert_eq!(
@@ -1244,6 +1297,7 @@ mod tests {
                     frozen_lockfile: true,
                     offline: true,
                 },
+                node_compat: true,
             })
         );
         assert_eq!(
@@ -1275,6 +1329,42 @@ mod tests {
     }
 
     #[test]
+    fn no_node_compat_parses_for_run_and_both_test_positions() {
+        assert_eq!(
+            parse_args(args(&["--no-node-compat", "main.js"])),
+            Ok(Command::Run {
+                input: super::Input::Path("main.js".into()),
+                allow_remote: AllowRemote::Unspecified,
+                config: ConfigChoice::Auto,
+                npm: NpmFlags::default(),
+                node_compat: false,
+            })
+        );
+        for values in [
+            ["--no-node-compat", "test", "a.test.js"].as_slice(),
+            ["test", "--no-node-compat", "a.test.js"].as_slice(),
+        ] {
+            assert_eq!(
+                parse_args(args(values)),
+                Ok(Command::Test {
+                    patterns: vec!["a.test.js".to_string()],
+                    allow_remote: AllowRemote::Unspecified,
+                    config: ConfigChoice::Auto,
+                    npm: NpmFlags::default(),
+                    node_compat: false,
+                })
+            );
+        }
+        assert_eq!(
+            parse_args(args(&["--no-node-compat", "types"])),
+            Err(
+                "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--no-node-compat`, `--config`, or `--no-config`"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
     fn config_flags_parse_and_reject_conflicts() {
         assert_eq!(
             parse_args(args(&["--config", "custom.jsonc", "main.js"])),
@@ -1283,6 +1373,7 @@ mod tests {
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Explicit(PathBuf::from("custom.jsonc")),
                 npm: NpmFlags::default(),
+                node_compat: true,
             })
         );
         assert_eq!(
@@ -1292,6 +1383,7 @@ mod tests {
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Explicit(PathBuf::from("custom.jsonc")),
                 npm: NpmFlags::default(),
+                node_compat: true,
             })
         );
         assert_eq!(
@@ -1301,6 +1393,7 @@ mod tests {
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Disabled,
                 npm: NpmFlags::default(),
+                node_compat: true,
             })
         );
         assert_eq!(
@@ -1411,7 +1504,7 @@ mod tests {
         assert_eq!(
             parse_args(args(&["--allow-remote", "types"])),
             Err(
-                "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--config`, or `--no-config`"
+                "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--no-node-compat`, `--config`, or `--no-config`"
                     .to_string()
             )
         );

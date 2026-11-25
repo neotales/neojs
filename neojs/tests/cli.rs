@@ -1691,11 +1691,11 @@ specifiers, `package.json` dependencies/`#imports`, and `neo.lock` resolve
 without `node_modules` or install scripts via the verified CAS cache
 (offline by default; use `--allow-remote` to fetch missing packages,
 `--frozen-lockfile` to require `neo.lock`, `--offline` to forbid network, or
-`--no-npm` to disable). `node:` is not implemented. Local modules discover";
+`--no-npm` to disable). Local modules discover";
     #[cfg(not(feature = "npm"))]
     let npm_summary = "\
 user cache. JSR metadata and files use the same HTTPS limits and cache. npm:
-and node: are not implemented (npm support was disabled at compile time). Local modules discover";
+is not implemented (npm support was disabled at compile time). Local modules discover";
 
     format!(
         "\
@@ -1715,6 +1715,7 @@ Usage:
 
 Options:
 {npm_options}
+  --no-node-compat disable built-in `node:*` compatibility modules
   --config <path>  use an explicit neo.jsonc manifest instead of discovery
   --no-config      disable automatic neo.jsonc manifest discovery
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -1737,6 +1738,10 @@ including the uuid/v4 and uuid/v7 subpaths. Import one by its canonical `neo:`
 specifier, such as `neo:age` and `neo:test`; a bare name is not a built-in
 module. `Neo.getBuiltInModule` takes the same canonical specifier, such as
 `Neo.getBuiltInModule(\"neo:test\")`; the README lists every specifier.
+Supported `node:*` compatibility modules (`node:path`, `node:os`, `node:process`,
+`node:fs`, `node:fs/promises`, `node:child_process`, `node:buffer`, `node:url`,
+`node:crypto`) are available by canonical `node:` specifier unless
+`--no-node-compat` is passed.
 
 Remote loading is disabled by default. `--allow-remote` enables an https:,
 gh:, or github: entry, absolute https: imports, and
@@ -1753,7 +1758,7 @@ allowlist, and not a sandbox. Downloads are cached under `neojs/packages` in the
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
 runtime. There is no default discovery, and a file that registers no tests fails.
 Remote loading follows the flag or setting for every selected file.
-Node modules (`node:`) are rejected; there is no Node-module opt-in.
+Unsupported `node:` specifiers (such as `node:test`) are rejected.
 
 Exit codes:
   0  the module finished, or every test file passed
@@ -4743,4 +4748,77 @@ fn npm_cli_rejects_npm_when_compiled_without_npm_feature() {
             stderr(&flag_out)
         );
     }
+}
+
+#[test]
+#[cfg(feature = "node-compat")]
+fn no_node_compat_flag_disables_node_builtins_in_run_and_test() {
+    let project = Project::new();
+    let run_file = project.write(
+        "main.js",
+        "import path from \"node:path\";\nconsole.log(path.join(\"a\", \"b\"));\n",
+    );
+    let test_file = project.write(
+        "node.test.js",
+        "import test from \"neo:test\";\nimport path from \"node:path\";\ntest(\"ok\", () => { path.join(\"a\", \"b\"); });\n",
+    );
+
+    let ok = run_args(&[run_file.to_str().unwrap()]);
+    assert_eq!(ok.status.code(), Some(0), "{}", stderr(&ok));
+
+    let disabled_run = run_args(&["--no-node-compat", run_file.to_str().unwrap()]);
+    assert_eq!(disabled_run.status.code(), Some(1));
+    assert!(
+        stderr(&disabled_run).contains("Node.js built-in"),
+        "{}",
+        stderr(&disabled_run)
+    );
+
+    for test_args in [
+        ["--no-node-compat", "test", test_file.to_str().unwrap()].as_slice(),
+        ["test", "--no-node-compat", test_file.to_str().unwrap()].as_slice(),
+    ] {
+        let disabled_test = run_args(test_args);
+        assert_eq!(disabled_test.status.code(), Some(1));
+        assert!(
+            stderr(&disabled_test).contains("Node.js built-in"),
+            "{test_args:?}: {}",
+            stderr(&disabled_test)
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "node-compat")]
+fn node_process_exit_and_exit_code_propagate_through_cli() {
+    let project = Project::new();
+    let exit_file = project.write(
+        "exit_42.js",
+        "import process from \"node:process\";\nconsole.log(\"before\");\nprocess.exit(42);\nconsole.log(\"after\");\n",
+    );
+    let exit_out = run_args(&[exit_file.to_str().unwrap()]);
+    assert_eq!(exit_out.status.code(), Some(42), "{}", stderr(&exit_out));
+    assert_eq!(stdout(&exit_out), "before\n");
+
+    let code_file = project.write(
+        "exit_code_7.js",
+        "import process from \"node:process\";\nprocess.exitCode = 7;\nconsole.log(\"done\");\n",
+    );
+    let code_out = run_args(&[code_file.to_str().unwrap()]);
+    assert_eq!(code_out.status.code(), Some(7), "{}", stderr(&code_out));
+    assert_eq!(stdout(&code_out), "done\n");
+}
+
+#[test]
+#[cfg(not(feature = "node-compat"))]
+fn node_compat_disabled_at_compile_time_refuses_node_specifiers() {
+    let project = Project::new();
+    let file = project.write("main.js", "import \"node:path\";\n");
+    let output = run_args(&[file.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("Node.js built-in"),
+        "{}",
+        stderr(&output)
+    );
 }

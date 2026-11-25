@@ -15,6 +15,10 @@ use rquickjs::{
     Ctx, Exception, Function, Object, Result, String as JsString, Value, object::Property, qjs,
 };
 
+#[cfg_attr(
+    not(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh")),
+    allow(dead_code)
+)]
 struct PropertyEnumGuard {
     raw: *mut qjs::JSContext,
     tab: *mut qjs::JSPropertyEnum,
@@ -33,6 +37,10 @@ impl Drop for PropertyEnumGuard {
 
 /// Freezes `object` using QuickJS's native `JS_FreezeObject` without
 /// consulting `globalThis.Object.freeze`.
+#[cfg_attr(
+    not(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh")),
+    allow(dead_code)
+)]
 pub(super) fn freeze_native<'js>(ctx: &Ctx<'js>, object: &Object<'js>) -> Result<()> {
     let rc = unsafe { qjs::JS_FreezeObject(ctx.as_raw().as_ptr(), object.as_raw()) };
     if rc < 0 {
@@ -63,7 +71,8 @@ pub(super) fn get_prototype<'js>(ctx: &Ctx<'js>, val: qjs::JSValue) -> Result<Va
 ///
 /// Returns `Ok(None)` when the property is absent, or `Err(TypeError)` when
 /// the own property is an accessor.
-#[cfg(feature = "neo-crypto")]
+#[cfg(any(feature = "neo-crypto", feature = "node-compat"))]
+#[cfg_attr(not(feature = "neo-crypto"), allow(dead_code))]
 pub(super) fn own_data_property<'js>(
     ctx: &Ctx<'js>,
     object: qjs::JSValue,
@@ -80,7 +89,7 @@ pub(super) fn own_data_property<'js>(
 
 /// Reads an own array element data property at `index` without walking
 /// `Array.prototype` or invoking getters/proxy traps.
-#[cfg(feature = "neo-crypto")]
+#[cfg(any(feature = "neo-crypto", feature = "node-compat"))]
 pub(super) fn own_array_element<'js>(
     ctx: &Ctx<'js>,
     array: &Array<'js>,
@@ -95,7 +104,7 @@ pub(super) fn own_array_element<'js>(
     own_data_property_by_atom(ctx, array.as_raw(), atom, accessor_msg)
 }
 
-#[cfg(feature = "neo-crypto")]
+#[cfg(any(feature = "neo-crypto", feature = "node-compat"))]
 fn own_data_property_by_atom<'js>(
     ctx: &Ctx<'js>,
     object: qjs::JSValue,
@@ -197,7 +206,10 @@ pub(super) fn throw_coded_error(
 /// Validates a `Uint8Array` view (including resizable-`ArrayBuffer` views) and
 /// passes its live byte slice to `f` without executing JavaScript while the
 /// slice is alive.
-#[cfg(any(feature = "neo-fs", feature = "neo-ssh"))]
+#[cfg_attr(
+    not(any(feature = "neo-fs", feature = "neo-ssh", feature = "node-compat")),
+    allow(dead_code)
+)]
 pub(super) fn with_uint8_array_bytes<'js, T>(
     ctx: &Ctx<'js>,
     value: &Value<'js>,
@@ -302,6 +314,10 @@ pub(super) fn with_uint8_array_bytes_ex<'js, T>(
 /// Validates that `value` (when `Some` and not `undefined`) is a plain object
 /// with no proxies, symbols, non-enumerable properties, or accessors, and
 /// passes each own enumerable string property to `on_field`.
+#[cfg_attr(
+    not(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh")),
+    allow(dead_code)
+)]
 pub(super) fn parse_options<'js>(
     ctx: &Ctx<'js>,
     value: Option<&Value<'js>>,

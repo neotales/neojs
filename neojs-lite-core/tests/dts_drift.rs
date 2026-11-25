@@ -11,7 +11,8 @@
     feature = "neo-strings",
     feature = "neo-template",
     feature = "neo-test",
-    feature = "neo-uuid"
+    feature = "neo-uuid",
+    feature = "node-compat"
 ))]
 
 //! Live runtime CI drift test proving 1:1 parity between `neojs-dts` Lite
@@ -36,11 +37,19 @@ struct ObservedModule {
 }
 
 #[derive(Debug)]
+struct ObservedNodeModule {
+    specifier: String,
+    has_default: bool,
+    ns_keys: Vec<String>,
+}
+
+#[derive(Debug)]
 struct ObservedRuntime {
     engine: String,
     console_keys: Vec<String>,
     list: Vec<String>,
     modules: Vec<ObservedModule>,
+    node_modules: Vec<ObservedNodeModule>,
 }
 
 fn parse_csv(text: &str) -> Vec<String> {
@@ -56,6 +65,7 @@ fn parse_report(text: &str) -> ObservedRuntime {
     let mut console_keys = None;
     let mut list = None;
     let mut modules = Vec::new();
+    let mut node_modules = Vec::new();
 
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("ENGINE\t") {
@@ -79,6 +89,19 @@ fn parse_report(text: &str) -> ObservedRuntime {
                 reg_type: parts[3].to_string(),
                 reg_keys: parse_csv(parts[4]),
             });
+        } else if let Some(rest) = line.strip_prefix("NODE\t") {
+            let parts: Vec<&str> = rest.split('\t').collect();
+            assert_eq!(parts.len(), 3, "unexpected NODE line: {line:?}");
+            let has_default = match parts[1] {
+                "true" => true,
+                "false" => false,
+                other => panic!("unexpected has_default value: {other:?}"),
+            };
+            node_modules.push(ObservedNodeModule {
+                specifier: parts[0].to_string(),
+                has_default,
+                ns_keys: parse_csv(parts[2]),
+            });
         } else {
             panic!("unexpected report line: {line:?}");
         }
@@ -89,6 +112,7 @@ fn parse_report(text: &str) -> ObservedRuntime {
         console_keys: console_keys.expect("CONSOLE line"),
         list: list.expect("LIST line"),
         modules,
+        node_modules,
     }
 }
 
@@ -153,6 +177,28 @@ for (const specifier of list) {{
     );
 }}
 
+const nodeList = [
+    "node:buffer",
+    "node:child_process",
+    "node:crypto",
+    "node:fs",
+    "node:os",
+    "node:path",
+    "node:path/posix",
+    "node:path/win32",
+    "node:process",
+    "node:url",
+];
+for (const specifier of nodeList) {{
+    if (Neo.getBuiltInModule(specifier) !== undefined) {{
+        throw new Error(`Neo.getBuiltInModule(${{specifier}}) must return undefined`);
+    }}
+    const ns = await import(specifier);
+    const nsKeys = Object.keys(ns).sort();
+    const hasDefault = Object.prototype.hasOwnProperty.call(ns, "default");
+    lines.push(`NODE\t${{specifier}}\t${{hasDefault}}\t${{nsKeys.join(",")}}`);
+}}
+
 writeTextFile("{escaped_path}", lines.join("\n"));
 "#
     );
@@ -182,18 +228,29 @@ writeTextFile("{escaped_path}", lines.join("\n"));
         );
     }
 
-    // 2. Compare Neo.getBuiltInModulesList() against expected_exports and parse_declared_exports.
+    // 2. Compare Neo.getBuiltInModulesList() against neo:* expected_exports and parse_declared_exports.
     let expected = expected_exports(Profile::Lite);
     let bundle = render_bundle(Profile::Lite);
     let declared = parse_declared_exports(&bundle);
 
     let expected_specs: Vec<&str> = expected.iter().map(|m| m.specifier).collect();
+    let expected_neo: Vec<_> = expected
+        .iter()
+        .zip(declared.iter())
+        .filter(|(exp, _)| exp.specifier.starts_with("neo:"))
+        .collect();
+    let expected_node: Vec<_> = expected
+        .iter()
+        .zip(declared.iter())
+        .filter(|(exp, _)| exp.specifier.starts_with("node:"))
+        .collect();
+    let expected_neo_specs: Vec<&str> = expected_neo.iter().map(|(m, _)| m.specifier).collect();
     let declared_specs: Vec<&str> = declared.iter().map(|m| m.specifier.as_str()).collect();
     let observed_specs: Vec<&str> = observed.list.iter().map(String::as_str).collect();
 
     assert_eq!(
-        observed_specs, expected_specs,
-        "Neo.getBuiltInModulesList() drifted from neojs_dts::expected_exports(Profile::Lite)"
+        observed_specs, expected_neo_specs,
+        "Neo.getBuiltInModulesList() drifted from neojs_dts neo:* expected_exports(Profile::Lite)"
     );
     assert_eq!(
         declared_specs, expected_specs,
@@ -206,16 +263,15 @@ writeTextFile("{escaped_path}", lines.join("\n"));
             "Lite globals.d.ts NeoBuiltInModuleMap missing `{spec}`"
         );
     }
+    assert!(
+        !globals.contains("\"node:"),
+        "Lite globals.d.ts NeoBuiltInModuleMap must remain neo:*-only"
+    );
 
     // 3. Per-module 1:1 export parity across live ESM namespace, registry,
     //    expected_exports, bundle parse_declared_exports, and standalone module_dts.
-    assert_eq!(observed.modules.len(), expected.len());
-    for ((live, exp), decl) in observed
-        .modules
-        .iter()
-        .zip(expected.iter())
-        .zip(declared.iter())
-    {
+    assert_eq!(observed.modules.len(), expected_neo.len());
+    for (live, (exp, decl)) in observed.modules.iter().zip(expected_neo.iter()) {
         assert_eq!(live.specifier, exp.specifier);
         assert_eq!(decl.specifier, exp.specifier);
 
@@ -297,5 +353,34 @@ writeTextFile("{escaped_path}", lines.join("\n"));
                 live.specifier
             );
         }
+    }
+
+    assert_eq!(observed.node_modules.len(), expected_node.len());
+    for (live, (exp, decl)) in observed.node_modules.iter().zip(expected_node.iter()) {
+        assert_eq!(live.specifier, exp.specifier);
+        assert_eq!(decl.specifier, exp.specifier);
+        assert_eq!(live.has_default, exp.has_default, "{}", live.specifier);
+        assert_eq!(decl.has_default, exp.has_default, "{}", live.specifier);
+
+        let live_keys: Vec<&str> = live.ns_keys.iter().map(String::as_str).collect();
+        assert_eq!(
+            live_keys,
+            exp.runtime_keys(),
+            "{}: live node:* Object.keys(ns) drifted from neojs_dts::expected_exports(Profile::Lite)",
+            live.specifier
+        );
+        assert_eq!(
+            live_keys,
+            decl.runtime_keys(),
+            "{}: live node:* Object.keys(ns) drifted from neojs_dts::parse_declared_exports",
+            live.specifier
+        );
+
+        let standalone_src = module_dts(Profile::Lite, exp.specifier)
+            .unwrap_or_else(|| panic!("missing module_dts for {}", exp.specifier));
+        let standalone_parsed = parse_declared_exports(standalone_src);
+        assert_eq!(standalone_parsed.len(), 1);
+        assert_eq!(standalone_parsed[0].runtime_keys(), live_keys);
+        assert_eq!(standalone_parsed[0].has_default, live.has_default);
     }
 }

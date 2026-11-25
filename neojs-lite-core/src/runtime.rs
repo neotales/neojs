@@ -445,10 +445,62 @@ fn install_test_gc(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
 /// One runtime evaluates one entry; create another for later work. The loader is
 /// installed on a private QuickJS runtime, so multiple [`Runtime`] values do not
 /// share modules or globals.
+/// Shared state recording whether JS code called `node:process` `exit(code)` or
+/// assigned `process.exitCode`.
+#[derive(Debug, Default)]
+#[cfg_attr(not(feature = "node-compat"), allow(dead_code))]
+pub(crate) struct ProcessExitState {
+    pub(crate) exited: bool,
+    pub(crate) exit_code: Option<i32>,
+}
+
+/// Configuration options for constructing a [`Runtime`].
+#[derive(Debug, Clone)]
+pub struct RuntimeOptions {
+    #[cfg(feature = "manifest")]
+    import_resolver: Option<neojs_manifest::ImportResolver>,
+    node_compat: bool,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RuntimeOptions {
+    /// Creates default runtime options with `node:*` compatibility enabled
+    /// (when compiled with the `node-compat` feature).
+    pub fn new() -> Self {
+        Self {
+            #[cfg(feature = "manifest")]
+            import_resolver: None,
+            node_compat: true,
+        }
+    }
+
+    /// Enables or disables runtime `node:*` built-in compatibility modules.
+    ///
+    /// When set to `false`, importing any `node:*` specifier fails even if
+    /// the `node-compat` Cargo feature is compiled in.
+    pub fn with_node_compat(mut self, enabled: bool) -> Self {
+        self.node_compat = enabled;
+        self
+    }
+
+    /// Attaches an explicit `neo.jsonc` [`neojs_manifest::ImportResolver`].
+    #[cfg(feature = "manifest")]
+    pub fn with_import_resolver(mut self, resolver: neojs_manifest::ImportResolver) -> Self {
+        self.import_resolver = Some(resolver);
+        self
+    }
+}
+
 pub struct Runtime {
     context: Context,
     _runtime: rquickjs::Runtime,
     rejections: Rc<RefCell<RejectionState>>,
+    exit_state: Rc<RefCell<ProcessExitState>>,
     consumed: bool,
 }
 
@@ -476,7 +528,7 @@ impl Runtime {
     /// allocate its runtime or context, or the native surface could not be
     /// installed.
     pub fn new() -> Result<Self, Error> {
-        Self::build(FileResolver::new())
+        Self::with_options(RuntimeOptions::new())
     }
 
     /// Creates a QuickJS runtime with an explicit `neo.jsonc`
@@ -514,10 +566,29 @@ impl Runtime {
     /// ```
     #[cfg(feature = "manifest")]
     pub fn with_import_resolver(resolver: neojs_manifest::ImportResolver) -> Result<Self, Error> {
-        Self::build(FileResolver::with_import_resolver(resolver))
+        Self::with_options(RuntimeOptions::new().with_import_resolver(resolver))
     }
 
-    fn build(resolver: FileResolver) -> Result<Self, Error> {
+    /// Creates a QuickJS runtime configured with explicit [`RuntimeOptions`].
+    pub fn with_options(options: RuntimeOptions) -> Result<Self, Error> {
+        #[cfg(feature = "manifest")]
+        let resolver = match options.import_resolver {
+            Some(resolver) => FileResolver::with_import_resolver(resolver),
+            None => FileResolver::new(),
+        };
+        #[cfg(not(feature = "manifest"))]
+        let resolver = FileResolver::new();
+        let resolver = resolver.with_node_compat(options.node_compat);
+        Self::build(resolver, options.node_compat)
+    }
+
+    /// Returns the requested process exit code set via `node:process`
+    /// (`process.exit(code)` or `process.exitCode`), if any.
+    pub fn exit_code(&self) -> Option<i32> {
+        self.exit_state.borrow().exit_code
+    }
+
+    fn build(resolver: FileResolver, node_compat: bool) -> Result<Self, Error> {
         let runtime = rquickjs::Runtime::new().map_err(|error| Error::Init {
             message: error.to_string(),
         })?;
@@ -530,7 +601,10 @@ impl Runtime {
                     .record(&ctx, promise, reason, handled);
             },
         )));
-        runtime.set_loader(resolver, FileLoader);
+        let exit_state = Rc::new(RefCell::new(ProcessExitState::default()));
+        let interrupt_exit = Rc::clone(&exit_state);
+        runtime.set_interrupt_handler(Some(Box::new(move || interrupt_exit.borrow().exited)));
+        runtime.set_loader(resolver, FileLoader { node_compat });
         let context = Context::full(&runtime).map_err(|error| Error::Init {
             message: error.to_string(),
         })?;
@@ -558,6 +632,12 @@ impl Runtime {
                     #[cfg(feature = "neo-test")]
                     &rejections,
                 )?;
+                #[cfg(feature = "node-compat")]
+                if node_compat {
+                    crate::node_compat::install(&ctx, Rc::clone(&exit_state))?;
+                }
+                #[cfg(not(feature = "node-compat"))]
+                let _ = node_compat;
                 #[cfg(test)]
                 install_test_gc(&ctx)?;
                 Ok(())
@@ -569,6 +649,7 @@ impl Runtime {
             context,
             _runtime: runtime,
             rejections,
+            exit_state,
             consumed: false,
         })
     }
@@ -720,6 +801,10 @@ impl Runtime {
             })?;
             Ok(())
         });
+        if self.exit_state.borrow().exited {
+            self.clear_rejection_roots();
+            return Ok(());
+        }
         match result {
             Ok(()) => self.report_unhandled_rejections(name),
             Err(error) => {

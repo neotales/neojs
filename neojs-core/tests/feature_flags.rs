@@ -307,3 +307,51 @@ if (imported) throw new Error("neo:db was importable while disabled");
 "#)
     .expect("db absent");
 }
+
+#[test]
+#[cfg(feature = "node-compat")]
+fn node_compat_is_present_when_enabled_and_stays_isolated_from_neo_registry() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.some((spec) => spec.startsWith("node:"))) {
+    throw new Error(`node:* leaked into Neo.getBuiltInModulesList(): ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("node:path") !== undefined) {
+    throw new Error("Neo.getBuiltInModule(\"node:path\") must return undefined");
+}
+const nodePath = await import("node:path");
+if (nodePath.posix.join("a", "b") !== "a/b") {
+    throw new Error("node:path failed");
+}
+let bareImported = false;
+try {
+    await import("path");
+    bareImported = true;
+} catch {
+    // Expected: bare name never aliases node: or neo:.
+}
+if (bareImported) throw new Error("bare \"path\" was importable");
+"#)
+    .expect("node-compat feature enabled");
+}
+
+#[test]
+#[cfg(not(feature = "node-compat"))]
+fn node_compat_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+if (Neo.getBuiltInModule("node:path") !== undefined) {
+    throw new Error("Neo.getBuiltInModule(\"node:path\") returned a module");
+}
+for (const spec of ["node:path", "node:fs", "node:fs/promises", "node:process"]) {
+    let imported = false;
+    try {
+        await import(spec);
+        imported = true;
+    } catch {
+        // Expected: node-compat feature is compiled out.
+    }
+    if (imported) throw new Error(`${spec} was importable while disabled`);
+}
+"#)
+    .expect("node-compat absent");
+}

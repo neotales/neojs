@@ -411,6 +411,8 @@ mod fs;
 // in `neojs-remote`.
 mod jsr_loader;
 mod loader;
+#[cfg(feature = "node-compat")]
+mod node_compat;
 #[cfg(feature = "npm")]
 mod npm_loader;
 mod path;

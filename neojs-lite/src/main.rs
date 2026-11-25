@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use neojs_dts::Profile;
-use neojs_lite_core::{Error, ImportResolver, Runtime, TestReport};
+use neojs_lite_core::{Error, ImportResolver, Runtime, RuntimeOptions, TestReport};
 use neojs_manifest::{
     DiscoveredManifest, MAX_DISCOVERY_DEPTH, Manifest, Workspace, discover_manifest,
 };
@@ -30,8 +30,16 @@ fn main() -> ExitCode {
             println!("neojs-lite {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Command::Run { path, config } => run(&path, &config),
-        Command::Test { patterns, config } => run_tests(&patterns, &config),
+        Command::Run {
+            path,
+            config,
+            node_compat,
+        } => run(&path, &config, node_compat),
+        Command::Test {
+            patterns,
+            config,
+            node_compat,
+        } => run_tests(&patterns, &config, node_compat),
         Command::Types { profile, out_dir } => run_types(profile, out_dir.as_deref()),
         Command::TypesHelp => {
             print!("{}", types_help());
@@ -51,10 +59,12 @@ enum Command {
     Run {
         path: PathBuf,
         config: ConfigChoice,
+        node_compat: bool,
     },
     Test {
         patterns: Vec<String>,
         config: ConfigChoice,
+        node_compat: bool,
     },
     Types {
         profile: Profile,
@@ -102,11 +112,16 @@ impl ConfigChoice {
 
 fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
     let mut config = ConfigChoice::Auto;
+    let mut node_compat = true;
     let mut index = 0;
     while let Some(argument) = args.get(index) {
         match argument.to_str() {
             Some("--no-config") => {
                 config.set_disabled()?;
+                index += 1;
+            }
+            Some("--no-node-compat") => {
+                node_compat = false;
                 index += 1;
             }
             Some("--config") => {
@@ -147,12 +162,16 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
                 return Ok(Command::Run {
                     path: PathBuf::from(&rest[1]),
                     config,
+                    node_compat,
                 });
             }
-            "test" => return parse_test_args(&rest[1..], config),
+            "test" => return parse_test_args(&rest[1..], config, node_compat),
             "types" => {
-                if config != ConfigChoice::Auto {
-                    return Err("`types` does not accept `--config` or `--no-config`".to_string());
+                if config != ConfigChoice::Auto || !node_compat {
+                    return Err(
+                        "`types` does not accept `--config`, `--no-config`, or `--no-node-compat`"
+                            .to_string(),
+                    );
                 }
                 return parse_types_args(&rest[1..]);
             }
@@ -169,15 +188,21 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
     Ok(Command::Run {
         path: PathBuf::from(first),
         config,
+        node_compat,
     })
 }
 
 /// Parses `neojs-lite test <file-or-glob>...`.
 ///
-/// `--config <path>` and `--no-config` may appear before or after `test`.
+/// `--config <path>`, `--no-config`, and `--no-node-compat` may appear before
+/// or after `test`.
 /// `--` ends option parsing so a pattern beginning with `-` can still be named.
 /// Requires at least one pattern; discovery defaults are deliberately absent.
-fn parse_test_args(args: &[OsString], mut config: ConfigChoice) -> Result<Command, String> {
+fn parse_test_args(
+    args: &[OsString],
+    mut config: ConfigChoice,
+    mut node_compat: bool,
+) -> Result<Command, String> {
     if args.len() == 1 && matches!(args[0].to_str(), Some("-h" | "--help")) {
         return Ok(Command::Help);
     }
@@ -195,6 +220,11 @@ fn parse_test_args(args: &[OsString], mut config: ConfigChoice) -> Result<Comman
         }
         if !after_double_dash && value == "--no-config" {
             config.set_disabled()?;
+            index += 1;
+            continue;
+        }
+        if !after_double_dash && value == "--no-node-compat" {
+            node_compat = false;
             index += 1;
             continue;
         }
@@ -226,7 +256,11 @@ fn parse_test_args(args: &[OsString], mut config: ConfigChoice) -> Result<Comman
     if patterns.is_empty() {
         return Err("no test files or globs given".to_string());
     }
-    Ok(Command::Test { patterns, config })
+    Ok(Command::Test {
+        patterns,
+        config,
+        node_compat,
+    })
 }
 
 /// Parses `neojs-lite types [--profile <lite|v8>] [--out-dir <dir>]`.
@@ -453,14 +487,15 @@ fn discover_resolver_for_entry(entry_path: &Path) -> Result<Option<ImportResolve
     Ok(Some(ImportResolver::from_manifest(&discovered)))
 }
 
-fn create_runtime(resolver: Option<ImportResolver>) -> Result<Runtime, Error> {
-    match resolver {
-        Some(resolver) => Runtime::with_import_resolver(resolver),
-        None => Runtime::new(),
+fn create_runtime(resolver: Option<ImportResolver>, node_compat: bool) -> Result<Runtime, Error> {
+    let mut options = RuntimeOptions::new().with_node_compat(node_compat);
+    if let Some(resolver) = resolver {
+        options = options.with_import_resolver(resolver);
     }
+    Runtime::with_options(options)
 }
 
-fn run(path: &Path, config: &ConfigChoice) -> ExitCode {
+fn run(path: &Path, config: &ConfigChoice, node_compat: bool) -> ExitCode {
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
         Err(message) => {
@@ -480,7 +515,7 @@ fn run(path: &Path, config: &ConfigChoice) -> ExitCode {
         }
     };
 
-    let mut runtime = match create_runtime(resolver) {
+    let mut runtime = match create_runtime(resolver, node_compat) {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("neojs-lite: {error}");
@@ -489,7 +524,13 @@ fn run(path: &Path, config: &ConfigChoice) -> ExitCode {
     };
 
     match runtime.run_file(path) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            if let Some(code) = runtime.exit_code() {
+                ExitCode::from((code & 0xff) as u8)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
         Err(error) => {
             eprintln!("neojs-lite: {error}");
             ExitCode::from(exit_code(&error))
@@ -530,7 +571,7 @@ impl TestTotals {
 /// A file that fails to load, fails a test, registers no tests, leaves a test
 /// pending, leaves an unhandled rejection, or leaves unsettled job work makes
 /// the command exit 1. Later files still run in fresh isolated runtimes.
-fn run_tests(patterns: &[String], config: &ConfigChoice) -> ExitCode {
+fn run_tests(patterns: &[String], config: &ConfigChoice, node_compat: bool) -> ExitCode {
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
         Err(message) => {
@@ -563,7 +604,7 @@ fn run_tests(patterns: &[String], config: &ConfigChoice) -> ExitCode {
     let mut failed_files = 0usize;
     for (file, resolver) in files.iter().zip(resolvers) {
         println!("test {}:", file.display());
-        let mut runtime = match create_runtime(resolver) {
+        let mut runtime = match create_runtime(resolver, node_compat) {
             Ok(runtime) => runtime,
             Err(error) => {
                 eprintln!("neojs-lite: {error}");
@@ -572,6 +613,13 @@ fn run_tests(patterns: &[String], config: &ConfigChoice) -> ExitCode {
         };
         if let Err(error) = runtime.run_file(file) {
             eprintln!("neojs-lite: {}: {error}", file.display());
+            failed_files += 1;
+            continue;
+        }
+        if let Some(code) = runtime.exit_code()
+            && code != 0
+        {
+            eprintln!("neojs-lite: {}: exited with code {code}", file.display());
             failed_files += 1;
             continue;
         }
@@ -687,9 +735,14 @@ Examples:
 }
 
 #[cfg(feature = "neo-template")]
-const BUILTIN_MODULES_HELP: &str = "  neo:assert, neo:chars, neo:console, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:strings, neo:template, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7";
+const NEO_MODULES_HELP: &str = "  neo:assert, neo:chars, neo:console, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:strings, neo:template, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7";
 #[cfg(not(feature = "neo-template"))]
-const BUILTIN_MODULES_HELP: &str = "  neo:assert, neo:chars, neo:console, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7";
+const NEO_MODULES_HELP: &str = "  neo:assert, neo:chars, neo:console, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7";
+
+#[cfg(feature = "node-compat")]
+const NODE_MODULES_HELP: &str = "\n  node:buffer, node:child_process, node:crypto, node:fs, node:os, node:path, node:path/posix, node:path/win32, node:process, node:url (unless --no-node-compat)";
+#[cfg(not(feature = "node-compat"))]
+const NODE_MODULES_HELP: &str = "";
 
 fn help() -> String {
     format!(
@@ -707,14 +760,15 @@ Usage:
                                        emit TypeScript declarations (.d.ts)
 
 Options:
-  --config <path>  Use an explicit neo.jsonc manifest instead of discovery
-  --no-config      Disable automatic neo.jsonc manifest discovery
-  -h, --help       Print this help (alone or after `test`)
-  -V, --version    Print the version
-  --               End option parsing, for a file or pattern beginning with `-`
+  --config <path>   Use an explicit neo.jsonc manifest instead of discovery
+  --no-config       Disable automatic neo.jsonc manifest discovery
+  --no-node-compat  Disable node:* built-in compatibility modules
+  -h, --help        Print this help (alone or after `test`)
+  -V, --version     Print the version
+  --                End option parsing, for a file or pattern beginning with `-`
 
 Built-in modules:
-{}
+{}{}
 
 Modules are ECMAScript modules, and relative imports resolve from the importing
 file. .js, .mjs, .ts, and .mts run. TypeScript is stripped, not type checked:
@@ -723,7 +777,8 @@ only erasable syntax is accepted (no enum, namespace, or other transforms), and
 
 Local modules discover `neo.jsonc` upward for `imports` and `workspaces`
 unless `--config` or `--no-config` is passed. Remote (`https:`, `gh:`, `jsr:`,
-`npm:`) and `node:` imports are not supported in `neojs-lite`.
+`npm:`) and unsupported `node:*` imports (such as `node:fs/promises`) are not
+supported in `neojs-lite`.
 
 `neojs-lite test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
@@ -738,7 +793,8 @@ Exit codes:
      not be expanded
 ",
         env!("CARGO_PKG_VERSION"),
-        BUILTIN_MODULES_HELP
+        NEO_MODULES_HELP,
+        NODE_MODULES_HELP
     )
 }
 
@@ -760,6 +816,7 @@ mod tests {
             Ok(Command::Test {
                 patterns: vec!["a.test.js".to_string(), "b/*.test.js".to_string()],
                 config: ConfigChoice::Auto,
+                node_compat: true,
             })
         );
     }
@@ -772,6 +829,7 @@ mod tests {
             Ok(Command::Test {
                 patterns: vec!["-weird.test.js".to_string()],
                 config: ConfigChoice::Auto,
+                node_compat: true,
             })
         );
     }
@@ -795,6 +853,7 @@ mod tests {
             Ok(Command::Run {
                 path: PathBuf::from("main.js"),
                 config: ConfigChoice::Explicit(PathBuf::from("custom.jsonc")),
+                node_compat: true,
             })
         );
         assert_eq!(
@@ -802,6 +861,23 @@ mod tests {
             Ok(Command::Test {
                 patterns: vec!["a.test.js".to_string()],
                 config: ConfigChoice::Disabled,
+                node_compat: true,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["--no-node-compat", "main.js"])),
+            Ok(Command::Run {
+                path: PathBuf::from("main.js"),
+                config: ConfigChoice::Auto,
+                node_compat: false,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["test", "--no-node-compat", "a.test.js"])),
+            Ok(Command::Test {
+                patterns: vec!["a.test.js".to_string()],
+                config: ConfigChoice::Auto,
+                node_compat: false,
             })
         );
         assert_eq!(
@@ -859,7 +935,17 @@ mod tests {
         );
         assert_eq!(
             parse_args(args(&["--no-config", "types"])),
-            Err("`types` does not accept `--config` or `--no-config`".to_string())
+            Err(
+                "`types` does not accept `--config`, `--no-config`, or `--no-node-compat`"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            parse_args(args(&["--no-node-compat", "types"])),
+            Err(
+                "`types` does not accept `--config`, `--no-config`, or `--no-node-compat`"
+                    .to_string()
+            )
         );
     }
 }

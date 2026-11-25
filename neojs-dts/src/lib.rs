@@ -205,6 +205,20 @@ const NEO_UUID_DTS: &str = include_str!("../types/neo/uuid.d.ts");
 const NEO_UUID_V4_DTS: &str = include_str!("../types/neo/uuid/v4.d.ts");
 const NEO_UUID_V7_DTS: &str = include_str!("../types/neo/uuid/v7.d.ts");
 
+const NODE_BUFFER_DTS: &str = include_str!("../types/node/buffer.d.ts");
+const NODE_CHILD_PROCESS_DTS: &str = include_str!("../types/node/child_process.d.ts");
+const NODE_CHILD_PROCESS_LITE_DTS: &str = include_str!("../types/node/child_process-lite.d.ts");
+const NODE_CRYPTO_DTS: &str = include_str!("../types/node/crypto.d.ts");
+const NODE_FS_DTS: &str = include_str!("../types/node/fs.d.ts");
+const NODE_FS_LITE_DTS: &str = include_str!("../types/node/fs-lite.d.ts");
+const NODE_FS_PROMISES_DTS: &str = include_str!("../types/node/fs-promises.d.ts");
+const NODE_OS_DTS: &str = include_str!("../types/node/os.d.ts");
+const NODE_PATH_DTS: &str = include_str!("../types/node/path.d.ts");
+const NODE_PATH_POSIX_DTS: &str = include_str!("../types/node/path/posix.d.ts");
+const NODE_PATH_WIN32_DTS: &str = include_str!("../types/node/path/win32.d.ts");
+const NODE_PROCESS_DTS: &str = include_str!("../types/node/process.d.ts");
+const NODE_URL_DTS: &str = include_str!("../types/node/url.d.ts");
+
 const V8_FILES: &[DtsFile] = &[
     DtsFile {
         path: "index.d.ts",
@@ -311,6 +325,61 @@ const V8_FILES: &[DtsFile] = &[
         specifier: Some("neo:uuid/v7"),
         content: NEO_UUID_V7_DTS,
     },
+    DtsFile {
+        path: "node/buffer.d.ts",
+        specifier: Some("node:buffer"),
+        content: NODE_BUFFER_DTS,
+    },
+    DtsFile {
+        path: "node/child_process.d.ts",
+        specifier: Some("node:child_process"),
+        content: NODE_CHILD_PROCESS_DTS,
+    },
+    DtsFile {
+        path: "node/crypto.d.ts",
+        specifier: Some("node:crypto"),
+        content: NODE_CRYPTO_DTS,
+    },
+    DtsFile {
+        path: "node/fs.d.ts",
+        specifier: Some("node:fs"),
+        content: NODE_FS_DTS,
+    },
+    DtsFile {
+        path: "node/fs-promises.d.ts",
+        specifier: Some("node:fs/promises"),
+        content: NODE_FS_PROMISES_DTS,
+    },
+    DtsFile {
+        path: "node/os.d.ts",
+        specifier: Some("node:os"),
+        content: NODE_OS_DTS,
+    },
+    DtsFile {
+        path: "node/path.d.ts",
+        specifier: Some("node:path"),
+        content: NODE_PATH_DTS,
+    },
+    DtsFile {
+        path: "node/path/posix.d.ts",
+        specifier: Some("node:path/posix"),
+        content: NODE_PATH_POSIX_DTS,
+    },
+    DtsFile {
+        path: "node/path/win32.d.ts",
+        specifier: Some("node:path/win32"),
+        content: NODE_PATH_WIN32_DTS,
+    },
+    DtsFile {
+        path: "node/process.d.ts",
+        specifier: Some("node:process"),
+        content: NODE_PROCESS_DTS,
+    },
+    DtsFile {
+        path: "node/url.d.ts",
+        specifier: Some("node:url"),
+        content: NODE_URL_DTS,
+    },
 ];
 
 const LITE_FILES: &[DtsFile] = &[
@@ -398,6 +467,56 @@ const LITE_FILES: &[DtsFile] = &[
         path: "neo/uuid/v7.d.ts",
         specifier: Some("neo:uuid/v7"),
         content: NEO_UUID_V7_DTS,
+    },
+    DtsFile {
+        path: "node/buffer.d.ts",
+        specifier: Some("node:buffer"),
+        content: NODE_BUFFER_DTS,
+    },
+    DtsFile {
+        path: "node/child_process.d.ts",
+        specifier: Some("node:child_process"),
+        content: NODE_CHILD_PROCESS_LITE_DTS,
+    },
+    DtsFile {
+        path: "node/crypto.d.ts",
+        specifier: Some("node:crypto"),
+        content: NODE_CRYPTO_DTS,
+    },
+    DtsFile {
+        path: "node/fs.d.ts",
+        specifier: Some("node:fs"),
+        content: NODE_FS_LITE_DTS,
+    },
+    DtsFile {
+        path: "node/os.d.ts",
+        specifier: Some("node:os"),
+        content: NODE_OS_DTS,
+    },
+    DtsFile {
+        path: "node/path.d.ts",
+        specifier: Some("node:path"),
+        content: NODE_PATH_DTS,
+    },
+    DtsFile {
+        path: "node/path/posix.d.ts",
+        specifier: Some("node:path/posix"),
+        content: NODE_PATH_POSIX_DTS,
+    },
+    DtsFile {
+        path: "node/path/win32.d.ts",
+        specifier: Some("node:path/win32"),
+        content: NODE_PATH_WIN32_DTS,
+    },
+    DtsFile {
+        path: "node/process.d.ts",
+        specifier: Some("node:process"),
+        content: NODE_PROCESS_DTS,
+    },
+    DtsFile {
+        path: "node/url.d.ts",
+        specifier: Some("node:url"),
+        content: NODE_URL_DTS,
     },
 ];
 
@@ -646,6 +765,198 @@ const UUID_V7_EXPORTS: ModuleExports = ModuleExports {
     has_default: true,
 };
 
+const NODE_BUFFER_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:buffer",
+    exports: &["Buffer"],
+    has_default: true,
+};
+
+const NODE_CHILD_PROCESS_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:child_process",
+    exports: &["spawnSync", "execFileSync", "execFile"],
+    has_default: true,
+};
+
+const NODE_CHILD_PROCESS_LITE_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:child_process",
+    exports: &["spawnSync", "execFileSync"],
+    has_default: true,
+};
+
+const NODE_CRYPTO_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:crypto",
+    exports: &[
+        "randomBytes",
+        "randomUUID",
+        "createHash",
+        "createHmac",
+        "pbkdf2Sync",
+        "timingSafeEqual",
+    ],
+    has_default: true,
+};
+
+const NODE_FS_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:fs",
+    exports: &[
+        "readFileSync",
+        "writeFileSync",
+        "appendFileSync",
+        "existsSync",
+        "statSync",
+        "lstatSync",
+        "readdirSync",
+        "mkdirSync",
+        "rmSync",
+        "unlinkSync",
+        "renameSync",
+        "copyFileSync",
+        "realpathSync",
+        "mkdtempSync",
+        "constants",
+        "promises",
+    ],
+    has_default: true,
+};
+
+const NODE_FS_LITE_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:fs",
+    exports: &[
+        "readFileSync",
+        "writeFileSync",
+        "appendFileSync",
+        "existsSync",
+        "statSync",
+        "lstatSync",
+        "readdirSync",
+        "mkdirSync",
+        "rmSync",
+        "unlinkSync",
+        "renameSync",
+        "copyFileSync",
+        "realpathSync",
+        "mkdtempSync",
+        "constants",
+    ],
+    has_default: true,
+};
+
+const NODE_FS_PROMISES_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:fs/promises",
+    exports: &[
+        "readFile",
+        "writeFile",
+        "appendFile",
+        "stat",
+        "lstat",
+        "readdir",
+        "mkdir",
+        "rm",
+        "unlink",
+        "rename",
+        "copyFile",
+        "realpath",
+        "mkdtemp",
+        "constants",
+    ],
+    has_default: true,
+};
+
+const NODE_OS_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:os",
+    exports: &[
+        "platform",
+        "arch",
+        "EOL",
+        "homedir",
+        "tmpdir",
+        "hostname",
+        "cpus",
+        "endianness",
+        "type",
+        "machine",
+    ],
+    has_default: true,
+};
+
+const NODE_PATH_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:path",
+    exports: &[
+        "sep",
+        "delimiter",
+        "join",
+        "resolve",
+        "normalize",
+        "relative",
+        "dirname",
+        "basename",
+        "extname",
+        "parse",
+        "format",
+        "isAbsolute",
+        "posix",
+        "win32",
+    ],
+    has_default: true,
+};
+
+const NODE_PATH_POSIX_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:path/posix",
+    exports: &[
+        "sep",
+        "delimiter",
+        "join",
+        "resolve",
+        "normalize",
+        "relative",
+        "dirname",
+        "basename",
+        "extname",
+        "parse",
+        "format",
+        "isAbsolute",
+        "posix",
+        "win32",
+    ],
+    has_default: true,
+};
+
+const NODE_PATH_WIN32_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:path/win32",
+    exports: &[
+        "sep",
+        "delimiter",
+        "join",
+        "resolve",
+        "normalize",
+        "relative",
+        "dirname",
+        "basename",
+        "extname",
+        "parse",
+        "format",
+        "isAbsolute",
+        "posix",
+        "win32",
+    ],
+    has_default: true,
+};
+
+const NODE_PROCESS_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:process",
+    exports: &[
+        "argv", "cwd", "chdir", "env", "exit", "exitCode", "platform", "arch", "pid", "version",
+        "versions", "hrtime",
+    ],
+    has_default: true,
+};
+
+const NODE_URL_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "node:url",
+    exports: &["fileURLToPath", "pathToFileURL", "URL", "URLSearchParams"],
+    has_default: true,
+};
+
 const V8_EXPECTED_EXPORTS: &[ModuleExports] = &[
     AGE_EXPORTS,
     ASSERT_EXPORTS,
@@ -666,6 +977,17 @@ const V8_EXPECTED_EXPORTS: &[ModuleExports] = &[
     UUID_EXPORTS,
     UUID_V4_EXPORTS,
     UUID_V7_EXPORTS,
+    NODE_BUFFER_EXPORTS,
+    NODE_CHILD_PROCESS_EXPORTS,
+    NODE_CRYPTO_EXPORTS,
+    NODE_FS_EXPORTS,
+    NODE_FS_PROMISES_EXPORTS,
+    NODE_OS_EXPORTS,
+    NODE_PATH_EXPORTS,
+    NODE_PATH_POSIX_EXPORTS,
+    NODE_PATH_WIN32_EXPORTS,
+    NODE_PROCESS_EXPORTS,
+    NODE_URL_EXPORTS,
 ];
 
 const LITE_EXPECTED_EXPORTS: &[ModuleExports] = &[
@@ -684,6 +1006,16 @@ const LITE_EXPECTED_EXPORTS: &[ModuleExports] = &[
     UUID_EXPORTS,
     UUID_V4_EXPORTS,
     UUID_V7_EXPORTS,
+    NODE_BUFFER_EXPORTS,
+    NODE_CHILD_PROCESS_LITE_EXPORTS,
+    NODE_CRYPTO_EXPORTS,
+    NODE_FS_LITE_EXPORTS,
+    NODE_OS_EXPORTS,
+    NODE_PATH_EXPORTS,
+    NODE_PATH_POSIX_EXPORTS,
+    NODE_PATH_WIN32_EXPORTS,
+    NODE_PROCESS_EXPORTS,
+    NODE_URL_EXPORTS,
 ];
 
 /// Returns all embedded `.d.ts` files for `profile`, suitable for release

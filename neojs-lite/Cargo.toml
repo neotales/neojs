@@ -15,9 +15,11 @@ name = "neojs-lite"
 path = "src/main.rs"
 
 [features]
-default = ["neo-template"]
+default = ["neo-template", "node-compat"]
 # Enables `neo:template` in `neojs-lite-core`. Opt-outable with `--no-default-features`.
 neo-template = ["neojs-lite-core/neo-template"]
+# Enables `node:*` compatibility modules in `neojs-lite-core`. Opt-outable with `--no-default-features`.
+node-compat = ["neojs-lite-core/node-compat"]
 
 [dependencies]
 # The command's module bundle is explicit rather than inherited from

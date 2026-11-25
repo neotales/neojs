@@ -10,11 +10,13 @@ rust-version.workspace = true
 authors.workspace = true
 
 [features]
-default = ["neo-db", "neo-template", "npm"]
+default = ["neo-db", "neo-template", "node-compat", "npm"]
 # Enables `neo:db` in `neojs-core`. Opt-outable with `--no-default-features`.
 neo-db = ["neojs-core/neo-db"]
 # Enables `neo:template` in `neojs-core`. Opt-outable with `--no-default-features`.
 neo-template = ["neojs-core/neo-template"]
+# Enables `node:*` compatibility modules in `neojs-core`. Opt-outable with `--no-default-features`.
+node-compat = ["neojs-core/node-compat"]
 # Opt-outable `npm:` and `package.json` CAS-backed module resolution.
 npm = ["neojs-core/npm"]
 
