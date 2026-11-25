@@ -104,6 +104,16 @@ pub enum ResolverError {
         actual: Option<String>,
     },
 
+    /// Resolved package tarball `package.json` `"version"` did not match the locked version.
+    #[error(
+        "tarball package.json version mismatch for `{package}`: expected `{expected}`, got `{actual}`"
+    )]
+    PackageVersionMismatch {
+        package: String,
+        expected: String,
+        actual: String,
+    },
+
     /// Graph exceeded [`NpmLimits::max_graph_packages`].
     #[error("npm dependency graph exceeded {limit}-package limit")]
     GraphLimitExceeded { limit: usize },
@@ -337,17 +347,25 @@ impl NpmRegistry for RemoteNpmRegistry {
 
     fn fetch_tarball(&self, tarball_url: &str, _integrity: &str) -> Result<Vec<u8>, ResolverError> {
         let url = Url::parse(tarball_url).map_err(|err| ResolverError::Registry {
-            package: tarball_url.to_owned(),
+            package: redact_tarball_url_str(tarball_url),
             reason: err.to_string(),
         })?;
+        let display = neojs_remote::display_url(&url);
         let fetched = self
             .client
             .fetch(&url)
             .map_err(|err| ResolverError::Registry {
-                package: tarball_url.to_owned(),
+                package: display,
                 reason: err.to_string(),
             })?;
         Ok(fetched.body)
+    }
+}
+
+fn redact_tarball_url_str(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(url) => neojs_remote::display_url(&url),
+        Err(_) => "<invalid tarball URL>".to_owned(),
     }
 }
 
@@ -1698,6 +1716,56 @@ impl ProjectPackageResolver {
         self.resolve_declared_npm(&pkg_name, subpath.as_deref(), graph)
     }
 
+    /// Resolves local-only project targets (`#imports` internal files and
+    /// package self-references) without consulting a [`ResolvedNpmGraph`] or
+    /// requiring a [`CasStore`].
+    ///
+    /// Returns `Ok(Some(ProjectResolution::NotIntercepted))` for non-project
+    /// schemes/paths, `Ok(Some(ProjectResolution::LocalFile { .. }))` for local
+    /// `#imports` / self-references, and `Ok(None)` when the specifier targets
+    /// an external npm dependency.
+    pub fn resolve_local_specifier(
+        &self,
+        specifier: &str,
+    ) -> Result<Option<ProjectResolution>, ResolverError> {
+        if has_scheme_prefix_ci(specifier, "neo:")
+            || has_scheme_prefix_ci(specifier, "node:")
+            || specifier.starts_with("./")
+            || specifier.starts_with("../")
+            || specifier.starts_with('/')
+            || specifier.contains(':')
+        {
+            return Ok(Some(ProjectResolution::NotIntercepted));
+        }
+
+        let proj_name = self.package_json.name.as_deref().unwrap_or("<project>");
+        if specifier.starts_with('#') {
+            let resolved = ExportsResolver::resolve_project_import(
+                &self.package_json,
+                &self.root_dir,
+                proj_name,
+                specifier,
+            )?;
+            return match resolved {
+                crate::exports::PackageImportTarget::InternalFile(file) => {
+                    self.resolve_local_rel(&file.rel_path).map(Some)
+                }
+                crate::exports::PackageImportTarget::ExternalPackage { .. } => Ok(None),
+            };
+        }
+
+        let (pkg_name, subpath) = split_bare_package_specifier(specifier)?;
+        if self.package_json.name.as_deref() == Some(pkg_name.as_str())
+            && let Some(exports) = &self.package_json.exports
+        {
+            let rel =
+                ExportsResolver::resolve_exports_target(exports, proj_name, subpath.as_deref())?;
+            return self.resolve_local_rel(&rel).map(Some);
+        }
+
+        Ok(None)
+    }
+
     fn resolve_local_rel(&self, rel_path: &str) -> Result<ProjectResolution, ResolverError> {
         use std::path::Component;
 
@@ -1793,6 +1861,9 @@ pub fn resolve_requests_with_lockfile<R: NpmRegistry + ?Sized>(
     let mut lockfile_modified = false;
     let mut visited_keys: BTreeMap<String, String> = BTreeMap::new();
 
+    let mut locked_siblings: Vec<(PackageName, NpmVersion)> = Vec::new();
+    let mut unlocked_reqs: Vec<NpmRootRequest> = Vec::new();
+
     for req in requests {
         let spec_key = format!("{}@{}", req.name, req.constraint);
         if let Some(pkg_key) = lockfile.specifiers.get(&spec_key).cloned() {
@@ -1827,6 +1898,9 @@ pub fn resolve_requests_with_lockfile<R: NpmRegistry + ?Sized>(
                 graph: &mut graph,
             };
             let instance_id = load_locked_package(&req.name, &pkg_key, req.optional, &mut ctx)?;
+            if instance_id.is_some() {
+                locked_siblings.push((req.name.clone(), parsed_ver));
+            }
             graph
                 .roots
                 .insert((req.name.clone(), req.constraint.to_string()), instance_id);
@@ -1843,22 +1917,70 @@ pub fn resolve_requests_with_lockfile<R: NpmRegistry + ?Sized>(
                     ),
                 });
             }
-            let Some(reg) = registry else {
+            if registry.is_none() {
                 return Err(ResolverError::Offline {
                     reason: format!(
                         "specifier `{spec_key}` is not in neo.lock / offline CAS cache and remote loading is disabled (--allow-remote required)"
                     ),
                 });
-            };
-            let sub_graph = NpmGraphResolver::new(reg, cas.clone())
-                .with_limits(limits)
-                .with_platform(platform.clone())
-                .resolve_requests(std::slice::from_ref(req))?;
-            if lockfile.record_graph(&sub_graph) {
-                lockfile_modified = true;
             }
-            graph.merge(sub_graph);
+            unlocked_reqs.push(req.clone());
         }
+    }
+
+    if !unlocked_reqs.is_empty() {
+        let reg = registry.ok_or_else(|| ResolverError::Offline {
+            reason: "remote loading is disabled (--allow-remote required)".to_owned(),
+        })?;
+        let resolver = NpmGraphResolver::new(reg, cas.clone())
+            .with_limits(limits)
+            .with_platform(platform.clone());
+
+        let mut combined_reqs = unlocked_reqs.clone();
+        let mut synthetic_roots: Vec<(PackageName, String)> = Vec::new();
+        let mut sub_graph = loop {
+            match resolver.resolve_requests(&combined_reqs) {
+                Ok(g) => break g,
+                Err(ResolverError::MissingPeerDependency {
+                    package,
+                    version,
+                    peer,
+                    range,
+                }) => {
+                    if let Some((_, ver)) = locked_siblings
+                        .iter()
+                        .find(|(name, _)| name.as_str() == peer.as_str())
+                    {
+                        let peer_name = PackageName::parse(&peer)?;
+                        let constraint = VersionConstraint::parse(&ver.to_string())?;
+                        let root_key = (peer_name.clone(), constraint.to_string());
+                        if !synthetic_roots.contains(&root_key) {
+                            synthetic_roots.push(root_key);
+                            combined_reqs.push(NpmRootRequest {
+                                name: peer_name,
+                                constraint,
+                                optional: false,
+                            });
+                            continue;
+                        }
+                    }
+                    return Err(ResolverError::MissingPeerDependency {
+                        package,
+                        version,
+                        peer,
+                        range,
+                    });
+                }
+                Err(err) => return Err(err),
+            }
+        };
+        for root_key in &synthetic_roots {
+            sub_graph.roots.remove(root_key);
+        }
+        if lockfile.record_graph(&sub_graph) {
+            lockfile_modified = true;
+        }
+        graph.merge(sub_graph);
     }
 
     Ok((graph, lockfile_modified))
@@ -1908,6 +2030,13 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
 
     // Load and verify `.tree` from CAS (or fetch tarball when permitted).
     let _ = parse_sha512_sri(&locked.integrity)?;
+    if ctx.frozen_lockfile && locked.tree_sha256.is_none() {
+        return Err(ResolverError::FrozenLockfile {
+            reason: format!(
+                "locked package `{pkg_key}` is missing required `treeSha256` under --frozen-lockfile"
+            ),
+        });
+    }
     let tree = match PackageTree::load_verified(
         ctx.cas.cache_root(),
         ctx.registry_origin,
@@ -1946,8 +2075,19 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
                 meta.dist.tarball.clone()
             };
             let tgz = reg.fetch_tarball(&tarball_url, &locked.integrity)?;
-            ctx.ingestor
-                .ingest(ctx.registry_origin, &locked.integrity, &tgz)?
+            let tree = ctx
+                .ingestor
+                .ingest(ctx.registry_origin, &locked.integrity, &tgz)?;
+            if let Some(expected_tree_sha256) = &locked.tree_sha256
+                && expected_tree_sha256 != &tree.tree_sha256
+            {
+                return Err(CasError::IntegrityMismatch {
+                    expected: expected_tree_sha256.clone(),
+                    actual: tree.tree_sha256,
+                }
+                .into());
+            }
+            tree
         }
     };
 
@@ -1961,6 +2101,15 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
         return Err(ResolverError::PackageIdentityMismatch {
             expected: expected_name.to_string(),
             actual: package_json.name.clone(),
+        });
+    }
+    if let Some(pkg_ver) = &package_json.version
+        && pkg_ver != &locked.version
+    {
+        return Err(ResolverError::PackageVersionMismatch {
+            package: expected_name.to_string(),
+            expected: locked.version.clone(),
+            actual: pkg_ver.clone(),
         });
     }
     if !ctx.platform.matches(
@@ -1989,6 +2138,19 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
                 });
             }
         }
+        for peer_name in package_json.peer_dependencies.keys() {
+            let is_optional_peer = package_json
+                .peer_dependencies_meta
+                .get(peer_name)
+                .is_some_and(|m| m.optional);
+            if !is_optional_peer && !locked.dependencies.contains_key(peer_name) {
+                return Err(ResolverError::FrozenLockfile {
+                    reason: format!(
+                        "locked package `{pkg_key}` is missing required peer dependency `{peer_name}`"
+                    ),
+                });
+            }
+        }
     }
 
     // Record visited before recursing so dependency cycles terminate cleanly.
@@ -2000,6 +2162,38 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
     let mut peer_deps = BTreeMap::new();
 
     for (dep_name_str, dep_pkg_key) in &locked.dependencies {
+        if !package_json.is_declared_dependency(dep_name_str) {
+            return Err(ResolverError::DisallowedImport {
+                referrer: pkg_key.to_owned(),
+                specifier: dep_name_str.to_owned(),
+                reason: format!(
+                    "locked dependency `{dep_name_str}` is not declared in dependencies, optionalDependencies, or peerDependencies of `{expected_name}`"
+                ),
+            });
+        }
+        let declared_range = package_json
+            .dependencies
+            .get(dep_name_str)
+            .or_else(|| package_json.optional_dependencies.get(dep_name_str))
+            .or_else(|| package_json.peer_dependencies.get(dep_name_str))
+            .expect("checked by is_declared_dependency");
+        let declared_constraint = VersionConstraint::parse(declared_range)?;
+        let child_locked = ctx.lockfile.packages.get(dep_pkg_key).ok_or_else(|| {
+            LockfileError::PackageNotFound {
+                pkg_key: dep_pkg_key.clone(),
+            }
+        })?;
+        let child_ver = NpmVersion::parse(&child_locked.version)?;
+        if let VersionConstraint::Range(range) = &declared_constraint
+            && !range.matches(&child_ver)
+        {
+            return Err(ResolverError::FrozenLockfile {
+                reason: format!(
+                    "locked dependency `{dep_pkg_key}` of `{pkg_key}` does not satisfy `{dep_name_str}@{declared_range}`"
+                ),
+            });
+        }
+
         let dep_name = PackageName::parse(dep_name_str)?;
         let is_opt = package_json
             .optional_dependencies

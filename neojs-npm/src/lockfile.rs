@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cas::{CasError, read_bounded_regular_file, validate_sha256_hex};
 use crate::resolver::ResolvedNpmGraph;
+use crate::semver::NpmVersion;
 use crate::tarball::parse_sha512_sri;
 
 /// Canonical lockfile filename.
@@ -74,7 +75,7 @@ pub enum LockfileError {
 }
 
 /// One pinned package entry inside [`Lockfile::packages`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LockedPackage {
     /// Exact resolved SemVer version string.
@@ -90,6 +91,67 @@ pub struct LockedPackage {
     /// Resolved dependency map (`dep_name -> target_pkg_key`).
     #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
+}
+
+impl<'de> Deserialize<'de> for LockedPackage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct PkgVisitor;
+
+        impl<'de> Visitor<'de> for PkgVisitor {
+            type Value = LockedPackage;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a locked package object in neo.lock")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut seen = BTreeSet::new();
+                let mut version: Option<String> = None;
+                let mut integrity: Option<String> = None;
+                let mut tree_sha256: Option<Option<String>> = None;
+                let mut tarball_url: Option<String> = None;
+                let mut dependencies: Option<BTreeMap<String, String>> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    if !seen.insert(key.clone()) {
+                        return Err(de::Error::custom(format!(
+                            "duplicate key `{key}` in locked package"
+                        )));
+                    }
+                    match key.as_str() {
+                        "version" => version = Some(map.next_value()?),
+                        "integrity" => integrity = Some(map.next_value()?),
+                        "treeSha256" => tree_sha256 = Some(map.next_value()?),
+                        "tarballUrl" => tarball_url = Some(map.next_value()?),
+                        "dependencies" => {
+                            dependencies = Some(map.next_value::<NoDupStringMap>()?.0);
+                        }
+                        other => {
+                            return Err(de::Error::custom(format!(
+                                "unknown field `{other}` in locked package"
+                            )));
+                        }
+                    }
+                }
+
+                Ok(LockedPackage {
+                    version: version.ok_or_else(|| de::Error::missing_field("version"))?,
+                    integrity: integrity.ok_or_else(|| de::Error::missing_field("integrity"))?,
+                    tree_sha256: tree_sha256.flatten(),
+                    tarball_url: tarball_url.unwrap_or_default(),
+                    dependencies: dependencies.unwrap_or_default(),
+                })
+            }
+        }
+
+        deserializer.deserialize_map(PkgVisitor)
+    }
 }
 
 /// Deterministic `neo.lock` v1 lockfile.
@@ -159,6 +221,12 @@ impl Lockfile {
                     reason: format!("package `{pkg_key}` has an empty version"),
                 });
             }
+            NpmVersion::parse(&pkg.version).map_err(|err| LockfileError::InvalidJson {
+                reason: format!(
+                    "package `{pkg_key}` has invalid SemVer version `{}`: {err}",
+                    pkg.version
+                ),
+            })?;
             if pkg.integrity.trim().is_empty() {
                 return Err(LockfileError::InvalidJson {
                     reason: format!("package `{pkg_key}` has an empty integrity"),
@@ -300,18 +368,13 @@ impl Lockfile {
         let mut changed = false;
 
         // Assign deterministic lockfile keys for every instance in `graph`.
-        // When only one context exists for `<name>@<version>`, use `<name>@<version>`;
-        // otherwise keep `<name>@<version>~<ctx>` for distinct peer contexts.
-        let mut version_counts: BTreeMap<String, usize> = BTreeMap::new();
-        for pkg in graph.instances().values() {
-            let base = format!("{}@{}", pkg.name, pkg.version);
-            *version_counts.entry(base).or_default() += 1;
-        }
+        // Non-peer-contextualized instances (`ctx == "0"`) use `<name>@<version>`,
+        // while peer-contextualized instances (`ctx != "0"`) always preserve
+        // `<name>@<version>~<ctx>` so incremental calls never collide.
         let mut instance_keys: BTreeMap<&str, String> = BTreeMap::new();
         for (instance_id, pkg) in graph.instances() {
-            let base = format!("{}@{}", pkg.name, pkg.version);
-            let key = if version_counts.get(&base).copied().unwrap_or(0) <= 1 || pkg.ctx == "0" {
-                base
+            let key = if pkg.ctx == "0" {
+                format!("{}@{}", pkg.name, pkg.version)
             } else {
                 instance_id.clone()
             };
@@ -400,7 +463,10 @@ fn verify_digest_match(
         return Ok(());
     }
 
-    if expected.starts_with("sha512-") {
+    if expected
+        .split_whitespace()
+        .any(|token| token.starts_with("sha512-"))
+    {
         let expected_sha512 =
             parse_sha512_sri(expected).map_err(|err| LockfileError::InvalidIntegrity {
                 pkg_key: pkg_key.to_owned(),
@@ -689,6 +755,34 @@ mod tests {
             ),
             Err(LockfileError::InvalidJson { .. })
         ));
+        // Duplicate key inside LockedPackage.
+        assert!(matches!(
+            Lockfile::parse(
+                r#"{"version":1,"specifiers":{},"packages":{"a@1":{"version":"1.0.0","version":"2.0.0","integrity":"sha256-aaaa"}}}"#
+            ),
+            Err(LockfileError::InvalidJson { .. })
+        ));
+        // Duplicate key inside LockedPackage.dependencies.
+        assert!(matches!(
+            Lockfile::parse(
+                r#"{"version":1,"specifiers":{},"packages":{"a@1":{"version":"1.0.0","integrity":"sha256-aaaa","dependencies":{"b":"b@1","b":"b@2"}}}}"#
+            ),
+            Err(LockfileError::InvalidJson { .. })
+        ));
+        // Unknown field inside LockedPackage.
+        assert!(matches!(
+            Lockfile::parse(
+                r#"{"version":1,"specifiers":{},"packages":{"a@1":{"version":"1.0.0","integrity":"sha256-aaaa","extra":1}}}"#
+            ),
+            Err(LockfileError::InvalidJson { .. })
+        ));
+        // Invalid SemVer inside LockedPackage.
+        assert!(matches!(
+            Lockfile::parse(
+                r#"{"version":1,"specifiers":{},"packages":{"a@bad":{"version":"not-semver","integrity":"sha256-aaaa"}}}"#
+            ),
+            Err(LockfileError::InvalidJson { .. })
+        ));
     }
 
     #[test]
@@ -805,6 +899,26 @@ mod tests {
         assert!(matches!(
             lock.verify_integrity(
                 "sri512@1.0.0",
+                &format!("sha512-{}", BASE64_STANDARD.encode([0x00; 64]))
+            ),
+            Err(LockfileError::IntegrityMismatch { .. })
+        ));
+
+        // Multi-token SRI parity (`sha256-ignored sha512-...`).
+        lock.packages.insert(
+            "multi@1.0.0".to_owned(),
+            LockedPackage {
+                version: "1.0.0".to_owned(),
+                integrity: format!("sha256-{b64_digest} {sha512_sri}"),
+                tree_sha256: None,
+                tarball_url: String::new(),
+                dependencies: BTreeMap::new(),
+            },
+        );
+        assert!(lock.verify_integrity("multi@1.0.0", &sha512_sri).is_ok());
+        assert!(matches!(
+            lock.verify_integrity(
+                "multi@1.0.0",
                 &format!("sha512-{}", BASE64_STANDARD.encode([0x00; 64]))
             ),
             Err(LockfileError::IntegrityMismatch { .. })

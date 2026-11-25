@@ -11,7 +11,7 @@
 //!   only when remote loading is enabled and `--offline` is not set.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use deno_core::url::Url;
@@ -19,8 +19,9 @@ use neojs_module_policy::is_path_specifier;
 use neojs_npm::{
     CasStore, DEFAULT_REGISTRY_ORIGIN, ExportsResolver, LOCKFILE_NAME, LoadedNpmModule, Lockfile,
     MAX_DISCOVERY_DEPTH, NpmLimits, NpmReferrerResolution, NpmRootRequest, NpmSpecifier,
-    ProjectPackageResolver, ProjectResolution, RemoteNpmRegistry, ResolvedNpmGraph, TargetPlatform,
-    VersionConstraint, resolve_requests_with_lockfile, split_bare_package_specifier,
+    PackageName, ProjectPackageResolver, ProjectResolution, RemoteNpmRegistry, ResolvedNpmGraph,
+    ResolverError, TargetPlatform, VersionConstraint, resolve_requests_with_lockfile,
+    split_bare_package_specifier,
 };
 use neojs_remote::{RemoteClient, RemoteOptions};
 
@@ -180,12 +181,11 @@ impl NpmLoader {
         let req = NpmRootRequest::from_specifier(&spec).map_err(|err| err.to_string())?;
 
         let referrer_dir = file_referrer_dir(referrer)?;
-        let project_dir = self
-            .discover_project_for_dir(&referrer_dir)?
-            .map(|proj| proj.root_dir().to_path_buf());
+        let project = self.discover_project_for_dir(&referrer_dir)?;
+        let project_dir = project.as_ref().map(|proj| proj.root_dir().to_path_buf());
         let lock_dir = self.ensure_lockfile_slot(&referrer_dir, project_dir.as_deref())?;
 
-        self.ensure_request_resolved(&req, &lock_dir)?;
+        self.ensure_request_resolved(&req, &lock_dir, project.as_ref())?;
         let graph_borrow = self.graph.borrow();
         let graph = graph_borrow
             .as_ref()
@@ -216,84 +216,71 @@ impl NpmLoader {
             return Ok(None);
         };
 
-        if specifier.starts_with('#') {
+        // Resolve local `#imports` and package self-references directly without
+        // touching CasStore (works even when XDG_CACHE_HOME/HOME are unset).
+        if let Some(local_res) = project
+            .resolve_local_specifier(specifier)
+            .map_err(|err| err.to_string())?
+        {
+            return match local_res {
+                ProjectResolution::NotIntercepted => Ok(None),
+                ProjectResolution::LocalFile { path, .. } => {
+                    Url::from_file_path(&path).map(Some).map_err(|()| {
+                        format!(
+                            "resolved path `{}` is not a valid file: URL",
+                            path.display()
+                        )
+                    })
+                }
+                ProjectResolution::NpmModule(url) => Ok(Some(url)),
+            };
+        }
+
+        let target_name = if specifier.starts_with('#') {
             let proj_name = project
                 .package_json()
                 .name
                 .as_deref()
                 .unwrap_or("<project>");
-            let target = ExportsResolver::resolve_project_import(
+            match ExportsResolver::resolve_project_import(
                 project.package_json(),
                 project.root_dir(),
                 proj_name,
                 specifier,
             )
-            .map_err(|err| err.to_string())?;
-            match target {
+            .map_err(|err| err.to_string())?
+            {
+                neojs_npm::PackageImportTarget::ExternalPackage { name, .. } => name,
                 neojs_npm::PackageImportTarget::InternalFile(_) => {
-                    let empty_graph = self.empty_or_existing_graph()?;
-                    match project
-                        .resolve_specifier(specifier, &empty_graph)
-                        .map_err(|err| err.to_string())?
-                    {
-                        ProjectResolution::LocalFile { path, .. } => {
-                            let url = Url::from_file_path(&path).map_err(|()| {
-                                format!(
-                                    "resolved path `{}` is not a valid file: URL",
-                                    path.display()
-                                )
-                            })?;
-                            return Ok(Some(url));
-                        }
-                        ProjectResolution::NotIntercepted => return Ok(None),
-                        ProjectResolution::NpmModule(url) => return Ok(Some(url)),
-                    }
-                }
-                neojs_npm::PackageImportTarget::ExternalPackage { name, .. } => {
-                    let Some((range_str, optional)) = project.dependency_constraint(&name) else {
-                        return Err(format!(
-                            "package `{name}` is not declared in project package.json dependencies"
-                        ));
-                    };
-                    let constraint =
-                        VersionConstraint::parse(range_str).map_err(|err| err.to_string())?;
-                    let req = NpmRootRequest {
-                        name,
-                        constraint,
-                        optional,
-                    };
-                    let lock_dir =
-                        self.ensure_lockfile_slot(&referrer_dir, Some(project.root_dir()))?;
-                    self.ensure_request_resolved(&req, &lock_dir)?;
+                    unreachable!("InternalFile is handled by resolve_local_specifier")
                 }
             }
         } else {
-            let (pkg_name, _) =
-                split_bare_package_specifier(specifier).map_err(|err| err.to_string())?;
-            let is_self_ref = project.package_json().name.as_deref() == Some(pkg_name.as_str())
-                && project.package_json().exports.is_some();
-            if !is_self_ref {
-                let Some((range_str, optional)) = project.dependency_constraint(&pkg_name) else {
-                    return Err(format!(
-                        "package `{pkg_name}` is not declared in project package.json dependencies"
-                    ));
-                };
-                let constraint =
-                    VersionConstraint::parse(range_str).map_err(|err| err.to_string())?;
-                let req = NpmRootRequest {
-                    name: pkg_name,
-                    constraint,
-                    optional,
-                };
-                let lock_dir =
-                    self.ensure_lockfile_slot(&referrer_dir, Some(project.root_dir()))?;
-                self.ensure_request_resolved(&req, &lock_dir)?;
-            }
-        }
+            split_bare_package_specifier(specifier)
+                .map_err(|err| err.to_string())?
+                .0
+        };
 
-        let graph = self.empty_or_existing_graph()?;
+        let Some((range_str, optional)) = project.dependency_constraint(&target_name) else {
+            return Err(format!(
+                "package `{target_name}` is not declared in project package.json dependencies"
+            ));
+        };
+        let constraint = VersionConstraint::parse(range_str).map_err(|err| err.to_string())?;
+        let req = NpmRootRequest {
+            name: target_name,
+            constraint,
+            optional,
+        };
+        let lock_dir = self.ensure_lockfile_slot(&referrer_dir, Some(project.root_dir()))?;
+        self.ensure_request_resolved(&req, &lock_dir, Some(&project))?;
+
+        let graph_borrow = self.graph.borrow();
+        let graph = graph_borrow
+            .as_ref()
+            .ok_or_else(|| "internal error: npm graph not initialized".to_owned())?;
         match project
-            .resolve_specifier(specifier, &graph)
+            .resolve_specifier(specifier, graph)
             .map_err(|err| err.to_string())?
         {
             ProjectResolution::NotIntercepted => Ok(None),
@@ -353,14 +340,6 @@ impl NpmLoader {
                 .to_owned()
         })?;
         Ok(CasStore::new(root))
-    }
-
-    fn empty_or_existing_graph(&self) -> Result<ResolvedNpmGraph, String> {
-        if let Some(existing) = self.graph.borrow().as_ref() {
-            return Ok(existing.clone());
-        }
-        let cas = self.cas_store()?;
-        ResolvedNpmGraph::new(&self.options.registry_origin, cas).map_err(|err| err.to_string())
     }
 
     fn discover_project_for_dir(
@@ -423,7 +402,12 @@ impl NpmLoader {
         Ok(lock_dir)
     }
 
-    fn ensure_request_resolved(&self, req: &NpmRootRequest, lock_dir: &Path) -> Result<(), String> {
+    fn ensure_request_resolved(
+        &self,
+        req: &NpmRootRequest,
+        lock_dir: &Path,
+        project: Option<&ProjectPackageResolver>,
+    ) -> Result<(), String> {
         let constraint_str = req.constraint.to_string();
         if self
             .graph
@@ -449,18 +433,57 @@ impl NpmLoader {
             .get_mut(lock_dir)
             .ok_or_else(|| "internal error: missing lockfile slot".to_owned())?;
 
-        let (sub_graph, modified) = resolve_requests_with_lockfile(
-            std::slice::from_ref(req),
-            &mut slot.lockfile,
-            &cas,
-            registry_ref,
-            &self.options.registry_origin,
-            self.options.frozen_lockfile,
-            self.options.offline,
-            NpmLimits::default(),
-            &TargetPlatform::current(),
-        )
-        .map_err(|err| err.to_string())?;
+        let mut requests = vec![req.clone()];
+        let mut seen_peers = BTreeSet::from([req.name.clone()]);
+        let max_attempts = 1 + project.map_or(0, |p| {
+            p.package_json().dependencies.len()
+                + p.package_json().dev_dependencies.len()
+                + p.package_json().optional_dependencies.len()
+        });
+
+        let (sub_graph, modified) = loop {
+            match resolve_requests_with_lockfile(
+                &requests,
+                &mut slot.lockfile,
+                &cas,
+                registry_ref,
+                &self.options.registry_origin,
+                self.options.frozen_lockfile,
+                self.options.offline,
+                NpmLimits::default(),
+                &TargetPlatform::current(),
+            ) {
+                Ok(res) => break res,
+                Err(ResolverError::MissingPeerDependency { ref peer, .. })
+                    if requests.len() < max_attempts =>
+                {
+                    let Some(proj) = project else {
+                        return Err(format!(
+                            "package `{}` requires peer `{peer}`, which is missing",
+                            req.name
+                        ));
+                    };
+                    let peer_name = PackageName::parse(peer).map_err(|e| e.to_string())?;
+                    if !seen_peers.insert(peer_name.clone()) {
+                        return Err(format!("missing peer dependency `{peer}`"));
+                    }
+                    let Some((range_str, optional)) = proj.dependency_constraint(&peer_name) else {
+                        return Err(format!(
+                            "package `{}` requires peer `{peer}`, which is not declared in project package.json",
+                            req.name
+                        ));
+                    };
+                    let constraint =
+                        VersionConstraint::parse(range_str).map_err(|e| e.to_string())?;
+                    requests.push(NpmRootRequest {
+                        name: peer_name,
+                        constraint,
+                        optional,
+                    });
+                }
+                Err(err) => return Err(err.to_string()),
+            }
+        };
 
         if modified
             && slot.persist_on_change

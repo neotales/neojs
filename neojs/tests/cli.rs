@@ -1647,6 +1647,36 @@ fn prints_the_compact_help() {
 }
 
 fn expected_help() -> String {
+    #[cfg(feature = "npm")]
+    let npm_options = "\
+  --allow-remote   allow https:, gh:, and github: entry and imports, and
+                   jsr:/npm: network fetches; off by default
+  --no-allow-remote
+                   force remote loading off, overriding NEOJS_ALLOW_REMOTE
+  --no-npm         disable npm: and package.json module resolution
+  --frozen-lockfile
+                   refuse npm resolutions not pinned in neo.lock
+  --offline        refuse network fetches; serve npm packages strictly from CAS";
+    #[cfg(not(feature = "npm"))]
+    let npm_options = "\
+  --allow-remote   allow https:, gh:, and github: entry and imports, and
+                   jsr: imports; off by default
+  --no-allow-remote
+                   force remote loading off, overriding NEOJS_ALLOW_REMOTE";
+
+    #[cfg(feature = "npm")]
+    let npm_summary = "\
+user cache. JSR metadata and files use the same HTTPS limits and cache. `npm:`
+specifiers, `package.json` dependencies/`#imports`, and `neo.lock` resolve
+without `node_modules` or install scripts via the verified CAS cache
+(offline by default; use `--allow-remote` to fetch missing packages,
+`--frozen-lockfile` to require `neo.lock`, `--offline` to forbid network, or
+`--no-npm` to disable). `node:` is not implemented. Local modules discover";
+    #[cfg(not(feature = "npm"))]
+    let npm_summary = "\
+user cache. JSR metadata and files use the same HTTPS limits and cache. npm:
+and node: are not implemented (npm support was disabled at compile time). Local modules discover";
+
     format!(
         "\
 neojs {}
@@ -1664,14 +1694,7 @@ Usage:
                                   emit TypeScript declarations (.d.ts)
 
 Options:
-  --allow-remote   allow https:, gh:, and github: entry and imports, and
-                   jsr:/npm: network fetches; off by default
-  --no-allow-remote
-                   force remote loading off, overriding NEOJS_ALLOW_REMOTE
-  --no-npm         disable npm: and package.json module resolution
-  --frozen-lockfile
-                   refuse npm resolutions not pinned in neo.lock
-  --offline        refuse network fetches; serve npm packages strictly from CAS
+{npm_options}
   --config <path>  use an explicit neo.jsonc manifest instead of discovery
   --no-config      disable automatic neo.jsonc manifest discovery
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -1702,12 +1725,7 @@ jsr:@scope/name[@version][/subpath] imports from the public JSR registry;
 before or after `test`. A gh:/github: specifier becomes a
 raw.githubusercontent.com https: URL. It is not SSRF protection, not a host
 allowlist, and not a sandbox. Downloads are cached under `neojs/packages` in the
-user cache. JSR metadata and files use the same HTTPS limits and cache. `npm:`
-specifiers, `package.json` dependencies/`#imports`, and `neo.lock` resolve
-without `node_modules` or install scripts via the verified CAS cache
-(offline by default; use `--allow-remote` to fetch missing packages,
-`--frozen-lockfile` to require `neo.lock`, `--offline` to forbid network, or
-`--no-npm` to disable). `node:` is not implemented. Local modules discover
+{npm_summary}
 `neo.jsonc` upward for `imports` and `workspaces` unless `--config` or
 `--no-config` is passed.
 
@@ -4644,6 +4662,38 @@ console.log(npmGreet("explicit"));
             stderr(&out)
         );
     }
+
+    #[test]
+    fn npm_cli_local_hash_imports_and_self_ref_succeed_without_home_or_xdg_cache() {
+        let project = Project::new();
+        project.write(
+            "package.json",
+            r##"{
+                "name": "local-app",
+                "type": "module",
+                "exports": { "./self": "./src/msg.ts" },
+                "imports": { "#msg": "./src/msg.ts" }
+            }"##,
+        );
+        project.write("src/msg.ts", "export const msg: string = 'no-cas-ok';\n");
+        let main = project.write(
+            "main.ts",
+            r##"
+import { msg as a } from "#msg";
+import { msg as b } from "local-app/self";
+console.log(`${a}:${b}`);
+"##,
+        );
+        let out = neojs_command()
+            .env_remove("HOME")
+            .env_remove("XDG_CACHE_HOME")
+            .env_remove("USERPROFILE")
+            .arg(&main)
+            .output()
+            .expect("spawn neojs");
+        assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+        assert_eq!(stdout(&out), "no-cas-ok:no-cas-ok\n");
+    }
 }
 
 #[cfg(not(feature = "npm"))]
@@ -4658,4 +4708,19 @@ fn npm_cli_rejects_npm_when_compiled_without_npm_feature() {
         "{}",
         stderr(&out)
     );
+
+    for flag in ["--no-npm", "--frozen-lockfile", "--offline"] {
+        let flag_out = run_args(&[flag, main.to_str().unwrap()]);
+        assert_eq!(
+            flag_out.status.code(),
+            Some(2),
+            "{flag}: {}",
+            stderr(&flag_out)
+        );
+        assert!(
+            stderr(&flag_out).contains("requires `neojs` built with the `npm` feature"),
+            "{flag}: {}",
+            stderr(&flag_out)
+        );
+    }
 }

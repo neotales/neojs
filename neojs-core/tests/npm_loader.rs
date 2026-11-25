@@ -589,6 +589,193 @@ if (calc(10) !== 25) throw new Error("transitive npm calc failed");
             "{err_bare}"
         );
     }
+
+    #[test]
+    fn npm_package_boundary_rejects_dev_deps_traversal_schemes_and_tampered_cas_blob() {
+        let project = TempDir::new().unwrap();
+        let cache = TempDir::new().unwrap();
+        let cas = CasStore::new(cache.path());
+
+        let (dev_sri, dev_tree) = seed_cas_package(
+            &cas,
+            r#"{"name":"secret-dev","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+            &[("index.mjs", "export const secret = 1;\n")],
+        );
+
+        let cases = [
+            (
+                "dev-caller",
+                r#"{"name":"dev-caller","version":"1.0.0","type":"module","exports":"./index.mjs","devDependencies":{"secret-dev":"^1.0.0"}}"#,
+                "import { secret } from 'secret-dev'; export const x = secret;\n",
+                "not declared",
+            ),
+            (
+                "escape-caller",
+                r#"{"name":"escape-caller","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+                "import x from '../../outside.mjs'; export const y = x;\n",
+                "invalid virtual npm URL",
+            ),
+            (
+                "file-caller",
+                r#"{"name":"file-caller","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+                "import x from 'file:///etc/passwd'; export const y = x;\n",
+                "not allowed",
+            ),
+            (
+                "https-caller",
+                r#"{"name":"https-caller","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+                "import x from 'https://example.test/evil.mjs'; export const y = x;\n",
+                "not allowed",
+            ),
+            (
+                "jsr-caller",
+                r#"{"name":"jsr-caller","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+                "import x from 'jsr:@std/path@1.0.0'; export const y = x;\n",
+                "not allowed",
+            ),
+        ];
+
+        let mut lock = Lockfile::new();
+        lock.packages.insert(
+            "secret-dev@1.0.0".to_owned(),
+            LockedPackage {
+                version: "1.0.0".to_owned(),
+                integrity: dev_sri,
+                tree_sha256: Some(dev_tree),
+                tarball_url: "https://registry.npmjs.org/secret-dev/-/1.0.0.tgz".to_owned(),
+                dependencies: BTreeMap::new(),
+            },
+        );
+        for (name, pkg_json, code, _) in &cases {
+            let (sri, tree) = seed_cas_package(&cas, pkg_json, &[("index.mjs", code)]);
+            lock.specifiers
+                .insert(format!("{name}@^1.0.0"), format!("{name}@1.0.0"));
+            lock.packages.insert(
+                format!("{name}@1.0.0"),
+                LockedPackage {
+                    version: "1.0.0".to_owned(),
+                    integrity: sri,
+                    tree_sha256: Some(tree),
+                    tarball_url: format!("https://registry.npmjs.org/{name}/-/1.0.0.tgz"),
+                    dependencies: BTreeMap::new(),
+                },
+            );
+        }
+        lock.write_atomic(&project.path().join("neo.lock")).unwrap();
+
+        for (name, _, _, expected_err) in &cases {
+            let entry = write_file(
+                project.path(),
+                &format!("{name}.js"),
+                &format!("import {{ x }} from 'npm:{name}@^1.0.0'; console.log(x);"),
+            );
+            let err = Runtime::with_options(
+                RuntimeOptions::new()
+                    .with_frozen_lockfile(true)
+                    .with_offline(true)
+                    .with_npm_cache_dir(cache.path()),
+            )
+            .unwrap()
+            .run_file(&entry)
+            .expect_err(&format!("{name} must be rejected"));
+            assert!(
+                err.to_string().contains(expected_err),
+                "{name}: unexpected error: {err}"
+            );
+        }
+
+        // Tamper directly with a CAS blob on disk and verify load fails closed.
+        let mod_src = "export const ok = 'untampered';\n";
+        let (good_sri, good_tree_hash) = seed_cas_package(
+            &cas,
+            r#"{"name":"tamper-pkg","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+            &[("index.mjs", mod_src)],
+        );
+        let mod_digest = neojs_npm::sha256_hex(mod_src.as_bytes());
+        let blob_path = cas.blob_path(&mod_digest).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&blob_path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let mut tampered_bytes = mod_src.as_bytes().to_vec();
+        tampered_bytes[0] = b'X';
+        fs::write(&blob_path, &tampered_bytes).unwrap();
+
+        let mut tamper_lock = Lockfile::new();
+        tamper_lock.specifiers.insert(
+            "tamper-pkg@^1.0.0".to_owned(),
+            "tamper-pkg@1.0.0".to_owned(),
+        );
+        tamper_lock.packages.insert(
+            "tamper-pkg@1.0.0".to_owned(),
+            LockedPackage {
+                version: "1.0.0".to_owned(),
+                integrity: good_sri,
+                tree_sha256: Some(good_tree_hash),
+                tarball_url: "https://registry.npmjs.org/tamper-pkg/-/1.0.0.tgz".to_owned(),
+                dependencies: BTreeMap::new(),
+            },
+        );
+        tamper_lock
+            .write_atomic(&project.path().join("neo.lock"))
+            .unwrap();
+        let tamper_entry = write_file(
+            project.path(),
+            "tamper.js",
+            r#"import { ok } from "npm:tamper-pkg@^1.0.0"; console.log(ok);"#,
+        );
+        let err = Runtime::with_options(
+            RuntimeOptions::new()
+                .with_frozen_lockfile(true)
+                .with_offline(true)
+                .with_npm_cache_dir(cache.path()),
+        )
+        .unwrap()
+        .run_file(&tamper_entry)
+        .expect_err("tampered CAS blob must fail closed");
+        assert!(err.to_string().contains("integrity mismatch"), "{err}");
+    }
+
+    #[test]
+    fn local_hash_imports_and_self_ref_work_without_cas_dir() {
+        let project = TempDir::new().unwrap();
+        write_file(
+            project.path(),
+            "package.json",
+            r##"{
+                "name": "local-only-app",
+                "version": "1.0.0",
+                "type": "module",
+                "exports": { "./self": "./src/helper.ts" },
+                "imports": { "#helper": "./src/helper.ts" }
+            }"##,
+        );
+        write_file(
+            project.path(),
+            "src/helper.ts",
+            "export const value: number = 99;\n",
+        );
+        let main = write_file(
+            project.path(),
+            "main.ts",
+            r##"
+import { value as a } from "#helper";
+import { value as b } from "local-only-app/self";
+if (a !== 99 || b !== 99) throw new Error("local #imports/self-ref failed");
+"##,
+        );
+        // Point cache dir at a nonexistent/unwritable-never-used path; local-only
+        // `#imports` and self-reference must never touch CasStore.
+        let opts = RuntimeOptions::new()
+            .with_npm_cache_dir(project.path().join("nonexistent-cas"))
+            .with_offline(true);
+        Runtime::with_options(opts)
+            .unwrap()
+            .run_file(&main)
+            .expect("local #imports and self-ref succeed without CAS");
+        assert!(!project.path().join("nonexistent-cas").exists());
+    }
 }
 
 #[cfg(all(feature = "npm", feature = "test-support"))]
@@ -773,6 +960,85 @@ if (greet("neo") !== "hello neo" || fmt("x") !== "hello x") throw new Error("bad
         .run_file(&main)
         .expect("frozen offline run succeeds");
         assert_eq!(server.request_count(), reqs_after_first);
+    }
+
+    #[test]
+    fn project_sibling_peer_dependency_resolves_lazily_and_persists_ctx_lockfile() {
+        let project = TempDir::new().unwrap();
+        let cache = TempDir::new().unwrap();
+        let server = MockNpmServer::new();
+
+        server.publish(
+            "host-lib",
+            "1.0.0",
+            r#"{"name":"host-lib","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+            &[("index.mjs", "export const hostTag = 'host-1';\n")],
+        );
+        server.publish(
+            "plug-lib",
+            "1.0.0",
+            r#"{
+                "name": "plug-lib",
+                "version": "1.0.0",
+                "type": "module",
+                "exports": "./index.mjs",
+                "peerDependencies": { "host-lib": "^1.0.0" }
+            }"#,
+            &[(
+                "index.mjs",
+                "import { hostTag } from 'host-lib'; export const plugTag = `plug+${hostTag}`;\n",
+            )],
+        );
+
+        // Note: `unused-pkg` is declared in `package.json` but NOT published on
+        // `server`; lazy peer-aware resolution must resolve `plug-lib` + its
+        // sibling peer `host-lib` without touching `unused-pkg`.
+        write_file(
+            project.path(),
+            "package.json",
+            r#"{
+                "name": "peer-app",
+                "type": "module",
+                "dependencies": {
+                    "plug-lib": "^1.0.0",
+                    "host-lib": "^1.0.0",
+                    "unused-pkg": "^1.0.0"
+                }
+            }"#,
+        );
+        let main = write_file(
+            project.path(),
+            "main.js",
+            r#"
+import { plugTag } from "plug-lib";
+if (plugTag !== "plug+host-1") throw new Error("sibling peer failed");
+"#,
+        );
+
+        let opts =
+            RuntimeOptions::new().with_remote(RemoteOptions::new().with_cache_dir(cache.path()));
+        Runtime::with_options_and_transport(opts, server.transport())
+            .unwrap()
+            .run_file(&main)
+            .expect("sibling peer dependency resolves cleanly");
+
+        let lock = Lockfile::read_from_path(&project.path().join("neo.lock")).unwrap();
+        let plug_key = lock.specifiers.get("plug-lib@^1.0.0").unwrap();
+        assert!(
+            plug_key.starts_with("plug-lib@1.0.0~p"),
+            "lockfile must preserve peer ctx: {plug_key}"
+        );
+
+        // Frozen offline run succeeds without network and without `unused-pkg`.
+        Runtime::with_options(
+            RuntimeOptions::new()
+                .with_frozen_lockfile(true)
+                .with_offline(true)
+                .with_npm_cache_dir(cache.path()),
+        )
+        .unwrap()
+        .run_file(&main)
+        .expect("frozen offline run succeeds with peer ctx");
     }
 }
 

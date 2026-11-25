@@ -1354,3 +1354,311 @@ fn regression_tarball_hardening_and_windows_drive_and_case_insensitive_builtins(
         NpmReferrerResolution::NodeBuiltin("NODE:path".to_owned())
     );
 }
+
+#[test]
+fn lockfile_resolution_enforces_tree_hash_package_json_constraints_peers_and_ctx() {
+    use neojs_npm::{
+        DEFAULT_REGISTRY_ORIGIN, LockedPackage, Lockfile, NpmRootRequest, RemoteNpmRegistry,
+        VersionConstraint, resolve_requests_with_lockfile,
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cas = CasStore::new(tmp.path());
+    let mut reg = MockRegistry::new();
+
+    reg.publish_simple(
+        "host",
+        "1.0.0",
+        true,
+        r#"{"name":"host","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+        &[("index.mjs", "export const v = 1;\n")],
+    );
+    reg.publish_simple(
+        "host",
+        "2.0.0",
+        true,
+        r#"{"name":"host","version":"2.0.0","type":"module","exports":"./index.mjs"}"#,
+        &[("index.mjs", "export const v = 2;\n")],
+    );
+    reg.publish_simple(
+        "plug",
+        "1.0.0",
+        true,
+        r#"{"name":"plug","version":"1.0.0","type":"module","exports":"./index.mjs","peerDependencies":{"host":"^1.0.0 || ^2.0.0"}}"#,
+        &[("index.mjs", "export const p = 1;\n")],
+    );
+    reg.publish_simple(
+        "leaf",
+        "1.0.0",
+        true,
+        r#"{"name":"leaf","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+        &[("index.mjs", "export const l = 1;\n")],
+    );
+    reg.publish_simple(
+        "leaf",
+        "2.0.0",
+        true,
+        r#"{"name":"leaf","version":"2.0.0","type":"module","exports":"./index.mjs"}"#,
+        &[("index.mjs", "export const l = 2;\n")],
+    );
+    reg.publish_simple(
+        "parent",
+        "1.0.0",
+        true,
+        r#"{"name":"parent","version":"1.0.0","type":"module","exports":"./index.mjs","dependencies":{"leaf":"^1.0.0"},"devDependencies":{"dev-only":"^1.0.0"}}"#,
+        &[("index.mjs", "export const p = 1;\n")],
+    );
+    reg.publish_simple(
+        "dev-only",
+        "1.0.0",
+        true,
+        r#"{"name":"dev-only","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+        &[("index.mjs", "export const d = 1;\n")],
+    );
+
+    // 1. Incremental Lockfile::record_graph preserves `~<ctx>` whenever ctx != "0".
+    let resolver = NpmGraphResolver::new(&reg, cas.clone());
+    let g1 = resolver
+        .resolve_specifiers(&[
+            NpmSpecifier::parse("npm:host@1.0.0").unwrap(),
+            NpmSpecifier::parse("npm:plug@1.0.0").unwrap(),
+        ])
+        .unwrap();
+    let g2 = resolver
+        .resolve_specifiers(&[
+            NpmSpecifier::parse("npm:host@2.0.0").unwrap(),
+            NpmSpecifier::parse("npm:plug@1.0.0").unwrap(),
+        ])
+        .unwrap();
+    let mut lock = Lockfile::new();
+    assert!(lock.record_graph(&g1));
+    assert!(lock.record_graph(&g2));
+    let plug_keys: Vec<_> = lock
+        .packages
+        .keys()
+        .filter(|k| k.starts_with("plug@1.0.0~p"))
+        .collect();
+    assert_eq!(
+        plug_keys.len(),
+        2,
+        "distinct ~<ctx> entries preserved: {plug_keys:?}"
+    );
+
+    // 2. Cold-cache treeSha256 mismatch fails closed with CasError::IntegrityMismatch.
+    let cold_cache = tempfile::tempdir().unwrap();
+    let cold_cas = CasStore::new(cold_cache.path());
+    let parent_meta = reg
+        .fetch_packument(&PackageName::parse("parent").unwrap())
+        .unwrap();
+    let parent_v = &parent_meta.versions["1.0.0"];
+    let mut cold_lock = Lockfile::new();
+    cold_lock
+        .specifiers
+        .insert("parent@^1.0.0".to_owned(), "parent@1.0.0".to_owned());
+    cold_lock.packages.insert(
+        "parent@1.0.0".to_owned(),
+        LockedPackage {
+            version: "1.0.0".to_owned(),
+            integrity: parent_v.dist.integrity.clone().unwrap(),
+            tree_sha256: Some("0".repeat(64)),
+            tarball_url: parent_v.dist.tarball.clone(),
+            dependencies: BTreeMap::new(),
+        },
+    );
+    let req_parent = vec![NpmRootRequest {
+        name: PackageName::parse("parent").unwrap(),
+        constraint: VersionConstraint::parse("^1.0.0").unwrap(),
+        optional: false,
+    }];
+    let err = resolve_requests_with_lockfile(
+        &req_parent,
+        &mut cold_lock,
+        &cold_cas,
+        Some(&reg),
+        DEFAULT_REGISTRY_ORIGIN,
+        true,
+        false,
+        NpmLimits::default(),
+        &TargetPlatform::current(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ResolverError::Cas(CasError::IntegrityMismatch { .. })),
+        "{err}"
+    );
+
+    // 3. Frozen lockfile requires treeSha256.
+    cold_lock
+        .packages
+        .get_mut("parent@1.0.0")
+        .unwrap()
+        .tree_sha256 = None;
+    let err = resolve_requests_with_lockfile(
+        &req_parent,
+        &mut cold_lock,
+        &cold_cas,
+        Some(&reg),
+        DEFAULT_REGISTRY_ORIGIN,
+        true,
+        false,
+        NpmLimits::default(),
+        &TargetPlatform::current(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ResolverError::FrozenLockfile { .. }), "{err}");
+
+    // Seed valid parent + leaf@1.0.0 + leaf@2.0.0 + dev-only@1.0.0 into `cas`.
+    let base_graph = resolver
+        .resolve_specifiers(&[
+            NpmSpecifier::parse("npm:parent@^1.0.0").unwrap(),
+            NpmSpecifier::parse("npm:leaf@2.0.0").unwrap(),
+            NpmSpecifier::parse("npm:dev-only@1.0.0").unwrap(),
+        ])
+        .unwrap();
+    let mut base_lock = Lockfile::new();
+    base_lock.record_graph(&base_graph);
+
+    // 4. Reject locked dependency not declared in package.json (e.g. injected devDependencies).
+    let mut dev_inject = base_lock.clone();
+    dev_inject
+        .packages
+        .get_mut("parent@1.0.0")
+        .unwrap()
+        .dependencies
+        .insert("dev-only".to_owned(), "dev-only@1.0.0".to_owned());
+    let err = resolve_requests_with_lockfile(
+        &req_parent,
+        &mut dev_inject,
+        &cas,
+        None::<&MockRegistry>,
+        DEFAULT_REGISTRY_ORIGIN,
+        true,
+        true,
+        NpmLimits::default(),
+        &TargetPlatform::current(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ResolverError::DisallowedImport { .. }),
+        "{err}"
+    );
+
+    // 5. Reject locked child version violating parent's SemVer constraint (`leaf@^1.0.0` vs `2.0.0`).
+    let mut bad_child_ver = base_lock.clone();
+    bad_child_ver
+        .packages
+        .get_mut("parent@1.0.0")
+        .unwrap()
+        .dependencies
+        .insert("leaf".to_owned(), "leaf@2.0.0".to_owned());
+    let err = resolve_requests_with_lockfile(
+        &req_parent,
+        &mut bad_child_ver,
+        &cas,
+        None::<&MockRegistry>,
+        DEFAULT_REGISTRY_ORIGIN,
+        true,
+        true,
+        NpmLimits::default(),
+        &TargetPlatform::current(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ResolverError::FrozenLockfile { .. }), "{err}");
+
+    // 6. Reject locked package.json version mismatch.
+    let mut bad_pkg_ver = base_lock.clone();
+    let parent_pkg = bad_pkg_ver.packages.remove("parent@1.0.0").unwrap();
+    bad_pkg_ver
+        .specifiers
+        .insert("parent@^1.0.0".to_owned(), "parent@1.0.1".to_owned());
+    bad_pkg_ver.packages.insert(
+        "parent@1.0.1".to_owned(),
+        LockedPackage {
+            version: "1.0.1".to_owned(),
+            ..parent_pkg
+        },
+    );
+    let err = resolve_requests_with_lockfile(
+        &req_parent,
+        &mut bad_pkg_ver,
+        &cas,
+        None::<&MockRegistry>,
+        DEFAULT_REGISTRY_ORIGIN,
+        true,
+        true,
+        NpmLimits::default(),
+        &TargetPlatform::current(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ResolverError::PackageVersionMismatch { .. }),
+        "{err}"
+    );
+
+    // 7. Reject missing required peerDependency in frozen mode.
+    let mut missing_peer_lock = Lockfile::new();
+    missing_peer_lock.record_graph(&g1);
+    let plug_key = missing_peer_lock
+        .packages
+        .keys()
+        .find(|k| k.starts_with("plug@"))
+        .unwrap()
+        .clone();
+    missing_peer_lock
+        .packages
+        .get_mut(&plug_key)
+        .unwrap()
+        .dependencies
+        .clear();
+    let req_plug = vec![NpmRootRequest {
+        name: PackageName::parse("plug").unwrap(),
+        constraint: VersionConstraint::parse("1.0.0").unwrap(),
+        optional: false,
+    }];
+    let err = resolve_requests_with_lockfile(
+        &req_plug,
+        &mut missing_peer_lock,
+        &cas,
+        None::<&MockRegistry>,
+        DEFAULT_REGISTRY_ORIGIN,
+        true,
+        true,
+        NpmLimits::default(),
+        &TargetPlatform::current(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ResolverError::FrozenLockfile { .. }), "{err}");
+
+    // 8. RemoteNpmRegistry::fetch_tarball redacts credentials and query tokens from errors.
+    struct FailingTransport;
+    impl neojs_remote::RemoteTransport for FailingTransport {
+        fn get(
+            &self,
+            _request: &neojs_remote::RemoteRequest<'_>,
+        ) -> Result<neojs_remote::RemoteResponse, String> {
+            Err("simulated transport failure".to_owned())
+        }
+    }
+    let client = neojs_remote::RemoteClient::with_transport(
+        neojs_remote::RemoteOptions::new().without_cache(),
+        std::sync::Arc::new(FailingTransport),
+    );
+    let remote_reg = RemoteNpmRegistry::with_client(DEFAULT_REGISTRY_ORIGIN, client);
+    let err = remote_reg
+        .fetch_tarball(
+            "https://user:supersecret@registry.npmjs.org/pkg.tgz?token=leak123",
+            "sha512-x",
+        )
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(!msg.contains("supersecret"), "credential leaked: {msg}");
+    assert!(!msg.contains("leak123"), "query token leaked: {msg}");
+    let bad_err = remote_reg
+        .fetch_tarball("not a url ?secret=abc", "sha512-x")
+        .unwrap_err();
+    let bad_msg = bad_err.to_string();
+    assert!(
+        !bad_msg.contains("secret=abc"),
+        "malformed URL leaked: {bad_msg}"
+    );
+}

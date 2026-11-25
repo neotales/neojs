@@ -225,6 +225,7 @@ enum Input {
 fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
     let mut allow_remote = AllowRemote::Unspecified;
     let mut config = ConfigChoice::Auto;
+    #[cfg_attr(not(feature = "npm"), allow(unused_mut))]
     let mut npm = NpmFlags::default();
     let mut index = 0;
     while let Some(argument) = args.get(index) {
@@ -238,16 +239,33 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
                 index += 1;
             }
             Some("--no-npm") => {
-                npm.enabled = false;
-                index += 1;
+                #[cfg(not(feature = "npm"))]
+                return Err("`--no-npm` requires `neojs` built with the `npm` feature".to_string());
+                #[cfg(feature = "npm")]
+                {
+                    npm.enabled = false;
+                    index += 1;
+                }
             }
             Some("--frozen-lockfile") => {
-                npm.frozen_lockfile = true;
-                index += 1;
+                #[cfg(not(feature = "npm"))]
+                return Err(
+                    "`--frozen-lockfile` requires `neojs` built with the `npm` feature".to_string(),
+                );
+                #[cfg(feature = "npm")]
+                {
+                    npm.frozen_lockfile = true;
+                    index += 1;
+                }
             }
             Some("--offline") => {
-                npm.offline = true;
-                index += 1;
+                #[cfg(not(feature = "npm"))]
+                return Err("`--offline` requires `neojs` built with the `npm` feature".to_string());
+                #[cfg(feature = "npm")]
+                {
+                    npm.offline = true;
+                    index += 1;
+                }
             }
             Some("--no-config") => {
                 config.set_disabled()?;
@@ -340,7 +358,7 @@ fn parse_test_args(
     args: &[OsString],
     mut allow_remote: AllowRemote,
     mut config: ConfigChoice,
-    mut npm: NpmFlags,
+    #[cfg_attr(not(feature = "npm"), allow(unused_mut))] mut npm: NpmFlags,
 ) -> Result<Command, String> {
     if args.len() == 1 && matches!(args[0].to_str(), Some("-h" | "--help")) {
         return Ok(Command::Help);
@@ -368,19 +386,36 @@ fn parse_test_args(
             continue;
         }
         if !after_double_dash && value == "--no-npm" {
-            npm.enabled = false;
-            index += 1;
-            continue;
+            #[cfg(not(feature = "npm"))]
+            return Err("`--no-npm` requires `neojs` built with the `npm` feature".to_string());
+            #[cfg(feature = "npm")]
+            {
+                npm.enabled = false;
+                index += 1;
+                continue;
+            }
         }
         if !after_double_dash && value == "--frozen-lockfile" {
-            npm.frozen_lockfile = true;
-            index += 1;
-            continue;
+            #[cfg(not(feature = "npm"))]
+            return Err(
+                "`--frozen-lockfile` requires `neojs` built with the `npm` feature".to_string(),
+            );
+            #[cfg(feature = "npm")]
+            {
+                npm.frozen_lockfile = true;
+                index += 1;
+                continue;
+            }
         }
         if !after_double_dash && value == "--offline" {
-            npm.offline = true;
-            index += 1;
-            continue;
+            #[cfg(not(feature = "npm"))]
+            return Err("`--offline` requires `neojs` built with the `npm` feature".to_string());
+            #[cfg(feature = "npm")]
+            {
+                npm.offline = true;
+                index += 1;
+                continue;
+            }
         }
         if !after_double_dash && value == "--no-config" {
             config.set_disabled()?;
@@ -946,6 +981,36 @@ Examples:
 /// which the last line points at. The options and every remote-flag placement
 /// must stay in step with the current dev parser.
 fn help() -> String {
+    #[cfg(feature = "npm")]
+    let npm_options = "\
+  --allow-remote   allow https:, gh:, and github: entry and imports, and
+                   jsr:/npm: network fetches; off by default
+  --no-allow-remote
+                   force remote loading off, overriding NEOJS_ALLOW_REMOTE
+  --no-npm         disable npm: and package.json module resolution
+  --frozen-lockfile
+                   refuse npm resolutions not pinned in neo.lock
+  --offline        refuse network fetches; serve npm packages strictly from CAS";
+    #[cfg(not(feature = "npm"))]
+    let npm_options = "\
+  --allow-remote   allow https:, gh:, and github: entry and imports, and
+                   jsr: imports; off by default
+  --no-allow-remote
+                   force remote loading off, overriding NEOJS_ALLOW_REMOTE";
+
+    #[cfg(feature = "npm")]
+    let npm_summary = "\
+user cache. JSR metadata and files use the same HTTPS limits and cache. `npm:`
+specifiers, `package.json` dependencies/`#imports`, and `neo.lock` resolve
+without `node_modules` or install scripts via the verified CAS cache
+(offline by default; use `--allow-remote` to fetch missing packages,
+`--frozen-lockfile` to require `neo.lock`, `--offline` to forbid network, or
+`--no-npm` to disable). `node:` is not implemented. Local modules discover";
+    #[cfg(not(feature = "npm"))]
+    let npm_summary = "\
+user cache. JSR metadata and files use the same HTTPS limits and cache. npm:
+and node: are not implemented (npm support was disabled at compile time). Local modules discover";
+
     format!(
         "\
 neojs {}
@@ -963,14 +1028,7 @@ Usage:
                                   emit TypeScript declarations (.d.ts)
 
 Options:
-  --allow-remote   allow https:, gh:, and github: entry and imports, and
-                   jsr:/npm: network fetches; off by default
-  --no-allow-remote
-                   force remote loading off, overriding NEOJS_ALLOW_REMOTE
-  --no-npm         disable npm: and package.json module resolution
-  --frozen-lockfile
-                   refuse npm resolutions not pinned in neo.lock
-  --offline        refuse network fetches; serve npm packages strictly from CAS
+{npm_options}
   --config <path>  use an explicit neo.jsonc manifest instead of discovery
   --no-config      disable automatic neo.jsonc manifest discovery
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -1001,12 +1059,7 @@ jsr:@scope/name[@version][/subpath] imports from the public JSR registry;
 before or after `test`. A gh:/github: specifier becomes a
 raw.githubusercontent.com https: URL. It is not SSRF protection, not a host
 allowlist, and not a sandbox. Downloads are cached under `neojs/packages` in the
-user cache. JSR metadata and files use the same HTTPS limits and cache. `npm:`
-specifiers, `package.json` dependencies/`#imports`, and `neo.lock` resolve
-without `node_modules` or install scripts via the verified CAS cache
-(offline by default; use `--allow-remote` to fetch missing packages,
-`--frozen-lockfile` to require `neo.lock`, `--offline` to forbid network, or
-`--no-npm` to disable). `node:` is not implemented. Local modules discover
+{npm_summary}
 `neo.jsonc` upward for `imports` and `workspaces` unless `--config` or
 `--no-config` is passed.
 
@@ -1154,6 +1207,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "npm")]
     #[test]
     fn npm_flags_parse_for_run_and_test_and_reject_types() {
         assert_eq!(
@@ -1199,6 +1253,25 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[cfg(not(feature = "npm"))]
+    #[test]
+    fn npm_flags_reject_when_compiled_without_npm_feature() {
+        for flag in ["--no-npm", "--frozen-lockfile", "--offline"] {
+            assert_eq!(
+                parse_args(args(&[flag, "main.js"])),
+                Err(format!(
+                    "`{flag}` requires `neojs` built with the `npm` feature"
+                ))
+            );
+            assert_eq!(
+                parse_args(args(&["test", flag, "a.test.js"])),
+                Err(format!(
+                    "`{flag}` requires `neojs` built with the `npm` feature"
+                ))
+            );
+        }
     }
 
     #[test]

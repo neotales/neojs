@@ -41,9 +41,10 @@
 //! (including a bare `import.meta.resolve` or a failed verified load), a later
 //! direct load of that URL takes the verified path because the original
 //! specifier is not recoverable at load time; that is conservative
-//! verification, not a bypass. There is no lockfile, publisher signature, dist-tag,
-//! private registry, `npm:`, `node:`, or import-map support; a package
-//! that imports those specifiers fails at resolution. Resolution is synchronous,
+//! verification, not a bypass. Inside JSR packages, there is no lockfile,
+//! publisher signature, dist-tag, private registry, `npm:`, `node:`, or
+//! import-map support; a JSR package that imports those specifiers fails at
+//! resolution. Resolution is synchronous,
 //! so the first metadata request for a package or version blocks the isolate
 //! thread.
 //!
@@ -319,7 +320,11 @@
 //! replacements are not followed. Neither path follows a replacement of the
 //! whole `globalThis.console` property. It does not provide other `neo:` or
 //! `node:` import specifiers; `node:` modules, including `node:test`, remain
-//! rejected while no explicit Node-module opt-in exists. CommonJS (`.cjs` and
+//! rejected while no explicit Node-module opt-in exists. With the default `npm`
+//! feature enabled (opt-outable at compile time and via [`NpmOptions`]), local
+//! modules also support `npm:` specifiers, nearest `package.json`
+//! `dependencies`/`devDependencies`/`#imports`, and `neo.lock` v1 via `CasStore`
+//! without `node_modules` or install scripts. CommonJS (`.cjs` and
 //! `.cts` files), remote imports unless [`Runtime::with_remote`] enabled them,
 //! module type attributes, and a permission system are not implemented. See the
 //! repository README for the full list of limits.
