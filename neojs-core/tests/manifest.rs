@@ -253,28 +253,41 @@ if (platform === "fake" || upperPlatform === "fake" || platform !== upperPlatfor
     // `node:fs` must use the real built-in rather than `./fake-fs.js` (when
     // `node-compat` is enabled), and uppercase `NODE:fs` / unsupported `node:*`
     // specifiers remain rejected without ever falling back to `imports`.
-    let node_fs_main = write(
-        dir.path(),
-        "node_fs_check.ts",
-        "import { existsSync } from \"node:fs\";\nif (typeof existsSync !== \"function\") throw new Error(\"node:fs shadowed\");\n",
-    );
-    Runtime::with_import_resolver(resolver.clone())
+    #[cfg(feature = "node-compat")]
+    {
+        let node_fs_main = write(
+            dir.path(),
+            "node_fs_check.ts",
+            "import { existsSync } from \"node:fs\";\nif (typeof existsSync !== \"function\") throw new Error(\"node:fs shadowed\");\n",
+        );
+        Runtime::with_import_resolver(resolver.clone())
+            .expect("runtime")
+            .run_file(&node_fs_main)
+            .expect("node:fs succeeds and is not shadowed");
+
+        let node_disabled_err = Runtime::with_options(
+            neojs_core::RuntimeOptions::new()
+                .with_import_resolver(resolver.clone())
+                .with_node_compat(false),
+        )
         .expect("runtime")
         .run_file(&node_fs_main)
-        .expect("node:fs succeeds and is not shadowed");
+        .expect_err("node:fs with --no-node-compat must be rejected");
+        assert!(
+            node_disabled_err.to_string().contains("Node.js built-in"),
+            "{node_disabled_err}"
+        );
+    }
 
-    let node_disabled_err = Runtime::with_options(
-        neojs_core::RuntimeOptions::new()
-            .with_import_resolver(resolver.clone())
-            .with_node_compat(false),
-    )
-    .expect("runtime")
-    .run_file(&node_fs_main)
-    .expect_err("node:fs with --no-node-compat must be rejected");
-    assert!(
-        node_disabled_err.to_string().contains("Node.js built-in"),
-        "{node_disabled_err}"
-    );
+    #[cfg(not(feature = "node-compat"))]
+    {
+        let node_fs_main = write(dir.path(), "node_fs_disabled.ts", "import \"node:fs\";\n");
+        let err = Runtime::with_import_resolver(resolver.clone())
+            .expect("runtime")
+            .run_file(&node_fs_main)
+            .expect_err("node:fs without node-compat feature must be rejected");
+        assert!(err.to_string().contains("Node.js built-in"), "{err}");
+    }
 
     for (file, spec) in [
         ("node_unsupported_check.ts", "node:test"),

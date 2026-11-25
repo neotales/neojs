@@ -245,6 +245,67 @@ process.exitCode = 23;
 }
 
 #[test]
+#[cfg(feature = "node-compat")]
+fn v8_node_compat_accepts_resizable_array_buffer_views() {
+    run_with_options(
+        r#"
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync, execFile } from "node:child_process";
+import { Buffer } from "node:buffer";
+import { timingSafeEqual } from "node:crypto";
+
+const rab = new ArrayBuffer(4, { maxByteLength: 16 });
+const view = new Uint8Array(rab);
+view.set([65, 66, 67, 68]);
+rab.resize(6);
+view.set([69, 70], 4);
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "neojs-rab-"));
+try {
+    const syncFile = path.join(root, "sync.bin");
+    fs.writeFileSync(syncFile, view);
+    if (fs.readFileSync(syncFile, "utf8") !== "ABCDEF") {
+        throw new Error("fs.writeFileSync RAB mismatch");
+    }
+
+    const asyncFile = path.join(root, "async.bin");
+    await fsp.writeFile(asyncFile, view);
+    await fsp.appendFile(asyncFile, view.subarray(0, 2));
+    if (await fsp.readFile(asyncFile, "utf8") !== "ABCDEFAB") {
+        throw new Error("fs.promises write/append RAB mismatch");
+    }
+
+    const syncSpawn = spawnSync("sh", ["-c", "cat"], { input: view, encoding: "utf8" });
+    if (syncSpawn.status !== 0 || syncSpawn.stdout !== "ABCDEF") {
+        throw new Error(`spawnSync RAB mismatch: ${JSON.stringify(syncSpawn)}`);
+    }
+
+    const asyncSpawn = await execFile("sh", ["-c", "cat"], { input: view, encoding: "utf8" });
+    if (asyncSpawn.stdout !== "ABCDEF") {
+        throw new Error(`execFile RAB mismatch: ${JSON.stringify(asyncSpawn)}`);
+    }
+
+    if (Buffer.from(view).toString("utf8") !== "ABCDEF") {
+        throw new Error("Buffer.from RAB mismatch");
+    }
+    if (!timingSafeEqual(view, Buffer.from("ABCDEF"))) {
+        throw new Error("timingSafeEqual RAB mismatch");
+    }
+} finally {
+    fs.rmSync(root, { recursive: true, force: true });
+}
+"#,
+        RuntimeOptions::new(),
+    )
+    .expect(
+        "RAB-backed Uint8Array works across fs, fs/promises, child_process, buffer, and crypto",
+    );
+}
+
+#[test]
 #[cfg(not(feature = "node-compat"))]
 fn v8_node_compat_is_absent_when_feature_is_disabled() {
     for spec in ["node:path", "node:fs", "node:fs/promises", "node:process"] {

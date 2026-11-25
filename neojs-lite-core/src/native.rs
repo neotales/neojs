@@ -70,7 +70,8 @@ pub(super) fn get_prototype<'js>(ctx: &Ctx<'js>, val: qjs::JSValue) -> Result<Va
 ///
 /// Returns `Ok(None)` when the property is absent, or `Err(TypeError)` when
 /// the own property is an accessor.
-#[cfg(feature = "neo-crypto")]
+#[cfg(any(feature = "neo-crypto", feature = "node-compat"))]
+#[cfg_attr(not(feature = "neo-crypto"), allow(dead_code))]
 pub(super) fn own_data_property<'js>(
     ctx: &Ctx<'js>,
     object: qjs::JSValue,
@@ -87,7 +88,7 @@ pub(super) fn own_data_property<'js>(
 
 /// Reads an own array element data property at `index` without walking
 /// `Array.prototype` or invoking getters/proxy traps.
-#[cfg(feature = "neo-crypto")]
+#[cfg(any(feature = "neo-crypto", feature = "node-compat"))]
 pub(super) fn own_array_element<'js>(
     ctx: &Ctx<'js>,
     array: &Array<'js>,
@@ -102,7 +103,7 @@ pub(super) fn own_array_element<'js>(
     own_data_property_by_atom(ctx, array.as_raw(), atom, accessor_msg)
 }
 
-#[cfg(feature = "neo-crypto")]
+#[cfg(any(feature = "neo-crypto", feature = "node-compat"))]
 fn own_data_property_by_atom<'js>(
     ctx: &Ctx<'js>,
     object: qjs::JSValue,

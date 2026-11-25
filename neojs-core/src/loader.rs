@@ -188,8 +188,10 @@ impl FileModuleLoader {
         if builtins::resolve(specifier).is_some() || case_insensitive_builtin(specifier).is_some() {
             return Ok(None);
         }
-        #[cfg(feature = "node-compat")]
-        if self.node_compat && crate::node_compat::resolve_specifier(specifier).is_some() {
+        if specifier
+            .split_once(':')
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("node"))
+        {
             return Ok(None);
         }
         match resolver.resolve(specifier) {

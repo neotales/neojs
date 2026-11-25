@@ -835,6 +835,7 @@ fn types_subcommand_defaults_to_lite_and_supports_v8_out_dir_and_help() {
 }
 
 #[test]
+#[cfg(feature = "node-compat")]
 fn no_node_compat_flag_disables_node_builtins_in_run_and_test() {
     let dir = tempfile::tempdir().expect("temp dir");
     write(
@@ -889,6 +890,7 @@ fn no_node_compat_flag_disables_node_builtins_in_run_and_test() {
 }
 
 #[test]
+#[cfg(feature = "node-compat")]
 fn node_process_exit_and_exit_code_propagate_through_cli() {
     let dir = tempfile::tempdir().expect("temp dir");
     write(
@@ -909,4 +911,15 @@ fn node_process_exit_and_exit_code_propagate_through_cli() {
     let code_out = run(&[dir.path().join("exit_code_7.js").as_os_str()]);
     assert_eq!(code_out.status.code(), Some(7), "{}", stderr(&code_out));
     assert_eq!(stdout(&code_out), "done\n");
+}
+
+#[test]
+#[cfg(not(feature = "node-compat"))]
+fn node_compat_disabled_at_compile_time_refuses_node_specifiers() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(&dir, "main.js", "import \"node:path\";\n");
+    let main_path = dir.path().join("main.js");
+    let output = run(&[main_path.as_os_str()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("node:"), "{}", stderr(&output));
 }

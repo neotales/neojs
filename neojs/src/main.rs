@@ -805,6 +805,13 @@ fn run_tests(
             failed_files += 1;
             continue;
         }
+        if let Some(code) = runtime.exit_code()
+            && code != 0
+        {
+            eprintln!("neojs: {}: exited with code {code}", file.display());
+            failed_files += 1;
+            continue;
+        }
         match runtime.run_tests() {
             Ok(report) => {
                 let no_tests = report.total == 0 && report.unhandled == 0;

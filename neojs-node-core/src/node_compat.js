@@ -2,10 +2,91 @@
     "use strict";
 
     const isV8 = Boolean(host.isV8);
+    const MAX_CHILD_ARGS = 4096;
+    const MAX_CHILD_ENV = 4096;
+
+    const objectCreate = Object.create;
+    const objectKeys = Object.keys;
+    const objectDefineProperty = Object.defineProperty;
+    const getPrototypeOf = Object.getPrototypeOf;
+    const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+    const arrayIsArray = Array.isArray;
+    const numberIsInteger = Number.isInteger;
+    const numberIsFinite = Number.isFinite;
+    const mathTrunc = Math.trunc;
+    const makeError = Error;
+    const makeTypeError = TypeError;
+    const makeRangeError = RangeError;
+    const makeUint8Array = Uint8Array;
+    const typedArrayProto = getPrototypeOf(makeUint8Array.prototype);
+    const dataViewProto = DataView.prototype;
+    const arrayBufferProto = ArrayBuffer.prototype;
+    const callBind = Function.prototype.call.bind(Function.prototype.bind);
+    const fnCallBind = (fn) => callBind(Function.prototype.call, fn);
+
+    const taBufferOf = fnCallBind(getOwnPropertyDescriptor(typedArrayProto, "buffer").get);
+    const taByteOffsetOf = fnCallBind(getOwnPropertyDescriptor(typedArrayProto, "byteOffset").get);
+    const taByteLengthOf = fnCallBind(getOwnPropertyDescriptor(typedArrayProto, "byteLength").get);
+    const taTagOf = fnCallBind(getOwnPropertyDescriptor(typedArrayProto, Symbol.toStringTag).get);
+    const typedArraySet = fnCallBind(typedArrayProto.set);
+    const typedArraySubarray = fnCallBind(typedArrayProto.subarray);
+
+    const dvBufferOf = fnCallBind(getOwnPropertyDescriptor(dataViewProto, "buffer").get);
+    const dvByteOffsetOf = fnCallBind(getOwnPropertyDescriptor(dataViewProto, "byteOffset").get);
+    const dvByteLengthOf = fnCallBind(getOwnPropertyDescriptor(dataViewProto, "byteLength").get);
+
+    const abByteLengthOf = fnCallBind(getOwnPropertyDescriptor(arrayBufferProto, "byteLength").get);
+    const sabByteLengthOf = typeof SharedArrayBuffer === "function"
+        ? fnCallBind(getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "byteLength").get)
+        : null;
+
+    function defineDataProp(obj, name, value) {
+        const desc = objectCreate(null);
+        desc.value = value;
+        desc.writable = true;
+        desc.enumerable = true;
+        desc.configurable = true;
+        objectDefineProperty(obj, name, desc);
+    }
+
+    function isRealArrayBuffer(val) {
+        if (val === null || typeof val !== "object") return false;
+        try {
+            abByteLengthOf(val);
+            return true;
+        } catch {
+            if (sabByteLengthOf !== null) {
+                try {
+                    sabByteLengthOf(val);
+                    return true;
+                } catch {
+                    return false;
+                }
+            }
+            return false;
+        }
+    }
+
+    function readViewSlice(value) {
+        if (value === null || typeof value !== "object") return null;
+        try {
+            if (taTagOf(value) !== undefined) {
+                return new makeUint8Array(taBufferOf(value), taByteOffsetOf(value), taByteLengthOf(value));
+            }
+        } catch {
+            // Fall through to DataView check.
+        }
+        try {
+            const buf = dvBufferOf(value);
+            return new makeUint8Array(buf, dvByteOffsetOf(value), dvByteLengthOf(value));
+        } catch {
+            return null;
+        }
+    }
 
     function assertString(value, name) {
         if (typeof value !== "string") {
-            throw new TypeError(`${name} must be a string`);
+            throw new makeTypeError(`${name} must be a string`);
         }
         return value;
     }
@@ -15,7 +96,7 @@
             return fallback;
         }
         if (typeof enc !== "string") {
-            throw new TypeError("encoding must be a string");
+            throw new makeTypeError("encoding must be a string");
         }
         const lower = enc.toLowerCase();
         switch (lower) {
@@ -34,8 +115,8 @@
             case "ascii":
                 return "ascii";
             default: {
-                const err = new TypeError(`Unknown encoding: ${enc}`);
-                err.code = "ERR_UNKNOWN_ENCODING";
+                const err = new makeTypeError(`Unknown encoding: ${enc}`);
+                defineDataProp(err, "code", "ERR_UNKNOWN_ENCODING");
                 throw err;
             }
         }
@@ -62,13 +143,14 @@
         if (typeof input === "string") {
             return host.bufferDecode(input, normalizeEncoding(encoding, "utf8"));
         }
-        if (ArrayBuffer.isView(input)) {
-            return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+        const view = readViewSlice(input);
+        if (view !== null) {
+            return view;
         }
-        if (input instanceof ArrayBuffer) {
-            return new Uint8Array(input);
+        if (isRealArrayBuffer(input)) {
+            return new makeUint8Array(input);
         }
-        throw new TypeError("data must be a string, TypedArray, DataView, or ArrayBuffer");
+        throw new makeTypeError("data must be a string, TypedArray, DataView, or ArrayBuffer");
     }
 
     // -------------------------------------------------------------------------
@@ -79,25 +161,27 @@
             if (typeof value === "string") {
                 const enc = normalizeEncoding(encodingOrOffset, "utf8");
                 const bytes = host.bufferDecode(value, enc);
-                return new Buffer(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+                return new Buffer(taBufferOf(bytes), taByteOffsetOf(bytes), taByteLengthOf(bytes));
             }
-            if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer === "function" && value instanceof SharedArrayBuffer)) {
+            if (isRealArrayBuffer(value)) {
                 const offset = encodingOrOffset ?? 0;
                 if (length === undefined) {
                     return new Buffer(value, offset);
                 }
                 return new Buffer(value, offset, length);
             }
-            if (ArrayBuffer.isView(value)) {
-                const copy = new Uint8Array(value.byteLength);
-                copy.set(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
-                return new Buffer(copy.buffer);
+            const view = readViewSlice(value);
+            if (view !== null) {
+                const viewLen = taByteLengthOf(view);
+                const copy = new makeUint8Array(viewLen);
+                typedArraySet(copy, view);
+                return new Buffer(taBufferOf(copy));
             }
-            if (Array.isArray(value) || (value !== null && typeof value === "object" && typeof value[Symbol.iterator] === "function")) {
-                const arr = Uint8Array.from(value);
-                return new Buffer(arr.buffer);
+            if (arrayIsArray(value) || (value !== null && typeof value === "object" && typeof value[Symbol.iterator] === "function")) {
+                const arr = makeUint8Array.from(value);
+                return new Buffer(taBufferOf(arr));
             }
-            throw new TypeError("The first argument must be of type string, Buffer, ArrayBuffer, Array, or Array-like Object");
+            throw new makeTypeError("The first argument must be of type string, Buffer, ArrayBuffer, Array, or Array-like Object");
         }
 
         static alloc(size, fill, encoding) {
@@ -134,20 +218,26 @@
         }
 
         static concat(list, totalLength) {
-            if (!Array.isArray(list)) {
-                throw new TypeError("The \"list\" argument must be an instance of Array");
+            if (!arrayIsArray(list)) {
+                throw new makeTypeError("The \"list\" argument must be an instance of Array");
             }
             let total = 0;
             for (let i = 0; i < list.length; i++) {
                 const item = list[i];
-                if (!ArrayBuffer.isView(item) || !(item instanceof Uint8Array)) {
-                    throw new TypeError("The \"list\" argument elements must be instances of Buffer or Uint8Array");
+                let isU8 = false;
+                try {
+                    isU8 = taTagOf(item) === "Uint8Array";
+                } catch {
+                    isU8 = false;
                 }
-                total += item.byteLength;
+                if (!isU8) {
+                    throw new makeTypeError("The \"list\" argument elements must be instances of Buffer or Uint8Array");
+                }
+                total += taByteLengthOf(item);
             }
             if (totalLength !== undefined) {
-                if (!Number.isInteger(totalLength) || totalLength < 0) {
-                    throw new RangeError("totalLength must be a non-negative integer");
+                if (!numberIsInteger(totalLength) || totalLength < 0) {
+                    throw new makeRangeError("totalLength must be a non-negative integer");
                 }
                 total = totalLength;
             }
@@ -155,12 +245,13 @@
             let offset = 0;
             for (let i = 0; i < list.length && offset < total; i++) {
                 const item = list[i];
+                const itemLen = taByteLengthOf(item);
                 const remaining = total - offset;
-                if (item.byteLength <= remaining) {
-                    out.set(item, offset);
-                    offset += item.byteLength;
+                if (itemLen <= remaining) {
+                    typedArraySet(out, item, offset);
+                    offset += itemLen;
                 } else {
-                    out.set(item.subarray(0, remaining), offset);
+                    typedArraySet(out, typedArraySubarray(item, 0, remaining), offset);
                     offset = total;
                 }
             }
@@ -923,31 +1014,36 @@
     // -------------------------------------------------------------------------
     function parseChildArgs(file, argsOrOpts, maybeOpts) {
         const command = assertString(file, "command");
-        let args = [];
-        let options = {};
+        const args = [];
+        let options = objectCreate(null);
         if (argsOrOpts !== undefined && argsOrOpts !== null) {
-            if (Array.isArray(argsOrOpts)) {
-                args = argsOrOpts.map((a) => {
+            if (arrayIsArray(argsOrOpts)) {
+                const argCount = argsOrOpts.length;
+                if (!numberIsInteger(argCount) || argCount < 0 || argCount > MAX_CHILD_ARGS) {
+                    throw new makeRangeError(`args length exceeds maximum (${MAX_CHILD_ARGS})`);
+                }
+                for (let i = 0; i < argCount; i++) {
+                    const a = argsOrOpts[i];
                     if (typeof a !== "string") {
-                        throw new TypeError("args must be an array of strings");
+                        throw new makeTypeError("args must be an array of strings");
                     }
-                    return a;
-                });
+                    args[i] = a;
+                }
                 if (maybeOpts !== undefined && maybeOpts !== null) {
                     if (typeof maybeOpts !== "object") {
-                        throw new TypeError("options must be an object");
+                        throw new makeTypeError("options must be an object");
                     }
                     options = maybeOpts;
                 }
             } else if (typeof argsOrOpts === "object") {
                 options = argsOrOpts;
             } else {
-                throw new TypeError("args must be an array of strings");
+                throw new makeTypeError("args must be an array of strings");
             }
         }
-        if (options.shell === true) {
-            const err = new Error("shell execution is disabled in neojs");
-            err.code = "ERR_UNSUPPORTED";
+        if (options.shell) {
+            const err = new makeError("shell execution is disabled in neojs");
+            defineDataProp(err, "code", "ERR_UNSUPPORTED");
             throw err;
         }
         let cwd;
@@ -957,13 +1053,19 @@
         let env;
         if (options.env !== undefined) {
             if (options.env === null || typeof options.env !== "object") {
-                throw new TypeError("options.env must be an object");
+                throw new makeTypeError("options.env must be an object");
+            }
+            const keys = objectKeys(options.env);
+            if (keys.length > MAX_CHILD_ENV) {
+                throw new makeRangeError(`options.env exceeds maximum entries (${MAX_CHILD_ENV})`);
             }
             env = [];
-            for (const key of Object.keys(options.env)) {
+            let envIdx = 0;
+            for (let i = 0; i < keys.length; i++) {
+                const key = keys[i];
                 const val = options.env[key];
                 if (val !== undefined && val !== null) {
-                    env.push([String(key), String(val)]);
+                    env[envIdx++] = [String(key), String(val)];
                 }
             }
         }
@@ -973,17 +1075,17 @@
         }
         let timeoutMs;
         if (options.timeout !== undefined) {
-            if (typeof options.timeout !== "number" || !Number.isFinite(options.timeout) || options.timeout < 0) {
-                throw new RangeError("options.timeout must be a non-negative finite number");
+            if (typeof options.timeout !== "number" || !numberIsFinite(options.timeout) || options.timeout < 0) {
+                throw new makeRangeError("options.timeout must be a non-negative finite number");
             }
-            timeoutMs = Math.trunc(options.timeout);
+            timeoutMs = mathTrunc(options.timeout);
         }
         let maxBuffer;
         if (options.maxBuffer !== undefined) {
-            if (typeof options.maxBuffer !== "number" || !Number.isFinite(options.maxBuffer) || options.maxBuffer < 0) {
-                throw new RangeError("options.maxBuffer must be a non-negative finite number");
+            if (typeof options.maxBuffer !== "number" || !numberIsFinite(options.maxBuffer) || options.maxBuffer < 0) {
+                throw new makeRangeError("options.maxBuffer must be a non-negative finite number");
             }
-            maxBuffer = Math.trunc(options.maxBuffer);
+            maxBuffer = mathTrunc(options.maxBuffer);
         }
         let encoding = null;
         if (options.encoding !== undefined && options.encoding !== null && options.encoding !== "buffer") {
@@ -1012,13 +1114,13 @@
                 message = `Command failed with exit code ${res.status}`;
             }
         }
-        const err = new Error(message);
-        err.code = res.errorCode ?? (res.timedOut ? "ETIMEDOUT" : undefined);
-        err.status = res.status;
-        err.signal = res.signal;
-        err.stdout = stdout;
-        err.stderr = stderr;
-        err.timedOut = res.timedOut;
+        const err = new makeError(message);
+        defineDataProp(err, "code", res.errorCode ?? (res.timedOut ? "ETIMEDOUT" : undefined));
+        defineDataProp(err, "status", res.status);
+        defineDataProp(err, "signal", res.signal);
+        defineDataProp(err, "stdout", stdout);
+        defineDataProp(err, "stderr", stderr);
+        defineDataProp(err, "timedOut", res.timedOut);
         return err;
     }
 
@@ -1141,11 +1243,11 @@
             return new Hash(host.cryptoHmacCreate(assertString(algorithm, "algorithm"), toBytes(key, "utf8")));
         },
         pbkdf2Sync(password, salt, iterations, keylen, digest) {
-            if (!Number.isInteger(iterations) || iterations <= 0) {
-                throw new RangeError("iterations must be a positive integer");
+            if (!numberIsInteger(iterations) || iterations <= 0 || iterations > 0xffffffff) {
+                throw new makeRangeError("iterations must be a positive 32-bit integer");
             }
-            if (!Number.isInteger(keylen) || keylen < 0) {
-                throw new RangeError("keylen must be a non-negative integer");
+            if (!numberIsInteger(keylen) || keylen < 0) {
+                throw new makeRangeError("keylen must be a non-negative integer");
             }
             const pwBytes = toBytes(password, "utf8");
             const saltBytes = toBytes(salt, "utf8");
@@ -1153,13 +1255,16 @@
             return toBuffer(host.cryptoPbkdf2Sync(pwBytes, saltBytes, iterations, keylen, alg));
         },
         timingSafeEqual(a, b) {
-            if (!ArrayBuffer.isView(a) || !ArrayBuffer.isView(b)) {
-                throw new TypeError("The \"buf1\" and \"buf2\" arguments must be TypedArray or DataView instances");
+            const va = readViewSlice(a);
+            const vb = readViewSlice(b);
+            if (va === null || vb === null) {
+                throw new makeTypeError("The \"buf1\" and \"buf2\" arguments must be TypedArray or DataView instances");
             }
-            return host.cryptoTimingSafeEqual(
-                new Uint8Array(a.buffer, a.byteOffset, a.byteLength),
-                new Uint8Array(b.buffer, b.byteOffset, b.byteLength),
-            );
+            const sa = new makeUint8Array(taByteLengthOf(va));
+            typedArraySet(sa, va);
+            const sb = new makeUint8Array(taByteLengthOf(vb));
+            typedArraySet(sb, vb);
+            return host.cryptoTimingSafeEqual(sa, sb);
         },
     });
 

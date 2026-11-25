@@ -42,10 +42,15 @@ use rquickjs::{
     TypedArray, Value,
     function::Opt,
     module::{Declarations, Exports, ModuleDef},
+    object::Property,
+    qjs,
 };
 
-use crate::native::{throw_coded_error, with_uint8_array_bytes};
+use crate::native::{own_array_element, throw_coded_error, with_uint8_array_bytes};
 use crate::runtime::ProcessExitState;
+
+const MAX_CHILD_ARGS: usize = 4096;
+const MAX_CHILD_ENV: usize = 4096;
 
 const PATH_EXPORTS: &[&str] = &[
     "sep",
@@ -157,7 +162,13 @@ fn throw_with_code<'js>(
             if ctx.has_exception() {
                 let exc = ctx.catch();
                 if let Some(obj) = exc.as_object() {
-                    let _ = obj.set("code", code_str);
+                    let _ = obj.prop(
+                        "code",
+                        Property::from(code_str)
+                            .writable()
+                            .enumerable()
+                            .configurable(),
+                    );
                 }
                 return ctx.throw(exc);
             }
@@ -169,7 +180,13 @@ fn throw_with_code<'js>(
             if ctx.has_exception() {
                 let exc = ctx.catch();
                 if let Some(obj) = exc.as_object() {
-                    let _ = obj.set("code", code_str);
+                    let _ = obj.prop(
+                        "code",
+                        Property::from(code_str)
+                            .writable()
+                            .enumerable()
+                            .configurable(),
+                    );
                 }
                 return ctx.throw(exc);
             }
@@ -211,10 +228,40 @@ fn current_cwd_lossy_safe() -> String {
         .unwrap_or_default()
 }
 
+fn array_length(ctx: &Ctx<'_>, array: &Array<'_>) -> Result<usize> {
+    let mut len: i64 = 0;
+    let rc = unsafe { qjs::JS_GetLength(ctx.as_raw().as_ptr(), array.as_raw(), &mut len) };
+    if rc < 0 || len < 0 {
+        return Err(if ctx.has_exception() {
+            rquickjs::Error::Exception
+        } else {
+            Exception::throw_type(ctx, "expected an array")
+        });
+    }
+    usize::try_from(len).map_err(|_| Exception::throw_range(ctx, "array length out of range"))
+}
+
 fn read_string_vec<'js>(ctx: &Ctx<'js>, array: Array<'js>) -> Result<Vec<String>> {
-    let mut out = Vec::with_capacity(array.len());
-    for item in array.iter::<Value<'js>>() {
-        let val = item?;
+    let count = array_length(ctx, &array)?;
+    if count > MAX_CHILD_ARGS {
+        return Err(Exception::throw_range(
+            ctx,
+            &format!("args length exceeds maximum ({MAX_CHILD_ARGS})"),
+        ));
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(count)
+        .map_err(|_| Exception::throw_range(ctx, "args allocation failed"))?;
+    for idx in 0..count {
+        let index = u32::try_from(idx)
+            .map_err(|_| Exception::throw_range(ctx, "args index out of range"))?;
+        let val = own_array_element(
+            ctx,
+            &array,
+            index,
+            "args elements must be plain data properties",
+        )?
+        .ok_or_else(|| Exception::throw_type(ctx, "expected array of strings"))?;
         let Some(s) = val.as_string() else {
             return Err(Exception::throw_type(ctx, "expected array of strings"));
         };
@@ -647,12 +694,54 @@ fn host_child_spawn_sync<'js>(
         let Some(env_arr) = env_val.into_array() else {
             return Err(Exception::throw_type(&ctx, "env must be an array"));
         };
-        let mut pairs = Vec::with_capacity(env_arr.len());
-        for entry in env_arr.iter::<Array<'js>>() {
-            let pair = entry?;
-            let k: String = pair.get(0)?;
-            let v: String = pair.get(1)?;
-            pairs.push((k, v));
+        let count = array_length(&ctx, &env_arr)?;
+        if count > MAX_CHILD_ENV {
+            return Err(Exception::throw_range(
+                &ctx,
+                &format!("env length exceeds maximum ({MAX_CHILD_ENV})"),
+            ));
+        }
+        let mut pairs = Vec::new();
+        pairs
+            .try_reserve_exact(count)
+            .map_err(|_| Exception::throw_range(&ctx, "env allocation failed"))?;
+        for idx in 0..count {
+            let index = u32::try_from(idx)
+                .map_err(|_| Exception::throw_range(&ctx, "env index out of range"))?;
+            let entry = own_array_element(
+                &ctx,
+                &env_arr,
+                index,
+                "env entries must be plain data properties",
+            )?
+            .ok_or_else(|| Exception::throw_type(&ctx, "env entries must be [key, value] pairs"))?;
+            let Some(pair) = entry.into_array() else {
+                return Err(Exception::throw_type(
+                    &ctx,
+                    "env entries must be [key, value] pairs",
+                ));
+            };
+            let k_val = own_array_element(
+                &ctx,
+                &pair,
+                0,
+                "env entry key must be a plain data property",
+            )?
+            .ok_or_else(|| Exception::throw_type(&ctx, "env entry key must be a string"))?;
+            let v_val = own_array_element(
+                &ctx,
+                &pair,
+                1,
+                "env entry value must be a plain data property",
+            )?
+            .ok_or_else(|| Exception::throw_type(&ctx, "env entry value must be a string"))?;
+            let (Some(k), Some(v)) = (k_val.as_string(), v_val.as_string()) else {
+                return Err(Exception::throw_type(
+                    &ctx,
+                    "env entries must be [string, string] pairs",
+                ));
+            };
+            pairs.push((k.to_string()?, v.to_string()?));
         }
         spawn_opts.clear_env = true;
         spawn_opts.env = Some(pairs);

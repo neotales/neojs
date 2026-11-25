@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use deno_core::FastStaticString;
-use deno_core::JsBuffer;
 use deno_core::JsRuntime;
 use deno_core::OpState;
 use deno_core::Resource;
@@ -25,7 +24,10 @@ use deno_error::JsErrorClass;
 use deno_error::PropertyValue;
 use neojs_node_core::buffer::{Encoding, decode as buf_decode, encode as buf_encode};
 use neojs_node_core::child_process::{DEFAULT_MAX_BUFFER, SpawnOptions, spawn_sync};
-use neojs_node_core::crypto::hash::{DigestState, HashAlgorithm};
+use neojs_node_core::crypto::hash::{DigestState, HashAlgorithm, MAX_OPEN_DIGESTS};
+
+const MAX_CHILD_ARGS: usize = 4096;
+const MAX_CHILD_ENV: usize = 4096;
 use neojs_node_core::crypto::password::pbkdf2 as core_pbkdf2;
 use neojs_node_core::fs::{
     CopyOptions, MkdirOptions, ReadOptions, RemoveOptions, WriteOptions, copy_file, exists, lstat,
@@ -298,9 +300,61 @@ struct DirEntryDto {
 struct SpawnOptsDto {
     cwd: Option<String>,
     env: Option<Vec<(String, String)>>,
-    input: Option<deno_core::JsBuffer>,
     timeout_ms: Option<u64>,
     max_buffer: Option<usize>,
+}
+
+fn read_v8_bytes<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    value: v8::Local<'s, v8::Value>,
+    type_msg: &'static str,
+) -> Result<Vec<u8>, NodeOpError> {
+    let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) else {
+        return Err(NodeOpError::type_err(type_msg));
+    };
+    let Some(buffer) = view.buffer(scope) else {
+        return Err(NodeOpError::type_err("ArrayBufferView buffer is detached"));
+    };
+    if buffer.was_detached() {
+        return Err(NodeOpError::type_err("ArrayBufferView buffer is detached"));
+    }
+    let length = view.byte_length();
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| NodeOpError::new("RangeError", Some("ENOMEM"), "buffer allocation failed"))?;
+    bytes.resize(length, 0);
+    if length <= i32::MAX as usize {
+        if view.copy_contents(&mut bytes) != length {
+            return Err(NodeOpError::type_err(
+                "ArrayBufferView buffer is detached or out of bounds",
+            ));
+        }
+    } else {
+        let store = buffer.get_backing_store();
+        let offset = view.byte_offset();
+        let end = offset.checked_add(length).ok_or_else(|| {
+            NodeOpError::type_err("ArrayBufferView buffer is detached or out of bounds")
+        })?;
+        let slice = store.get(offset..end).ok_or_else(|| {
+            NodeOpError::type_err("ArrayBufferView buffer is detached or out of bounds")
+        })?;
+        for (dst, src) in bytes.iter_mut().zip(slice.iter()) {
+            *dst = src.get();
+        }
+    }
+    Ok(bytes)
+}
+
+fn read_optional_v8_bytes<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    value: v8::Local<'s, v8::Value>,
+    type_msg: &'static str,
+) -> Result<Option<Vec<u8>>, NodeOpError> {
+    if value.is_undefined() || value.is_null() {
+        return Ok(None);
+    }
+    read_v8_bytes(scope, value, type_msg).map(Some)
 }
 
 #[derive(Serialize)]
@@ -670,17 +724,19 @@ fn op_node_fs_read_file_sync(#[string] path: String) -> Result<Vec<u8>, NodeOpEr
 }
 
 #[op2(fast)]
-fn op_node_fs_write_file_sync(
+fn op_node_fs_write_file_sync<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
     #[string] path: String,
-    #[buffer] data: &[u8],
+    data: v8::Local<'s, v8::Value>,
     append: bool,
 ) -> Result<(), NodeOpError> {
+    let bytes = read_v8_bytes(scope, data, "data must be a TypedArray or DataView")?;
     let opts = WriteOptions {
         create: true,
         create_new: false,
         append,
     };
-    write_file(path, data, opts).map_err(NodeOpError::from_fs)
+    write_file(path, &bytes, opts).map_err(NodeOpError::from_fs)
 }
 
 #[op2(fast)]
@@ -788,10 +844,9 @@ async fn op_node_fs_read_file_async(#[string] path: String) -> Result<Vec<u8>, N
 #[op2]
 async fn op_node_fs_write_file_async(
     #[string] path: String,
-    #[buffer] data: JsBuffer,
+    #[buffer(copy)] bytes: Vec<u8>,
     append: bool,
 ) -> Result<(), NodeOpError> {
-    let bytes = data.to_vec();
     run_blocking(move || {
         let opts = WriteOptions {
             create: true,
@@ -907,16 +962,36 @@ async fn op_node_fs_mkdtemp_async(#[string] prefix: String) -> Result<String, No
 // child_process ops
 // ---------------------------------------------------------------------------
 
-fn build_spawn_options(dto: SpawnOptsDto) -> SpawnOptions {
+fn build_spawn_options(dto: SpawnOptsDto, stdin: Option<Vec<u8>>) -> SpawnOptions {
     let has_env = dto.env.is_some();
     SpawnOptions {
         cwd: dto.cwd.map(PathBuf::from),
         env: dto.env,
         clear_env: has_env,
-        stdin: dto.input.map(|buf| buf.to_vec()),
+        stdin,
         timeout_ms: dto.timeout_ms,
         max_buffer: dto.max_buffer.unwrap_or(DEFAULT_MAX_BUFFER),
     }
+}
+
+fn validate_child_limits(args: &[String], opts: &SpawnOptsDto) -> Result<(), NodeOpError> {
+    if args.len() > MAX_CHILD_ARGS {
+        return Err(NodeOpError::new(
+            "RangeError",
+            Some("ERR_OUT_OF_RANGE"),
+            format!("args length exceeds maximum ({MAX_CHILD_ARGS})"),
+        ));
+    }
+    if let Some(env) = &opts.env
+        && env.len() > MAX_CHILD_ENV
+    {
+        return Err(NodeOpError::new(
+            "RangeError",
+            Some("ERR_OUT_OF_RANGE"),
+            format!("options.env exceeds maximum entries ({MAX_CHILD_ENV})"),
+        ));
+    }
+    Ok(())
 }
 
 fn spawn_impl(
@@ -967,12 +1042,16 @@ fn spawn_impl(
 
 #[op2]
 #[serde]
-fn op_node_child_spawn_sync(
+fn op_node_child_spawn_sync<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
     #[string] command: String,
     #[serde] args: Vec<String>,
     #[serde] opts: SpawnOptsDto,
+    input: v8::Local<'s, v8::Value>,
 ) -> Result<SpawnResultDto, NodeOpError> {
-    let spawn_opts = build_spawn_options(opts);
+    validate_child_limits(&args, &opts)?;
+    let stdin = read_optional_v8_bytes(scope, input, "input must be a TypedArray or DataView")?;
+    let spawn_opts = build_spawn_options(opts, stdin);
     spawn_impl(&command, &args, &spawn_opts)
 }
 
@@ -982,8 +1061,12 @@ async fn op_node_child_exec_file_async(
     #[string] command: String,
     #[serde] args: Vec<String>,
     #[serde] opts: SpawnOptsDto,
+    has_input: bool,
+    #[buffer(copy)] input: Vec<u8>,
 ) -> Result<SpawnResultDto, NodeOpError> {
-    let spawn_opts = build_spawn_options(opts);
+    validate_child_limits(&args, &opts)?;
+    let stdin = if has_input { Some(input) } else { None };
+    let spawn_opts = build_spawn_options(opts, stdin);
     run_blocking(move || spawn_impl(&command, &args, &spawn_opts)).await
 }
 
@@ -1009,12 +1092,29 @@ fn op_node_crypto_random_uuid() -> Result<String, NodeOpError> {
     random_uuid().map_err(NodeOpError::from_core)
 }
 
+fn ensure_digest_capacity(state: &OpState) -> Result<(), NodeOpError> {
+    let open = state
+        .resource_table
+        .names()
+        .filter(|(_, name)| *name == "NodeDigestResource")
+        .count();
+    if open >= MAX_OPEN_DIGESTS {
+        return Err(NodeOpError::new(
+            "RangeError",
+            Some("ERR_CRYPTO_TOO_MANY_OBJECTS"),
+            "too many open digest handles",
+        ));
+    }
+    Ok(())
+}
+
 #[op2(fast)]
 #[smi]
 fn op_node_crypto_hash_create(
     state: &mut OpState,
     #[string] algorithm: String,
 ) -> Result<ResourceId, NodeOpError> {
+    ensure_digest_capacity(state)?;
     let alg = HashAlgorithm::parse(&algorithm).ok_or_else(|| {
         NodeOpError::new(
             "Error",
@@ -1033,6 +1133,7 @@ fn op_node_crypto_hmac_create(
     #[string] algorithm: String,
     #[buffer] key: &[u8],
 ) -> Result<ResourceId, NodeOpError> {
+    ensure_digest_capacity(state)?;
     let alg = HashAlgorithm::parse(&algorithm).ok_or_else(|| {
         NodeOpError::new(
             "Error",
@@ -1395,8 +1496,11 @@ fn build_v8_node_bootstrap() -> String {
         fsCopyFileAsync: ops.op_node_fs_copy_file_async,
         fsRealpathAsync: ops.op_node_fs_realpath_async,
         fsMkdtempAsync: ops.op_node_fs_mkdtemp_async,
-        childSpawnSync: ops.op_node_child_spawn_sync,
-        childExecFileAsync: ops.op_node_child_exec_file_async,
+        childSpawnSync: (cmd, args, opts) => ops.op_node_child_spawn_sync(cmd, args, opts, opts?.input),
+        childExecFileAsync: (cmd, args, opts) =>
+            (opts?.input !== undefined && opts?.input !== null)
+                ? ops.op_node_child_exec_file_async(cmd, args, opts, true, opts.input)
+                : ops.op_node_child_exec_file_async(cmd, args, opts, false, new Uint8Array(0)),
         cryptoRandomBytes: ops.op_node_crypto_random_bytes,
         cryptoRandomUUID: ops.op_node_crypto_random_uuid,
         cryptoHashCreate: ops.op_node_crypto_hash_create,

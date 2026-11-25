@@ -439,4 +439,55 @@ test("node:crypto provides randomBytes, randomUUID, createHash, createHmac, pbkd
     assert.strictEquals(timingSafeEqual(eqA, eqB), true);
     assert.strictEquals(timingSafeEqual(eqA, neq), false);
     assert.throws(() => timingSafeEqual(eqA, Buffer.from("short")), RangeError);
+
+    // Tampered own `byteLength` on TypedArray/DataView must not spoof lengths.
+    const fakeZeroA = new Uint8Array([1, 2, 3, 4]);
+    const fakeZeroB = new Uint8Array([9, 8]);
+    Object.defineProperty(fakeZeroA, "byteLength", { value: 0 });
+    Object.defineProperty(fakeZeroB, "byteLength", { value: 0 });
+    assert.throws(() => timingSafeEqual(fakeZeroA, fakeZeroB), RangeError);
+    const fakeZeroSameLen = new Uint8Array([9, 8, 7, 6]);
+    Object.defineProperty(fakeZeroSameLen, "byteLength", { value: 0 });
+    assert.strictEquals(timingSafeEqual(fakeZeroA, fakeZeroSameLen), false);
+    assert.equals(Array.from(Buffer.from(fakeZeroA)), [1, 2, 3, 4]);
+
+    // Iterations exceeding uint32 must throw RangeError on both engines.
+    assert.throws(() => pbkdf2Sync("pw", "salt", 0x1_0000_0000, 16, "sha256"), RangeError);
+});
+
+test("node:child_process rejects truthy shell options and bounds arg/env tampering", () => {
+    for (const shellOpt of [true, "sh", 1]) {
+        let err;
+        try {
+            spawnSync("sh", ["-c", "echo nope"], { shell: shellOpt });
+        } catch (caught) {
+            err = caught;
+        }
+        assert.ok(err instanceof Error);
+        assert.strictEquals(err.code, "ERR_UNSUPPORTED");
+    }
+
+    const tamperedProtoDesc = Object.getOwnPropertyDescriptor(Object.prototype, "code");
+    Object.defineProperty(Object.prototype, "code", {
+        configurable: true,
+        set() {
+            throw new Error("Object.prototype.code setter must not be invoked");
+        },
+    });
+    try {
+        let childErr;
+        try {
+            execFileSync("sh", ["-c", "exit 7"]);
+        } catch (caught) {
+            childErr = caught;
+        }
+        assert.ok(childErr instanceof Error);
+        assert.strictEquals(childErr.status, 7);
+    } finally {
+        if (tamperedProtoDesc) {
+            Object.defineProperty(Object.prototype, "code", tamperedProtoDesc);
+        } else {
+            delete Object.prototype.code;
+        }
+    }
 });

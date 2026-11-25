@@ -4448,6 +4448,7 @@ fn types_subcommand_help_and_error_cases() {
 }
 
 #[test]
+#[cfg(feature = "node-compat")]
 fn no_node_compat_flag_disables_node_builtins_in_run_and_test() {
     let project = Project::new();
     let run_file = project.write(
@@ -4485,6 +4486,7 @@ fn no_node_compat_flag_disables_node_builtins_in_run_and_test() {
 }
 
 #[test]
+#[cfg(feature = "node-compat")]
 fn node_process_exit_and_exit_code_propagate_through_cli() {
     let project = Project::new();
     let exit_file = project.write(
@@ -4502,4 +4504,18 @@ fn node_process_exit_and_exit_code_propagate_through_cli() {
     let code_out = run_args(&[code_file.to_str().unwrap()]);
     assert_eq!(code_out.status.code(), Some(7), "{}", stderr(&code_out));
     assert_eq!(stdout(&code_out), "done\n");
+}
+
+#[test]
+#[cfg(not(feature = "node-compat"))]
+fn node_compat_disabled_at_compile_time_refuses_node_specifiers() {
+    let project = Project::new();
+    let file = project.write("main.js", "import \"node:path\";\n");
+    let output = run_args(&[file.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("Node.js built-in"),
+        "{}",
+        stderr(&output)
+    );
 }
