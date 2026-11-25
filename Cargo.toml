@@ -89,9 +89,6 @@ neojs-crypto-core = { version = "0.0.0-alpha.0", path = "neojs-crypto-core" }
 neojs-dts = { version = "0.0.0-alpha.0", path = "neojs-dts" }
 # Engine-neutral core filesystem operations for `neo:fs`.
 neojs-fs-core = { version = "0.0.0-alpha.0", path = "neojs-fs-core" }
-# Engine-neutral core HTTP routing, static file resolution, cookie, and policy
-# primitives for `neo:http`. Has no JS engine, Tokio, or Hyper dependency.
-neojs-http-core = { version = "0.0.0-alpha.0", path = "neojs-http-core" }
 # `neo.jsonc` JSONC parsing, bounded upward discovery, workspace expansion, and
 # pure import-map/workspace resolution.
 neojs-manifest = { version = "0.0.0-alpha.0", path = "neojs-manifest" }

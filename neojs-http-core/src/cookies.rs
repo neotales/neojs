@@ -4,7 +4,7 @@ use std::fmt;
 use std::fmt::Write as _;
 
 use crate::HttpCoreError;
-use crate::policy::{is_http_token_char, validate_header_value};
+use crate::policy::{DEFAULT_MAX_HEADER_BYTES, is_http_token_char, validate_header_value};
 
 /// Default maximum number of cookies accepted from a single `Cookie` header.
 pub const DEFAULT_MAX_COOKIES: usize = 128;
@@ -16,7 +16,7 @@ pub enum SameSite {
     Lax,
     /// Sent only on same-site requests.
     Strict,
-    /// Sent on both same-site and cross-site requests (requires `Secure` in browsers).
+    /// Sent on both same-site and cross-site requests (requires `Secure`).
     None,
 }
 
@@ -153,17 +153,24 @@ pub fn parse_cookies(header: &str) -> Result<Vec<(String, String)>, HttpCoreErro
 }
 
 /// Parses an HTTP `Cookie` request header into `(name, value)` pairs with an
-/// explicit `max_cookies` upper bound.
+/// explicit `max_cookies` upper bound and [`DEFAULT_MAX_HEADER_BYTES`] byte
+/// bound.
 ///
 /// # Errors
 ///
-/// Returns [`HttpCoreError::InvalidCookie`] if `header` contains control
-/// characters (including CR/LF/NUL), malformed cookie pairs, invalid cookie
-/// names, or more than `max_cookies` cookies.
+/// Returns [`HttpCoreError::InvalidCookie`] if `header` exceeds
+/// [`DEFAULT_MAX_HEADER_BYTES`], contains control characters (including
+/// CR/LF/NUL), has malformed cookie pairs, invalid cookie names, values
+/// violating RFC 6265 `cookie-octet` rules, or more than `max_cookies` cookies.
 pub fn parse_cookies_with_limit(
     header: &str,
     max_cookies: usize,
 ) -> Result<Vec<(String, String)>, HttpCoreError> {
+    if header.len() > DEFAULT_MAX_HEADER_BYTES {
+        return Err(HttpCoreError::InvalidCookie {
+            reason: "cookie header exceeds maximum header byte limit",
+        });
+    }
     validate_header_value(header).map_err(|_| HttpCoreError::InvalidCookie {
         reason: "cookie header contains disallowed control bytes",
     })?;
@@ -192,14 +199,7 @@ pub fn parse_cookies_with_limit(
         if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
             value = &value[1..value.len() - 1];
         }
-        if value
-            .bytes()
-            .any(|b| b == b'"' || b == b'\\' || b < 0x20 || b == 0x7F)
-        {
-            return Err(HttpCoreError::InvalidCookie {
-                reason: "cookie value contains disallowed characters",
-            });
-        }
+        validate_cookie_value(value)?;
 
         cookies.push((name.to_owned(), value.to_owned()));
     }
@@ -211,12 +211,13 @@ pub fn parse_cookies_with_limit(
 ///
 /// Strictly rejects CR, LF, NUL, control characters, semicolons, quotes,
 /// commas, backslashes, whitespace, and non-ASCII bytes in cookie names and
-/// values, as well as invalid `Path` and `Domain` attributes, preventing HTTP
-/// header and attribute injection.
+/// values, rejects `SameSite=None` without `Secure`, enforces
+/// [`DEFAULT_MAX_HEADER_BYTES`], and validates `Path` and `Domain` attributes.
 ///
 /// # Errors
 ///
-/// Returns [`HttpCoreError::InvalidCookie`] if any field fails validation.
+/// Returns [`HttpCoreError::InvalidCookie`] if any field fails validation or
+/// the formatted header exceeds [`DEFAULT_MAX_HEADER_BYTES`].
 ///
 /// # Examples
 ///
@@ -248,8 +249,25 @@ pub fn format_set_cookie(cookie: &SetCookie) -> Result<String, HttpCoreError> {
     if let Some(domain) = &cookie.domain {
         validate_cookie_domain(domain)?;
     }
+    if cookie.same_site == Some(SameSite::None) && !cookie.secure {
+        return Err(HttpCoreError::InvalidCookie {
+            reason: "SameSite=None cookies must set the Secure attribute",
+        });
+    }
 
-    let mut out = String::with_capacity(cookie.name.len() + cookie.value.len() + 64);
+    let base_len = cookie
+        .name
+        .len()
+        .saturating_add(cookie.value.len())
+        .saturating_add(cookie.path.as_ref().map_or(0, String::len))
+        .saturating_add(cookie.domain.as_ref().map_or(0, String::len));
+    if base_len > DEFAULT_MAX_HEADER_BYTES {
+        return Err(HttpCoreError::InvalidCookie {
+            reason: "Set-Cookie header exceeds maximum header byte limit",
+        });
+    }
+
+    let mut out = String::with_capacity(base_len.saturating_add(64));
     out.push_str(&cookie.name);
     out.push('=');
     out.push_str(&cookie.value);
@@ -274,6 +292,12 @@ pub fn format_set_cookie(cookie: &SetCookie) -> Result<String, HttpCoreError> {
     if let Some(same_site) = cookie.same_site {
         out.push_str("; SameSite=");
         out.push_str(same_site.as_str());
+    }
+
+    if out.len() > DEFAULT_MAX_HEADER_BYTES {
+        return Err(HttpCoreError::InvalidCookie {
+            reason: "Set-Cookie header exceeds maximum header byte limit",
+        });
     }
 
     Ok(out)
@@ -327,18 +351,26 @@ fn validate_cookie_path(path: &str) -> Result<(), HttpCoreError> {
 }
 
 fn validate_cookie_domain(domain: &str) -> Result<(), HttpCoreError> {
-    if domain.is_empty() {
+    let normalized = domain.strip_prefix('.').unwrap_or(domain);
+    if normalized.is_empty() || normalized.len() > 253 {
         return Err(HttpCoreError::InvalidCookie {
-            reason: "cookie Domain attribute must not be empty",
+            reason: "cookie Domain attribute length is invalid",
         });
     }
-    let valid = domain
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.');
-    if !valid || domain.bytes().all(|b| b == b'.') {
-        return Err(HttpCoreError::InvalidCookie {
-            reason: "cookie Domain attribute contains invalid characters",
-        });
+
+    for label in normalized.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(HttpCoreError::InvalidCookie {
+                reason: "cookie Domain attribute contains invalid DNS labels",
+            });
+        }
     }
     Ok(())
 }

@@ -1,9 +1,19 @@
 //! Go 1.22+ `ServeMux`-style HTTP method and path-parameter router.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashSet};
 
 use crate::HttpCoreError;
 use crate::policy::{is_http_token_char, percent_decode_segment};
+
+/// Default maximum number of routes permitted in a single [`Router`].
+pub const DEFAULT_MAX_ROUTES: usize = 4096;
+
+/// Default maximum number of `/`-separated segments in a route pattern or request path.
+pub const DEFAULT_MAX_PATH_SEGMENTS: usize = 128;
+
+/// Default maximum byte length of a route pattern path or request path.
+pub const DEFAULT_MAX_PATH_BYTES: usize = 8192;
 
 /// Outcome of matching a request method and URL path in [`Router::match_route`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,9 +66,9 @@ enum MethodRank {
     Exact = 3,
 }
 
-struct CandidateMatch {
-    specificity: (Vec<u8>, MethodRank),
-    handler_id: usize,
+struct CandidateMatch<'a> {
+    route: &'a Route,
+    method_rank: MethodRank,
     params: Vec<(String, String)>,
 }
 
@@ -82,6 +92,15 @@ impl Route {
 
     fn has_wildcard(&self) -> bool {
         matches!(self.segments.last(), Some(Segment::Wildcard(_)))
+    }
+
+    fn rank_at(&self, idx: usize) -> u8 {
+        if idx < self.segments.len() {
+            self.segments[idx].rank()
+        } else {
+            // Only reachable when the final segment is a wildcard.
+            1
+        }
     }
 
     fn match_path(&self, req_segs: &[String]) -> Option<Vec<(String, String)>> {
@@ -117,20 +136,22 @@ impl Route {
 
         Some(params)
     }
+}
 
-    fn specificity_key(&self, req_len: usize, method_rank: MethodRank) -> (Vec<u8>, MethodRank) {
-        let mut ranks = Vec::with_capacity(req_len);
-        for idx in 0..req_len {
-            let rank = if idx < self.segments.len() {
-                self.segments[idx].rank()
-            } else {
-                // Only reachable when the final segment is a wildcard.
-                1
-            };
-            ranks.push(rank);
+fn compare_route_specificity(
+    a: &Route,
+    a_rank: MethodRank,
+    b: &Route,
+    b_rank: MethodRank,
+    req_len: usize,
+) -> Ordering {
+    for idx in 0..req_len {
+        let ord = a.rank_at(idx).cmp(&b.rank_at(idx));
+        if ord != Ordering::Equal {
+            return ord;
         }
-        (ranks, method_rank)
     }
+    a_rank.cmp(&b_rank)
 }
 
 /// Deterministic HTTP method and path-parameter router.
@@ -142,7 +163,7 @@ impl Route {
 ///   HTTP token (for example `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`,
 ///   `OPTIONS`). When omitted, the route matches any valid HTTP method.
 /// * Path starting with `/`, composed of:
-///   * literal segments (`/users/me`),
+///   * literal segments (`/users/me`, percent-decoded at registration),
 ///   * named single-segment parameters (`/users/{id}`), matching one non-empty
 ///     segment, or
 ///   * a trailing multi-segment wildcard (`/files/{path...}`), which must be
@@ -152,6 +173,10 @@ impl Route {
 /// (`literal > {param} > {wildcard...}`), then method-specific over any-method.
 /// `GET` routes automatically satisfy `HEAD` requests unless an explicit `HEAD`
 /// route matches with equal or higher specificity.
+///
+/// Bounded by [`DEFAULT_MAX_ROUTES`] (configurable via
+/// [`Router::with_max_routes`]), [`DEFAULT_MAX_PATH_SEGMENTS`], and
+/// [`DEFAULT_MAX_PATH_BYTES`].
 ///
 /// # Examples
 ///
@@ -189,16 +214,32 @@ impl Route {
 ///     }
 /// );
 /// ```
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Router {
     routes: Vec<Route>,
+    max_routes: usize,
+}
+
+impl Default for Router {
+    fn default() -> Self {
+        Self::with_max_routes(DEFAULT_MAX_ROUTES)
+    }
 }
 
 impl Router {
-    /// Creates an empty [`Router`].
+    /// Creates an empty [`Router`] bounded by [`DEFAULT_MAX_ROUTES`].
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates an empty [`Router`] with an explicit maximum route capacity.
+    #[must_use]
+    pub fn with_max_routes(max_routes: usize) -> Self {
+        Self {
+            routes: Vec::new(),
+            max_routes,
+        }
     }
 
     /// Returns the number of registered routes.
@@ -215,15 +256,26 @@ impl Router {
 
     /// Registers a route pattern associated with `handler_id`.
     ///
+    /// Literal segments are percent-decoded at registration so equivalent
+    /// encoded and unencoded routes are normalized and conflict-checked.
+    ///
     /// # Errors
     ///
-    /// Returns [`HttpCoreError::InvalidPattern`] if the pattern is empty, has
-    /// an invalid HTTP method prefix, lacks a leading `/`, contains invalid
-    /// segment/parameter syntax, places a `{wildcard...}` segment before the
-    /// end, or repeats a parameter name. Returns [`HttpCoreError::RouteConflict`]
-    /// if an equivalent route pattern for the same method scope is already
+    /// Returns [`HttpCoreError::RouteLimitExceeded`] if the router has reached
+    /// its configured maximum route capacity, [`HttpCoreError::InvalidPattern`]
+    /// if the pattern is empty, exceeds [`DEFAULT_MAX_PATH_BYTES`] or
+    /// [`DEFAULT_MAX_PATH_SEGMENTS`], has an invalid HTTP method prefix, lacks a
+    /// leading `/`, contains invalid segment/parameter syntax or invalid
+    /// percent-encoding, places a `{wildcard...}` segment before the end, or
+    /// repeats a parameter name, or [`HttpCoreError::RouteConflict`] if an
+    /// equivalent route pattern for the same method scope is already
     /// registered.
     pub fn add(&mut self, pattern: &str, handler_id: usize) -> Result<(), HttpCoreError> {
+        if self.routes.len() >= self.max_routes {
+            return Err(HttpCoreError::RouteLimitExceeded {
+                limit: self.max_routes,
+            });
+        }
         let route = parse_route(pattern, handler_id)?;
         if self
             .routes
@@ -240,25 +292,36 @@ impl Router {
 
     /// Matches an HTTP `method` and request `path` against registered routes.
     ///
+    /// Callers must strip any `?query` or `#fragment` suffix before calling this
+    /// method; `path` is treated purely as the URL pathname.
+    ///
     /// Matched `{param}` and `{wildcard...}` values are safely percent-decoded
-    /// as UTF-8. Requests with invalid tokens, missing leading `/`, raw NUL
-    /// bytes, malformed percent-escapes, `%00`, or invalid UTF-8 yield
-    /// [`RouteMatch::NotFound`].
+    /// as UTF-8. Requests exceeding [`DEFAULT_MAX_PATH_BYTES`] or
+    /// [`DEFAULT_MAX_PATH_SEGMENTS`], or containing invalid tokens, missing
+    /// leading `/`, ASCII control bytes, malformed percent-escapes, `%00`, or
+    /// invalid UTF-8 fail closed with [`RouteMatch::NotFound`].
     #[must_use]
     pub fn match_route(&self, method: &str, path: &str) -> RouteMatch {
-        if !is_valid_request_method(method) || !path.starts_with('/') || path.contains('\0') {
+        if !is_valid_request_method(method)
+            || !path.starts_with('/')
+            || path.len() > DEFAULT_MAX_PATH_BYTES
+            || path.bytes().any(|b| b < 0x20 || b == 0x7F)
+        {
             return RouteMatch::NotFound;
         }
 
         let mut req_segs = Vec::new();
         for raw_seg in path[1..].split('/') {
+            if req_segs.len() >= DEFAULT_MAX_PATH_SEGMENTS {
+                return RouteMatch::NotFound;
+            }
             let Ok(decoded) = percent_decode_segment(raw_seg) else {
                 return RouteMatch::NotFound;
             };
             req_segs.push(decoded);
         }
 
-        let mut best: Option<CandidateMatch> = None;
+        let mut best: Option<CandidateMatch<'_>> = None;
         let mut path_matched = false;
         let mut allowed_methods = BTreeSet::new();
 
@@ -283,14 +346,19 @@ impl Router {
             };
 
             if let Some(rank) = method_rank {
-                let specificity = route.specificity_key(req_segs.len(), rank);
-                let replace = best
-                    .as_ref()
-                    .is_none_or(|current| specificity > current.specificity);
+                let replace = best.as_ref().is_none_or(|current| {
+                    compare_route_specificity(
+                        route,
+                        rank,
+                        current.route,
+                        current.method_rank,
+                        req_segs.len(),
+                    ) == Ordering::Greater
+                });
                 if replace {
                     best = Some(CandidateMatch {
-                        specificity,
-                        handler_id: route.handler_id,
+                        route,
+                        method_rank: rank,
                         params,
                     });
                 }
@@ -299,7 +367,7 @@ impl Router {
 
         if let Some(matched) = best {
             RouteMatch::Matched {
-                handler_id: matched.handler_id,
+                handler_id: matched.route.handler_id,
                 params: matched.params,
             }
         } else if path_matched {
@@ -363,6 +431,11 @@ fn parse_route(pattern: &str, handler_id: usize) -> Result<Route, HttpCoreError>
             reason: "route pattern path must start with '/'",
         });
     }
+    if raw_path.len() > DEFAULT_MAX_PATH_BYTES {
+        return Err(HttpCoreError::InvalidPattern {
+            reason: "route pattern path exceeds maximum byte length",
+        });
+    }
     if raw_path
         .bytes()
         .any(|b| b == b' ' || b == b'?' || b == b'#' || b == b'\\')
@@ -374,6 +447,12 @@ fn parse_route(pattern: &str, handler_id: usize) -> Result<Route, HttpCoreError>
 
     let raw_segments: Vec<&str> = raw_path[1..].split('/').collect();
     let total = raw_segments.len();
+    if total > DEFAULT_MAX_PATH_SEGMENTS {
+        return Err(HttpCoreError::InvalidPattern {
+            reason: "route pattern exceeds maximum path segment count",
+        });
+    }
+
     let mut segments = Vec::with_capacity(total);
     let mut seen_params = HashSet::new();
 
@@ -428,7 +507,9 @@ fn parse_route(pattern: &str, handler_id: usize) -> Result<Route, HttpCoreError>
                 segments.push(Segment::Param(inner.to_owned()));
             }
         } else {
-            segments.push(Segment::Literal(raw_seg.to_owned()));
+            let decoded = percent_decode_segment(raw_seg)
+                .map_err(|reason| HttpCoreError::InvalidPattern { reason })?;
+            segments.push(Segment::Literal(decoded));
         }
     }
 

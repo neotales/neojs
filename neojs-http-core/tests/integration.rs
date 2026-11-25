@@ -2,9 +2,10 @@ use std::fs;
 use std::path::Path;
 
 use neojs_http_core::{
-    DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_COOKIES, DEFAULT_MAX_HEADER_BYTES, HttpCoreError,
-    HttpCoreErrorCode, RouteMatch, Router, SameSite, SetCookie, format_set_cookie,
-    mime_type_for_path, parse_cookies, parse_cookies_with_limit, resolve_static_file,
+    DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_COOKIES, DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_PATH_BYTES,
+    DEFAULT_MAX_PATH_SEGMENTS, DEFAULT_MAX_ROUTES, HttpCoreError, HttpCoreErrorCode, RouteMatch,
+    Router, SameSite, SetCookie, format_set_cookie, mime_type_for_path, parse_cookies,
+    parse_cookies_with_limit, resolve_static_file, resolve_static_relative_path,
     validate_header_name, validate_header_value,
 };
 
@@ -231,7 +232,7 @@ fn router_percent_decodes_and_rejects_invalid_encodings() {
     assert_eq!(router.match_route("GET", "/files"), RouteMatch::NotFound);
     assert_eq!(router.match_route("GET", "/users/"), RouteMatch::NotFound);
 
-    // Malformed percent escapes, NUL bytes, and invalid UTF-8 fail closed as NotFound.
+    // Malformed percent escapes, control chars, NUL bytes, and invalid UTF-8 fail closed as NotFound.
     assert_eq!(
         router.match_route("GET", "/users/%ZZ"),
         RouteMatch::NotFound
@@ -246,10 +247,91 @@ fn router_percent_decodes_and_rejects_invalid_encodings() {
         RouteMatch::NotFound
     );
     assert_eq!(
+        router.match_route("GET", "/users/a\x1Fb"),
+        RouteMatch::NotFound
+    );
+    assert_eq!(
+        router.match_route("GET", "/users/a\x7Fb"),
+        RouteMatch::NotFound
+    );
+    assert_eq!(
         router.match_route("GET", "/users/%FF"),
         RouteMatch::NotFound
     );
     assert_eq!(router.match_route("GET", "relative"), RouteMatch::NotFound);
+}
+
+#[test]
+fn router_normalizes_literal_percent_encoding_and_enforces_bounds() {
+    let mut router = Router::new();
+    router.add("GET /caf%C3%A9", 1).unwrap();
+
+    // Equivalent unencoded literal conflicts at registration.
+    let conflict = router.add("GET /café", 2).unwrap_err();
+    assert_eq!(conflict.code(), HttpCoreErrorCode::RouteConflict);
+
+    // Matches both unencoded and percent-encoded request paths.
+    assert_eq!(
+        router.match_route("GET", "/café"),
+        RouteMatch::Matched {
+            handler_id: 1,
+            params: vec![],
+        }
+    );
+    assert_eq!(
+        router.match_route("GET", "/caf%C3%A9"),
+        RouteMatch::Matched {
+            handler_id: 1,
+            params: vec![],
+        }
+    );
+
+    // Invalid literal percent escapes fail at registration.
+    for bad in ["GET /bad%ZZ", "GET /bad%00", "GET /bad%FF", "GET /bad%2"] {
+        assert_eq!(
+            router.add(bad, 9).unwrap_err().code(),
+            HttpCoreErrorCode::InvalidPattern
+        );
+    }
+
+    // Path byte and segment bounds at registration and match_route.
+    assert_eq!(DEFAULT_MAX_ROUTES, 4096);
+    assert_eq!(DEFAULT_MAX_PATH_SEGMENTS, 128);
+    assert_eq!(DEFAULT_MAX_PATH_BYTES, 8192);
+
+    let too_long_pattern = format!("/{}", "a".repeat(DEFAULT_MAX_PATH_BYTES));
+    assert_eq!(
+        router.add(&too_long_pattern, 10).unwrap_err().code(),
+        HttpCoreErrorCode::InvalidPattern
+    );
+
+    let too_many_segments_pattern = "/a".repeat(DEFAULT_MAX_PATH_SEGMENTS + 1);
+    assert_eq!(
+        router
+            .add(&too_many_segments_pattern, 11)
+            .unwrap_err()
+            .code(),
+        HttpCoreErrorCode::InvalidPattern
+    );
+
+    router.add("GET /{catchall...}", 99).unwrap();
+    let too_long_req = format!("/{}", "a".repeat(DEFAULT_MAX_PATH_BYTES));
+    assert_eq!(
+        router.match_route("GET", &too_long_req),
+        RouteMatch::NotFound
+    );
+    let too_many_segments_req = "/a".repeat(DEFAULT_MAX_PATH_SEGMENTS + 1);
+    assert_eq!(
+        router.match_route("GET", &too_many_segments_req),
+        RouteMatch::NotFound
+    );
+
+    // Route capacity limit.
+    let mut capped = Router::with_max_routes(2);
+    capped.add("GET /one", 1).unwrap();
+    capped.add("GET /two", 2).unwrap();
+    let limit_err = capped.add("GET /three", 3).unwrap_err();
+    assert_eq!(limit_err.code(), HttpCoreErrorCode::RouteLimitExceeded);
 }
 
 #[test]
@@ -330,22 +412,60 @@ fn static_file_resolution_handles_index_mime_and_security_guards() {
     let err_missing = resolve_static_file(root.path(), "/missing.txt", None).unwrap_err();
     assert_eq!(err_missing.code(), HttpCoreErrorCode::NotFound);
 
-    // Percent-encoded filename and relative path (from wildcard capture).
-    let space_file = resolve_static_file(root.path(), "sub/hello%20world.txt", None).unwrap();
+    // Raw percent-encoded URL path decodes once cleanly.
+    let space_file = resolve_static_file(root.path(), "/sub/hello%20world.txt", None).unwrap();
     assert_eq!(space_file.mime_type, "text/plain; charset=utf-8");
     assert_eq!(space_file.size, 5);
 
-    // Traversal, NUL, backslash, and encoded slash rejections.
+    // Already-decoded relative path (e.g. from Router wildcard capture) avoids double-decoding.
+    fs::write(root.path().join("100%real.txt"), b"literal%").unwrap();
+    let literal_percent = resolve_static_relative_path(root.path(), "100%real.txt", None).unwrap();
+    assert_eq!(literal_percent.size, 8);
+    assert_eq!(
+        resolve_static_relative_path(root.path(), "sub/hello world.txt", None)
+            .unwrap()
+            .size,
+        5
+    );
+    // Double-encoding stays literal in resolve_static_relative_path.
+    assert_eq!(
+        resolve_static_relative_path(root.path(), "sub/hello%20world.txt", None)
+            .unwrap_err()
+            .code(),
+        HttpCoreErrorCode::NotFound
+    );
+
+    // Trailing slash on a regular file yields NotFound.
+    assert_eq!(
+        resolve_static_file(root.path(), "/sub/hello%20world.txt/", None)
+            .unwrap_err()
+            .code(),
+        HttpCoreErrorCode::NotFound
+    );
+    assert_eq!(
+        resolve_static_relative_path(root.path(), "sub/hello world.txt/", None)
+            .unwrap_err()
+            .code(),
+        HttpCoreErrorCode::NotFound
+    );
+
+    // Traversal, control chars, NUL, backslash, colon/drive prefixes, and encoded slash rejections.
     let bad_paths = [
         "/../secret.txt",
         "/sub/../../secret.txt",
         "/%2e%2e/secret.txt",
         "/sub/%2e%2e/sub/index.html",
         "/index.html\0.png",
+        "/index.html\n",
+        "/index.html\x7F",
         "/index%00.html",
         "/sub\\index.html",
         "/sub%5cindex.html",
         "/sub%2findex.html",
+        "C:",
+        "/C:/Windows/win.ini",
+        "/%43%3a/Windows/win.ini",
+        "/foo:bar",
         "/%FF",
         "/%2",
     ];
@@ -359,7 +479,15 @@ fn static_file_resolution_handles_index_mime_and_security_guards() {
     }
 
     // Invalid index_file values.
-    for bad_idx in ["", ".", "..", "sub/index.html", "a\\b", "idx\0.html"] {
+    for bad_idx in [
+        "",
+        ".",
+        "..",
+        "sub/index.html",
+        "a\\b",
+        "idx\0.html",
+        "C:index.html",
+    ] {
         let err = resolve_static_file(root.path(), "/", Some(bad_idx)).unwrap_err();
         assert_eq!(err.code(), HttpCoreErrorCode::InvalidPath);
     }
@@ -368,6 +496,7 @@ fn static_file_resolution_handles_index_mime_and_security_guards() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
+        use std::process::Command;
 
         // Symlink escaping root_dir is rejected.
         let escape_link = root.path().join("escape.txt");
@@ -379,11 +508,14 @@ fn static_file_resolution_handles_index_mime_and_security_guards() {
             "error must not echo internal path"
         );
 
-        // Directory symlink escaping root_dir is rejected.
+        // Directory symlink escaping root_dir is rejected even for nonexistent descendants (no oracle).
         let dir_escape = root.path().join("outside_dir");
         symlink(outside.path(), &dir_escape).unwrap();
         let err = resolve_static_file(root.path(), "/outside_dir/secret.txt", None).unwrap_err();
         assert_eq!(err.code(), HttpCoreErrorCode::InvalidPath);
+        let err_nonexistent =
+            resolve_static_file(root.path(), "/outside_dir/does_not_exist.txt", None).unwrap_err();
+        assert_eq!(err_nonexistent.code(), HttpCoreErrorCode::InvalidPath);
 
         // Index file symlink escaping root_dir is rejected.
         fs::create_dir(root.path().join("tricky")).unwrap();
@@ -403,6 +535,13 @@ fn static_file_resolution_handles_index_mime_and_security_guards() {
         .unwrap();
         let resolved = resolve_static_file(root.path(), "/alias.txt", None).unwrap();
         assert_eq!(resolved.size, 5);
+
+        // Non-regular files (such as FIFOs) return NotFound.
+        let fifo_path = root.path().join("pipe.fifo");
+        let status = Command::new("mkfifo").arg(&fifo_path).status().unwrap();
+        assert!(status.success());
+        let fifo_err = resolve_static_file(root.path(), "/pipe.fifo", None).unwrap_err();
+        assert_eq!(fifo_err.code(), HttpCoreErrorCode::NotFound);
     }
 }
 
@@ -463,7 +602,7 @@ fn cookies_parse_format_and_reject_injection() {
     assert_eq!(parse_cookies_with_limit("a=1; b=2", 2).unwrap().len(), 2);
     assert!(parse_cookies_with_limit("a=1; b=2; c=3", 2).is_err());
 
-    // Malformed / injected Cookie headers.
+    // Malformed / injected Cookie headers and invalid cookie-octet values.
     for bad in [
         "a=1\r\nEvil: 1",
         "a=1\nEvil: 1",
@@ -472,6 +611,9 @@ fn cookies_parse_format_and_reject_injection() {
         "=noname",
         "noequals",
         "a=\"unclosed",
+        "a=has space",
+        "a=has,comma",
+        "a=café",
     ] {
         assert_eq!(
             parse_cookies(bad).unwrap_err().code(),
@@ -480,17 +622,29 @@ fn cookies_parse_format_and_reject_injection() {
         );
     }
 
+    // Header byte bound enforcement on parse_cookies and format_set_cookie.
+    let oversized_cookie_header = format!("a={}", "x".repeat(DEFAULT_MAX_HEADER_BYTES));
+    assert_eq!(
+        parse_cookies(&oversized_cookie_header).unwrap_err().code(),
+        HttpCoreErrorCode::InvalidCookie
+    );
+    let oversized_set_cookie = SetCookie::new("a", "x".repeat(DEFAULT_MAX_HEADER_BYTES));
+    assert_eq!(
+        format_set_cookie(&oversized_set_cookie).unwrap_err().code(),
+        HttpCoreErrorCode::InvalidCookie
+    );
+
     // Set-Cookie formatting with all attributes.
     let full = SetCookie::new("session", "abc_123")
         .path("/app")
-        .domain("example.com")
+        .domain(".example.com")
         .max_age(0)
         .http_only(true)
         .secure(true)
         .same_site(SameSite::None);
     assert_eq!(
         full.format().unwrap(),
-        "session=abc_123; Path=/app; Domain=example.com; Max-Age=0; HttpOnly; Secure; SameSite=None"
+        "session=abc_123; Path=/app; Domain=.example.com; Max-Age=0; HttpOnly; Secure; SameSite=None"
     );
 
     assert_eq!(
@@ -502,7 +656,14 @@ fn cookies_parse_format_and_reject_injection() {
         "s=1; SameSite=Strict"
     );
 
-    // Rejection of CR/LF/NUL/attribute-injection in Set-Cookie fields.
+    // SameSite=None requires Secure.
+    let insecure_none = SetCookie::new("s", "1").same_site(SameSite::None);
+    assert_eq!(
+        format_set_cookie(&insecure_none).unwrap_err().code(),
+        HttpCoreErrorCode::InvalidCookie
+    );
+
+    // Rejection of CR/LF/NUL/attribute-injection and invalid DNS domains in Set-Cookie fields.
     let invalid_cookies = [
         SetCookie::new("", "val"),
         SetCookie::new("bad name", "val"),
@@ -521,6 +682,10 @@ fn cookies_parse_format_and_reject_injection() {
         SetCookie::new("ok", "1").domain(""),
         SetCookie::new("ok", "1").domain("a.com; HttpOnly"),
         SetCookie::new("ok", "1").domain(".."),
+        SetCookie::new("ok", "1").domain("a..b.com"),
+        SetCookie::new("ok", "1").domain("-bad.example.com"),
+        SetCookie::new("ok", "1").domain("bad-.example.com"),
+        SetCookie::new("ok", "1").domain(format!("{}.com", "a".repeat(64))),
     ];
 
     for cookie in invalid_cookies {

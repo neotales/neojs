@@ -66,5 +66,9 @@ pub use error::{HttpCoreError, HttpCoreErrorCode};
 pub use policy::{
     DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_HEADER_BYTES, validate_header_name, validate_header_value,
 };
-pub use router::{RouteMatch, Router};
-pub use static_files::{StaticFile, mime_type_for_path, resolve_static_file};
+pub use router::{
+    DEFAULT_MAX_PATH_BYTES, DEFAULT_MAX_PATH_SEGMENTS, DEFAULT_MAX_ROUTES, RouteMatch, Router,
+};
+pub use static_files::{
+    StaticFile, mime_type_for_path, resolve_static_file, resolve_static_relative_path,
+};

@@ -16,6 +16,8 @@ pub enum HttpCoreErrorCode {
     InvalidPattern,
     /// Route pattern conflicts with an already-registered route.
     RouteConflict,
+    /// Router reached its configured maximum route count.
+    RouteLimitExceeded,
     /// Requested static file or directory index was not found.
     NotFound,
     /// Supplied URL path or index filename failed safety validation.
@@ -35,6 +37,7 @@ impl HttpCoreErrorCode {
         match self {
             Self::InvalidPattern => "NEO_HTTP_INVALID_PATTERN",
             Self::RouteConflict => "NEO_HTTP_ROUTE_CONFLICT",
+            Self::RouteLimitExceeded => "NEO_HTTP_ROUTE_LIMIT_EXCEEDED",
             Self::NotFound => "NEO_HTTP_NOT_FOUND",
             Self::InvalidPath => "NEO_HTTP_INVALID_PATH",
             Self::InvalidHeader => "NEO_HTTP_INVALID_HEADER",
@@ -65,6 +68,12 @@ pub enum HttpCoreError {
     RouteConflict {
         /// Human-readable reason the route conflicted.
         reason: &'static str,
+    },
+    /// Router reached its maximum allowed route capacity.
+    #[error("router route capacity limit of {limit} exceeded")]
+    RouteLimitExceeded {
+        /// Configured maximum number of routes.
+        limit: usize,
     },
     /// Requested static file or index file does not exist.
     #[error("static file not found")]
@@ -103,6 +112,7 @@ impl HttpCoreError {
         match self {
             Self::InvalidPattern { .. } => HttpCoreErrorCode::InvalidPattern,
             Self::RouteConflict { .. } => HttpCoreErrorCode::RouteConflict,
+            Self::RouteLimitExceeded { .. } => HttpCoreErrorCode::RouteLimitExceeded,
             Self::NotFound => HttpCoreErrorCode::NotFound,
             Self::InvalidPath { .. } => HttpCoreErrorCode::InvalidPath,
             Self::InvalidHeader { .. } => HttpCoreErrorCode::InvalidHeader,
@@ -115,6 +125,9 @@ impl HttpCoreError {
 pub(crate) fn map_io_error(err: io::Error) -> HttpCoreError {
     match err.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => HttpCoreError::NotFound,
+        io::ErrorKind::InvalidFilename => HttpCoreError::InvalidPath {
+            reason: "invalid filename or path component",
+        },
         _ => HttpCoreError::Io { source: err },
     }
 }
