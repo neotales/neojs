@@ -35,6 +35,8 @@ use crate::crypto::neojs_crypto;
 use crate::crypto_cipher::neojs_crypto_cipher;
 use crate::crypto_hash::neojs_crypto_hash;
 use crate::crypto_shamir::neojs_crypto_shamir;
+#[cfg(feature = "neo-db")]
+use crate::db::neojs_db;
 use crate::fs::neojs_fs;
 use crate::jsr_loader::JsrModuleLoader;
 use crate::jsr_loader::Limits as JsrLimits;
@@ -563,6 +565,8 @@ impl Runtime {
             neojs_stdio::init(),
             neojs_uuid::init(),
         ];
+        #[cfg(feature = "neo-db")]
+        extensions.push(neojs_db::init());
         #[cfg(feature = "test-support")]
         extensions.push(crate::cron::test_support_extension());
         #[cfg(feature = "test-support")]

@@ -191,6 +191,7 @@ const NEO_CONSOLE_DTS: &str = include_str!("../types/neo/console.d.ts");
 const NEO_CRON_DTS: &str = include_str!("../types/neo/cron.d.ts");
 const NEO_CRYPTO_DTS: &str = include_str!("../types/neo/crypto.d.ts");
 const NEO_CRYPTO_LITE_DTS: &str = include_str!("../types/neo/crypto-lite.d.ts");
+const NEO_DB_DTS: &str = include_str!("../types/neo/db.d.ts");
 const NEO_FS_DTS: &str = include_str!("../types/neo/fs.d.ts");
 const NEO_OS_DTS: &str = include_str!("../types/neo/os.d.ts");
 const NEO_PATH_DTS: &str = include_str!("../types/neo/path.d.ts");
@@ -243,6 +244,11 @@ const V8_FILES: &[DtsFile] = &[
         path: "neo/crypto.d.ts",
         specifier: Some("neo:crypto"),
         content: NEO_CRYPTO_DTS,
+    },
+    DtsFile {
+        path: "neo/db.d.ts",
+        specifier: Some("neo:db"),
+        content: NEO_DB_DTS,
     },
     DtsFile {
         path: "neo/fs.d.ts",
@@ -494,6 +500,12 @@ const CRYPTO_LITE_EXPORTS: ModuleExports = ModuleExports {
     has_default: false,
 };
 
+const DB_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "neo:db",
+    exports: &["DbError", "open", "openSqlite"],
+    has_default: false,
+};
+
 const FS_EXPORTS: ModuleExports = ModuleExports {
     specifier: "neo:fs",
     exports: &[
@@ -624,6 +636,7 @@ const V8_EXPECTED_EXPORTS: &[ModuleExports] = &[
     CONSOLE_EXPORTS,
     CRON_EXPORTS,
     CRYPTO_EXPORTS,
+    DB_EXPORTS,
     FS_EXPORTS,
     OS_EXPORTS,
     PATH_EXPORTS,

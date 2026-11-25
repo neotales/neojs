@@ -191,3 +191,58 @@ if (imported) throw new Error("neo:strings was importable while disabled");
 "#)
     .expect("strings absent");
 }
+
+#[test]
+#[cfg(feature = "neo-db")]
+fn db_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:db")) {
+    throw new Error(`db is missing from the list: ${JSON.stringify(list)}`);
+}
+if (list.includes("db")) {
+    throw new Error(`a bare db name is listed: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:db");
+if (registry === undefined || typeof registry !== "object") {
+    throw new Error("the db registry object is missing");
+}
+if (Neo.getBuiltInModule("db") !== undefined) {
+    throw new Error("the registry accepted a bare db name");
+}
+const namespace = await import("neo:db");
+if (namespace === registry) {
+    throw new Error("the ES module namespace must be distinct from the registry object");
+}
+if (namespace.openSqlite !== registry.openSqlite) {
+    throw new Error("the namespace export is not the registry function");
+}
+"#)
+    .expect("db feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-db"))]
+fn db_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:db") || list.includes("db")) {
+    throw new Error(`db is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:db") !== undefined) {
+    throw new Error("the canonical db registry object is still present");
+}
+if (Neo.getBuiltInModule("db") !== undefined) {
+    throw new Error("a bare db name returned a module");
+}
+let imported = false;
+try {
+    await import("neo:db");
+    imported = true;
+} catch {
+    // Expected: the loader has no db entry.
+}
+if (imported) throw new Error("neo:db was importable while disabled");
+"#)
+    .expect("db absent");
+}

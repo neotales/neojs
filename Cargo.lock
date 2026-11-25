@@ -2064,6 +2064,7 @@ dependencies = [
  "getrandom 0.4.3",
  "neojs-builtins",
  "neojs-crypto-core",
+ "neojs-dbapi",
  "neojs-dts",
  "neojs-fs-core",
  "neojs-manifest",
@@ -2281,8 +2282,6 @@ dependencies = [
 [[package]]
 name = "neotales-dbapi"
 version = "0.0.0-alpha.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7d9dbc2eb79b7ae0f0e5f504a3e966118905516f931afa4a5ead135f98ef653"
 dependencies = [
  "futures-core",
  "neotales-resilience",
