@@ -54,15 +54,16 @@ Wrong argument types or wrong argument counts (including trailing `undefined`) t
 
 ```ts
 import { decrypt, encrypt, generateIdentity, identityToRecipient } from "vael:age";
+import { Buffer } from "node:buffer";
 
 const { identity, recipient } = generateIdentity();
 if (identityToRecipient(identity) !== recipient) {
   throw new Error("recipient mismatch");
 }
 
-const secret = new TextEncoder().encode("deployment token");
+const secret = Buffer.from("deployment token", "utf8");
 const ciphertext = encrypt(recipient, secret);
 const plaintext = decrypt(identity, ciphertext);
 
-console.log(new TextDecoder().decode(plaintext));
+console.log(Buffer.from(plaintext).toString("utf8"));
 ```

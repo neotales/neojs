@@ -34,10 +34,14 @@ On macOS, use `shasum -a 256 -c SHA256SUMS.txt` (filtering to the downloaded arc
 
 ## Archive Layout & Bundled `types/`
 
-Extracting an archive produces three items at the archive root:
+The release archives contain `vjs` (or `vjs-lite`), `LICENSE.md`, and `types/` directly at the archive root without a wrapping directory, so extract into a dedicated directory:
+
+```sh
+mkdir -p vjs && tar -xzf vjs-<tag>-linux-amd64.tar.gz -C vjs
+```
 
 ```text
-vjs-<tag>-linux-amd64/
+vjs/
 ├── vjs           # (or vjs.exe on Windows; vjs-lite / vjs-lite.exe for Lite)
 ├── LICENSE.md
 └── types/
@@ -55,7 +59,10 @@ Both `vjs` and `vjs-lite` read their invoked binary name from `argv[0]` (strippi
 
 ```sh
 ln -s /usr/local/bin/vjs /usr/local/bin/vael
-vael --help   # Prints "Usage: vael <file> ..."
+vael --help
+# Usage:
+#   vael <file>                    run one module
+#   ...
 ```
 
 If `argv[0]` is empty or contains whitespace or control characters, the CLI falls back to `vjs` or `vjs-lite`.

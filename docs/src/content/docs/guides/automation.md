@@ -64,6 +64,7 @@ Because no shell is invoked, arguments containing spaces or metacharacters are n
 ```ts
 import { connect } from "vael:ssh";
 import { readFile } from "vael:fs";
+import { Buffer } from "node:buffer";
 import { env } from "node:process";
 
 const conn = connect({
@@ -81,7 +82,7 @@ try {
   if (res.status !== 0) {
     throw new Error(`Remote command exited ${res.status}`);
   }
-  console.log(new TextDecoder().decode(res.stdout).trim());
+  console.log(Buffer.from(res.stdout).toString("utf8").trim());
 } finally {
   conn.close();
 }

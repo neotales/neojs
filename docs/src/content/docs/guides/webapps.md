@@ -45,15 +45,24 @@ import {
 } from "vael:http";
 
 export function createApp({ db, staticDir, logSink }) {
+  const templates = createAppTemplates();
   const mux = createRouter();
 
   mux.use(recover(), requestId(), securityHeaders(), logger({ sink: logSink }));
   mux.static("/assets", staticDir);
 
   mux.get("/", async (req) => {
-    const status = req.query.get("status") ?? "all";
-    const tasks = await listTasks(db, status);
-    return html(renderHomePage({ tasks, status }));
+    const filter = req.query.get("status") ?? "all";
+    const tasks = await listTasks(db, filter);
+    return html(
+      renderHomePage(templates, {
+        heading: "vaeljs task board",
+        filter,
+        tasks,
+        totalCount: tasks.length,
+        flash: "",
+      }),
+    );
   });
 
   mux.post("/tasks/{id}/toggle", async (req) => {
@@ -193,7 +202,8 @@ import test from "vael:test";
 test("POST /api/tasks creates a task and escapes XSS on SSR", async () => {
   const db = await openTaskDb(":memory:");
   try {
-    const app = createApp({ db, staticDir: "./public" });
+    // Pass logSink (or omit optional logSink/cookieSecret) to match examples/webapp/app.ts
+    const app = createApp({ db, staticDir: "./public", logSink: undefined });
     const res = await app.mux.fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

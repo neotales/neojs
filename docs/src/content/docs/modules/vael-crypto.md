@@ -42,7 +42,7 @@ These 7 exports offload CPU-intensive work to a bounded Tokio worker pool sharin
 ## Stateful `Cipher` and `Hash` Lifecycles
 
 - **`Cipher`**: `update(data, encoding?)` accepts up to `8 MiB` per call and always returns an empty `Uint8Array` (all output is produced by `final()`). Supports `setAAD(aad)` (max `8 MiB`), `setAuthTag(tag)` (16 bytes, GCM decryptor), `getAuthTag()` (GCM encryptor after `final()`), and `setAutoPadding(enabled)` (CBC). Open ciphers are capped at **`64` objects / `64 MiB` buffered bytes** per runtime — call `close()` or `dispose()` in a `finally` block even after `final()`.
-- **`Hash`**: `update(data, encoding?)` accepts up to `16 MiB` per call (`"utf8"` / `"utf-8"` only for string encoding). `digest(encoding?)` consumes the state and returns `Uint8Array` or a string (`"hex"`, `"base64"`, `"base64url"`, `"latin1"`, `"binary"`). Open digest objects are capped at **`1024` per runtime**; call `close()` or `dispose()` if abandoning before `digest()`.
+- **`Hash`**: `update(data, encoding?)` accepts `"utf8"` / `"utf-8"` for string encoding and enforces `MAX_HASH_INPUT_BYTES` (`16 MiB`) **cumulatively** across all `update()` calls on a `Hash`/`Hmac` instance. `digest(encoding?)` consumes the state and returns `Uint8Array` or a string (`"hex"`, `"base64"`, `"base64url"`, `"latin1"`, `"binary"`). Open digest objects are capped at **`1024` per runtime**; call `close()` or `dispose()` if abandoning before `digest()`.
 
 ## Error Codes (`CryptoErrorCode`)
 
@@ -52,15 +52,16 @@ These 7 exports offload CPU-intensive work to a bounded Tokio worker pool sharin
 
 ```ts
 import { createHash, decrypt, encrypt, generateEnvelopeKey } from "vael:crypto";
+import { Buffer } from "node:buffer";
 
 // NEO1 authenticated AES-256-GCM envelope (works on both vjs and vjs-lite)
 const key = generateEnvelopeKey();
-const aad = new TextEncoder().encode("tenant:42");
-const plaintext = new TextEncoder().encode("secret payload");
+const aad = Buffer.from("tenant:42", "utf8");
+const plaintext = Buffer.from("secret payload", "utf8");
 
 const envelope = encrypt(key, plaintext, aad);
 const recovered = decrypt(key, envelope, aad);
-console.log(new TextDecoder().decode(recovered));
+console.log(Buffer.from(recovered).toString("utf8"));
 
 // Incremental SHA-256 digest
 const h = createHash("sha256");

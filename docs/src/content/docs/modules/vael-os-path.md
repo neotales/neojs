@@ -19,7 +19,7 @@ Both `vael:os` and `vael:path` are available in **both `vjs` (V8) and `vjs-lite`
 | `arch` | `"x86_64" \| "aarch64" \| (string & {})` | Rust target architecture (`"x86_64"`, `"aarch64"`, etc.). |
 
 :::tip[Rust vs Node Vocabulary]
-`vael:os` uses Rust target names (`"macos"`, `"x86_64"`, `"aarch64"`). If you need Node.js names (`"darwin"`, `"win32"`, `"x64"`, `"arm64"`), use [`node:os`](/modules/node-compat/#nodeos).
+`vael:os` uses Rust target names (`"macos"`, `"x86_64"`, `"aarch64"`). If you need Node.js names (`"darwin"`, `"win32"`, `"x64"`, `"arm64"`), use [`node:os`](/vaeljs/modules/node-compat/#nodeos).
 :::
 
 ## `vael:path`

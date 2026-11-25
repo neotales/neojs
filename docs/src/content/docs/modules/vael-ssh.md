@@ -82,6 +82,7 @@ Failures throw an `Error` with `name = "SshError"` and `code` set to one of:
 ```ts
 import { readFile, readTextFile } from "vael:fs";
 import { connect } from "vael:ssh";
+import { Buffer } from "node:buffer";
 
 const conn = connect({
   host: "10.0.0.10",
@@ -94,7 +95,7 @@ const conn = connect({
 
 try {
   const { stdout, status } = conn.exec("uname -a");
-  console.log(status, new TextDecoder().decode(stdout));
+  console.log(status, Buffer.from(stdout).toString("utf8"));
 } finally {
   conn.close();
 }

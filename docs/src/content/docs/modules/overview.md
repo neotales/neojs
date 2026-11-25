@@ -26,7 +26,7 @@ Both runtimes install only two ambient globals — `Vael` and `console` — with
 | --- | --- | --- |
 | `Vael` | `engine` | Readonly runtime identifier: `"vael"` in `vjs`, `"vael-lite"` in `vjs-lite`. |
 | `Vael` | `getBuiltInModulesList()` | Returns a frozen `readonly string[]` of enabled canonical `vael:*` specifiers in registration order. |
-| `Vael` | `getBuiltInModule(specifier)` | Returns the cached frozen module object for a registered `vael:*` specifier, or `undefined` if absent. Throws `TypeError` if `specifier` is not a string. |
+| `Vael` | `getBuiltInModule(specifier)` | Returns the cached frozen module object for a registered `vael:*` specifier — except `"vael:console"`, which returns the live mutable `globalThis.console` object — or `undefined` if absent. Throws `TypeError` if `specifier` is not a string. |
 | `console` | `log`, `debug`, `info` | Format arguments separated by spaces to stdout, followed by a newline. |
 | `console` | `warn`, `error` | Format arguments separated by spaces to stderr, followed by a newline. |
 
@@ -63,30 +63,30 @@ By default, `vjs` provides **31 modules** (`20` `vael:*` + `11` `node:*`) and `v
 
 | Specifier | `vjs` (V8) | `vjs-lite` (QuickJS) | Feature / Notes | Reference |
 | --- | --- | --- | --- | --- |
-| `vael:age` | Yes | No | Binary age v1 X25519 encryption | [`vael:age`](/modules/vael-age/) |
-| `vael:assert` | Yes | Yes | Assertions + `rejects` / `doesNotReject` | [`vael:test` & `vael:assert`](/modules/vael-testing/) |
-| `vael:chars` | Yes | Yes | Unicode scalar classification & case | [`vael:strings`, `vael:chars`, `vael:slices`](/modules/vael-text/) |
-| `vael:console` | Yes | Yes | Mirrors global `console` | [Utilities](/modules/vael-utilities/) |
-| `vael:cron` | Yes | No | UTC 5-field cron scheduler & `next` | [Utilities](/modules/vael-utilities/) |
-| `vael:crypto` | Sync + Async (20) | Sync only (13) | 7 `*Async` pool ops are V8-only | [`vael:crypto`](/modules/vael-crypto/) |
-| `vael:db` | Yes | No | `vael-db` feature (SQLite by default) | [`vael:db`](/modules/vael-db/) |
-| `vael:fs` | Yes | Yes | 14 synchronous filesystem ops | [`vael:fs`](/modules/vael-fs/) |
-| `vael:http` | Yes | No | `vael-http` feature (`ServeMux`, `serve`) | [`vael:http`](/modules/vael-http/) |
-| `vael:os` | Yes | Yes | Build-target `platform` & `arch` | [`vael:os` & `vael:path`](/modules/vael-os-path/) |
-| `vael:path` | Yes | Yes | Lexical `posix` & `win32` path tools | [`vael:os` & `vael:path`](/modules/vael-os-path/) |
-| `vael:slices` | Yes | Yes | Zero-copy `Slice` & `CharSlice` views | [`vael:strings`, `vael:chars`, `vael:slices`](/modules/vael-text/) |
-| `vael:ssh` | Yes | Yes | Synchronous SSH-2 client | [`vael:ssh`](/modules/vael-ssh/) |
-| `vael:stdio` | Yes | No | Bounded `Readable`, `Writable`, `stdout`/`stderr` | [Utilities](/modules/vael-utilities/) |
-| `vael:strings` | Yes | Yes | Unicode 16.0 case-folded search & trim | [`vael:strings`, `vael:chars`, `vael:slices`](/modules/vael-text/) |
-| `vael:template` | Yes | Yes | `vael-template` feature (Go + Sprig) | [`vael:template`](/modules/vael-template/) |
-| `vael:test` | Yes | Yes | `timeout` option is V8-only | [`vael:test` & `vael:assert`](/modules/vael-testing/) |
-| `vael:uuid` | Yes | Yes | RFC 9562 `v4` & `v7` | [Utilities](/modules/vael-utilities/) |
-| `vael:uuid/v4` | Yes | Yes | Subpath re-export of `v4` | [Utilities](/modules/vael-utilities/) |
-| `vael:uuid/v7` | Yes | Yes | Subpath re-export of `v7` | [Utilities](/modules/vael-utilities/) |
+| `vael:age` | Yes | No | Binary age v1 X25519 encryption | [`vael:age`](/vaeljs/modules/vael-age/) |
+| `vael:assert` | Yes | Yes | Assertions + `rejects` / `doesNotReject` | [`vael:test` & `vael:assert`](/vaeljs/modules/vael-testing/) |
+| `vael:chars` | Yes | Yes | Unicode scalar classification & case | [`vael:strings`, `vael:chars`, `vael:slices`](/vaeljs/modules/vael-text/) |
+| `vael:console` | Yes | Yes | Mirrors global `console` | [Utilities](/vaeljs/modules/vael-utilities/) |
+| `vael:cron` | Yes | No | UTC 5-field cron scheduler & `next` | [Utilities](/vaeljs/modules/vael-utilities/) |
+| `vael:crypto` | Sync + Async (20) | Sync only (13) | 7 `*Async` pool ops are V8-only | [`vael:crypto`](/vaeljs/modules/vael-crypto/) |
+| `vael:db` | Yes | No | `vael-db` feature (SQLite by default) | [`vael:db`](/vaeljs/modules/vael-db/) |
+| `vael:fs` | Yes | Yes | 14 synchronous filesystem ops | [`vael:fs`](/vaeljs/modules/vael-fs/) |
+| `vael:http` | Yes | No | `vael-http` feature (`ServeMux`, `serve`) | [`vael:http`](/vaeljs/modules/vael-http/) |
+| `vael:os` | Yes | Yes | Build-target `platform` & `arch` | [`vael:os` & `vael:path`](/vaeljs/modules/vael-os-path/) |
+| `vael:path` | Yes | Yes | Lexical `posix` & `win32` path tools | [`vael:os` & `vael:path`](/vaeljs/modules/vael-os-path/) |
+| `vael:slices` | Yes | Yes | Zero-copy `Slice` & `CharSlice` views | [`vael:strings`, `vael:chars`, `vael:slices`](/vaeljs/modules/vael-text/) |
+| `vael:ssh` | Yes | Yes | Synchronous SSH-2 client | [`vael:ssh`](/vaeljs/modules/vael-ssh/) |
+| `vael:stdio` | Yes | No | Bounded `Readable`, `Writable`, `stdout`/`stderr` | [Utilities](/vaeljs/modules/vael-utilities/) |
+| `vael:strings` | Yes | Yes | Unicode 16.0 case-folded search & trim | [`vael:strings`, `vael:chars`, `vael:slices`](/vaeljs/modules/vael-text/) |
+| `vael:template` | Yes | Yes | `vael-template` feature (Go + Sprig) | [`vael:template`](/vaeljs/modules/vael-template/) |
+| `vael:test` | Yes | Yes | `timeout` option is V8-only | [`vael:test` & `vael:assert`](/vaeljs/modules/vael-testing/) |
+| `vael:uuid` | Yes | Yes | RFC 9562 `v4` & `v7` | [Utilities](/vaeljs/modules/vael-utilities/) |
+| `vael:uuid/v4` | Yes | Yes | Subpath re-export of `v4` | [Utilities](/vaeljs/modules/vael-utilities/) |
+| `vael:uuid/v7` | Yes | Yes | Subpath re-export of `v7` | [Utilities](/vaeljs/modules/vael-utilities/) |
 
 ### `node:*` Compatibility Modules
 
-All `node:*` modules require the `node-compat` Cargo feature (enabled by default) and can be disabled at runtime with `--no-node-compat`. See [Node Compatibility (`node:*`)](/modules/node-compat/) for exact export tables.
+All `node:*` modules require the `node-compat` Cargo feature (enabled by default) and can be disabled at runtime with `--no-node-compat`. See [Node Compatibility (`node:*`)](/vaeljs/modules/node-compat/) for exact export tables.
 
 | Specifier | `vjs` (V8) | `vjs-lite` (QuickJS) | Notes |
 | --- | --- | --- | --- |

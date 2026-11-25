@@ -1,6 +1,21 @@
-/* VaelJS Starlight Theme — Arcane Ember / Amber on Deep Slate (dark) & Crisp Warm Slate (light) */
+/* VaelJS Starlight Theme — Arcane Ember / Amber on Deep Slate (dark default) & Crisp Warm Slate (light) */
 
 :root {
+  /* Dark mode (Starlight default) — deep slate background with crisp amber/ember accents (WCAG AA+) */
+  --sl-color-accent-low: #451a03;
+  --sl-color-accent: #f59e0b;
+  --sl-color-accent-high: #fde68a;
+  --sl-color-white: #f8fafc;
+  --sl-color-gray-1: #e2e8f0;
+  --sl-color-gray-2: #cbd5e1;
+  --sl-color-gray-3: #94a3b8;
+  --sl-color-gray-4: #475569;
+  --sl-color-gray-5: #1e293b;
+  --sl-color-gray-6: #111827;
+  --sl-color-black: #090d16;
+}
+
+:root[data-theme="light"] {
   /* Light mode — high-contrast warm slate & deep amber-ember accent (WCAG AA+) */
   --sl-color-accent-low: #fef3c7;
   --sl-color-accent: #b45309;
@@ -14,21 +29,6 @@
   --sl-color-gray-6: #f1f5f9;
   --sl-color-gray-7: #f8fafc;
   --sl-color-black: #ffffff;
-}
-
-:root[data-theme="dark"] {
-  /* Dark mode — deep slate background with crisp amber/ember accents (WCAG AA+) */
-  --sl-color-accent-low: #451a03;
-  --sl-color-accent: #f59e0b;
-  --sl-color-accent-high: #fde68a;
-  --sl-color-white: #f8fafc;
-  --sl-color-gray-1: #e2e8f0;
-  --sl-color-gray-2: #cbd5e1;
-  --sl-color-gray-3: #94a3b8;
-  --sl-color-gray-4: #475569;
-  --sl-color-gray-5: #1e293b;
-  --sl-color-gray-6: #111827;
-  --sl-color-black: #090d16;
 }
 
 /* Crisp code block framing and inline code legibility */
@@ -48,12 +48,7 @@
   font-size: 0.875em;
 }
 
-.sl-markdown-content table {
-  display: table;
-  width: 100%;
-  border-collapse: collapse;
-}
-
+/* Preserve Starlight's horizontal table scrolling (`display: block; overflow: auto;`) */
 .sl-markdown-content th {
   text-align: left;
   font-weight: 600;

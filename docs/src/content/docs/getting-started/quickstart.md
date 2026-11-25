@@ -110,10 +110,10 @@ Create `vael.jsonc` in your project root to map clean specifiers or define works
 }
 ```
 
-Both `vjs` and `vjs-lite` automatically discover `vael.jsonc` upward from the entry module's directory. See [vael.jsonc & Workspaces](/cli/vael-jsonc/) for the full schema and rules.
+Both `vjs` and `vjs-lite` automatically discover `vael.jsonc` upward from the entry module's directory. See [vael.jsonc & Workspaces](/vaeljs/cli/vael-jsonc/) for the full schema and rules.
 
 ## Next Steps
 
-- Compare engines in [vjs vs vjs-lite](/getting-started/vjs-vs-vjs-lite/).
-- Explore all CLI options in [Commands & Flags](/cli/commands/).
-- Build a service in [Go-Style WebApps](/guides/webapps/) or automate tasks in [Automation Recipes](/guides/automation/).
+- Compare engines in [vjs vs vjs-lite](/vaeljs/getting-started/vjs-vs-vjs-lite/).
+- Explore all CLI options in [Commands & Flags](/vaeljs/cli/commands/).
+- Build a service in [Go-Style WebApps](/vaeljs/guides/webapps/) or automate tasks in [Automation Recipes](/vaeljs/guides/automation/).

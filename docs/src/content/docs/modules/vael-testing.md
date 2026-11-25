@@ -52,12 +52,12 @@ Both `vael:test` and `vael:assert` are available in **both `vjs` (V8) and `vjs-l
 
 ## Running Tests via the CLI
 
-Run test suites directly with `vjs test` or `vjs-lite test`:
+Run test suites directly with `vjs test` or `vjs-lite test` (at least one file path or quoted glob is required):
 
 ```sh
-vjs test
-vjs test tests/**/*.test.ts
-vjs-lite test tests/unit.test.ts
+vjs test "tests/js/shared/*.test.*"
+vjs test examples/webapp/app.test.ts
+vjs-lite test "tests/js/shared/*.test.ts"
 ```
 
 ## Example

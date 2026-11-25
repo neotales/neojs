@@ -58,10 +58,11 @@ Wrong argument types throw `TypeError`. All filesystem and validation failures t
 
 ```ts
 import { mkdir, readDir, readTextFile, writeFileAtomic } from "vael:fs";
+import { Buffer } from "node:buffer";
 
 mkdir("./tmp-config", { recursive: true });
 
-const payload = new TextEncoder().encode(JSON.stringify({ port: 8080 }));
+const payload = Buffer.from(JSON.stringify({ port: 8080 }), "utf8");
 writeFileAtomic("./tmp-config/app.json", payload, { sync: true });
 
 const text = readTextFile("./tmp-config/app.json", { maxBytes: 65536 });

@@ -75,9 +75,11 @@ Both `vjs` and `vjs-lite` use the same exit code contract:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | The entry module finished cleanly (or exited `0`), or every selected test file passed. |
-| `1` | Runtime failure: module compile/load/strip error, uncaught exception, unhandled rejection, non-converging job queue, failing/pending test, or a test file registering zero tests. (Or custom exit code masked with `code & 0xff` via `node:process`.) |
+| `0` | The entry module finished cleanly, or every selected test file passed. |
+| `1` | Runtime failure: module compile/load/strip error, uncaught exception, unhandled rejection, non-converging job queue, failing/pending test, or a test file registering zero tests. |
 | `2` | Startup failure: invalid CLI flags or `VAELJS_ALLOW_REMOTE`, missing/invalid explicit `--config`, unreadable or unsupported entry file, or a test glob that failed to expand. |
+
+If the entry module exits via `node:process` (`process.exit(code)` or `process.exitCode`), the process exits with `code & 0xff`.
 
 ## `argv[0]` Symlink Behavior
 

@@ -3,11 +3,15 @@ import starlight from "@astrojs/starlight";
 
 export default defineConfig({
   site: "https://neotales.github.io",
+  base: "/vaeljs",
   integrations: [
     starlight({
       title: "VaelJS",
       description:
         "Fast, secure JavaScript & TypeScript runtimes for automation, webapps, and embedding — vjs (V8) and vjs-lite (QuickJS).",
+      editLink: {
+        baseUrl: "https://github.com/neotales/vaeljs/edit/dev/docs/",
+      },
       social: [
         {
           icon: "github",
