@@ -4,9 +4,9 @@
 // The default export is the console object the runtime installed: the object
 // `globalThis.console` named when the built-in registry was installed. The five
 // methods neojs defines write to stdout (`log`, `info`, `debug`) and to stderr
-// (`warn`, `error`), exactly as the global methods do. The object also carries
-// whatever other properties the engine's global console has; those are not part
-// of neojs's documented surface.
+// (`warn`, `error`), exactly as the global methods do. On V8 the object may
+// also carry whatever other properties the engine's global console has; those
+// are not part of neojs's documented surface.
 //
 // The named exports are the five method values read from that object when this
 // module is evaluated, captured as constants. A method replaced before that
@@ -20,9 +20,8 @@
 // The console object is not frozen. Unlike `chars`, this module's default
 // export is the live console object the runtime installed, and freezing it
 // would change existing console behaviour and break code that replaces a
-// method. `neojs-core/tests/runtime.rs` asserts the identity and mutation
-// contract. Neither this module nor the global console is a permission,
-// sandbox, or isolation boundary.
+// method. Neither this module nor the global console is a permission, sandbox,
+// or isolation boundary.
 
 // Read the registry rather than `globalThis.console`. The registry holds the
 // console object the runtime installed, so replacing the global property before

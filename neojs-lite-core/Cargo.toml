@@ -11,16 +11,17 @@ authors.workspace = true
 readme = "README.md"
 
 [features]
-# A default Lite build keeps the shared `neo:assert`, `neo:chars`, `neo:crypto`,
-# `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`, and `neo:uuid`
-# (`neo:uuid`, `neo:uuid/v4`, `neo:uuid/v7`) modules plus erasable TypeScript
+# A default Lite build keeps the shared `neo:assert`, `neo:chars`, `neo:console`,
+# `neo:crypto`, `neo:fs`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`,
+# `neo:strings`, `neo:test`, and `neo:uuid` (`neo:uuid`, `neo:uuid/v4`,
+# `neo:uuid/v7`) modules plus erasable TypeScript stripping (`typescript`). A
 # stripping (`typescript`). A consumer that wants the smallest QuickJS runtime
 # can disable default features; the CLI below selects the features explicitly
 # so a change to these defaults cannot silently change what the command
 # advertises. Cargo features are additive and unify across the dependency graph:
 # a feature is present whenever any dependent enables it. Selection is
 # compile-time surface selection, not a sandbox.
-default = ["neo-assert", "neo-chars", "neo-crypto", "neo-fs", "neo-os", "neo-ssh", "neo-strings", "neo-test", "neo-uuid", "typescript"]
+default = ["neo-assert", "neo-chars", "neo-console", "neo-crypto", "neo-fs", "neo-os", "neo-path", "neo-slices", "neo-ssh", "neo-strings", "neo-test", "neo-uuid", "typescript"]
 # The shared `assert` module and its Promise observation host hooks. This
 # enables the optional `neojs-builtins` dependency and its `assert` module.
 neo-assert = ["dep:neojs-builtins", "neojs-builtins/assert"]
@@ -28,6 +29,9 @@ neo-assert = ["dep:neojs-builtins", "neojs-builtins/assert"]
 # declaration, and introspection list entry. This enables the optional
 # `neojs-builtins` dependency and its `chars` module.
 neo-chars = ["dep:neojs-builtins", "neojs-builtins/chars"]
+# The shared `console` (`neo:console`) formatted global console (`log`, `debug`,
+# `info`, `warn`, `error`) and ESM wrapper. Enables `neojs-builtins/console`.
+neo-console = ["dep:neojs-builtins", "neojs-builtins/console"]
 # The shared `crypto` (`neo:crypto`) synchronous cryptographic exports, native
 # registry object, native module declaration, and introspection list entry. This
 # enables the optional `neojs-crypto-core` dependency; `--no-default-features`
@@ -41,6 +45,13 @@ neo-fs = ["dep:neojs-fs-core"]
 # The shared `os` Rust constants (`platform`, `arch`), native registry object,
 # native module declaration, and introspection list entry.
 neo-os = ["dep:neojs-builtins", "neojs-builtins/os"]
+# The shared `path` (`neo:path`) lexical path implementation, host cwd helper,
+# and ESM wrapper. Enables `neojs-builtins/path`.
+neo-path = ["dep:neojs-builtins", "neojs-builtins/path"]
+# The shared `slices` (`neo:slices`) live Array/TypedArray/CharSlice views and
+# ESM wrapper. Requires `neo-chars` because `CharSlice` captures `chars.toUpper`
+# and `chars.toLower`.
+neo-slices = ["dep:neojs-builtins", "neojs-builtins/slices", "neo-chars"]
 # The shared `ssh` (`neo:ssh`) synchronous SSH client, native registry object,
 # native module declaration, and introspection list entry. This enables the
 # optional `neojs-ssh-core` dependency (and `neotales-ssh`);

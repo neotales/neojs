@@ -30,6 +30,20 @@ console.log(value);
     runtime.run_file(&file).expect("run file");
 }
 
+#[test]
+fn console_handles_lone_surrogates_in_all_feature_builds() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "surrogate.js",
+            r#"
+console.log("a\uD800b");
+console.error("x\uDFFFy");
+"#,
+        )
+        .expect("lone surrogate console output must succeed");
+}
+
 #[cfg(feature = "neo-chars")]
 fn expected_list() -> (String, usize) {
     let mut entries = Vec::new();
@@ -39,6 +53,9 @@ fn expected_list() -> (String, usize) {
     if cfg!(feature = "neo-chars") {
         entries.push(r#""neo:chars""#);
     }
+    if cfg!(feature = "neo-console") {
+        entries.push(r#""neo:console""#);
+    }
     if cfg!(feature = "neo-crypto") {
         entries.push(r#""neo:crypto""#);
     }
@@ -47,6 +64,12 @@ fn expected_list() -> (String, usize) {
     }
     if cfg!(feature = "neo-os") {
         entries.push(r#""neo:os""#);
+    }
+    if cfg!(feature = "neo-path") {
+        entries.push(r#""neo:path""#);
+    }
+    if cfg!(feature = "neo-slices") {
+        entries.push(r#""neo:slices""#);
     }
     if cfg!(feature = "neo-ssh") {
         entries.push(r#""neo:ssh""#);

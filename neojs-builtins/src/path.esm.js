@@ -1,15 +1,13 @@
 // The `path` built-in module as seen by
 // `import ... from "neo:path"`.
 //
-// The implementations live in `neo.js`, which the runtime evaluates once per
-// realm. This file only re-exports them, so every named export is the same
-// function, frozen namespace, or constant as the matching property of
+// The implementations live in the runtime registry, which evaluates `path.js`
+// once per realm. This file only re-exports them, so every named export is the
+// same function, frozen namespace, or constant as the matching property of
 // `Neo.getBuiltInModule("neo:path")`. Nothing here reaches the private module
 // registry: it reads the public module object and binds its properties.
 //
-// The exported list must match the properties of the `path` object in
-// `neo.js`. The path integration tests assert that the two lists are identical
-// and that each export is identity-equal to the registry property.
+// The exported list must match the properties of the `path` registry object.
 //
 // This is a lexical path module, not Node's `path`, not `@neotales/path`, and
 // not NeoLiteJS `neo:path`. It has no glob or file URL helpers, accepts no URL

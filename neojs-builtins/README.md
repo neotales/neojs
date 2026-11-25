@@ -24,30 +24,33 @@ specifier, exact export names, and `Backend` (`Backend::Rust` or
   implementations with total predicates, target constants, or explicit error
   results. V8 binds native V8 function objects or host ops; QuickJS exports
   native QuickJS values and functions from native modules.
-* **`Backend::Ecmascript` (`assert`, `test`)**: shared ECMAScript factory
-  functions (`assert.js`, `test.js`) and `.esm.js` re-export wrappers
-  parameterized by engine-supplied host hooks (`isNativePromise`,
-  `observePromise`, `print`, rejection tracking, job/event-loop checks, and
-  optional timers).
+* **`Backend::Ecmascript` (`assert`, `console`, `path`, `slices`, `test`)**:
+  shared ECMAScript factory functions (`assert.js`, `console.js`, `path.js`,
+  `slices.js`, `test.js`) and `.esm.js` re-export wrappers parameterized by
+  engine-supplied host hooks (`isNativePromise`, `observePromise`, `print`,
+  `isWindows`, `readCwd`, `chars` case mappers, rejection tracking,
+  job/event-loop checks, and optional timers).
 
 In both engines, the registry entry and the ES module exports share function and
-class identity while the ES module namespace remains a distinct object.
+class identity while the ES module namespace remains a distinct object (for
+`neo:console`, the registry entry is the live mutable `globalThis.console`
+object).
 
 ## Module selection
 
-Every shared module has its own Cargo feature: `assert`, `chars`, `os`,
-`strings`, `test`, and `uuid` (`uuid` registers `neo:uuid`, `neo:uuid/v4`, and
-`neo:uuid/v7`).
+Every shared module has its own Cargo feature: `assert`, `chars`, `console`,
+`os`, `path`, `slices`, `strings`, `test`, and `uuid` (`uuid` registers
+`neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`; `slices` implies `chars`).
 
-* `neojs-core` enables `assert`, `os`, `test`, and `uuid` unconditionally and
-  `chars` and `strings` in its default feature set. `neo-slices` implies
-  `neo-chars` because `CharSlice` captures the native `chars.toUpper` and
-  `chars.toLower` functions.
-* `neojs-lite-core` enables `neo-assert`, `neo-chars`, `neo-os`, `neo-strings`,
-  `neo-test`, and `neo-uuid` in its default feature set.
-  `default-features = false` removes the `neojs-builtins` dependency (and
-  transitive `getrandom`/`uuid`), the registry entries, the loader entries, and
-  the introspection list entries.
+* `neojs-core` enables `assert`, `console`, `os`, `path`, `test`, and `uuid`
+  unconditionally and `chars`, `slices`, and `strings` in its default feature
+  set. `neo-slices` implies `neo-chars` because `CharSlice` captures the native
+  `chars.toUpper` and `chars.toLower` functions.
+* `neojs-lite-core` enables `neo-assert`, `neo-chars`, `neo-console`, `neo-os`,
+  `neo-path`, `neo-slices`, `neo-strings`, `neo-test`, and `neo-uuid` from this
+  crate in its default feature set. `default-features = false` removes the
+  `neojs-builtins` dependency (and transitive `getrandom`/`uuid`), the registry
+  entries, the loader entries, and the introspection list entries.
 * `neojs-builtins` itself has no default module features. A build without a
   module has no descriptor and no implementation code for it.
 

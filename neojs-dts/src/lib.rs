@@ -13,8 +13,8 @@
 //!   `console.{log,debug,info,warn,error}`, and all 17 `neo:*` built-in
 //!   modules).
 //! * [`Profile::Lite`] targets the `neojs-lite` binary
-//!   (`Neo.engine === "neo-lite"`, `console.{log,error}` only, and the 11 Lite
-//!   `neo:*` built-in modules).
+//!   (`Neo.engine === "neo-lite"`, `console.{log,debug,info,warn,error}`, and
+//!   the 14 Lite `neo:*` built-in modules).
 //!
 //! # Example
 //!
@@ -47,7 +47,8 @@ pub enum Profile {
     /// and all 17 `neo:*` built-ins).
     V8,
     /// QuickJS-backed `neojs-lite` runtime (`engine: "neo-lite"`,
-    /// `console.{log,error}` only, and the 11 Lite `neo:*` built-ins).
+    /// `console.{log,debug,info,warn,error}`, and the 14 Lite `neo:*`
+    /// built-ins).
     Lite,
 }
 
@@ -322,6 +323,11 @@ const LITE_FILES: &[DtsFile] = &[
         content: NEO_CHARS_DTS,
     },
     DtsFile {
+        path: "neo/console.d.ts",
+        specifier: Some("neo:console"),
+        content: NEO_CONSOLE_DTS,
+    },
+    DtsFile {
         path: "neo/crypto.d.ts",
         specifier: Some("neo:crypto"),
         content: NEO_CRYPTO_LITE_DTS,
@@ -335,6 +341,16 @@ const LITE_FILES: &[DtsFile] = &[
         path: "neo/os.d.ts",
         specifier: Some("neo:os"),
         content: NEO_OS_DTS,
+    },
+    DtsFile {
+        path: "neo/path.d.ts",
+        specifier: Some("neo:path"),
+        content: NEO_PATH_DTS,
+    },
+    DtsFile {
+        path: "neo/slices.d.ts",
+        specifier: Some("neo:slices"),
+        content: NEO_SLICES_DTS,
     },
     DtsFile {
         path: "neo/ssh.d.ts",
@@ -624,9 +640,12 @@ const V8_EXPECTED_EXPORTS: &[ModuleExports] = &[
 const LITE_EXPECTED_EXPORTS: &[ModuleExports] = &[
     ASSERT_EXPORTS,
     CHARS_EXPORTS,
+    CONSOLE_EXPORTS,
     CRYPTO_LITE_EXPORTS,
     FS_EXPORTS,
     OS_EXPORTS,
+    PATH_EXPORTS,
+    SLICES_EXPORTS,
     SSH_EXPORTS,
     STRINGS_EXPORTS,
     TEST_EXPORTS,

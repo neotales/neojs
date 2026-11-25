@@ -20,9 +20,18 @@ assert = []
 # explicitly. Cargo features are additive across the dependency graph, so a
 # module is present whenever any dependent enables it.
 chars = ["dep:unicode-general-category"]
+# The shared `neo:console` ECMAScript installer, ESM wrapper, and descriptor.
+# Zero engine dependencies and zero I/O; each engine supplies a print hook.
+console = []
 # The shared `neo:os` Rust implementation and descriptor. Zero dependencies and
 # zero I/O; exposes the compilation-target `platform` and `arch` constants.
 os = []
+# The shared `neo:path` ECMAScript implementation, ESM wrapper, and Rust host
+# helpers (`is_windows`, `current_dir`). Zero engine dependencies.
+path = []
+# The shared `neo:slices` ECMAScript implementation and ESM wrapper. It depends
+# on `chars` because `CharSlice` captures `chars.toUpper` and `chars.toLower`.
+slices = ["chars"]
 # The shared `neo:strings` Rust implementation and descriptor. The V8 runtime
 # enables it so a default V8 build keeps `strings`; the QuickJS runtime enables
 # it explicitly. It uses the same Unicode General_Category crate for the

@@ -1,9 +1,12 @@
 #![cfg(all(
     feature = "neo-assert",
     feature = "neo-chars",
+    feature = "neo-console",
     feature = "neo-crypto",
     feature = "neo-fs",
     feature = "neo-os",
+    feature = "neo-path",
+    feature = "neo-slices",
     feature = "neo-ssh",
     feature = "neo-strings",
     feature = "neo-test",
@@ -126,6 +129,8 @@ for (const specifier of list) {{
         if (key === "default") {{
             if (specifier === "neo:assert") {{
                 if (ns.default !== reg) throw new Error(`${{specifier}} default != reg`);
+            }} else if (specifier === "neo:console") {{
+                if (ns.default !== reg) throw new Error(`${{specifier}} default != reg`);
             }} else if (specifier === "neo:test") {{
                 if (ns.default !== reg.test) throw new Error(`${{specifier}} default != reg.test`);
             }} else if (specifier === "neo:uuid/v4") {{
@@ -164,15 +169,13 @@ writeTextFile("{escaped_path}", lines.join("\n"));
 
     assert_eq!(
         observed.console_keys,
-        vec!["error", "log"],
+        vec!["debug", "error", "info", "log", "warn"],
         "QuickJS console keys drifted from Profile::Lite"
     );
-    assert!(globals.contains("log("));
-    assert!(globals.contains("error("));
-    for absent in ["debug(", "info(", "warn("] {
+    for method in ["log(", "debug(", "info(", "warn(", "error("] {
         assert!(
-            !globals.contains(absent),
-            "Lite globals.d.ts must not declare console.{absent}"
+            globals.contains(method),
+            "Lite globals.d.ts must declare console.{method}"
         );
     }
 
@@ -262,6 +265,15 @@ writeTextFile("{escaped_path}", lines.join("\n"));
                         "neo:assert registry function missing property `{name}`"
                     );
                 }
+            }
+        } else if live.specifier == "neo:console" {
+            assert_eq!(live.reg_type, "object");
+            let reg_set: BTreeSet<&str> = live.reg_keys.iter().map(String::as_str).collect();
+            for name in exp.exports {
+                assert!(
+                    reg_set.contains(name),
+                    "neo:console registry object missing method `{name}`"
+                );
             }
         } else if live.specifier == "neo:uuid/v4" || live.specifier == "neo:uuid/v7" {
             assert_eq!(live.reg_type, "object", "{}", live.specifier);

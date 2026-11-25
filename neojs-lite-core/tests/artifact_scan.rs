@@ -29,6 +29,16 @@ const UUID_SEQUENCE_ONE_HEX: &str = "73797374656d20636c6f636b206973206f757473696
 const CRYPTO_SEQUENCE_ONE_HEX: &str =
     "6d616c666f726d6564206f7220756e737570706f727465642063727970746f20656e76656c6f7065";
 
+/// `neo:console host requires a print function and target object` from `neojs-builtins/src/console.js`.
+const CONSOLE_SEQUENCE_ONE_HEX: &str = "6e656f3a636f6e736f6c6520686f73742072657175697265732061207072696e742066756e6374696f6e20616e6420746172676574206f626a656374";
+
+/// `provide an absolute Windows base on the requested drive or share` from `neojs-builtins/src/path.js`.
+const PATH_SEQUENCE_ONE_HEX: &str = "70726f7669646520616e206162736f6c7574652057696e646f77732062617365206f6e2074686520726571756573746564206472697665206f72207368617265";
+
+/// `const CHAR_STATE = Symbol("charSliceState");` from `neojs-builtins/src/slices.js`.
+const SLICES_SEQUENCE_ONE_HEX: &str =
+    "636f6e737420434841525f5354415445203d2053796d626f6c282263686172536c696365537461746522293b";
+
 /// `create_new and append cannot both be enabled` from `neojs-fs-core/src/ops.rs`.
 const FS_SEQUENCE_ONE_HEX: &str =
     "6372656174655f6e657720616e6420617070656e642063616e6e6f7420626f746820626520656e61626c6564";
@@ -123,4 +133,22 @@ fn shared_source_bytes_follow_the_features() {
     assert_sequences(&artifact, &ssh_seqs, true, "neo-ssh is enabled");
     #[cfg(not(feature = "neo-ssh"))]
     assert_sequences(&artifact, &ssh_seqs, false, "neo-ssh is disabled");
+
+    let console_seqs = [CONSOLE_SEQUENCE_ONE_HEX];
+    #[cfg(feature = "neo-console")]
+    assert_sequences(&artifact, &console_seqs, true, "neo-console is enabled");
+    #[cfg(not(feature = "neo-console"))]
+    assert_sequences(&artifact, &console_seqs, false, "neo-console is disabled");
+
+    let path_seqs = [PATH_SEQUENCE_ONE_HEX];
+    #[cfg(feature = "neo-path")]
+    assert_sequences(&artifact, &path_seqs, true, "neo-path is enabled");
+    #[cfg(not(feature = "neo-path"))]
+    assert_sequences(&artifact, &path_seqs, false, "neo-path is disabled");
+
+    let slices_seqs = [SLICES_SEQUENCE_ONE_HEX];
+    #[cfg(feature = "neo-slices")]
+    assert_sequences(&artifact, &slices_seqs, true, "neo-slices is enabled");
+    #[cfg(not(feature = "neo-slices"))]
+    assert_sequences(&artifact, &slices_seqs, false, "neo-slices is disabled");
 }

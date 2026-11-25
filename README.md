@@ -367,23 +367,24 @@ dependency graph and are not a sandbox.
 `neo:chars` and `neo:strings` are native V8 Rust modules. Every other V8 built-in module —
 `neo:age`, `neo:assert`, `neo:console`, `neo:cron`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:path`,
 `neo:slices`, `neo:ssh`, `neo:stdio`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` —
-retains an ECMAScript module source or wrapper in V8 (with `neo:assert`, `neo:os`, `neo:test`, and
-`neo:uuid` delegating their shared core logic and sources to `neojs-builtins`, and `neo:fs`
-delegating to `neojs-fs-core`). Some of those
+retains an ECMAScript module source or wrapper in V8 (with `neo:assert`, `neo:console`, `neo:os`,
+`neo:path`, `neo:slices`, `neo:test`, and `neo:uuid` delegating their shared core logic and sources
+to `neojs-builtins`, and `neo:fs` delegating to `neojs-fs-core`). Some of those
 modules call private Rust host ops, but a host op is not a native module.
 
 The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"` and,
-with its default `neo-assert`, `neo-chars`, `neo-crypto`, `neo-fs`, `neo-os`, `neo-ssh`, `neo-strings`, `neo-test`, and `neo-uuid`
-features, implements the shared built-ins `neo:assert`, `neo:chars`, `neo:crypto` (13 synchronous exports only), `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`,
+with its default `neo-assert`, `neo-chars`, `neo-console`, `neo-crypto`, `neo-fs`, `neo-os`, `neo-path`, `neo-slices`, `neo-ssh`, `neo-strings`, `neo-test`, and `neo-uuid`
+features, implements the shared built-ins `neo:assert`, `neo:chars`, `neo:console`, `neo:crypto` (13 synchronous exports only), `neo:fs`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`, `neo:strings`,
 `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`. `Neo.getBuiltInModulesList()` is one
-frozen array of canonical specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
-registry object whose named exports share identity with the module namespace exports; the
+frozen array of canonical specifiers, and `Neo.getBuiltInModule(specifier)` returns the cached
+registry object (frozen for every module except `neo:console`, which is the live mutable
+`globalThis.console` object) whose named exports share identity with the module namespace exports; the
 namespace itself is a distinct object. With `default-features = false` the registry and list are
 empty. A bare name, another scheme, or any other specifier returns `undefined`; a non-string name
 throws `TypeError`. That list is not a claim that another V8 module is planned or available. The
 shared Rust and ECMAScript logic comes from the engine-neutral `neojs-builtins` crate (`chars`,
-`os`, `strings`, and `uuid` bound as native QuickJS modules; `assert` and `test` evaluated from
-shared factories with native QuickJS Promise and queue hooks), `neojs-crypto-core` (`crypto`
+`os`, `strings`, and `uuid` bound as native QuickJS modules; `assert`, `console`, `path`, `slices`,
+and `test` evaluated from shared factories with native QuickJS host hooks), `neojs-crypto-core` (`crypto`
 synchronous exports bound as a native QuickJS module), `neojs-fs-core` (`fs` bound as a
 native QuickJS module), and `neojs-ssh-core` (`ssh` bound as a native QuickJS module). See
 `neojs-builtins/README.md`, `neojs-crypto-core/README.md`, `neojs-fs-core/README.md`, and `neojs-ssh-core/README.md` for the
@@ -1791,17 +1792,18 @@ primitive values and an Error's own data without invoking getters, proxies, `toS
 It does **not** implement non-erasable TypeScript (`enum`, `namespace`, parameter properties), JSX/TSX,
 type checking, host asynchrony or timers, most `neo:` built-in modules, permissions, or a sandbox, and
 it does not claim parity with the V8 runtime. It installs a minimal `Neo` global whose engine is
-`"neo-lite"`; with the default `neo-assert`, `neo-chars`, `neo-crypto`, `neo-fs`, `neo-os`, `neo-ssh`, `neo-strings`,
+`"neo-lite"`; with the default `neo-assert`, `neo-chars`, `neo-console`, `neo-crypto`, `neo-fs`, `neo-os`, `neo-path`, `neo-slices`, `neo-ssh`, `neo-strings`,
 `neo-test`, `neo-uuid`, and `typescript` features its built-in module list is the canonical
-`["neo:assert", "neo:chars", "neo:crypto", "neo:fs", "neo:os", "neo:ssh", "neo:strings", "neo:test", "neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]`.
-`Neo.getBuiltInModule(specifier)` returns the frozen registry object whose named exports share
+`["neo:assert", "neo:chars", "neo:console", "neo:crypto", "neo:fs", "neo:os", "neo:path", "neo:slices", "neo:ssh", "neo:strings", "neo:test", "neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]`.
+`Neo.getBuiltInModule(specifier)` returns the cached registry object (frozen for every module except
+`neo:console`, which is the live mutable `globalThis.console` object) whose named exports share
 identity with the module namespace exports; the namespace itself is a distinct object. With
 `default-features = false` the list is empty and `typescript` (along with `deno_ast`) is disabled,
 so `.ts`/`.mts` files are rejected as unsupported entries. A bare name, another scheme, or any other specifier
 returns `undefined`, and a non-string name throws `TypeError`. All shared modules come from the
 engine-neutral `neojs-builtins` crate (`chars`, `os`, `strings`, and `uuid` bound as native QuickJS
-modules; `assert` and `test` evaluated from shared ECMAScript factories with native QuickJS Promise
-and queue hooks), `neojs-crypto-core` (`crypto` synchronous exports bound as a native QuickJS module),
+modules; `assert`, `console`, `path`, `slices`, and `test` evaluated from shared ECMAScript factories with native QuickJS host
+hooks), `neojs-crypto-core` (`crypto` synchronous exports bound as a native QuickJS module),
 `neojs-fs-core` (`fs` bound as a native QuickJS module), and `neojs-ssh-core` (`ssh` bound as a native QuickJS module).
 `neojs-lite-core::Runtime::run_tests` and `neojs-lite test <file-or-glob>...` run
 `neo:test` suites on QuickJS using the same `TestReport` contract and deterministic glob expansion
@@ -1843,8 +1845,8 @@ execution with mandatory host-key verification and password, in-memory-key, or e
 authentication, the built-in module registry and its `Neo.engine` and `Neo.getBuiltInModulesList`
 introspection, and the embedding API above. The QuickJS runtime (`neojs-lite-core` / `neojs-lite`)
 reports `Neo.engine` `"neo-lite"` and enables erasable TypeScript (`.ts`/`.mts`, opt-outable via
-`--no-default-features`) plus the shared `neo:assert`, `neo:chars`, `neo:crypto` (13 synchronous exports),
-`neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`
+`--no-default-features`) plus the shared `neo:assert`, `neo:chars`, `neo:console`, `neo:crypto` (13 synchronous exports),
+`neo:fs`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`
 modules by default (or an empty list and no TypeScript stripping with `default-features = false`);
 other V8 modules (and `*Async` crypto helpers) remain absent there.
 Features outside this list are not implemented.

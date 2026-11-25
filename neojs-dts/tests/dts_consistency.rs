@@ -42,9 +42,12 @@ const V8_SPECIFIERS: &[&str] = &[
 const LITE_SPECIFIERS: &[&str] = &[
     "neo:assert",
     "neo:chars",
+    "neo:console",
     "neo:crypto",
     "neo:fs",
     "neo:os",
+    "neo:path",
+    "neo:slices",
     "neo:ssh",
     "neo:strings",
     "neo:test",
@@ -53,14 +56,7 @@ const LITE_SPECIFIERS: &[&str] = &[
     "neo:uuid/v7",
 ];
 
-const V8_ONLY_SPECIFIERS: &[&str] = &[
-    "neo:age",
-    "neo:console",
-    "neo:cron",
-    "neo:path",
-    "neo:slices",
-    "neo:stdio",
-];
+const V8_ONLY_SPECIFIERS: &[&str] = &["neo:age", "neo:cron", "neo:stdio"];
 
 /// Validates balanced delimiters `{}` / `()` / `[]` and closed comments/strings
 /// across a `.d.ts` source string.
@@ -329,12 +325,10 @@ fn globals_and_index_match_profile_surfaces() {
 
     let lite_globals = globals_dts(Profile::Lite);
     assert!(lite_globals.contains("readonly engine: \"neo-lite\";"));
-    assert!(lite_globals.contains("log("));
-    assert!(lite_globals.contains("error("));
-    for forbidden_console in ["debug(", "info(", "warn("] {
+    for method in ["log(", "debug(", "info(", "warn(", "error("] {
         assert!(
-            !lite_globals.contains(forbidden_console),
-            "Lite console must NOT declare {forbidden_console}"
+            lite_globals.contains(method),
+            "Lite console must declare {method}"
         );
     }
     for spec in LITE_SPECIFIERS {

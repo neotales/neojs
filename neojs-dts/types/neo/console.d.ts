@@ -1,6 +1,6 @@
 declare module "neo:console" {
   /**
-   * Runtime console object installed on `globalThis.console` (`neojs` V8 profile).
+   * Runtime console object installed on `globalThis.console` (`neojs` and `neojs-lite`).
    */
   export interface NeoConsole {
     /** Write formatted arguments separated by spaces to stdout, followed by a newline. */

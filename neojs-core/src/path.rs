@@ -93,7 +93,7 @@ pub fn with_cwd_sequence<T>(values: Vec<Option<String>>, f: impl FnOnce() -> T) 
 /// JavaScript and are not a sandbox.
 #[op2(fast)]
 fn op_neo_path_is_windows() -> bool {
-    cfg!(windows)
+    neojs_builtins::path::is_windows()
 }
 
 /// Return the process working directory, or `null`.
@@ -114,13 +114,10 @@ fn op_neo_path_cwd<'s, 'i>(scope: &mut v8::PinScope<'s, 'i>) -> v8::Local<'s, v8
         };
     }
 
-    let Some(directory) = std::env::current_dir().ok() else {
+    let Some(text) = neojs_builtins::path::current_dir() else {
         return v8::null(scope).into();
     };
-    let Some(text) = directory.to_str() else {
-        return v8::null(scope).into();
-    };
-    match v8::String::new(scope, text) {
+    match v8::String::new(scope, &text) {
         Some(value) => value.into(),
         None => v8::null(scope).into(),
     }

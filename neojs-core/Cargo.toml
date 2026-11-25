@@ -25,7 +25,7 @@ default = ["neo-chars", "neo-slices", "neo-strings"]
 neo-chars = ["neojs-builtins/chars"]
 # `slices` and its loader/registry entries. It cannot be built without `chars`:
 # `CharSlice` captures `chars.toUpper` and `chars.toLower`.
-neo-slices = ["neo-chars"]
+neo-slices = ["neo-chars", "neojs-builtins/slices"]
 # The native `strings` binding and its canonical V8 registration. This enables
 # the shared `strings` module in `neojs-builtins`.
 neo-strings = ["neojs-builtins/strings"]
@@ -37,7 +37,7 @@ test-support = ["neojs-crypto-core/test-support", "neojs-remote/test-support", "
 deno_core.workspace = true
 deno_error.workspace = true
 getrandom.workspace = true
-neojs-builtins = { workspace = true, features = ["assert", "os", "test", "uuid"] }
+neojs-builtins = { workspace = true, features = ["assert", "console", "os", "path", "test", "uuid"] }
 neojs-crypto-core.workspace = true
 neojs-fs-core.workspace = true
 neojs-manifest.workspace = true
