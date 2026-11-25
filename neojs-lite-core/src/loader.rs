@@ -60,6 +60,7 @@ fn reject_attributes(
 pub(super) struct FileResolver {
     #[cfg(feature = "manifest")]
     import_resolver: Option<ImportResolver>,
+    node_compat: bool,
 }
 
 impl FileResolver {
@@ -67,6 +68,7 @@ impl FileResolver {
         Self {
             #[cfg(feature = "manifest")]
             import_resolver: None,
+            node_compat: true,
         }
     }
 
@@ -74,7 +76,13 @@ impl FileResolver {
     pub(super) fn with_import_resolver(resolver: ImportResolver) -> Self {
         Self {
             import_resolver: Some(resolver),
+            node_compat: true,
         }
+    }
+
+    pub(super) fn with_node_compat(mut self, enabled: bool) -> Self {
+        self.node_compat = enabled;
+        self
     }
 
     #[cfg(feature = "manifest")]
@@ -115,11 +123,20 @@ impl FileResolver {
                     name,
                     "npm: modules are not supported; remote module loading is not supported in neojs-lite",
                 )),
-                NormalizedSpecifier::Node(_) => Err(Error::new_resolving_message(
-                    base,
-                    name,
-                    "the `node:` scheme is not implemented in neojs-lite; use a relative path, an absolute path, or a file: URL",
-                )),
+                NormalizedSpecifier::Node(node) => {
+                    #[cfg(feature = "node-compat")]
+                    if self.node_compat
+                        && let Some(canonical) = crate::node_compat::resolve_specifier(&node)
+                    {
+                        return Ok(Some(canonical.to_owned()));
+                    }
+                    let _ = &node;
+                    Err(Error::new_resolving_message(
+                        base,
+                        name,
+                        node_unsupported_reason(self.node_compat),
+                    ))
+                }
                 NormalizedSpecifier::Bare(_) => Err(Error::new_resolving_message(
                     base,
                     name,
@@ -144,6 +161,22 @@ impl Resolver for FileResolver {
         // a fragment. Resolving to the same string gives the engine one module
         // identity for static and dynamic imports. With both module features
         // off the dependency is absent and this block is not compiled.
+        #[cfg(feature = "node-compat")]
+        if self.node_compat
+            && let Some(canonical) = crate::node_compat::resolve_specifier(name)
+        {
+            return Ok(canonical.to_owned());
+        }
+        if name
+            .split_once(':')
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("node"))
+        {
+            return Err(Error::new_resolving_message(
+                base,
+                name,
+                node_unsupported_reason(self.node_compat),
+            ));
+        }
         #[cfg(feature = "neo-crypto")]
         if name == crate::crypto::SPECIFIER {
             return Ok(crate::crypto::SPECIFIER.to_owned());
@@ -174,7 +207,7 @@ impl Resolver for FileResolver {
         if let Some(resolved) = self.resolve_with_import_resolver(base, name)? {
             return Ok(resolved);
         }
-        let path = candidate_path(base, name)?;
+        let path = candidate_path_with_compat(base, name, self.node_compat)?;
         canonicalize_module_path(base, name, &path)
     }
 }
@@ -202,7 +235,22 @@ fn canonicalize_module_path(base: &str, name: &str, path: &Path) -> Result<Strin
 /// joined to the base's parent directory, never to the process working
 /// directory, so imports stay stable when the caller's current directory
 /// changes. A `file:` URL is converted to its local path.
+fn node_unsupported_reason(node_compat: bool) -> &'static str {
+    if !cfg!(feature = "node-compat") {
+        "the `node:` scheme is not implemented in neojs-lite; use a relative path, an absolute path, or a file: URL"
+    } else if !node_compat {
+        "Node.js built-in modules are disabled (--no-node-compat)"
+    } else {
+        "the requested `node:` module is not implemented in neojs-lite"
+    }
+}
+
+#[cfg(test)]
 fn candidate_path(base: &str, name: &str) -> Result<PathBuf> {
+    candidate_path_with_compat(base, name, true)
+}
+
+fn candidate_path_with_compat(base: &str, name: &str, node_compat: bool) -> Result<PathBuf> {
     if is_windows_drive_path(name) {
         return Ok(PathBuf::from(name));
     }
@@ -216,6 +264,11 @@ fn candidate_path(base: &str, name: &str) -> Result<PathBuf> {
                     "file: URL does not name a local filesystem path",
                 )
             }),
+            "node" => Err(Error::new_resolving_message(
+                base,
+                name,
+                node_unsupported_reason(node_compat),
+            )),
             scheme => Err(Error::new_resolving_message(
                 base,
                 name,
@@ -262,7 +315,10 @@ fn is_windows_drive_path(specifier: &str) -> bool {
 /// is disabled, TypeScript modules are rejected with a clear message. Every
 /// unsupported extension carries the shared policy's reason. Read errors name
 /// the resolved module.
-pub(super) struct FileLoader;
+pub(super) struct FileLoader {
+    #[cfg_attr(not(feature = "node-compat"), allow(dead_code))]
+    pub(super) node_compat: bool,
+}
 
 impl Loader for FileLoader {
     fn load<'js>(
@@ -271,11 +327,83 @@ impl Loader for FileLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
+        #[cfg(feature = "node-compat")]
+        if self.node_compat {
+            match name {
+                "node:path" => {
+                    return Module::declare_def::<crate::node_compat::NodePathModule, _>(
+                        ctx.clone(),
+                        name,
+                    );
+                }
+                "node:path/posix" => {
+                    return Module::declare_def::<crate::node_compat::NodePathPosixModule, _>(
+                        ctx.clone(),
+                        name,
+                    );
+                }
+                "node:path/win32" => {
+                    return Module::declare_def::<crate::node_compat::NodePathWin32Module, _>(
+                        ctx.clone(),
+                        name,
+                    );
+                }
+                "node:os" => {
+                    return Module::declare_def::<crate::node_compat::NodeOsModule, _>(
+                        ctx.clone(),
+                        name,
+                    );
+                }
+                "node:process" => {
+                    return Module::declare_def::<crate::node_compat::NodeProcessModule, _>(
+                        ctx.clone(),
+                        name,
+                    );
+                }
+                "node:fs" => {
+                    return Module::declare_def::<crate::node_compat::NodeFsModule, _>(
+                        ctx.clone(),
+                        name,
+                    );
+                }
+                "node:child_process" => {
+                    return Module::declare_def::<crate::node_compat::NodeChildProcessModule, _>(
+                        ctx.clone(),
+                        name,
+                    );
+                }
+                "node:buffer" => {
+                    return Module::declare_def::<crate::node_compat::NodeBufferModule, _>(
+                        ctx.clone(),
+                        name,
+                    );
+                }
+                "node:url" => {
+                    return Module::declare_def::<crate::node_compat::NodeUrlModule, _>(
+                        ctx.clone(),
+                        name,
+                    );
+                }
+                "node:crypto" => {
+                    return Module::declare_def::<crate::node_compat::NodeCryptoModule, _>(
+                        ctx.clone(),
+                        name,
+                    );
+                }
+                _ => {}
+            }
+        }
         // `neo:chars`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:ssh`,
         // `neo:strings`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` are native
         // QuickJS modules (`declare_def`) with no ECMAScript source;
         // `neo:assert`, `neo:console`, `neo:path`, `neo:slices`, and `neo:test`
         // declare the shared `.esm.js` re-export wrappers from `neojs-builtins`.
+        #[cfg(feature = "node-compat")]
+        if self.node_compat
+            && let Some(canonical) = crate::node_compat::resolve_specifier(name)
+        {
+            return crate::node_compat::declare_module(ctx, canonical);
+        }
         #[cfg(feature = "neo-crypto")]
         if name == crate::crypto::SPECIFIER {
             return Module::declare_def::<crate::crypto::CryptoModule, _>(ctx.clone(), name);

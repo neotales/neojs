@@ -23,12 +23,20 @@ struct ObservedModule {
 }
 
 #[derive(Debug)]
+struct ObservedNodeModule {
+    specifier: String,
+    ns_keys: Vec<String>,
+    has_default: bool,
+}
+
+#[derive(Debug)]
 struct ObservedRuntime {
     engine: String,
     console_keys: Vec<String>,
     console_methods: Vec<String>,
     list: Vec<String>,
     modules: Vec<ObservedModule>,
+    node_modules: Vec<ObservedNodeModule>,
 }
 
 fn parse_observed(json_text: &str) -> ObservedRuntime {
@@ -75,12 +83,29 @@ fn parse_observed(json_text: &str) -> ObservedRuntime {
         })
         .collect();
 
+    let node_modules = root["nodeModules"]
+        .as_array()
+        .expect("nodeModules array")
+        .iter()
+        .map(|m| ObservedNodeModule {
+            specifier: m["specifier"].as_str().expect("specifier").to_string(),
+            ns_keys: m["nsKeys"]
+                .as_array()
+                .expect("nsKeys")
+                .iter()
+                .map(|v| v.as_str().expect("key").to_string())
+                .collect(),
+            has_default: m["hasDefault"].as_bool().expect("hasDefault"),
+        })
+        .collect();
+
     ObservedRuntime {
         engine,
         console_keys,
         console_methods,
         list,
         modules,
+        node_modules,
     }
 }
 
@@ -116,6 +141,30 @@ for (const specifier of list) {{
     }});
 }}
 
+const nodeList = [
+    "node:buffer",
+    "node:child_process",
+    "node:crypto",
+    "node:fs",
+    "node:fs/promises",
+    "node:os",
+    "node:path",
+    "node:path/posix",
+    "node:path/win32",
+    "node:process",
+    "node:url",
+];
+const nodeModules = [];
+for (const specifier of nodeList) {{
+    if (Neo.getBuiltInModule(specifier) !== undefined) {{
+        throw new Error(`Neo.getBuiltInModule(${{specifier}}) must return undefined`);
+    }}
+    const ns = await import(specifier);
+    const nsKeys = Object.keys(ns).sort();
+    const hasDefault = Object.prototype.hasOwnProperty.call(ns, "default");
+    nodeModules.push({{ specifier, nsKeys, hasDefault }});
+}}
+
 const documentedConsoleMethods = ["log", "debug", "info", "warn", "error"];
 const consoleMethods = documentedConsoleMethods.filter(
     (name) => typeof globalThis.console[name] === "function"
@@ -127,6 +176,7 @@ const report = {{
     consoleMethods,
     list: Array.from(list),
     modules,
+    nodeModules,
 }};
 
 writeTextFile(reportPath, JSON.stringify(report));
@@ -161,18 +211,29 @@ writeTextFile(reportPath, JSON.stringify(report));
         );
     }
 
-    // 2. Compare Neo.getBuiltInModulesList() against expected_exports and parse_declared_exports.
+    // 2. Compare Neo.getBuiltInModulesList() against neo:* expected_exports and parse_declared_exports.
     let expected = expected_exports(Profile::V8);
     let bundle = render_bundle(Profile::V8);
     let declared = parse_declared_exports(&bundle);
 
     let expected_specs: Vec<&str> = expected.iter().map(|m| m.specifier).collect();
+    let expected_neo: Vec<_> = expected
+        .iter()
+        .zip(declared.iter())
+        .filter(|(exp, _)| exp.specifier.starts_with("neo:"))
+        .collect();
+    let expected_node: Vec<_> = expected
+        .iter()
+        .zip(declared.iter())
+        .filter(|(exp, _)| exp.specifier.starts_with("node:"))
+        .collect();
+    let expected_neo_specs: Vec<&str> = expected_neo.iter().map(|(m, _)| m.specifier).collect();
     let declared_specs: Vec<&str> = declared.iter().map(|m| m.specifier.as_str()).collect();
     let observed_specs: Vec<&str> = observed.list.iter().map(String::as_str).collect();
 
     assert_eq!(
-        observed_specs, expected_specs,
-        "Neo.getBuiltInModulesList() drifted from neojs_dts::expected_exports(Profile::V8)"
+        observed_specs, expected_neo_specs,
+        "Neo.getBuiltInModulesList() drifted from neojs_dts neo:* expected_exports(Profile::V8)"
     );
     assert_eq!(
         declared_specs, expected_specs,
@@ -185,16 +246,15 @@ writeTextFile(reportPath, JSON.stringify(report));
             "V8 globals.d.ts NeoBuiltInModuleMap missing `{spec}`"
         );
     }
+    assert!(
+        !globals.contains("\"node:"),
+        "V8 globals.d.ts NeoBuiltInModuleMap must remain neo:*-only"
+    );
 
     // 3. Per-module 1:1 export parity across live ESM namespace, expected_exports,
     //    bundle parse_declared_exports, and standalone module_dts.
-    assert_eq!(observed.modules.len(), expected.len());
-    for ((live, exp), decl) in observed
-        .modules
-        .iter()
-        .zip(expected.iter())
-        .zip(declared.iter())
-    {
+    assert_eq!(observed.modules.len(), expected_neo.len());
+    for (live, (exp, decl)) in observed.modules.iter().zip(expected_neo.iter()) {
         assert_eq!(live.specifier, exp.specifier);
         assert_eq!(decl.specifier, exp.specifier);
 
@@ -277,5 +337,34 @@ writeTextFile(reportPath, JSON.stringify(report));
                 live.specifier
             );
         }
+    }
+
+    assert_eq!(observed.node_modules.len(), expected_node.len());
+    for (live, (exp, decl)) in observed.node_modules.iter().zip(expected_node.iter()) {
+        assert_eq!(live.specifier, exp.specifier);
+        assert_eq!(decl.specifier, exp.specifier);
+        assert_eq!(live.has_default, exp.has_default, "{}", live.specifier);
+        assert_eq!(decl.has_default, exp.has_default, "{}", live.specifier);
+
+        let live_keys: Vec<&str> = live.ns_keys.iter().map(String::as_str).collect();
+        assert_eq!(
+            live_keys,
+            exp.runtime_keys(),
+            "{}: live node:* Object.keys(ns) drifted from neojs_dts::expected_exports(Profile::V8)",
+            live.specifier
+        );
+        assert_eq!(
+            live_keys,
+            decl.runtime_keys(),
+            "{}: live node:* Object.keys(ns) drifted from neojs_dts::parse_declared_exports",
+            live.specifier
+        );
+
+        let standalone_src = module_dts(Profile::V8, exp.specifier)
+            .unwrap_or_else(|| panic!("missing module_dts for {}", exp.specifier));
+        let standalone_parsed = parse_declared_exports(standalone_src);
+        assert_eq!(standalone_parsed.len(), 1);
+        assert_eq!(standalone_parsed[0].runtime_keys(), live_keys);
+        assert_eq!(standalone_parsed[0].has_default, live.has_default);
     }
 }

@@ -45,11 +45,13 @@ pub mod buffer;
 pub mod canonical;
 pub mod child_process;
 pub mod error;
+pub mod helpers;
 pub mod os;
 pub mod path;
 pub mod process;
 pub mod url;
 
 pub use error::{NodeCoreError, NodeCoreErrorCode};
+pub use helpers::NODE_COMPAT_FACTORY_SOURCE;
 pub use neojs_crypto_core as crypto;
 pub use neojs_fs_core as fs;

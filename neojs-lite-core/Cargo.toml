@@ -21,7 +21,7 @@ readme = "README.md"
 # advertises. Cargo features are additive and unify across the dependency graph:
 # a feature is present whenever any dependent enables it. Selection is
 # compile-time surface selection, not a sandbox.
-default = ["neo-assert", "neo-chars", "neo-console", "neo-crypto", "neo-fs", "neo-os", "neo-path", "neo-slices", "neo-ssh", "neo-strings", "neo-test", "neo-uuid", "typescript"]
+default = ["neo-assert", "neo-chars", "neo-console", "neo-crypto", "neo-fs", "neo-os", "neo-path", "neo-slices", "neo-ssh", "neo-strings", "neo-test", "neo-uuid", "node-compat", "typescript"]
 # The shared `assert` module and its Promise observation host hooks. This
 # enables the optional `neojs-builtins` dependency and its `assert` module.
 neo-assert = ["dep:neojs-builtins", "neojs-builtins/assert"]
@@ -69,6 +69,10 @@ neo-test = ["dep:neojs-builtins", "neojs-builtins/test"]
 # entries. This enables `neojs-builtins/uuid` (and its fallible `getrandom` +
 # `uuid::Builder` dependencies); `--no-default-features` keeps all of them out.
 neo-uuid = ["dep:neojs-builtins", "neojs-builtins/uuid"]
+# Node.js compatibility modules (`node:path`, `node:os`, `node:process`,
+# `node:fs`, `node:child_process`, `node:buffer`, `node:url`, `node:crypto`).
+# Enables `neojs-node-core` (`--no-default-features` keeps it out).
+node-compat = ["dep:neojs-node-core"]
 # `neo.jsonc` `ImportResolver` integration for local `imports` and workspace
 # packages. Opt-in so `--no-default-features` stays free of manifest/glob deps.
 manifest = ["dep:neojs-manifest"]
@@ -87,6 +91,7 @@ neojs-crypto-core = { workspace = true, optional = true }
 neojs-fs-core = { workspace = true, optional = true }
 neojs-manifest = { workspace = true, optional = true }
 neojs-module-policy = { version = "0.0.0-alpha.0", path = "../neojs-module-policy" }
+neojs-node-core = { workspace = true, optional = true }
 neojs-ssh-core = { workspace = true, optional = true }
 # Pinned: the C API and Rust API change between minor releases. 0.14.0 is the
 # version reviewed for this crate; `loader` supplies the module resolver and

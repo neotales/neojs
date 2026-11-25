@@ -763,3 +763,85 @@ if (imported) throw new Error("neo:slices was importable while disabled");
 "#)
     .expect("slices absent");
 }
+
+#[test]
+#[cfg(feature = "node-compat")]
+fn node_compat_is_present_on_lite_respects_runtime_opt_out_and_excludes_fs_promises() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.some((spec) => spec.startsWith("node:"))) {
+    throw new Error(`node:* leaked into Neo.getBuiltInModulesList(): ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("node:path") !== undefined) {
+    throw new Error("Neo.getBuiltInModule(\"node:path\") must return undefined");
+}
+const nodePath = await import("node:path");
+if (nodePath.posix.join("a", "b") !== "a/b") {
+    throw new Error("node:path failed");
+}
+let promisesImported = false;
+try {
+    await import("node:fs/promises");
+    promisesImported = true;
+} catch {
+    // Expected: node:fs/promises is V8-only.
+}
+if (promisesImported) throw new Error("node:fs/promises must not be available in neojs-lite");
+let bareImported = false;
+try {
+    await import("fs");
+    bareImported = true;
+} catch {
+    // Expected: bare name never aliases node: or neo:.
+}
+if (bareImported) throw new Error("bare \"fs\" was importable");
+"#)
+    .expect("lite node-compat feature enabled");
+
+    let mut disabled =
+        Runtime::with_options(neojs_lite_core::RuntimeOptions::new().with_node_compat(false))
+            .expect("runtime with node_compat disabled");
+    let err = disabled
+        .run_source("disabled.js", "import 'node:path';\n")
+        .expect_err("node:path must fail when node_compat is disabled");
+    assert!(err.to_string().contains("node:"), "{err}");
+
+    let mut exit_rt = Runtime::new().expect("runtime");
+    exit_rt
+        .run_source(
+            "exit.js",
+            "import process from 'node:process';\nprocess.exit(19);\nthrow new Error('unreachable');\n",
+        )
+        .expect("process.exit terminates cleanly");
+    assert_eq!(exit_rt.exit_code(), Some(19));
+
+    let mut code_rt = Runtime::new().expect("runtime");
+    code_rt
+        .run_source(
+            "exit_code.js",
+            "import process from 'node:process';\nprocess.exitCode = 11;\n",
+        )
+        .expect("process.exitCode completes cleanly");
+    assert_eq!(code_rt.exit_code(), Some(11));
+}
+
+#[test]
+#[cfg(not(feature = "node-compat"))]
+fn node_compat_is_absent_on_lite_when_feature_is_disabled() {
+    run(r#"
+if (Neo.getBuiltInModule("node:path") !== undefined) {
+    throw new Error("Neo.getBuiltInModule(\"node:path\") returned a module");
+}
+for (const spec of ["node:path", "node:fs", "node:process", "node:crypto"]) {
+    let imported = false;
+    try {
+        await import(spec);
+        imported = true;
+    } catch {
+        // Expected: node-compat feature is compiled out.
+    }
+    if (imported) throw new Error(`${spec} was importable while disabled`);
+}
+"#)
+    .expect("lite node-compat absent");
+}

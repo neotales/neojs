@@ -16,6 +16,7 @@
 //!
 //! The type is not `Send` and must be used from the thread that created it.
 
+use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -72,6 +73,15 @@ fn console_shim() -> String {
     )
 }
 
+/// Shared per-runtime exit state mutated by `node:process` (`exit` / `exitCode`).
+#[derive(Debug, Default)]
+pub(crate) struct ProcessExitState {
+    #[allow(dead_code)]
+    pub(crate) exited: bool,
+    #[allow(dead_code)]
+    pub(crate) exit_code: Option<i32>,
+}
+
 /// An ECMAScript runtime with a local-file module loader and optional HTTPS
 /// and JSR module loading.
 ///
@@ -87,6 +97,8 @@ pub struct Runtime {
     /// Whether entry-module loading has started. It is set before V8 sees the
     /// module, because a failed load can leave the module map in a partial state.
     consumed: bool,
+    /// Process exit state populated when `node:process` sets `exitCode` or calls `exit()`.
+    exit_state: Rc<RefCell<ProcessExitState>>,
     /// The remote client, when [`Runtime::with_remote`] enabled HTTPS loading.
     /// The loader holds a clone; entry loading uses this copy so both paths
     /// apply the same limits.
@@ -160,15 +172,28 @@ impl TestReport {
 /// Configuration for constructing a [`Runtime`].
 ///
 /// Defaults to local-only module loading with no import-map or workspace
-/// resolver and no implicit `neo.jsonc` discovery.
-#[derive(Clone, Debug, Default)]
+/// resolver, no implicit `neo.jsonc` discovery, and `node-compat` enabled
+/// (when compiled with the `node-compat` Cargo feature).
+#[derive(Clone, Debug)]
 pub struct RuntimeOptions {
     remote: Option<RemoteOptions>,
     import_resolver: Option<ImportResolver>,
+    node_compat: bool,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self {
+            remote: None,
+            import_resolver: None,
+            node_compat: true,
+        }
+    }
 }
 
 impl RuntimeOptions {
-    /// Creates default options: local-only loading with no import resolver.
+    /// Creates default options: local-only loading with no import resolver and
+    /// `node:*` compatibility modules enabled (when compiled with `node-compat`).
     pub fn new() -> Self {
         Self::default()
     }
@@ -187,6 +212,14 @@ impl RuntimeOptions {
     /// [`RuntimeOptions::with_remote`].
     pub fn with_import_resolver(mut self, resolver: ImportResolver) -> Self {
         self.import_resolver = Some(resolver);
+        self
+    }
+
+    /// Enables or disables canonical `node:*` compatibility modules at runtime.
+    ///
+    /// Has no effect when compiled without the `node-compat` Cargo feature.
+    pub fn with_node_compat(mut self, enabled: bool) -> Self {
+        self.node_compat = enabled;
         self
     }
 }
@@ -394,7 +427,13 @@ impl Runtime {
     /// [`ImportResolver`] without implicit filesystem manifest discovery.
     pub fn with_options(options: RuntimeOptions) -> Result<Self, Error> {
         let remote = options.remote.map(RemoteClient::new);
-        Self::build(console_shim(), neo_shim(), remote, options.import_resolver)
+        Self::build(
+            console_shim(),
+            neo_shim(),
+            remote,
+            options.import_resolver,
+            options.node_compat,
+        )
     }
 
     /// Creates a runtime over an injected remote transport.
@@ -422,6 +461,7 @@ impl Runtime {
             neo_shim(),
             Some(RemoteClient::with_transport(options, transport)),
             None,
+            true,
         )
     }
 
@@ -454,6 +494,7 @@ impl Runtime {
             neo_shim(),
             Some(RemoteClient::with_transport(options, transport)),
             Some(resolver),
+            true,
         )
     }
 
@@ -487,7 +528,7 @@ impl Runtime {
         builtins: String,
         module_loader: Rc<dyn deno_core::ModuleLoader>,
     ) -> Result<Self, Error> {
-        Self::assemble(console.into(), builtins, module_loader, None, None)
+        Self::assemble(console.into(), builtins, module_loader, None, None, true)
     }
 
     /// Creates a runtime with an optional remote client and optional import
@@ -502,8 +543,11 @@ impl Runtime {
         builtins: String,
         remote: Option<RemoteClient>,
         import_resolver: Option<ImportResolver>,
+        node_compat: bool,
     ) -> Result<Self, Error> {
-        let files = Rc::new(FileModuleLoader::new(remote.clone(), import_resolver));
+        let files = Rc::new(
+            FileModuleLoader::new(remote.clone(), import_resolver).with_node_compat(node_compat),
+        );
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match remote.clone() {
             Some(remote_client) => Rc::new(JsrModuleLoader::new(
                 Rc::new(RemoteRegistry::new(remote_client)),
@@ -512,7 +556,14 @@ impl Runtime {
             )),
             None => files.clone(),
         };
-        Self::assemble(console.into(), builtins, module_loader, Some(files), remote)
+        Self::assemble(
+            console.into(),
+            builtins,
+            module_loader,
+            Some(files),
+            remote,
+            node_compat,
+        )
     }
 
     /// Builds the runtimes, isolate, extensions, and shims.
@@ -522,6 +573,7 @@ impl Runtime {
         module_loader: Rc<dyn deno_core::ModuleLoader>,
         loader: Option<Rc<FileModuleLoader>>,
         remote: Option<RemoteClient>,
+        node_compat: bool,
     ) -> Result<Self, Error> {
         let driver = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -563,6 +615,12 @@ impl Runtime {
             neojs_stdio::init(),
             neojs_uuid::init(),
         ];
+        #[cfg(feature = "node-compat")]
+        if node_compat {
+            extensions.push(crate::node_compat::neojs_node_compat::init());
+        }
+        #[cfg(not(feature = "node-compat"))]
+        let _ = node_compat;
         #[cfg(feature = "test-support")]
         extensions.push(crate::cron::test_support_extension());
         #[cfg(feature = "test-support")]
@@ -576,9 +634,11 @@ impl Runtime {
                 ..Default::default()
             })
         };
+        let exit_state = Rc::new(RefCell::new(ProcessExitState::default()));
         let mut runtime = Self {
             js: Some(js),
             consumed: false,
+            exit_state: exit_state.clone(),
             remote,
             redactions,
             loader,
@@ -601,7 +661,17 @@ impl Runtime {
         crate::chars::remove_entries_global(js).map_err(Error::NativeBuiltins)?;
         #[cfg(feature = "neo-strings")]
         crate::strings::remove_entries_global(js).map_err(Error::NativeBuiltins)?;
+        #[cfg(feature = "node-compat")]
+        if node_compat {
+            crate::node_compat::install(js, exit_state).map_err(Error::NativeBuiltins)?;
+        }
         Ok(runtime)
+    }
+
+    /// Returns the exit code set by `node:process` (`process.exitCode` or
+    /// `process.exit(code)`), if any.
+    pub fn exit_code(&self) -> Option<i32> {
+        self.exit_state.borrow().exit_code
     }
 
     /// Creates a JSR test runtime with explicit resource limits.
@@ -649,6 +719,7 @@ impl Runtime {
         let Self {
             js,
             consumed,
+            exit_state,
             remote: _,
             redactions: _,
             loader: _,
@@ -657,8 +728,10 @@ impl Runtime {
         } = self;
         let js = js.as_mut().expect("the isolate is present until Drop");
         let ops = ops.as_ref().expect("the ops runtime is present until Drop");
-        ops.block_on(run_entry(js, consumed, path.as_ref()))
-            .map_err(|error| redact_error(error, redactions.as_ref()))
+        let res = ops
+            .block_on(run_entry(js, consumed, path.as_ref()))
+            .map_err(|error| redact_error(error, redactions.as_ref()));
+        handle_run_result(js, exit_state, res)
     }
 
     /// Runs one remote entry module to completion and blocks until it finishes.
@@ -697,6 +770,7 @@ impl Runtime {
         let Self {
             js,
             consumed,
+            exit_state,
             remote: _,
             redactions: _,
             loader: _,
@@ -705,14 +779,16 @@ impl Runtime {
         } = self;
         let js = js.as_mut().expect("the isolate is present until Drop");
         let ops = ops.as_ref().expect("the ops runtime is present until Drop");
-        ops.block_on(run_remote_entry(
-            js,
-            consumed,
-            loader.as_ref(),
-            &remote,
-            url,
-        ))
-        .map_err(|error| redact_error(error, redactions.as_ref()))
+        let res = ops
+            .block_on(run_remote_entry(
+                js,
+                consumed,
+                loader.as_ref(),
+                &remote,
+                url,
+            ))
+            .map_err(|error| redact_error(error, redactions.as_ref()));
+        handle_run_result(js, exit_state, res)
     }
 
     /// Runs one remote entry module to completion on the caller's executor.
@@ -732,9 +808,10 @@ impl Runtime {
         let loader = self.loader.clone().ok_or(Error::RemoteDisabled)?;
         let redactions = self.redactions.clone();
         let js = self.js.as_mut().expect("the isolate is present until Drop");
-        run_remote_entry(js, &mut self.consumed, loader.as_ref(), &remote, url)
+        let res = run_remote_entry(js, &mut self.consumed, loader.as_ref(), &remote, url)
             .await
-            .map_err(|error| redact_error(error, redactions.as_ref()))
+            .map_err(|error| redact_error(error, redactions.as_ref()));
+        handle_run_result(js, &self.exit_state, res)
     }
 
     /// Runs one entry module to completion on the caller's executor.
@@ -773,9 +850,10 @@ impl Runtime {
     pub async fn run_file_async(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
         let redactions = self.redactions.clone();
         let js = self.js.as_mut().expect("the isolate is present until Drop");
-        run_entry(js, &mut self.consumed, path.as_ref())
+        let res = run_entry(js, &mut self.consumed, path.as_ref())
             .await
-            .map_err(|error| redact_error(error, redactions.as_ref()))
+            .map_err(|error| redact_error(error, redactions.as_ref()));
+        handle_run_result(js, &self.exit_state, res)
     }
 
     /// Runs the tests registered through the `test` built-in and returns their
@@ -845,6 +923,20 @@ fn redact_error(error: Error, redactions: Option<&Redactions>) -> Error {
         (Error::Core(error), Some(redactions)) => Error::Core(redact_core_error(error, redactions)),
         (other, _) => other,
     }
+}
+
+/// Converts a V8 termination error caused by `node:process`'s `exit()` into a
+/// clean `Ok(())` while canceling V8's pending termination flag.
+fn handle_run_result(
+    js: &mut JsRuntime,
+    exit_state: &Rc<RefCell<ProcessExitState>>,
+    result: Result<(), Error>,
+) -> Result<(), Error> {
+    if exit_state.borrow().exited {
+        js.v8_isolate().cancel_terminate_execution();
+        return Ok(());
+    }
+    result
 }
 
 impl Drop for Runtime {

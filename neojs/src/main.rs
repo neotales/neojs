@@ -46,16 +46,18 @@ fn main() -> ExitCode {
             input,
             allow_remote,
             config,
+            node_compat,
         } => match resolve_allow_remote(allow_remote) {
-            Ok(allow_remote) => run(input, allow_remote, &config),
+            Ok(allow_remote) => run(input, allow_remote, &config, node_compat),
             Err(message) => startup_failure(&message),
         },
         Command::Test {
             patterns,
             allow_remote,
             config,
+            node_compat,
         } => match resolve_allow_remote(allow_remote) {
-            Ok(allow_remote) => run_tests(&patterns, allow_remote, &config),
+            Ok(allow_remote) => run_tests(&patterns, allow_remote, &config, node_compat),
             Err(message) => startup_failure(&message),
         },
         Command::Types { profile, out_dir } => run_types(profile, out_dir.as_deref()),
@@ -78,11 +80,13 @@ enum Command {
         input: Input,
         allow_remote: AllowRemote,
         config: ConfigChoice,
+        node_compat: bool,
     },
     Test {
         patterns: Vec<String>,
         allow_remote: AllowRemote,
         config: ConfigChoice,
+        node_compat: bool,
     },
     Types {
         profile: Profile,
@@ -202,6 +206,7 @@ enum Input {
 fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
     let mut allow_remote = AllowRemote::Unspecified;
     let mut config = ConfigChoice::Auto;
+    let mut node_compat = true;
     let mut index = 0;
     while let Some(argument) = args.get(index) {
         match argument.to_str() {
@@ -211,6 +216,10 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
             }
             Some("--no-allow-remote") => {
                 allow_remote.choose(AllowRemote::Disabled)?;
+                index += 1;
+            }
+            Some("--no-node-compat") => {
+                node_compat = false;
                 index += 1;
             }
             Some("--no-config") => {
@@ -255,13 +264,17 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
                     input: classify_input(&rest[1]),
                     allow_remote,
                     config,
+                    node_compat,
                 });
             }
-            "test" => return parse_test_args(&rest[1..], allow_remote, config),
+            "test" => return parse_test_args(&rest[1..], allow_remote, config, node_compat),
             "types" => {
-                if allow_remote != AllowRemote::Unspecified || config != ConfigChoice::Auto {
+                if allow_remote != AllowRemote::Unspecified
+                    || config != ConfigChoice::Auto
+                    || !node_compat
+                {
                     return Err(
-                        "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--config`, or `--no-config`"
+                        "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--no-node-compat`, `--config`, or `--no-config`"
                             .to_string(),
                     );
                 }
@@ -281,21 +294,23 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
         input: classify_input(first),
         allow_remote,
         config,
+        node_compat,
     })
 }
 
 /// Parses `neojs test <file-or-glob>...`.
 ///
 /// Every argument is a pattern. `--allow-remote`, `--no-allow-remote`,
-/// `--config <path>`, and `--no-config` may appear before or after `test` and
-/// apply to each selected file's fresh runtime. `--` ends option parsing so a
-/// pattern beginning with `-`, including one named `--allow-remote`, can still
-/// be named. The command requires at least one pattern; discovery defaults are
-/// deliberately absent.
+/// `--no-node-compat`, `--config <path>`, and `--no-config` may appear before or
+/// after `test` and apply to each selected file's fresh runtime. `--` ends
+/// option parsing so a pattern beginning with `-`, including one named
+/// `--allow-remote`, can still be named. The command requires at least one
+/// pattern; discovery defaults are deliberately absent.
 fn parse_test_args(
     args: &[OsString],
     mut allow_remote: AllowRemote,
     mut config: ConfigChoice,
+    mut node_compat: bool,
 ) -> Result<Command, String> {
     if args.len() == 1 && matches!(args[0].to_str(), Some("-h" | "--help")) {
         return Ok(Command::Help);
@@ -319,6 +334,11 @@ fn parse_test_args(
         }
         if !after_double_dash && value == "--no-allow-remote" {
             allow_remote.choose(AllowRemote::Disabled)?;
+            index += 1;
+            continue;
+        }
+        if !after_double_dash && value == "--no-node-compat" {
+            node_compat = false;
             index += 1;
             continue;
         }
@@ -359,6 +379,7 @@ fn parse_test_args(
         patterns,
         allow_remote,
         config,
+        node_compat,
     })
 }
 
@@ -616,7 +637,7 @@ fn discover_resolver_for_entry(entry_path: &Path) -> Result<Option<ImportResolve
     Ok(Some(ImportResolver::from_manifest(&discovered)))
 }
 
-fn run(input: Input, allow_remote: bool, config: &ConfigChoice) -> ExitCode {
+fn run(input: Input, allow_remote: bool, config: &ConfigChoice, node_compat: bool) -> ExitCode {
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
         Err(message) => {
@@ -638,7 +659,7 @@ fn run(input: Input, allow_remote: bool, config: &ConfigChoice) -> ExitCode {
         }
     };
 
-    let mut runtime = match create_runtime(allow_remote, resolver) {
+    let mut runtime = match create_runtime(allow_remote, resolver, node_compat) {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("neojs: {error}");
@@ -651,7 +672,10 @@ fn run(input: Input, allow_remote: bool, config: &ConfigChoice) -> ExitCode {
         Input::Url(url) => runtime.run_url(url),
     };
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => match runtime.exit_code() {
+            Some(code) => ExitCode::from((code & 0xff) as u8),
+            None => ExitCode::SUCCESS,
+        },
         Err(error) => {
             eprintln!("neojs: {error}");
             ExitCode::from(exit_code(&error))
@@ -659,8 +683,8 @@ fn run(input: Input, allow_remote: bool, config: &ConfigChoice) -> ExitCode {
     }
 }
 
-/// Creates a runtime, with remote and JSR loading only when explicitly enabled
-/// and an optional `neo.jsonc` [`ImportResolver`].
+/// Creates a runtime, with remote and JSR loading only when explicitly enabled,
+/// an optional `neo.jsonc` [`ImportResolver`], and optional `node:*` compat.
 ///
 /// Each call gets its own default [`RemoteOptions`], so a fresh runtime also
 /// gets a fresh remote request, module, and byte budget. The default package
@@ -669,8 +693,9 @@ fn run(input: Input, allow_remote: bool, config: &ConfigChoice) -> ExitCode {
 fn create_runtime(
     allow_remote: bool,
     import_resolver: Option<ImportResolver>,
+    node_compat: bool,
 ) -> Result<Runtime, Error> {
-    let mut options = RuntimeOptions::new();
+    let mut options = RuntimeOptions::new().with_node_compat(node_compat);
     if allow_remote {
         options = options.with_remote(RemoteOptions::new());
     }
@@ -726,7 +751,12 @@ impl TestTotals {
 /// and the test queue cannot leak between files. With `allow_remote`, every
 /// fresh runtime can also load `https:` modules, with its own default remote
 /// limits and the shared user-profile package cache.
-fn run_tests(patterns: &[String], allow_remote: bool, config: &ConfigChoice) -> ExitCode {
+fn run_tests(
+    patterns: &[String],
+    allow_remote: bool,
+    config: &ConfigChoice,
+    node_compat: bool,
+) -> ExitCode {
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
         Err(message) => {
@@ -763,7 +793,7 @@ fn run_tests(patterns: &[String], allow_remote: bool, config: &ConfigChoice) -> 
     let mut failed_files = 0usize;
     for (file, resolver) in files.iter().zip(resolvers) {
         println!("test {}:", file.display());
-        let mut runtime = match create_runtime(allow_remote, resolver) {
+        let mut runtime = match create_runtime(allow_remote, resolver, node_compat) {
             Ok(runtime) => runtime,
             Err(error) => {
                 eprintln!("neojs: {error}");
@@ -890,6 +920,7 @@ Options:
                    jsr: imports; off by default
   --no-allow-remote
                    force remote loading off, overriding NEOJS_ALLOW_REMOTE
+  --no-node-compat disable built-in `node:*` compatibility modules
   --config <path>  use an explicit neo.jsonc manifest instead of discovery
   --no-config      disable automatic neo.jsonc manifest discovery
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -912,6 +943,10 @@ including the uuid/v4 and uuid/v7 subpaths. Import one by its canonical `neo:`
 specifier, such as `neo:age` and `neo:test`; a bare name is not a built-in
 module. `Neo.getBuiltInModule` takes the same canonical specifier, such as
 `Neo.getBuiltInModule(\"neo:test\")`; the README lists every specifier.
+Supported `node:*` compatibility modules (`node:path`, `node:os`, `node:process`,
+`node:fs`, `node:fs/promises`, `node:child_process`, `node:buffer`, `node:url`,
+`node:crypto`) are available by canonical `node:` specifier unless
+`--no-node-compat` is passed.
 
 Remote loading is disabled by default. `--allow-remote` enables an https:,
 gh:, or github: entry, absolute https: imports, and
@@ -921,14 +956,14 @@ before or after `test`. A gh:/github: specifier becomes a
 raw.githubusercontent.com https: URL. It is not SSRF protection, not a host
 allowlist, and not a sandbox. Downloads are cached under `neojs/packages` in the
 user cache. JSR metadata and files use the same HTTPS limits and cache. npm:
-and node: are not implemented. Local modules discover `neo.jsonc` upward for
+is not implemented. Local modules discover `neo.jsonc` upward for
 `imports` and `workspaces` unless `--config` or `--no-config` is passed.
 
 `neojs test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
 runtime. There is no default discovery, and a file that registers no tests fails.
 Remote loading follows the flag or setting for every selected file.
-Node modules (`node:`) are rejected; there is no Node-module opt-in.
+Unsupported `node:` specifiers (such as `node:test`) are rejected.
 
 Exit codes:
   0  the module finished, or every test file passed
@@ -968,6 +1003,7 @@ mod tests {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Enabled,
                 config: ConfigChoice::Auto,
+                node_compat: true,
             })
         );
     }
@@ -980,6 +1016,7 @@ mod tests {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Enabled,
                 config: ConfigChoice::Auto,
+                node_compat: true,
             })
         );
     }
@@ -996,6 +1033,7 @@ mod tests {
                     patterns: vec!["a.test.js".to_string()],
                     allow_remote: AllowRemote::Disabled,
                     config: ConfigChoice::Auto,
+                    node_compat: true,
                 })
             );
         }
@@ -1009,6 +1047,7 @@ mod tests {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Auto,
+                node_compat: true,
             })
         );
     }
@@ -1024,6 +1063,7 @@ mod tests {
                 ],
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Auto,
+                node_compat: true,
             })
         );
     }
@@ -1057,7 +1097,42 @@ mod tests {
                 input: super::Input::Path("main.js".into()),
                 allow_remote: AllowRemote::Disabled,
                 config: ConfigChoice::Auto,
+                node_compat: true,
             })
+        );
+    }
+
+    #[test]
+    fn no_node_compat_parses_for_run_and_both_test_positions() {
+        assert_eq!(
+            parse_args(args(&["--no-node-compat", "main.js"])),
+            Ok(Command::Run {
+                input: super::Input::Path("main.js".into()),
+                allow_remote: AllowRemote::Unspecified,
+                config: ConfigChoice::Auto,
+                node_compat: false,
+            })
+        );
+        for values in [
+            ["--no-node-compat", "test", "a.test.js"].as_slice(),
+            ["test", "--no-node-compat", "a.test.js"].as_slice(),
+        ] {
+            assert_eq!(
+                parse_args(args(values)),
+                Ok(Command::Test {
+                    patterns: vec!["a.test.js".to_string()],
+                    allow_remote: AllowRemote::Unspecified,
+                    config: ConfigChoice::Auto,
+                    node_compat: false,
+                })
+            );
+        }
+        assert_eq!(
+            parse_args(args(&["--no-node-compat", "types"])),
+            Err(
+                "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--no-node-compat`, `--config`, or `--no-config`"
+                    .to_string()
+            )
         );
     }
 
@@ -1069,6 +1144,7 @@ mod tests {
                 input: super::Input::Path("main.js".into()),
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Explicit(PathBuf::from("custom.jsonc")),
+                node_compat: true,
             })
         );
         assert_eq!(
@@ -1077,6 +1153,7 @@ mod tests {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Explicit(PathBuf::from("custom.jsonc")),
+                node_compat: true,
             })
         );
         assert_eq!(
@@ -1085,6 +1162,7 @@ mod tests {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Disabled,
+                node_compat: true,
             })
         );
         assert_eq!(
@@ -1195,7 +1273,7 @@ mod tests {
         assert_eq!(
             parse_args(args(&["--allow-remote", "types"])),
             Err(
-                "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--config`, or `--no-config`"
+                "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--no-node-compat`, `--config`, or `--no-config`"
                     .to_string()
             )
         );

@@ -14,6 +14,10 @@ readme = "README.md"
 name = "neojs-lite"
 path = "src/main.rs"
 
+[features]
+default = ["node-compat"]
+node-compat = ["neojs-lite-core/node-compat"]
+
 [dependencies]
 # The command's module bundle is explicit rather than inherited from
 # `neojs-lite-core` defaults, so a change to the library defaults cannot

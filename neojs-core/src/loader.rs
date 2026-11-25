@@ -120,6 +120,7 @@ pub(crate) type FinalUrlObserver = Rc<dyn Fn(&Url, &Url) -> Result<(), String>>;
 pub(crate) struct FileModuleLoader {
     remote: Option<RemoteClient>,
     import_resolver: Option<ImportResolver>,
+    node_compat: bool,
     /// A remote entry module prepared before loading starts.
     ///
     /// The runtime fetches and type-strips an entry before consuming itself, so
@@ -156,9 +157,16 @@ impl FileModuleLoader {
         Self {
             remote,
             import_resolver,
+            node_compat: true,
             entry: RefCell::new(None),
             final_url_observer: RefCell::new(None),
         }
+    }
+
+    /// Configures whether canonical `node:*` compatibility modules resolve.
+    pub(crate) fn with_node_compat(mut self, enabled: bool) -> Self {
+        self.node_compat = enabled;
+        self
     }
 
     /// Resolves a `jsr:` specifier mapped by the project's `ImportResolver`
@@ -178,6 +186,10 @@ impl FileModuleLoader {
             return Ok(None);
         }
         if builtins::resolve(specifier).is_some() || case_insensitive_builtin(specifier).is_some() {
+            return Ok(None);
+        }
+        #[cfg(feature = "node-compat")]
+        if self.node_compat && crate::node_compat::resolve_specifier(specifier).is_some() {
             return Ok(None);
         }
         match resolver.resolve(specifier) {
@@ -256,7 +268,8 @@ impl FileModuleLoader {
                     )))),
                 },
                 NormalizedSpecifier::Jsr(jsr) => {
-                    let reason = unsupported_specifier(&jsr.canonical(), referrer)
+                    let reason = self
+                        .unsupported_specifier(&jsr.canonical(), referrer)
                         .unwrap_or_else(|| {
                             with_referrer(
                                 format!(
@@ -269,8 +282,9 @@ impl FileModuleLoader {
                     Some(Err(JsErrorBox::generic(reason)))
                 }
                 NormalizedSpecifier::Npm(npm) => {
-                    let reason =
-                        unsupported_specifier(&npm.canonical(), referrer).unwrap_or_else(|| {
+                    let reason = self
+                        .unsupported_specifier(&npm.canonical(), referrer)
+                        .unwrap_or_else(|| {
                             with_referrer(
                                 format!(
                                     "cannot resolve `{}`: npm: modules are not implemented",
@@ -282,26 +296,29 @@ impl FileModuleLoader {
                     Some(Err(JsErrorBox::generic(reason)))
                 }
                 NormalizedSpecifier::Node(node) => {
-                    let reason = unsupported_specifier(&node, referrer).unwrap_or_else(|| {
-                        with_referrer(
-                            format!(
-                                "cannot resolve `{node}`: Node.js built-in modules are not implemented"
-                            ),
-                            referrer,
-                        )
-                    });
+                    #[cfg(feature = "node-compat")]
+                    if self.node_compat
+                        && let Some(canonical) = crate::node_compat::resolve_specifier(&node)
+                    {
+                        return Some(builtin_url(canonical));
+                    }
+                    let reason = self
+                        .unsupported_specifier(&node, referrer)
+                        .unwrap_or_else(|| with_referrer(self.node_unsupported_reason(), referrer));
                     Some(Err(JsErrorBox::generic(reason)))
                 }
                 NormalizedSpecifier::Bare(bare) => {
-                    let reason = unsupported_specifier(&bare, referrer).unwrap_or_else(|| {
-                        with_referrer(
-                            format!(
-                                "cannot resolve `{}`: bare import-map targets are not implemented",
-                                display_specifier(&bare)
-                            ),
-                            referrer,
-                        )
-                    });
+                    let reason = self
+                        .unsupported_specifier(&bare, referrer)
+                        .unwrap_or_else(|| {
+                            with_referrer(
+                                format!(
+                                    "cannot resolve `{}`: bare import-map targets are not implemented",
+                                    display_specifier(&bare)
+                                ),
+                                referrer,
+                            )
+                        });
                     Some(Err(JsErrorBox::generic(reason)))
                 }
             },
@@ -367,7 +384,7 @@ impl FileModuleLoader {
                 // A bare name has no URL base to resolve against. Reject it
                 // with the same explanation as a bare name from a local
                 // importer instead of a parser message about a missing base.
-                if let Some(reason) = unsupported_specifier(specifier, referrer) {
+                if let Some(reason) = self.unsupported_specifier(specifier, referrer) {
                     return Err(JsErrorBox::generic(reason));
                 }
                 return Err(JsErrorBox::generic(format!(
@@ -389,7 +406,7 @@ impl FileModuleLoader {
                 referrer,
             ))),
             _ => Err(JsErrorBox::generic(with_referrer(
-                unsupported_scheme(&specifier_url),
+                self.unsupported_scheme(&specifier_url),
                 referrer,
             ))),
         }
@@ -424,6 +441,25 @@ impl ModuleLoader for FileModuleLoader {
         // tab/newline characters, which would make `neo:ch\nars` resolve.
         if let Some(canonical) = case_insensitive_builtin(specifier) {
             return builtin_url(canonical);
+        }
+        #[cfg(feature = "node-compat")]
+        if self.node_compat
+            && let Some(canonical) = crate::node_compat::resolve_specifier(specifier)
+        {
+            return builtin_url(canonical);
+        }
+        if specifier
+            .split_once(':')
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("node"))
+        {
+            return Err(JsErrorBox::generic(with_referrer(
+                format!(
+                    "cannot resolve `{}`: {}",
+                    display_specifier(specifier),
+                    self.node_unsupported_reason()
+                ),
+                referrer,
+            )));
         }
 
         if let Some(resolved) = self.resolve_with_import_resolver(specifier, referrer) {
@@ -468,7 +504,7 @@ impl ModuleLoader for FileModuleLoader {
                 _ => {}
             }
         }
-        if let Some(reason) = unsupported_specifier(specifier, referrer) {
+        if let Some(reason) = self.unsupported_specifier(specifier, referrer) {
             return Err(JsErrorBox::generic(reason));
         }
         FsModuleLoader.resolve(specifier, referrer, kind)
@@ -667,87 +703,99 @@ fn builtin_url(canonical: &'static str) -> ModuleResolveResponse {
     })
 }
 
-fn unsupported_specifier(specifier: &str, referrer: &str) -> Option<String> {
-    if let Ok(url) = Url::parse(specifier) {
-        return match url.scheme() {
-            "file" => None,
-            _ => Some(with_referrer(unsupported_scheme(&url), referrer)),
-        };
+impl FileModuleLoader {
+    fn node_unsupported_reason(&self) -> String {
+        if !cfg!(feature = "node-compat") {
+            "Node.js built-in modules are not implemented".to_string()
+        } else if !self.node_compat {
+            "Node.js built-in modules are disabled (--no-node-compat)".to_string()
+        } else {
+            "Node.js built-in modules are not implemented for this specifier".to_string()
+        }
     }
 
-    if is_path_specifier(specifier) {
-        return None;
-    }
+    fn unsupported_specifier(&self, specifier: &str, referrer: &str) -> Option<String> {
+        if let Ok(url) = Url::parse(specifier) {
+            return match url.scheme() {
+                "file" => None,
+                _ => Some(with_referrer(self.unsupported_scheme(&url), referrer)),
+            };
+        }
 
-    if builtins::is_registry_name(specifier) {
-        return Some(with_referrer(
+        if is_path_specifier(specifier) {
+            return None;
+        }
+
+        if builtins::is_registry_name(specifier) {
+            return Some(with_referrer(
+                format!(
+                    "cannot resolve `{}`: Neo built-in modules must be imported by their canonical `neo:` specifier; use `neo:{}`. Bare module specifiers are not implemented (built-in modules: {})",
+                    display_specifier(specifier),
+                    specifier,
+                    builtins::implemented_specifiers()
+                ),
+                referrer,
+            ));
+        }
+
+        Some(with_referrer(
             format!(
-                "cannot resolve `{}`: Neo built-in modules must be imported by their canonical `neo:` specifier; use `neo:{}`. Bare module specifiers are not implemented (built-in modules: {})",
+                "cannot resolve `{}`: bare module specifiers are not implemented; use a relative or absolute file path (built-in modules: {})",
                 display_specifier(specifier),
-                specifier,
                 builtins::implemented_specifiers()
             ),
             referrer,
-        ));
+        ))
     }
 
-    Some(with_referrer(
-        format!(
-            "cannot resolve `{}`: bare module specifiers are not implemented; use a relative or absolute file path (built-in modules: {})",
-            display_specifier(specifier),
-            builtins::implemented_specifiers()
-        ),
-        referrer,
-    ))
-}
-
-fn unsupported_scheme(url: &Url) -> String {
-    if !url.username().is_empty() || url.password().is_some() {
-        return "cannot resolve a URL with a username or password; credentials are not supported"
-            .to_string();
-    }
-    let specifier = display_url(url);
-    let reason = match url.scheme() {
-        "neo" => {
-            let name = url.path();
-            if name.is_empty() {
-                format!(
-                    "a neo: specifier must name a module; neojs implements {}",
-                    builtins::implemented_specifiers()
-                )
-            } else if builtins::resolve_name(name).is_some() {
-                format!("the specifier must be exactly `neo:{name}`, with no query or fragment")
-            } else {
-                format!(
-                    "neo module `{name}` is not implemented; neojs implements {}",
-                    builtins::implemented_specifiers()
-                )
+    fn unsupported_scheme(&self, url: &Url) -> String {
+        if !url.username().is_empty() || url.password().is_some() {
+            return "cannot resolve a URL with a username or password; credentials are not supported"
+                .to_string();
+        }
+        let specifier = display_url(url);
+        let reason = match url.scheme() {
+            "neo" => {
+                let name = url.path();
+                if name.is_empty() {
+                    format!(
+                        "a neo: specifier must name a module; neojs implements {}",
+                        builtins::implemented_specifiers()
+                    )
+                } else if builtins::resolve_name(name).is_some() {
+                    format!("the specifier must be exactly `neo:{name}`, with no query or fragment")
+                } else {
+                    format!(
+                        "neo module `{name}` is not implemented; neojs implements {}",
+                        builtins::implemented_specifiers()
+                    )
+                }
             }
-        }
-        "node" => "Node.js built-in modules are not implemented".to_string(),
-        "npm" => "npm: modules are not implemented".to_string(),
-        "jsr" => {
-            "jsr: modules require remote module loading; create the Runtime with Runtime::with_remote (neojs --allow-remote) to enable them"
-                .to_string()
-        }
-        "http" => "only https: module URLs are supported, not http:".to_string(),
-        "https" => {
-            "remote module loading is disabled; create the Runtime with Runtime::with_remote"
-                .to_string()
-        }
-        "data" | "blob" => "data: and blob: modules are not implemented".to_string(),
-        scheme if scheme.len() == 1 && scheme.as_bytes()[0].is_ascii_alphabetic() => {
-            return format!(
-                "cannot resolve `{specifier}`: Windows drive paths must be written as file: URLs"
-            );
-        }
-        scheme => {
-            return format!(
-                "cannot resolve `{specifier}`: unsupported URL scheme `{scheme}`; only file: URLs are supported"
-            );
-        }
-    };
-    format!("cannot resolve `{specifier}`: {reason}")
+            "node" => self.node_unsupported_reason(),
+            "npm" => "npm: modules are not implemented".to_string(),
+            "jsr" => {
+                "jsr: modules require remote module loading; create the Runtime with Runtime::with_remote (neojs --allow-remote) to enable them"
+                    .to_string()
+            }
+            "http" => "only https: module URLs are supported, not http:".to_string(),
+            "https" => {
+                "remote module loading is disabled; create the Runtime with Runtime::with_remote"
+                    .to_string()
+            }
+            "data" | "blob" => "data: and blob: modules are not implemented".to_string(),
+            scheme if scheme.len() == 1 && scheme.as_bytes()[0].is_ascii_alphabetic() => {
+                return format!(
+                    "cannot resolve `{specifier}`: Windows drive paths must be written as file: URLs"
+                );
+            }
+            scheme => {
+                return format!(
+                    "cannot resolve `{specifier}`: unsupported URL scheme `{scheme}`; only file: URLs are supported"
+                );
+            }
+        };
+        format!("cannot resolve `{specifier}`: {reason}")
+    }
 }
 
 /// Returns whether `referrer` is a local `file:` URL.

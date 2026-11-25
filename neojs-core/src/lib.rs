@@ -404,6 +404,8 @@ mod fs;
 // in `neojs-remote`.
 mod jsr_loader;
 mod loader;
+#[cfg(feature = "node-compat")]
+mod node_compat;
 mod path;
 mod remote_redact;
 mod runtime;

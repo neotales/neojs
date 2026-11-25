@@ -7,7 +7,17 @@ use neojs_dts::{
     render_bundle, write_types_dir,
 };
 
-const FORBIDDEN_GLOBALS: &[&str] = &[
+const ALWAYS_FORBIDDEN_GLOBALS: &[&str] = &[
+    "Deno",
+    "Bun",
+    "window",
+    "document",
+    "require",
+    "fetch",
+    "setTimeout",
+];
+
+const NEO_AND_GLOBAL_FORBIDDEN: &[&str] = &[
     "Deno",
     "Bun",
     "process",
@@ -37,6 +47,17 @@ const V8_SPECIFIERS: &[&str] = &[
     "neo:uuid",
     "neo:uuid/v4",
     "neo:uuid/v7",
+    "node:buffer",
+    "node:child_process",
+    "node:crypto",
+    "node:fs",
+    "node:fs/promises",
+    "node:os",
+    "node:path",
+    "node:path/posix",
+    "node:path/win32",
+    "node:process",
+    "node:url",
 ];
 
 const LITE_SPECIFIERS: &[&str] = &[
@@ -54,9 +75,19 @@ const LITE_SPECIFIERS: &[&str] = &[
     "neo:uuid",
     "neo:uuid/v4",
     "neo:uuid/v7",
+    "node:buffer",
+    "node:child_process",
+    "node:crypto",
+    "node:fs",
+    "node:os",
+    "node:path",
+    "node:path/posix",
+    "node:path/win32",
+    "node:process",
+    "node:url",
 ];
 
-const V8_ONLY_SPECIFIERS: &[&str] = &["neo:age", "neo:cron", "neo:stdio"];
+const V8_ONLY_SPECIFIERS: &[&str] = &["neo:age", "neo:cron", "neo:stdio", "node:fs/promises"];
 
 /// Validates balanced delimiters `{}` / `()` / `[]` and closed comments/strings
 /// across a `.d.ts` source string.
@@ -154,8 +185,13 @@ fn contains_identifier_word(haystack: &str, needle: &str) -> bool {
     false
 }
 
-fn assert_no_forbidden_globals(label: &str, source: &str) {
-    for forbidden in FORBIDDEN_GLOBALS {
+fn assert_no_forbidden_globals(label: &str, source: &str, is_node_module: bool) {
+    let list = if is_node_module {
+        ALWAYS_FORBIDDEN_GLOBALS
+    } else {
+        NEO_AND_GLOBAL_FORBIDDEN
+    };
+    for forbidden in list {
         assert!(
             !contains_identifier_word(source, forbidden),
             "{label}: forbidden global identifier `{forbidden}` found"
@@ -232,7 +268,17 @@ fn every_embedded_dts_file_has_valid_syntax_and_zero_forbidden_globals() {
                 "{label}: file must end with a newline"
             );
             assert_valid_dts_syntax(&label, file.content);
-            assert_no_forbidden_globals(&label, file.content);
+            let allow_node_terms =
+                file.specifier.is_some_and(|s| s.starts_with("node:")) || file.path == "index.d.ts";
+            assert_no_forbidden_globals(&label, file.content, allow_node_terms);
+            if file.path == "index.d.ts" {
+                for line in file.content.lines() {
+                    assert!(
+                        line.starts_with("/// <reference path=\"./") && line.ends_with("\" />"),
+                        "{label}: unexpected non-reference line: {line:?}"
+                    );
+                }
+            }
 
             let parsed = parse_declared_exports(file.content);
             match file.specifier {
@@ -261,7 +307,7 @@ fn declared_exports_match_expected_exports_one_to_one_for_both_profiles() {
         let expected = expected_exports(profile);
         let bundle = render_bundle(profile);
         assert_valid_dts_syntax(profile.name(), &bundle);
-        assert_no_forbidden_globals(profile.name(), &bundle);
+        assert_no_forbidden_globals(profile.name(), &bundle, true);
 
         let parsed_bundle = parse_declared_exports(&bundle);
         assert_eq!(
@@ -317,10 +363,17 @@ fn globals_and_index_match_profile_surfaces() {
     }
     for spec in V8_SPECIFIERS {
         let key = format!("\"{spec}\":");
-        assert!(
-            v8_globals.contains(&key),
-            "V8 NeoBuiltInModuleMap must include {spec}"
-        );
+        if spec.starts_with("neo:") {
+            assert!(
+                v8_globals.contains(&key),
+                "V8 NeoBuiltInModuleMap must include {spec}"
+            );
+        } else {
+            assert!(
+                !v8_globals.contains(&key),
+                "V8 NeoBuiltInModuleMap must NOT include {spec}"
+            );
+        }
     }
 
     let lite_globals = globals_dts(Profile::Lite);
@@ -333,10 +386,17 @@ fn globals_and_index_match_profile_surfaces() {
     }
     for spec in LITE_SPECIFIERS {
         let key = format!("\"{spec}\":");
-        assert!(
-            lite_globals.contains(&key),
-            "Lite NeoBuiltInModuleMap must include {spec}"
-        );
+        if spec.starts_with("neo:") {
+            assert!(
+                lite_globals.contains(&key),
+                "Lite NeoBuiltInModuleMap must include {spec}"
+            );
+        } else {
+            assert!(
+                !lite_globals.contains(&key),
+                "Lite NeoBuiltInModuleMap must NOT include {spec}"
+            );
+        }
     }
     for spec in V8_ONLY_SPECIFIERS {
         let key = format!("\"{spec}\":");

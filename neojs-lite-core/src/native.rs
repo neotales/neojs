@@ -14,6 +14,10 @@ use rquickjs::{
     object::Property, qjs,
 };
 
+#[cfg_attr(
+    not(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh")),
+    allow(dead_code)
+)]
 struct PropertyEnumGuard {
     raw: *mut qjs::JSContext,
     tab: *mut qjs::JSPropertyEnum,
@@ -32,6 +36,10 @@ impl Drop for PropertyEnumGuard {
 
 /// Freezes `object` using QuickJS's native `JS_FreezeObject` without
 /// consulting `globalThis.Object.freeze`.
+#[cfg_attr(
+    not(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh")),
+    allow(dead_code)
+)]
 pub(super) fn freeze_native<'js>(ctx: &Ctx<'js>, object: &Object<'js>) -> Result<()> {
     let rc = unsafe { qjs::JS_FreezeObject(ctx.as_raw().as_ptr(), object.as_raw()) };
     if rc < 0 {
@@ -195,7 +203,10 @@ pub(super) fn throw_coded_error(
 /// Validates a `Uint8Array` view (including resizable-`ArrayBuffer` views) and
 /// passes its live byte slice to `f` without executing JavaScript while the
 /// slice is alive.
-#[cfg_attr(not(any(feature = "neo-fs", feature = "neo-ssh")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "neo-fs", feature = "neo-ssh", feature = "node-compat")),
+    allow(dead_code)
+)]
 pub(super) fn with_uint8_array_bytes<'js, T>(
     ctx: &Ctx<'js>,
     value: &Value<'js>,
@@ -299,6 +310,10 @@ pub(super) fn with_uint8_array_bytes_ex<'js, T>(
 /// Validates that `value` (when `Some` and not `undefined`) is a plain object
 /// with no proxies, symbols, non-enumerable properties, or accessors, and
 /// passes each own enumerable string property to `on_field`.
+#[cfg_attr(
+    not(any(feature = "neo-crypto", feature = "neo-fs", feature = "neo-ssh")),
+    allow(dead_code)
+)]
 pub(super) fn parse_options<'js>(
     ctx: &Ctx<'js>,
     value: Option<&Value<'js>>,

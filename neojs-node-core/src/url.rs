@@ -10,9 +10,227 @@ use url::Url;
 
 use crate::error::NodeCoreError;
 
-/// Maximum input byte length accepted by [`file_url_to_path`] and
-/// [`path_to_file_url`] (`64 KiB`).
+/// Maximum input byte length accepted by [`file_url_to_path`],
+/// [`path_to_file_url`], [`parse_url`], and [`update_url`] (`64 KiB`).
 pub const MAX_URL_BYTES: usize = 64 * 1024;
+
+/// Parsed WHATWG URL components backing `node:url`'s `URL` class.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedUrl {
+    /// Complete serialized URL (`url.href`).
+    pub href: String,
+    /// Serialized origin (`url.origin`).
+    pub origin: String,
+    /// Scheme including trailing colon (`"https:"`).
+    pub protocol: String,
+    /// Percent-encoded username (`url.username`).
+    pub username: String,
+    /// Percent-encoded password (`url.password`).
+    pub password: String,
+    /// Host and optional port (`"example.com:8080"` or `"example.com"`).
+    pub host: String,
+    /// Hostname without port (`"example.com"`).
+    pub hostname: String,
+    /// Decimal port string or `""`.
+    pub port: String,
+    /// Path component (`"/a/b"`).
+    pub pathname: String,
+    /// Query string including leading `"?"`, or `""`.
+    pub search: String,
+    /// Fragment including leading `"#"`, or `""`.
+    pub hash: String,
+}
+
+/// Mutable URL component selector for [`update_url`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UrlComponent {
+    /// Full URL string (`href`).
+    Href,
+    /// Scheme (`protocol`).
+    Protocol,
+    /// Username (`username`).
+    Username,
+    /// Password (`password`).
+    Password,
+    /// Host and optional port (`host`).
+    Host,
+    /// Hostname without port (`hostname`).
+    Hostname,
+    /// Port (`port`).
+    Port,
+    /// Path (`pathname`).
+    Pathname,
+    /// Query (`search`).
+    Search,
+    /// Fragment (`hash`).
+    Hash,
+}
+
+impl UrlComponent {
+    /// Parses a JS property name into a [`UrlComponent`].
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "href" => Some(Self::Href),
+            "protocol" => Some(Self::Protocol),
+            "username" => Some(Self::Username),
+            "password" => Some(Self::Password),
+            "host" => Some(Self::Host),
+            "hostname" => Some(Self::Hostname),
+            "port" => Some(Self::Port),
+            "pathname" => Some(Self::Pathname),
+            "search" => Some(Self::Search),
+            "hash" => Some(Self::Hash),
+            _ => None,
+        }
+    }
+}
+
+fn to_parsed_url(parsed: &Url) -> ParsedUrl {
+    let hostname = parsed.host_str().unwrap_or("").to_owned();
+    let port = parsed.port().map(|p| p.to_string()).unwrap_or_default();
+    let host = if port.is_empty() {
+        hostname.clone()
+    } else {
+        format!("{hostname}:{port}")
+    };
+    let search = match parsed.query() {
+        Some(q) if !q.is_empty() => format!("?{q}"),
+        _ => String::new(),
+    };
+    let hash = match parsed.fragment() {
+        Some(f) if !f.is_empty() => format!("#{f}"),
+        _ => String::new(),
+    };
+    ParsedUrl {
+        href: parsed.as_str().to_owned(),
+        origin: parsed.origin().ascii_serialization(),
+        protocol: format!("{}:", parsed.scheme()),
+        username: parsed.username().to_owned(),
+        password: parsed.password().unwrap_or("").to_owned(),
+        host,
+        hostname,
+        port,
+        pathname: parsed.path().to_owned(),
+        search,
+        hash,
+    }
+}
+
+fn validate_url_input(value: &str) -> Result<(), NodeCoreError> {
+    if value.len() > MAX_URL_BYTES {
+        return Err(NodeCoreError::InputTooLarge {
+            limit: MAX_URL_BYTES,
+            actual: Some(value.len()),
+        });
+    }
+    if value.as_bytes().contains(&0) {
+        return Err(NodeCoreError::InvalidUrl {
+            reason: "URL input must not contain a NUL byte",
+        });
+    }
+    Ok(())
+}
+
+/// Parses `input` (optionally resolved against `base`) into a [`ParsedUrl`].
+pub fn parse_url(input: &str, base: Option<&str>) -> Result<ParsedUrl, NodeCoreError> {
+    validate_url_input(input)?;
+    let parsed = if let Some(base_str) = base {
+        validate_url_input(base_str)?;
+        let base_url = Url::parse(base_str).map_err(|_| NodeCoreError::InvalidUrl {
+            reason: "invalid base URL",
+        })?;
+        base_url
+            .join(input)
+            .map_err(|_| NodeCoreError::InvalidUrl {
+                reason: "invalid URL",
+            })?
+    } else {
+        Url::parse(input).map_err(|_| NodeCoreError::InvalidUrl {
+            reason: "invalid URL",
+        })?
+    };
+    Ok(to_parsed_url(&parsed))
+}
+
+/// Updates one component on `href` and returns the re-serialized [`ParsedUrl`].
+pub fn update_url(
+    href: &str,
+    component: UrlComponent,
+    value: &str,
+) -> Result<ParsedUrl, NodeCoreError> {
+    validate_url_input(href)?;
+    validate_url_input(value)?;
+    if component == UrlComponent::Href {
+        return parse_url(value, None);
+    }
+    let mut parsed = Url::parse(href).map_err(|_| NodeCoreError::InvalidUrl {
+        reason: "invalid URL",
+    })?;
+    match component {
+        UrlComponent::Href => unreachable!(),
+        UrlComponent::Protocol => {
+            let scheme = value.strip_suffix(':').unwrap_or(value);
+            let _ = parsed.set_scheme(scheme);
+        }
+        UrlComponent::Username => {
+            let _ = parsed.set_username(value);
+        }
+        UrlComponent::Password => {
+            let pw = if value.is_empty() { None } else { Some(value) };
+            let _ = parsed.set_password(pw);
+        }
+        UrlComponent::Host => {
+            if let Some(colon) = value.rfind(':')
+                && !value[colon + 1..].contains(']')
+            {
+                let host_part = &value[..colon];
+                let port_part = &value[colon + 1..];
+                if parsed.set_host(Some(host_part)).is_ok() {
+                    if port_part.is_empty() {
+                        let _ = parsed.set_port(None);
+                    } else if let Ok(p) = port_part.parse::<u16>() {
+                        let _ = parsed.set_port(Some(p));
+                    }
+                }
+            } else {
+                let _ = parsed.set_host(Some(value));
+                let _ = parsed.set_port(None);
+            }
+        }
+        UrlComponent::Hostname => {
+            let host_opt = if value.is_empty() { None } else { Some(value) };
+            let _ = parsed.set_host(host_opt);
+        }
+        UrlComponent::Port => {
+            if value.is_empty() {
+                let _ = parsed.set_port(None);
+            } else if let Ok(p) = value.parse::<u16>() {
+                let _ = parsed.set_port(Some(p));
+            }
+        }
+        UrlComponent::Pathname => {
+            parsed.set_path(value);
+        }
+        UrlComponent::Search => {
+            let stripped = value.strip_prefix('?').unwrap_or(value);
+            if stripped.is_empty() {
+                parsed.set_query(None);
+            } else {
+                parsed.set_query(Some(stripped));
+            }
+        }
+        UrlComponent::Hash => {
+            let stripped = value.strip_prefix('#').unwrap_or(value);
+            if stripped.is_empty() {
+                parsed.set_fragment(None);
+            } else {
+                parsed.set_fragment(Some(stripped));
+            }
+        }
+    }
+    Ok(to_parsed_url(&parsed))
+}
 
 /// Converts a `file:` URL string into a local [`PathBuf`].
 ///

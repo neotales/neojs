@@ -43,6 +43,9 @@ const SLICES_SEQUENCE_ONE_HEX: &str =
 const FS_SEQUENCE_ONE_HEX: &str =
     "6372656174655f6e657720616e6420617070656e642063616e6e6f7420626f746820626520656e61626c6564";
 
+/// `node:child_process` from `neojs-node-core`.
+const NODE_COMPAT_SEQUENCE_ONE_HEX: &str = "6e6f64653a6368696c645f70726f63657373";
+
 /// `connect requires exactly one of hostKey or knownHosts; no insecure default is available`
 /// from `neojs-ssh-core/src/error.rs`.
 const SSH_SEQUENCE_ONE_HEX: &str = "636f6e6e6563742072657175697265732065786163746c79206f6e65206f6620686f73744b6579206f72206b6e6f776e486f7374733b206e6f20696e7365637572652064656661756c7420697320617661696c61626c65";
@@ -117,16 +120,47 @@ fn shared_source_bytes_follow_the_features() {
     assert_sequences(&artifact, &uuid_seqs, false, "neo-uuid is disabled");
 
     let crypto_seqs = [CRYPTO_SEQUENCE_ONE_HEX];
-    #[cfg(feature = "neo-crypto")]
-    assert_sequences(&artifact, &crypto_seqs, true, "neo-crypto is enabled");
-    #[cfg(not(feature = "neo-crypto"))]
-    assert_sequences(&artifact, &crypto_seqs, false, "neo-crypto is disabled");
+    #[cfg(any(feature = "neo-crypto", feature = "node-compat"))]
+    assert_sequences(
+        &artifact,
+        &crypto_seqs,
+        true,
+        "neo-crypto or node-compat is enabled",
+    );
+    #[cfg(not(any(feature = "neo-crypto", feature = "node-compat")))]
+    assert_sequences(
+        &artifact,
+        &crypto_seqs,
+        false,
+        "neo-crypto and node-compat are disabled",
+    );
 
     let fs_seqs = [FS_SEQUENCE_ONE_HEX];
-    #[cfg(feature = "neo-fs")]
-    assert_sequences(&artifact, &fs_seqs, true, "neo-fs is enabled");
-    #[cfg(not(feature = "neo-fs"))]
-    assert_sequences(&artifact, &fs_seqs, false, "neo-fs is disabled");
+    #[cfg(any(feature = "neo-fs", feature = "node-compat"))]
+    assert_sequences(
+        &artifact,
+        &fs_seqs,
+        true,
+        "neo-fs or node-compat is enabled",
+    );
+    #[cfg(not(any(feature = "neo-fs", feature = "node-compat")))]
+    assert_sequences(
+        &artifact,
+        &fs_seqs,
+        false,
+        "neo-fs and node-compat are disabled",
+    );
+
+    let node_compat_seqs = [NODE_COMPAT_SEQUENCE_ONE_HEX];
+    #[cfg(feature = "node-compat")]
+    assert_sequences(&artifact, &node_compat_seqs, true, "node-compat is enabled");
+    #[cfg(not(feature = "node-compat"))]
+    assert_sequences(
+        &artifact,
+        &node_compat_seqs,
+        false,
+        "node-compat is disabled",
+    );
 
     let ssh_seqs = [SSH_SEQUENCE_ONE_HEX];
     #[cfg(feature = "neo-ssh")]
