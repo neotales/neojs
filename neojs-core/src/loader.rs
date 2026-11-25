@@ -67,6 +67,8 @@ use std::path::Path;
 use std::rc::Rc;
 
 use crate::builtins;
+#[cfg(feature = "npm")]
+use crate::npm_loader::{NpmLoader, NpmOptions, NpmReferrerAction};
 use crate::typescript;
 use neojs_manifest::{ImportResolver, NormalizedSpecifier, ResolvedImport};
 use neojs_remote::RemoteClient;
@@ -74,6 +76,8 @@ use neojs_remote::diagnostic_url;
 use neojs_remote::display_url;
 use neojs_remote::github_url;
 use neojs_remote::validate_url;
+#[cfg(feature = "npm")]
+use std::path::PathBuf;
 
 pub(crate) use neojs_module_policy::{ModuleFormat, module_format};
 
@@ -120,6 +124,8 @@ pub(crate) type FinalUrlObserver = Rc<dyn Fn(&Url, &Url) -> Result<(), String>>;
 pub(crate) struct FileModuleLoader {
     remote: Option<RemoteClient>,
     import_resolver: Option<ImportResolver>,
+    #[cfg(feature = "npm")]
+    npm: NpmLoader,
     /// A remote entry module prepared before loading starts.
     ///
     /// The runtime fetches and type-strips an entry before consuming itself, so
@@ -149,13 +155,40 @@ pub(crate) struct PreparedEntry {
 
 impl FileModuleLoader {
     /// Creates a loader. `remote` is `None` when remote loading is disabled.
+    #[allow(dead_code)]
     pub(crate) fn new(
         remote: Option<RemoteClient>,
         import_resolver: Option<ImportResolver>,
     ) -> Self {
         Self {
+            #[cfg(feature = "npm")]
+            npm: NpmLoader::new(
+                NpmOptions::default(),
+                remote.clone(),
+                None,
+                import_resolver.as_ref().map(|r| r.root_dir().to_path_buf()),
+            ),
             remote,
             import_resolver,
+            entry: RefCell::new(None),
+            final_url_observer: RefCell::new(None),
+        }
+    }
+
+    /// Creates a loader with explicit `npm` options and remote cache directory.
+    #[cfg(feature = "npm")]
+    pub(crate) fn with_npm(
+        remote: Option<RemoteClient>,
+        remote_cache_dir: Option<PathBuf>,
+        import_resolver: Option<ImportResolver>,
+        npm_options: NpmOptions,
+    ) -> Self {
+        let manifest_root = import_resolver.as_ref().map(|r| r.root_dir().to_path_buf());
+        let npm = NpmLoader::new(npm_options, remote.clone(), remote_cache_dir, manifest_root);
+        Self {
+            remote,
+            import_resolver,
+            npm,
             entry: RefCell::new(None),
             final_url_observer: RefCell::new(None),
         }
@@ -269,17 +302,33 @@ impl FileModuleLoader {
                     Some(Err(JsErrorBox::generic(reason)))
                 }
                 NormalizedSpecifier::Npm(npm) => {
-                    let reason =
-                        unsupported_specifier(&npm.canonical(), referrer).unwrap_or_else(|| {
-                            with_referrer(
-                                format!(
-                                    "cannot resolve `{}`: npm: modules are not implemented",
-                                    npm.canonical()
-                                ),
-                                referrer,
-                            )
-                        });
-                    Some(Err(JsErrorBox::generic(reason)))
+                    #[cfg(feature = "npm")]
+                    {
+                        if self.npm.is_enabled() {
+                            return Some(self.resolve_npm(&npm.canonical(), referrer));
+                        }
+                        Some(Err(JsErrorBox::generic(with_referrer(
+                            format!(
+                                "cannot resolve `{}`: npm module resolution is disabled (--no-npm)",
+                                npm.canonical()
+                            ),
+                            referrer,
+                        ))))
+                    }
+                    #[cfg(not(feature = "npm"))]
+                    {
+                        let reason = unsupported_specifier(&npm.canonical(), referrer)
+                            .unwrap_or_else(|| {
+                                with_referrer(
+                                    format!(
+                                        "cannot resolve `{}`: npm: modules are not implemented",
+                                        npm.canonical()
+                                    ),
+                                    referrer,
+                                )
+                            });
+                        Some(Err(JsErrorBox::generic(reason)))
+                    }
                 }
                 NormalizedSpecifier::Node(node) => {
                     let reason = unsupported_specifier(&node, referrer).unwrap_or_else(|| {
@@ -406,6 +455,68 @@ impl FileModuleLoader {
         validate_url(&url).map_err(|error| JsErrorBox::generic(error.to_string()))?;
         Ok(url)
     }
+
+    #[cfg(feature = "npm")]
+    fn resolve_npm(&self, specifier: &str, referrer: &str) -> ModuleResolveResponse {
+        self.npm
+            .resolve_npm_specifier(specifier, referrer)
+            .map_err(|reason| {
+                JsErrorBox::generic(with_referrer(
+                    format!(
+                        "cannot resolve `{}`: {reason}",
+                        display_specifier(specifier)
+                    ),
+                    referrer,
+                ))
+            })
+    }
+
+    #[cfg(feature = "npm")]
+    fn resolve_from_npm_referrer(&self, specifier: &str, referrer: &str) -> ModuleResolveResponse {
+        let referrer_url = Url::parse(referrer).map_err(|error| {
+            JsErrorBox::generic(with_referrer(
+                format!("cannot resolve `{}`: {error}", display_specifier(specifier)),
+                referrer,
+            ))
+        })?;
+        match self.npm.resolve_from_npm_referrer(&referrer_url, specifier) {
+            Ok(NpmReferrerAction::ResolvedUrl(url)) => Ok(url),
+            Ok(NpmReferrerAction::DelegateNeoBuiltin(canonical_or_spec)) => {
+                if let Some(canonical) = builtins::resolve(&canonical_or_spec)
+                    .or_else(|| case_insensitive_builtin(&canonical_or_spec))
+                {
+                    return builtin_url(canonical);
+                }
+                let reason =
+                    unsupported_specifier(&canonical_or_spec, referrer).unwrap_or_else(|| {
+                        with_referrer(
+                            format!("cannot resolve `{}`", display_specifier(&canonical_or_spec)),
+                            referrer,
+                        )
+                    });
+                Err(JsErrorBox::generic(reason))
+            }
+            Ok(NpmReferrerAction::DelegateNodeBuiltin(node_spec)) => {
+                let reason = unsupported_specifier(&node_spec, referrer).unwrap_or_else(|| {
+                    with_referrer(
+                        format!(
+                            "cannot resolve `{}`: Node.js built-in modules are not implemented",
+                            display_specifier(&node_spec)
+                        ),
+                        referrer,
+                    )
+                });
+                Err(JsErrorBox::generic(reason))
+            }
+            Err(reason) => Err(JsErrorBox::generic(with_referrer(
+                format!(
+                    "cannot resolve `{}`: {reason}",
+                    display_specifier(specifier)
+                ),
+                referrer,
+            ))),
+        }
+    }
 }
 
 impl ModuleLoader for FileModuleLoader {
@@ -415,6 +526,7 @@ impl ModuleLoader for FileModuleLoader {
         referrer: &str,
         kind: ResolutionKind,
     ) -> ModuleResolveResponse {
+        // 1. `neo:*` built-ins (always canonical, never hijacked).
         if let Some(canonical) = builtins::resolve(specifier) {
             return builtin_url(canonical);
         }
@@ -426,10 +538,68 @@ impl ModuleLoader for FileModuleLoader {
             return builtin_url(canonical);
         }
 
+        // 2. `node:*` built-ins (never hijacked by import maps or package.json).
+        if is_node_scheme_ci(specifier) {
+            let reason = unsupported_specifier(specifier, referrer).unwrap_or_else(|| {
+                with_referrer(
+                    format!(
+                        "cannot resolve `{}`: Node.js built-in modules are not implemented",
+                        display_specifier(specifier)
+                    ),
+                    referrer,
+                )
+            });
+            return Err(JsErrorBox::generic(reason));
+        }
+
+        // Imports issued from inside an already-resolved `npm://` package stay
+        // strictly inside the package's verified CAS tree & declared dependencies.
+        #[cfg(feature = "npm")]
+        if is_npm_referrer(referrer) {
+            return self.resolve_from_npm_referrer(specifier, referrer);
+        }
+
+        // 3. `neo.jsonc` `imports` / workspace members.
         if let Some(resolved) = self.resolve_with_import_resolver(specifier, referrer) {
             return resolved;
         }
 
+        // 4. Explicit `npm:...` specifiers from local `file:` referrers.
+        if is_npm_scheme_ci(specifier) && is_file_referrer(referrer) {
+            #[cfg(feature = "npm")]
+            {
+                if self.npm.is_enabled() {
+                    return self.resolve_npm(specifier, referrer);
+                }
+                return Err(JsErrorBox::generic(with_referrer(
+                    format!(
+                        "cannot resolve `{}`: npm module resolution is disabled (--no-npm)",
+                        display_specifier(specifier)
+                    ),
+                    referrer,
+                )));
+            }
+        }
+
+        // 5. Nearest project `package.json` dependencies / devDependencies / `#imports`.
+        #[cfg(feature = "npm")]
+        if self.npm.is_enabled() && is_file_referrer(referrer) {
+            match self.npm.resolve_project_specifier(specifier, referrer) {
+                Ok(Some(url)) => return Ok(url),
+                Ok(None) => {}
+                Err(reason) => {
+                    return Err(JsErrorBox::generic(with_referrer(
+                        format!(
+                            "cannot resolve `{}`: {reason}",
+                            display_specifier(specifier)
+                        ),
+                        referrer,
+                    )));
+                }
+            }
+        }
+
+        // 6. `gh:` / `github:` / `https:` / local files.
         // `gh:` and `github:` are not a transport of their own: they name one
         // credential-free raw HTTPS URL. Resolving them here, before the
         // referrer branch, makes them work from a local or a remote importer.
@@ -493,6 +663,10 @@ impl ModuleLoader for FileModuleLoader {
                 module_specifier,
                 None,
             )));
+        }
+        #[cfg(feature = "npm")]
+        if module_specifier.scheme() == "npm" {
+            return self.load_npm(module_specifier);
         }
         if module_specifier.scheme() == "https" {
             if let Some(entry) = self.take_entry(module_specifier) {
@@ -627,6 +801,48 @@ impl FileModuleLoader {
             None,
         )))
     }
+
+    #[cfg(feature = "npm")]
+    fn load_npm(&self, module_specifier: &Url) -> ModuleLoadResponse {
+        let display = display_url(module_specifier);
+        let loaded = match self.npm.load_module(module_specifier) {
+            Ok(loaded) => loaded,
+            Err(reason) => {
+                return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                    "cannot load {display}: {reason}"
+                ))));
+            }
+        };
+        let source = match loaded.format {
+            ModuleFormat::JavaScript => {
+                ModuleSourceCode::Bytes(loaded.bytes.into_boxed_slice().into())
+            }
+            ModuleFormat::TypeScript => {
+                let code = match String::from_utf8(loaded.bytes) {
+                    Ok(code) => code,
+                    Err(_) => {
+                        return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                            "cannot load {display}: the module is not valid UTF-8"
+                        ))));
+                    }
+                };
+                match typescript::strip(module_specifier, code) {
+                    Ok(stripped) => ModuleSourceCode::String(stripped.into()),
+                    Err(reason) => {
+                        return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                            "cannot load {display}: {reason}"
+                        ))));
+                    }
+                }
+            }
+        };
+        ModuleLoadResponse::Sync(Ok(ModuleSource::new(
+            ModuleType::JavaScript,
+            source,
+            module_specifier,
+            None,
+        )))
+    }
 }
 
 /// Resolves a built-in specifier whose scheme differs only in ASCII case.
@@ -725,7 +941,17 @@ fn unsupported_scheme(url: &Url) -> String {
             }
         }
         "node" => "Node.js built-in modules are not implemented".to_string(),
-        "npm" => "npm: modules are not implemented".to_string(),
+        "npm" => {
+            #[cfg(feature = "npm")]
+            {
+                "npm: modules are only allowed from local modules when npm resolution is enabled"
+                    .to_string()
+            }
+            #[cfg(not(feature = "npm"))]
+            {
+                "npm: modules are not implemented".to_string()
+            }
+        }
         "jsr" => {
             "jsr: modules require remote module loading; create the Runtime with Runtime::with_remote (neojs --allow-remote) to enable them"
                 .to_string()
@@ -753,6 +979,26 @@ fn unsupported_scheme(url: &Url) -> String {
 /// Returns whether `referrer` is a local `file:` URL.
 fn is_file_referrer(referrer: &str) -> bool {
     Url::parse(referrer).is_ok_and(|url| url.scheme() == "file")
+}
+
+/// Returns whether `referrer` is a resolved virtual `npm://` URL.
+#[cfg(feature = "npm")]
+fn is_npm_referrer(referrer: &str) -> bool {
+    Url::parse(referrer).is_ok_and(|url| url.scheme() == "npm")
+}
+
+/// Returns whether `specifier` begins with `node:` (ASCII case-insensitive).
+fn is_node_scheme_ci(specifier: &str) -> bool {
+    specifier
+        .get(..5)
+        .is_some_and(|head| head.eq_ignore_ascii_case("node:"))
+}
+
+/// Returns whether `specifier` begins with `npm:` (ASCII case-insensitive).
+fn is_npm_scheme_ci(specifier: &str) -> bool {
+    specifier
+        .get(..4)
+        .is_some_and(|head| head.eq_ignore_ascii_case("npm:"))
 }
 
 /// Returns whether a specifier is a URL path that resolves against a remote

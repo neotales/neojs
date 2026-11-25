@@ -404,6 +404,8 @@ mod fs;
 // in `neojs-remote`.
 mod jsr_loader;
 mod loader;
+#[cfg(feature = "npm")]
+mod npm_loader;
 mod path;
 mod remote_redact;
 mod runtime;
@@ -417,6 +419,8 @@ mod uuid;
 pub use error::Error;
 pub use neojs_manifest::ImportResolver;
 pub use neojs_remote::RemoteOptions;
+#[cfg(feature = "npm")]
+pub use npm_loader::NpmOptions;
 pub use runtime::Runtime;
 pub use runtime::RuntimeOptions;
 pub use runtime::TestReport;

@@ -271,14 +271,20 @@ if (platform === "fake" || upperPlatform === "fake" || platform !== upperPlatfor
         .expect_err(".cjs must be rejected");
     assert!(err.to_string().contains(".cjs extension"), "{err}");
 
-    // `npm:` target must fail clearly as unsupported.
+    // `npm:` target must fail clearly when disabled or missing from offline CAS/lockfile.
     let npm_main = write(dir.path(), "npm_check.ts", r#"import "npm-dep";"#);
     let err = Runtime::with_import_resolver(resolver)
         .expect("runtime")
         .run_file(&npm_main)
-        .expect_err("npm: must be rejected");
+        .expect_err("npm: without cache/remote must fail");
+    #[cfg(not(feature = "npm"))]
     assert!(
         err.to_string().contains("npm: modules are not implemented"),
+        "{err}"
+    );
+    #[cfg(feature = "npm")]
+    assert!(
+        err.to_string().contains("offline") || err.to_string().contains("allow-remote"),
         "{err}"
     );
 }

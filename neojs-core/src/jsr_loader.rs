@@ -570,6 +570,11 @@ impl ModuleLoader for JsrModuleLoader {
         referrer: &str,
         kind: ResolutionKind,
     ) -> ModuleResolveResponse {
+        // Virtual `npm://` referrers enforce their own strict CAS package boundary
+        // (including forbidding `jsr:`, `https:`, and `file:` imports).
+        if Url::parse(referrer).is_ok_and(|url| url.scheme() == "npm") {
+            return self.files.resolve(specifier, referrer, kind);
+        }
         if specifier.starts_with("jsr:") {
             return self.resolve_jsr(specifier, referrer);
         }

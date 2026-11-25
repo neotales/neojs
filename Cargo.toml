@@ -96,6 +96,9 @@ neojs-fs-core = { version = "0.0.0-alpha.0", path = "neojs-fs-core" }
 # `neo.jsonc` JSONC parsing, bounded upward discovery, workspace expansion, and
 # pure import-map/workspace resolution.
 neojs-manifest = { version = "0.0.0-alpha.0", path = "neojs-manifest" }
+# Engine-neutral npm specifier, SemVer, package.json, exports, CAS tarball, lockfile,
+# and virtual graph resolver.
+neojs-npm = { version = "0.0.0-alpha.0", path = "neojs-npm" }
 # Engine-neutral HTTPS transport, global cache, GitHub normalization, and JSR
 # resolution. Has no JS engine dependency; `network` enables `ureq` + `rustls`.
 neojs-remote = { version = "0.0.0-alpha.0", path = "neojs-remote" }

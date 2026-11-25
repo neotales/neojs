@@ -138,7 +138,14 @@ impl ExportsResolver {
         pkg_name: &str,
         specifier: &str,
     ) -> Result<PackageImportTarget, ExportsError> {
-        resolve_import_impl(Some((tree, cas)), None, pkg_json, pkg_name, specifier)
+        resolve_import_impl(
+            Some((tree, cas)),
+            None,
+            pkg_json,
+            pkg_name,
+            specifier,
+            false,
+        )
     }
 
     /// Resolves a `#...` import specifier against a project `package.json`,
@@ -146,14 +153,22 @@ impl ExportsResolver {
     /// [`neojs_module_policy::package_module_format`].
     ///
     /// External targets (`"dep"` or `"dep/sub"`) must be declared in the
-    /// project `package.json`'s `dependencies` or `optionalDependencies`.
+    /// project `package.json`'s `dependencies`, `devDependencies`, or
+    /// `optionalDependencies`.
     pub fn resolve_project_import(
         pkg_json: &PackageJson,
         project_root: &Path,
         pkg_name: &str,
         specifier: &str,
     ) -> Result<PackageImportTarget, ExportsError> {
-        resolve_import_impl(None, Some(project_root), pkg_json, pkg_name, specifier)
+        resolve_import_impl(
+            None,
+            Some(project_root),
+            pkg_json,
+            pkg_name,
+            specifier,
+            true,
+        )
     }
 
     /// Determines the nearest `package.json` `"type"` for `rel_path` inside `tree`
@@ -215,6 +230,7 @@ fn resolve_import_impl(
     pkg_json: &PackageJson,
     pkg_name: &str,
     specifier: &str,
+    allow_dev_deps: bool,
 ) -> Result<PackageImportTarget, ExportsError> {
     if !specifier.starts_with('#') || specifier == "#" || specifier.starts_with("#/") {
         return Err(ExportsError::PackageImportNotDefined {
@@ -277,7 +293,12 @@ fn resolve_import_impl(
                 reason: err.to_string(),
             }
         })?;
-    if !pkg_json.is_declared_dependency(ext_name.as_str()) {
+    let is_declared = if allow_dev_deps {
+        pkg_json.is_declared_project_dependency(ext_name.as_str())
+    } else {
+        pkg_json.is_declared_dependency(ext_name.as_str())
+    };
+    if !is_declared {
         return Err(ExportsError::InvalidTarget {
             package: pkg_name.to_owned(),
             target,
@@ -557,6 +578,14 @@ fn resolve_legacy_fallback(
             target: sub.to_owned(),
             reason: err.to_string(),
         })?;
+        return Ok(clean);
+    }
+
+    if let Some(module_entry) = &pkg_json.module {
+        let stripped = module_entry
+            .strip_prefix("./")
+            .unwrap_or(module_entry.as_str());
+        let clean = normalize_target_rel(pkg_name, module_entry, stripped)?;
         return Ok(clean);
     }
 
