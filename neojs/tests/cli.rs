@@ -4825,3 +4825,177 @@ fn node_compat_disabled_at_compile_time_refuses_node_specifiers() {
         stderr(&output)
     );
 }
+
+#[cfg(all(
+    feature = "neo-db",
+    feature = "neo-http",
+    feature = "neo-template",
+    feature = "node-compat"
+))]
+#[test]
+fn webapp_example_passes_neojs_test_suite() {
+    let test_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("examples/webapp/app.test.ts");
+    let output = run_args_with_timeout(
+        &["test", test_file.to_str().expect("utf-8 test path")],
+        Duration::from_secs(30),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stdout(&output).contains("# 6 tests, 6 passed, 0 failed"),
+        "stdout:\n{}",
+        stdout(&output)
+    );
+}
+
+#[cfg(all(
+    feature = "neo-db",
+    feature = "neo-http",
+    feature = "neo-template",
+    feature = "node-compat"
+))]
+#[test]
+fn webapp_example_main_serves_live_http_round_trip() {
+    use std::io::{BufRead, BufReader, Write as _};
+    use std::net::TcpStream;
+
+    struct ChildGuard(Option<std::process::Child>);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let main_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("examples/webapp/main.ts");
+
+    let mut guard = ChildGuard(Some(
+        neojs_command()
+            .arg(&main_file)
+            .env("HOST", "127.0.0.1")
+            .env("PORT", "0")
+            .env("DB_PATH", ":memory:")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn webapp main.ts"),
+    ));
+
+    let child = guard.0.as_mut().expect("child present");
+    let stdout_pipe = child.stdout.take().expect("stdout pipe");
+    let stderr_pipe = child.stderr.take().expect("stderr pipe");
+
+    let (tx, rx) = mpsc::channel::<String>();
+    let stdout_handle = thread::spawn(move || {
+        let mut reader = BufReader::new(stdout_pipe);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let _ = tx.send(line.clone());
+                }
+            }
+        }
+    });
+
+    let stderr_handle = thread::spawn(move || {
+        let mut reader = BufReader::new(stderr_pipe);
+        let mut buf = String::new();
+        let _ = reader.read_to_string(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut startup_lines = Vec::new();
+    let listen_line = loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            drop(guard);
+            let stderr_output = stderr_handle.join().unwrap_or_default();
+            let _ = stdout_handle.join();
+            panic!(
+                "webapp timed out before printing bound URL; stdout={startup_lines:?}; stderr={stderr_output}"
+            );
+        };
+        match rx.recv_timeout(remaining) {
+            Ok(line) => {
+                if line.starts_with("Listening on http://") {
+                    break line;
+                }
+                startup_lines.push(line);
+            }
+            Err(_) => {
+                drop(guard);
+                let stderr_output = stderr_handle.join().unwrap_or_default();
+                let _ = stdout_handle.join();
+                panic!(
+                    "webapp exited before printing bound URL; stdout={startup_lines:?}; stderr={stderr_output}"
+                );
+            }
+        }
+    };
+
+    let addr = listen_line
+        .trim()
+        .strip_prefix("Listening on http://")
+        .expect("Listening on http://<addr>");
+
+    let send_http = |raw_req: &str| -> String {
+        let mut stream = TcpStream::connect(addr).expect("connect to webapp");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        stream.write_all(raw_req.as_bytes()).expect("write request");
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).expect("read response");
+        String::from_utf8_lossy(&resp).into_owned()
+    };
+
+    let health = send_http(&format!(
+        "GET /api/health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    ));
+    assert!(health.starts_with("HTTP/1.1 200 OK"), "{health}");
+    assert!(health.contains("\"runtime\":\"neojs\""), "{health}");
+
+    let payload = "{\"title\":\"Live <script>test</script>\"}";
+    let post = send_http(&format!(
+        "POST /api/tasks HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        payload.len(),
+        payload
+    ));
+    assert!(post.starts_with("HTTP/1.1 201 Created"), "{post}");
+
+    let home = send_http(&format!(
+        "GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    ));
+    assert!(home.starts_with("HTTP/1.1 200 OK"), "{home}");
+    assert!(
+        home.contains("Live &lt;script&gt;test&lt;/script&gt;"),
+        "{home}"
+    );
+
+    let css = send_http(&format!(
+        "GET /assets/style.css HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    ));
+    assert!(css.starts_with("HTTP/1.1 200 OK"), "{css}");
+    assert!(css.contains(".task-list"), "{css}");
+
+    drop(guard);
+    let _ = stdout_handle.join();
+    let _ = stderr_handle.join();
+}
