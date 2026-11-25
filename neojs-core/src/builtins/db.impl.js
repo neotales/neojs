@@ -28,7 +28,13 @@
     class DbError extends dbError {
         constructor(code, message, databaseKind) {
             super(message);
-            this.name = "DbError";
+            dbDefineProperty(this, "name", {
+                __proto__: null,
+                value: "DbError",
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            });
             dbDefineProperty(this, "code", {
                 __proto__: null,
                 value: code,
@@ -56,6 +62,7 @@
     function attachAsyncDispose(handle, closeFn) {
         if (dbAsyncDispose !== null) {
             dbDefineProperty(handle, dbAsyncDispose, {
+                __proto__: null,
                 value: closeFn,
                 enumerable: false,
                 writable: false,

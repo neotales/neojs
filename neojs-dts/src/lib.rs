@@ -10,7 +10,7 @@
 //! # Profiles
 //!
 //! * [`Profile::V8`] targets the full `neojs` binary (`Neo.engine === "neo"`,
-//!   `console.{log,debug,info,warn,error}`, and all 17 `neo:*` built-in
+//!   `console.{log,debug,info,warn,error}`, and all 18 `neo:*` built-in
 //!   modules).
 //! * [`Profile::Lite`] targets the `neojs-lite` binary
 //!   (`Neo.engine === "neo-lite"`, `console.{log,debug,info,warn,error}`, and
@@ -44,7 +44,7 @@ use std::path::{Component, Path, PathBuf};
 #[non_exhaustive]
 pub enum Profile {
     /// Full V8-backed `neojs` runtime (`engine: "neo"`, 5 `console` methods,
-    /// and all 17 `neo:*` built-ins).
+    /// and all 18 `neo:*` built-ins).
     V8,
     /// QuickJS-backed `neojs-lite` runtime (`engine: "neo-lite"`,
     /// `console.{log,debug,info,warn,error}`, and the 14 Lite `neo:*`

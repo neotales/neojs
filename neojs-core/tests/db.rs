@@ -480,12 +480,271 @@ try {
 if (!(dbErr instanceof DbError) || dbErr.code !== "DATABASE") {
     throw new Error(`expected DATABASE, got ${dbErr}`);
 }
+if (dbErr.databaseKind !== "Constraint") {
+    throw new Error(`expected databaseKind === 'Constraint', got ${dbErr.databaseKind}`);
+}
 for (const sensitive of ["uniq", "leaked_param_xyz", "INSERT"]) {
     if (dbErr.message.includes(sensitive)) {
         throw new Error(`database error leaked sensitive text: ${sensitive}`);
     }
 }
 await db.close();
+"#,
+    );
+}
+
+#[test]
+fn i64_min_max_and_proto_column_round_trip() {
+    run_js(
+        r#"
+import { openSqlite } from "neo:db";
+
+const db = await openSqlite();
+await db.execute("CREATE TABLE extremes (id INTEGER PRIMARY KEY, val INTEGER NOT NULL)");
+const minI64 = -9223372036854775808n;
+const maxI64 = 9223372036854775807n;
+
+await db.execute("INSERT INTO extremes (id, val) VALUES (?, ?)", [1, minI64]);
+await db.execute("INSERT INTO extremes (id, val) VALUES (?, ?)", [2, maxI64]);
+
+const rMin = await db.queryOne("SELECT val FROM extremes WHERE id = ?", [1]);
+if (!rMin || rMin.val !== minI64 || typeof rMin.val !== "bigint") {
+    throw new Error(`i64::MIN mismatch: ${rMin?.val}`);
+}
+
+const rMax = await db.queryOne("SELECT val FROM extremes WHERE id = ?", [2]);
+if (!rMax || rMax.val !== maxI64 || typeof rMax.val !== "bigint") {
+    throw new Error(`i64::MAX mismatch: ${rMax?.val}`);
+}
+
+// Column literally named "__proto__" becomes an own data property without polluting prototype
+const protoRow = await db.queryOne('SELECT 1 AS "__proto__"');
+if (!protoRow) throw new Error("missing protoRow");
+if (Object.getPrototypeOf(protoRow) !== Object.prototype) {
+    throw new Error("row prototype was altered by __proto__ column");
+}
+const desc = Object.getOwnPropertyDescriptor(protoRow, "__proto__");
+if (!desc || desc.value !== 1 || desc.enumerable !== true) {
+    throw new Error(`__proto__ own data property mismatch: ${JSON.stringify(desc)}`);
+}
+
+await db.close();
+"#,
+    );
+}
+
+#[test]
+fn hardened_param_parsing_rejects_proxies_getters_sparse_and_tampered_prototypes() {
+    run_js(
+        r#"
+import { DbError, openSqlite } from "neo:db";
+
+const db = await openSqlite();
+
+async function expectInvalidParam(fn, label) {
+    let err = null;
+    try {
+        await fn();
+    } catch (e) {
+        err = e;
+    }
+    if (!(err instanceof DbError) || err.code !== "INVALID_PARAM") {
+        throw new Error(`${label}: expected INVALID_PARAM, got ${err}`);
+    }
+}
+
+// 1. Sparse arrays and oversized length
+const sparse1 = [, 1];
+await expectInvalidParam(() => db.query("SELECT ?, ?", sparse1), "leading sparse hole");
+
+const sparse2 = [1, , 3];
+await expectInvalidParam(() => db.query("SELECT ?, ?, ?", sparse2), "middle sparse hole");
+
+const hugeSparse = [1];
+hugeSparse.length = 0x80000000;
+await expectInvalidParam(() => db.query("SELECT ?", hugeSparse), "huge sparse array");
+
+// Too many dense params (> MAX_DB_PARAMS)
+const tooMany = new Array(4097).fill(1);
+await expectInvalidParam(() => db.query("SELECT 1", tooMany), "over MAX_DB_PARAMS positional");
+
+// 2. Proxy params (must not invoke traps)
+let proxyTrapCalled = false;
+const proxyArr = new Proxy([1], {
+    get() {
+        proxyTrapCalled = true;
+        return 1;
+    },
+    getOwnPropertyDescriptor() {
+        proxyTrapCalled = true;
+        return { value: 1, writable: true, enumerable: true, configurable: true };
+    },
+});
+await expectInvalidParam(() => db.query("SELECT ?", proxyArr), "proxy array");
+if (proxyTrapCalled) throw new Error("proxy array trap was invoked");
+
+const proxyObj = new Proxy({ a: 1 }, {
+    ownKeys() {
+        proxyTrapCalled = true;
+        return ["a"];
+    },
+    get() {
+        proxyTrapCalled = true;
+        return 1;
+    },
+});
+await expectInvalidParam(() => db.query("SELECT @a", proxyObj), "proxy object");
+if (proxyTrapCalled) throw new Error("proxy object trap was invoked");
+
+// 3. Accessor getters on array and plain object (must never invoke getter)
+let getterCalled = false;
+const objWithGetter = {};
+Object.defineProperty(objWithGetter, "a", {
+    enumerable: true,
+    get() {
+        getterCalled = true;
+        return 1;
+    },
+});
+await expectInvalidParam(() => db.query("SELECT @a", objWithGetter), "object getter");
+if (getterCalled) throw new Error("object getter was invoked");
+
+const arrWithGetter = [];
+Object.defineProperty(arrWithGetter, "0", {
+    enumerable: true,
+    get() {
+        getterCalled = true;
+        return 1;
+    },
+});
+await expectInvalidParam(() => db.query("SELECT ?", arrWithGetter), "array getter");
+if (getterCalled) throw new Error("array getter was invoked");
+
+// 4. Object.prototype / Array.prototype poisoning resilience
+Object.defineProperty(Object.prototype, "code", {
+    __proto__: null,
+    configurable: true,
+    set() {
+        throw new Error("poisoned Object.prototype.code setter");
+    },
+});
+Object.defineProperty(Object.prototype, "name", {
+    __proto__: null,
+    configurable: true,
+    set() {
+        throw new Error("poisoned Object.prototype.name setter");
+    },
+});
+Object.defineProperty(Object.prototype, "value", {
+    __proto__: null,
+    configurable: true,
+    get() {
+        throw new Error("poisoned Object.prototype.value getter");
+    },
+});
+Object.defineProperty(Object.prototype, "get", {
+    __proto__: null,
+    configurable: true,
+    get() {
+        throw new Error("poisoned Object.prototype.get getter");
+    },
+});
+Object.defineProperty(Array.prototype, "0", {
+    __proto__: null,
+    configurable: true,
+    get() {
+        throw new Error("poisoned Array.prototype[0] getter");
+    },
+});
+
+try {
+    // Normal positional & named queries still work under prototype poisoning
+    const row1 = await db.queryOne("SELECT ? AS x", [42]);
+    if (!row1 || row1.x !== 42) throw new Error("positional query failed under poisoning");
+
+    const row2 = await db.queryOne("SELECT @y AS y", { y: "ok" });
+    if (!row2 || row2.y !== "ok") throw new Error("named query failed under poisoning");
+
+    // DbError construction & code/name remain unpoisoned
+    await expectInvalidParam(() => db.query("SELECT ?", [,]), "sparse hole under Array.prototype[0] poison");
+} finally {
+    delete Object.prototype.code;
+    delete Object.prototype.name;
+    delete Object.prototype.value;
+    delete Object.prototype.get;
+    delete Array.prototype["0"];
+}
+
+await db.close();
+"#,
+    );
+}
+
+#[test]
+fn transaction_rejects_nested_tx_direct_close_and_concurrent_db_close() {
+    run_js(
+        r#"
+import { DbError, openSqlite } from "neo:db";
+
+const db = await openSqlite();
+await db.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, val TEXT NOT NULL)");
+
+// 1. tx.transaction() and tx.close() reject with SQL
+await db.transaction(async (tx) => {
+    let nestedErr = null;
+    try {
+        await tx.transaction(async () => {});
+    } catch (e) {
+        nestedErr = e;
+    }
+    if (!(nestedErr instanceof DbError) || nestedErr.code !== "SQL") {
+        throw new Error(`expected SQL for nested tx, got ${nestedErr}`);
+    }
+
+    let closeErr = null;
+    try {
+        await tx.close();
+    } catch (e) {
+        closeErr = e;
+    }
+    if (!(closeErr instanceof DbError) || closeErr.code !== "SQL") {
+        throw new Error(`expected SQL for tx.close(), got ${closeErr}`);
+    }
+
+    await tx.execute("INSERT INTO items (id, val) VALUES (1, 'before-close')");
+});
+
+// 2. db.close() called during an active transaction:
+//    tx finishes committing cleanly, while db is closed afterward.
+await db.transaction(async (tx) => {
+    await tx.execute("INSERT INTO items (id, val) VALUES (2, 'during-close')");
+    await db.close();
+    await tx.execute("INSERT INTO items (id, val) VALUES (3, 'after-db-close-still-in-tx')");
+});
+
+let postCloseErr = null;
+try {
+    await db.query("SELECT * FROM items");
+} catch (e) {
+    postCloseErr = e;
+}
+if (!(postCloseErr instanceof DbError) || postCloseErr.code !== "CLOSED") {
+    throw new Error(`expected CLOSED on db after close during tx, got ${postCloseErr}`);
+}
+
+// 3. db.close() racing concurrently with db.transaction() start
+const db2 = await openSqlite();
+const txPromise = db2.transaction(async (tx) => {
+    await tx.execute("SELECT 1");
+    return "ok";
+});
+const closePromise = db2.close();
+const [txSettled] = await Promise.allSettled([txPromise, closePromise]);
+if (txSettled.status === "fulfilled") {
+    if (txSettled.value !== "ok") throw new Error(`unexpected tx result: ${txSettled.value}`);
+} else if (!(txSettled.reason instanceof DbError) || txSettled.reason.code !== "CLOSED") {
+    throw new Error(`unexpected tx race rejection: ${txSettled.reason}`);
+}
 "#,
     );
 }

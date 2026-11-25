@@ -749,10 +749,12 @@ impl Runtime {
     /// foreground tasks are serviced by the runtime's own driver thread.
     ///
     /// Asynchronous `crypto` calls (`hashAsync`, `hmacAsync`, `pbkdf2Async`,
-    /// `bcryptHashAsync`, and `bcryptVerifyAsync`) need a Tokio current-thread
-    /// runtime to host deno_core's async-op driver. They work when this future
-    /// is polled inside such a runtime, as it is under [`Runtime::run_file`],
-    /// and otherwise fail with `NEO_CRYPTO_NO_EXECUTOR`. The synchronous hash,
+    /// `bcryptHashAsync`, and `bcryptVerifyAsync`) and async `neo:db` calls
+    /// need a Tokio current-thread runtime to host deno_core's async-op driver.
+    /// They work when this future is polled inside such a runtime, as it is
+    /// under [`Runtime::run_file`]; without an active Tokio runtime, async
+    /// `crypto` calls fail with `NEO_CRYPTO_NO_EXECUTOR` and async `neo:db`
+    /// calls fail with `DbError` (`code: "DATABASE"`). The synchronous hash,
     /// HMAC, PBKDF2, and bcrypt API does not depend on the executor.
     ///
     /// Entry preparation is not offloaded: the file read and any TypeScript type

@@ -345,7 +345,7 @@ subpaths appear as their canonical specifiers too.
 Neo.engine; // "neo"
 Neo.getBuiltInModulesList();
 // ["neo:age", "neo:assert", "neo:chars", "neo:console",
-//  "neo:cron", "neo:crypto", "neo:fs", "neo:os", "neo:path", "neo:slices",
+//  "neo:cron", "neo:crypto", "neo:db", "neo:fs", "neo:os", "neo:path", "neo:slices",
 //  "neo:ssh", "neo:stdio", "neo:strings", "neo:test", "neo:uuid",
 //  "neo:uuid/v4", "neo:uuid/v7"]
 ```
@@ -355,21 +355,22 @@ Node modules: a `node:` opt-in is not implemented. The same frozen array is retu
 so a caller cannot change later results; a new `Runtime` allocates a new array. `Neo.getBuiltInModule`
 takes the same canonical `neo:` specifier: `Neo.getBuiltInModule("neo:age")` returns the module, and
 `Neo.getBuiltInModule("age")` returns `undefined`. Imports follow the same rule; the bare name `age`
-is not a built-in module specifier. The V8 build enables the positive `neo-chars`, `neo-slices`,
-and `neo-strings` features by default; `--no-default-features` removes all three modules, the native
-`chars` and `strings` registrations, their registry entries, and their loader entries. `chars` and
-`strings` are native Rust bindings; there is no JavaScript implementation or ESM facade. `slices` is
-still JavaScript and is a separate source file included only when `neo-slices` is enabled, so a
-disabled build does not embed its bytes. `neo-slices` implies `neo-chars` because `CharSlice`
+is not a built-in module specifier. The V8 build enables the positive `neo-chars`, `neo-db`,
+`neo-slices`, and `neo-strings` features by default; `--no-default-features` removes all four
+modules, the native `chars` and `strings` registrations, their registry entries, and their loader
+entries. `chars` and `strings` are native Rust bindings; there is no JavaScript implementation or
+ESM facade. `db` and `slices` are separate source files included only when `neo-db` / `neo-slices`
+are enabled, so a disabled build does not embed their bytes. `neo-slices` implies `neo-chars` because `CharSlice`
 captures the native `chars.toUpper`/`chars.toLower` functions. Features are additive across the
 dependency graph and are not a sandbox.
 
 `neo:chars` and `neo:strings` are native V8 Rust modules. Every other V8 built-in module —
-`neo:age`, `neo:assert`, `neo:console`, `neo:cron`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:path`,
-`neo:slices`, `neo:ssh`, `neo:stdio`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7` —
-retains an ECMAScript module source or wrapper in V8 (with `neo:assert`, `neo:console`, `neo:os`,
-`neo:path`, `neo:slices`, `neo:test`, and `neo:uuid` delegating their shared core logic and sources
-to `neojs-builtins`, and `neo:fs` delegating to `neojs-fs-core`). Some of those
+`neo:age`, `neo:assert`, `neo:console`, `neo:cron`, `neo:crypto`, `neo:db`, `neo:fs`, `neo:os`,
+`neo:path`, `neo:slices`, `neo:ssh`, `neo:stdio`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and
+`neo:uuid/v7` — retains an ECMAScript module source or wrapper in V8 (with `neo:assert`,
+`neo:console`, `neo:os`, `neo:path`, `neo:slices`, `neo:test`, and `neo:uuid` delegating their
+shared core logic and sources to `neojs-builtins`, `neo:db` delegating to `neojs-dbapi`, and
+`neo:fs` delegating to `neojs-fs-core`). Some of those
 modules call private Rust host ops, but a host op is not a native module.
 
 The QuickJS runtime installs the same `Neo` shape. It reports `Neo.engine` as `"neo-lite"` and,
@@ -1884,20 +1885,21 @@ Features outside this list are not implemented.
   rejected unless the runtime is created with remote loading enabled (`neojs --allow-remote`, or
   `NEOJS_ALLOW_REMOTE=1`), and `http:` is always rejected. In particular, `node:test` is not an
   alias for the `test` built-in; a Node-module opt-in is not implemented. The built-in modules are
-  `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `fs`, `os`, `path`, `slices`, `ssh`, `stdio`,
-  `strings`, `test`, and `uuid`,
+  `age`, `assert`, `chars`, `console`, `cron`, `crypto`, `db`, `fs`, `os`, `path`, `slices`, `ssh`,
+  `stdio`, `strings`, `test`, and `uuid`,
   reached through `Neo.getBuiltInModule("neo:age")`,
   `Neo.getBuiltInModule("neo:assert")`, `Neo.getBuiltInModule("neo:chars")`,
   `Neo.getBuiltInModule("neo:console")`, `Neo.getBuiltInModule("neo:cron")`,
-  `Neo.getBuiltInModule("neo:crypto")`, `Neo.getBuiltInModule("neo:fs")`, `Neo.getBuiltInModule("neo:os")`,
+  `Neo.getBuiltInModule("neo:crypto")`, `Neo.getBuiltInModule("neo:db")`,
+  `Neo.getBuiltInModule("neo:fs")`, `Neo.getBuiltInModule("neo:os")`,
   `Neo.getBuiltInModule("neo:path")`, `Neo.getBuiltInModule("neo:slices")`,
   `Neo.getBuiltInModule("neo:ssh")`, `Neo.getBuiltInModule("neo:stdio")`,
   `Neo.getBuiltInModule("neo:strings")`, `Neo.getBuiltInModule("neo:test")`,
   `Neo.getBuiltInModule("neo:uuid")`,
   `Neo.getBuiltInModule("neo:uuid/v4")`, and `Neo.getBuiltInModule("neo:uuid/v7")`, or
   through the import specifiers `neo:age`, `neo:assert`, `neo:chars`, `neo:console`,
-  `neo:cron`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`, `neo:stdio`,
-  `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`. Other `neo:` modules
+  `neo:cron`, `neo:crypto`, `neo:db`, `neo:fs`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`,
+  `neo:stdio`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`. Other `neo:` modules
   are rejected by name. Bare module specifiers, including a bare built-in name such as `age`, are
   rejected unless mapped by an active `neo.jsonc` `imports` map or workspace `@scope/pkg` member;
   the message names the canonical `neo:` form.

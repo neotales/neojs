@@ -28,6 +28,9 @@ use tokio::sync::{mpsc, oneshot};
 const MAX_SAFE_INTEGER_I64: i64 = 9_007_199_254_740_991;
 const MAX_SAFE_INTEGER_F64: f64 = 9_007_199_254_740_991.0;
 
+/// Upper bound on positional or named parameters accepted for a single statement.
+const MAX_DB_PARAMS: usize = 4_096;
+
 /// Stable screaming-snake-case error codes exposed on `DbError.code`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DbErrorCode {
@@ -489,6 +492,62 @@ fn is_plain_object<'s>(
         .is_some_and(|object_proto| proto.strict_equals(object_proto))
 }
 
+fn descriptor_data_value<'s>(
+    scope: &v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    key: v8::Local<'s, v8::Name>,
+) -> Result<v8::Local<'s, v8::Value>, DbOpError> {
+    let Some(descriptor_value) = object.get_own_property_descriptor(scope, key) else {
+        return Err(DbOpError::invalid_param(
+            "parameter property must be an own data property",
+        ));
+    };
+    let Ok(descriptor) = v8::Local::<v8::Object>::try_from(descriptor_value) else {
+        return Err(DbOpError::invalid_param(
+            "parameter property must be an own data property",
+        ));
+    };
+    let Some(get_key) = v8::String::new(scope, "get") else {
+        return Err(DbOpError::invalid_param(
+            "parameter property could not be inspected",
+        ));
+    };
+    let get_key: v8::Local<'s, v8::Name> = get_key.into();
+    if descriptor.has_own_property(scope, get_key) != Some(false) {
+        return Err(DbOpError::invalid_param(
+            "accessor properties are not allowed in parameters",
+        ));
+    }
+    let Some(value_key) = v8::String::new(scope, "value") else {
+        return Err(DbOpError::invalid_param(
+            "parameter property could not be inspected",
+        ));
+    };
+    let value_key: v8::Local<'s, v8::Name> = value_key.into();
+    if descriptor.has_own_property(scope, value_key) != Some(true) {
+        return Err(DbOpError::invalid_param(
+            "parameter property must be an own data property",
+        ));
+    }
+    descriptor
+        .get(scope, value_key.into())
+        .ok_or_else(|| DbOpError::invalid_param("failed to read parameter property value"))
+}
+
+fn own_array_element<'s>(
+    scope: &v8::PinScope<'s, '_>,
+    array: v8::Local<'s, v8::Array>,
+    index: u32,
+) -> Result<v8::Local<'s, v8::Value>, DbOpError> {
+    let number = v8::Integer::new_from_unsigned(scope, index);
+    let Some(key) = number.to_string(scope) else {
+        return Err(DbOpError::invalid_param(
+            "failed to format positional parameter index",
+        ));
+    };
+    descriptor_data_value(scope, array.cast::<v8::Object>(), key.into())
+}
+
 fn parse_params<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     value: v8::Local<'s, v8::Value>,
@@ -496,24 +555,27 @@ fn parse_params<'s>(
     if value.is_undefined() || value.is_null() {
         return Ok(Params::none());
     }
+    if value.is_proxy() {
+        return Err(DbOpError::invalid_param(
+            "proxy objects are not allowed as parameters",
+        ));
+    }
     if value.is_array() {
         let array = v8::Local::<v8::Array>::try_from(value)
             .map_err(|_| DbOpError::invalid_param("positional parameters must be an array"))?;
-        let len = array.length();
-        let mut out = Vec::with_capacity(len as usize);
-        v8::tc_scope!(let tc_scope, scope);
-        for index in 0..len {
-            let Some(item) = array.get_index(tc_scope, index) else {
-                return Err(DbOpError::invalid_param(
-                    "failed to read positional parameter element",
-                ));
-            };
-            if tc_scope.has_caught() {
-                return Err(DbOpError::invalid_param(
-                    "positional parameter getter threw an error",
-                ));
-            }
-            out.push(js_value_to_param(tc_scope, item)?);
+        let len_u32 = array.length();
+        let len = len_u32 as usize;
+        if len > MAX_DB_PARAMS {
+            return Err(DbOpError::invalid_param(
+                "positional parameter count exceeds limit",
+            ));
+        }
+        let mut out = Vec::new();
+        out.try_reserve_exact(len)
+            .map_err(|_| DbOpError::invalid_param("positional parameter allocation failed"))?;
+        for index in 0..len_u32 {
+            let item = own_array_element(scope, array, index)?;
+            out.push(js_value_to_param(scope, item)?);
         }
         return Ok(Params::positional(out));
     }
@@ -525,29 +587,33 @@ fn parse_params<'s>(
                 "parameters must be undefined, null, an array, or a plain object",
             ));
         }
-        v8::tc_scope!(let tc_scope, scope);
         let Some(keys) = object.get_own_property_names(
-            tc_scope,
+            scope,
             v8::GetPropertyNamesArgs {
                 mode: v8::KeyCollectionMode::OwnOnly,
                 property_filter: v8::PropertyFilter::ONLY_ENUMERABLE
                     | v8::PropertyFilter::SKIP_SYMBOLS,
-                ..Default::default()
+                index_filter: v8::IndexFilter::IncludeIndices,
+                key_conversion: v8::KeyConversionMode::ConvertToString,
             },
         ) else {
             return Err(DbOpError::invalid_param(
                 "failed to enumerate named parameter keys",
             ));
         };
-        if tc_scope.has_caught() {
+        let len_u32 = keys.length();
+        let len = len_u32 as usize;
+        if len > MAX_DB_PARAMS {
             return Err(DbOpError::invalid_param(
-                "named parameter enumeration threw an error",
+                "named parameter count exceeds limit",
             ));
         }
-        let len = keys.length();
-        let mut pairs = Vec::with_capacity(len as usize);
-        for index in 0..len {
-            let Some(key_val) = keys.get_index(tc_scope, index) else {
+        let mut pairs = Vec::new();
+        pairs
+            .try_reserve_exact(len)
+            .map_err(|_| DbOpError::invalid_param("named parameter allocation failed"))?;
+        for index in 0..len_u32 {
+            let Some(key_val) = keys.get_index(scope, index) else {
                 return Err(DbOpError::invalid_param(
                     "failed to read named parameter key",
                 ));
@@ -558,22 +624,13 @@ fn parse_params<'s>(
                 ));
             };
             let name = copy_v8_string(
-                tc_scope,
+                scope,
                 key_str,
                 DbErrorCode::InvalidParam,
                 "named parameter key must be valid UTF-8",
             )?;
-            let Some(prop_val) = object.get(tc_scope, key_val) else {
-                return Err(DbOpError::invalid_param(
-                    "failed to read named parameter value",
-                ));
-            };
-            if tc_scope.has_caught() {
-                return Err(DbOpError::invalid_param(
-                    "named parameter getter threw an error",
-                ));
-            }
-            let param = js_value_to_param(tc_scope, prop_val)?;
+            let prop_val = descriptor_data_value(scope, object, key_str.into())?;
+            let param = js_value_to_param(scope, prop_val)?;
             pairs.push((name, param));
         }
         return Ok(Params::named(pairs));
@@ -695,11 +752,24 @@ async fn send_tx_request<T>(
     }
 }
 
+fn ensure_tokio_runtime() -> Result<(), DbOpError> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Err(DbOpError::new(
+            DbErrorCode::Database,
+            "async database operation requires an active Tokio runtime",
+        ));
+    }
+    Ok(())
+}
+
 #[op2]
 async fn op_neo_db_open(
     state: Rc<RefCell<OpState>>,
     #[scoped] config_json: DbTextInput,
 ) -> DbOpOutcome {
+    if let Err(err) = ensure_tokio_runtime() {
+        return DbOpOutcome::Err(err);
+    }
     let json = match config_json.0 {
         Ok(json) => normalize_config_json(&json),
         Err(mut err) => {
@@ -725,6 +795,9 @@ async fn op_neo_db_open_sqlite(
     state: Rc<RefCell<OpState>>,
     #[scoped] database: DbTextInput,
 ) -> DbOpOutcome {
+    if let Err(err) = ensure_tokio_runtime() {
+        return DbOpOutcome::Err(err);
+    }
     let database = match database.0 {
         Ok(db) => db,
         Err(mut err) => {
@@ -764,6 +837,9 @@ async fn op_neo_db_execute(
     #[scoped] sql: DbTextInput,
     #[scoped] params: DbParamsInput,
 ) -> DbOpOutcome {
+    if let Err(err) = ensure_tokio_runtime() {
+        return DbOpOutcome::Err(err);
+    }
     let (sql, params) = match unpack_sql_and_params(sql, params) {
         Ok(parts) => parts,
         Err(err) => return DbOpOutcome::Err(err),
@@ -785,6 +861,9 @@ async fn op_neo_db_query(
     #[scoped] sql: DbTextInput,
     #[scoped] params: DbParamsInput,
 ) -> DbOpOutcome {
+    if let Err(err) = ensure_tokio_runtime() {
+        return DbOpOutcome::Err(err);
+    }
     let (sql, params) = match unpack_sql_and_params(sql, params) {
         Ok(parts) => parts,
         Err(err) => return DbOpOutcome::Err(err),
@@ -806,6 +885,9 @@ async fn op_neo_db_query_one(
     #[scoped] sql: DbTextInput,
     #[scoped] params: DbParamsInput,
 ) -> DbOpOutcome {
+    if let Err(err) = ensure_tokio_runtime() {
+        return DbOpOutcome::Err(err);
+    }
     let (sql, params) = match unpack_sql_and_params(sql, params) {
         Ok(parts) => parts,
         Err(err) => return DbOpOutcome::Err(err),
@@ -828,20 +910,20 @@ fn op_neo_db_close(state: &mut OpState, #[smi] rid: ResourceId) -> DbOpOutcome {
 
 #[op2]
 async fn op_neo_db_tx_begin(state: Rc<RefCell<OpState>>, #[smi] rid: ResourceId) -> DbOpOutcome {
+    if let Err(err) = ensure_tokio_runtime() {
+        return DbOpOutcome::Err(err);
+    }
     let db = match get_db(&state, rid) {
         Ok(db) => db,
         Err(err) => return DbOpOutcome::Err(err),
     };
-    if tokio::runtime::Handle::try_current().is_err() {
-        return DbOpOutcome::Err(DbOpError::new(
-            DbErrorCode::Database,
-            "database transaction requires an active Tokio runtime",
-        ));
-    }
     let mut conn = match db.connection().await {
         Ok(conn) => conn,
         Err(error) => return DbOpOutcome::Err(error.into()),
     };
+    if get_db(&state, rid).is_err() {
+        return DbOpOutcome::Err(DbOpError::closed());
+    }
     let (sender, mut receiver) = mpsc::channel::<TxCommand>(8);
     let (ready_tx, ready_rx) = oneshot::channel::<Result<(), DbError>>();
     tokio::spawn(async move {
@@ -879,6 +961,10 @@ async fn op_neo_db_tx_begin(state: Rc<RefCell<OpState>>, #[smi] rid: ResourceId)
     });
     match ready_rx.await {
         Ok(Ok(())) => {
+            if get_db(&state, rid).is_err() {
+                let _ = send_tx_request(sender, |reply| TxCommand::Rollback { reply }).await;
+                return DbOpOutcome::Err(DbOpError::closed());
+            }
             let tx_rid = state
                 .borrow_mut()
                 .resource_table
@@ -900,6 +986,9 @@ async fn op_neo_db_tx_execute(
     #[scoped] sql: DbTextInput,
     #[scoped] params: DbParamsInput,
 ) -> DbOpOutcome {
+    if let Err(err) = ensure_tokio_runtime() {
+        return DbOpOutcome::Err(err);
+    }
     let (sql, params) = match unpack_sql_and_params(sql, params) {
         Ok(parts) => parts,
         Err(err) => return DbOpOutcome::Err(err),
@@ -921,6 +1010,9 @@ async fn op_neo_db_tx_query(
     #[scoped] sql: DbTextInput,
     #[scoped] params: DbParamsInput,
 ) -> DbOpOutcome {
+    if let Err(err) = ensure_tokio_runtime() {
+        return DbOpOutcome::Err(err);
+    }
     let (sql, params) = match unpack_sql_and_params(sql, params) {
         Ok(parts) => parts,
         Err(err) => return DbOpOutcome::Err(err),
@@ -942,6 +1034,9 @@ async fn op_neo_db_tx_query_one(
     #[scoped] sql: DbTextInput,
     #[scoped] params: DbParamsInput,
 ) -> DbOpOutcome {
+    if let Err(err) = ensure_tokio_runtime() {
+        return DbOpOutcome::Err(err);
+    }
     let (sql, params) = match unpack_sql_and_params(sql, params) {
         Ok(parts) => parts,
         Err(err) => return DbOpOutcome::Err(err),
@@ -961,6 +1056,9 @@ async fn op_neo_db_tx_commit(
     state: Rc<RefCell<OpState>>,
     #[smi] tx_rid: ResourceId,
 ) -> DbOpOutcome {
+    if let Err(err) = ensure_tokio_runtime() {
+        return DbOpOutcome::Err(err);
+    }
     let Ok(resource) = state
         .borrow_mut()
         .resource_table
@@ -979,6 +1077,9 @@ async fn op_neo_db_tx_rollback(
     state: Rc<RefCell<OpState>>,
     #[smi] tx_rid: ResourceId,
 ) -> DbOpOutcome {
+    if let Err(err) = ensure_tokio_runtime() {
+        return DbOpOutcome::Err(err);
+    }
     let Ok(resource) = state
         .borrow_mut()
         .resource_table

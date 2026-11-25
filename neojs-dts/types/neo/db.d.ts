@@ -73,6 +73,11 @@ declare module "neo:db" {
 
   /**
    * Handle to an open database pool or active single-connection transaction.
+   *
+   * Note: SQLite `:memory:` databases opened via `openSqlite()` (or `open()` without
+   * an explicit `max_connections`) default to `max_connections: 1` so queries share
+   * the same in-memory database. Inside `transaction(fn)`, always use the `tx` handle
+   * passed to `fn` rather than the outer `db` handle.
    */
   export interface Database {
     /**
@@ -82,23 +87,35 @@ declare module "neo:db" {
 
     /**
      * Query a bounded batch of rows as plain objects keyed by column name.
+     *
+     * Bounded by `RowLimit::default()` (1,000 rows, 1 MiB); exceeding the limit
+     * rejects with `DbError` (`code === "DATABASE"`, `databaseKind === "Overflow"`).
+     * Signed 64-bit integer columns (`i64`) return `number` within
+     * `[Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]` and `bigint` outside it.
      */
     query(sql: string, params?: DbParams): Promise<Record<string, unknown>[]>;
 
     /**
      * Query at most one row, or `null` when no row matched.
      * Rejects with `code === "CARDINALITY"` if more than one row matched.
+     * Subject to the same `RowLimit::default()` (1,000 rows, 1 MiB) and
+     * `i64` -> `number` | `bigint` conversion rules as `query()`.
      */
     queryOne(sql: string, params?: DbParams): Promise<Record<string, unknown> | null>;
 
     /**
      * Execute `fn` inside a database transaction (`COMMIT` on resolve, `ROLLBACK` on reject).
+     *
+     * Calling `tx.transaction()` (nested transactions) or `tx.close()` directly on the
+     * transaction handle rejects with `DbError` (`code === "SQL"`). Any use of `tx` after
+     * `transaction()` settles rejects with `DbError` (`code === "CLOSED"`).
      */
     transaction<T>(fn: (tx: Database) => Promise<T> | T): Promise<T>;
 
     /**
      * Close the handle and release underlying resources. Idempotent.
      * Subsequent operations reject with `code === "CLOSED"`.
+     * Calling `close()` on a transaction handle rejects with `code === "SQL"`.
      */
     close(): Promise<void>;
 
