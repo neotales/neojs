@@ -9,7 +9,6 @@ use std::rc::Rc;
 use neojs_module_policy::{ModuleFormat, module_format};
 #[cfg(feature = "neo-console")]
 use rquickjs::Object;
-#[cfg(any(feature = "neo-console", feature = "neo-test"))]
 use rquickjs::function::Opt;
 use rquickjs::{
     CatchResultExt, CaughtError, Context, Ctx, Function, Module, Persistent, Value, qjs,
@@ -37,26 +36,36 @@ const JOB_BUDGET: usize = 100_000;
 /// `neojs-builtins`.
 #[cfg(not(feature = "neo-console"))]
 const FALLBACK_CONSOLE_SHIM: &str = r#"
-(function (write) {
+(function (print) {
     globalThis.console = Object.freeze({
-        log: (...args) => write("out", args.map((value) => String(value)).join(" ")),
-        error: (...args) => write("err", args.map((value) => String(value)).join(" ")),
+        log: (...args) => print(`${args.map((value) => String(value)).join(" ")}\n`, false),
+        error: (...args) => print(`${args.map((value) => String(value)).join(" ")}\n`, true),
     });
 })
 "#;
 
 /// Writes text to stdout or stderr without an added newline and flushes.
 ///
-/// Used by both `neo:console` and `neo:test` host hooks so output ordering and
-/// flush behavior match V8's `Deno.core.print`.
-#[cfg(any(feature = "neo-console", feature = "neo-test"))]
-pub(super) fn host_print(text: Opt<Value<'_>>, is_error: Opt<Value<'_>>) -> rquickjs::Result<()> {
+/// Decodes QuickJS string primitives lossily via `JS_ToCStringLen2` +
+/// `String::from_utf8_lossy` so lone surrogates match V8's `Deno.core.print`
+/// instead of failing UTF-8 conversion. Used by `neo:console`, `neo:test`, and
+/// the `--no-default-features` fallback console.
+pub(super) fn host_print(
+    ctx: Ctx<'_>,
+    text: Opt<Value<'_>>,
+    is_error: Opt<Value<'_>>,
+) -> rquickjs::Result<()> {
     use std::io::Write;
 
-    let Some(text) = text.0.and_then(|value| value.into_string()) else {
+    let Some(value) = text.0 else {
         return Ok(());
     };
-    let text = text.to_string()?;
+    if !value.is_string() {
+        return Ok(());
+    }
+    let Some(text) = string_primitive(&ctx, value.as_raw()) else {
+        return Ok(());
+    };
     let is_error = is_error
         .0
         .and_then(|value| value.as_bool())
@@ -448,14 +457,18 @@ impl Runtime {
     /// `console` and the native `Neo` introspection global.
     ///
     /// `Neo.engine` is `"neo-lite"`. With the default `neo-assert`, `neo-chars`,
-    /// `neo-crypto`, `neo-fs`, `neo-os`, `neo-ssh`, `neo-strings`, `neo-test`,
-    /// and `neo-uuid` features the registry contains the canonical modules
-    /// `neo:assert`, `neo:chars`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:ssh`,
-    /// `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and `neo:uuid/v7`.
-    /// `Neo.getBuiltInModulesList()` returns one frozen array of canonical
-    /// specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
-    /// registry object whose named exports share identity with the module
-    /// namespace. The namespace itself is a distinct object. A bare name, another
+    /// `neo-console`, `neo-crypto`, `neo-fs`, `neo-os`, `neo-path`,
+    /// `neo-slices`, `neo-ssh`, `neo-strings`, `neo-test`, and `neo-uuid`
+    /// features the registry contains the canonical modules `neo:assert`,
+    /// `neo:chars`, `neo:console`, `neo:crypto`, `neo:fs`, `neo:os`, `neo:path`,
+    /// `neo:slices`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`,
+    /// `neo:uuid/v4`, and `neo:uuid/v7`. `Neo.getBuiltInModulesList()` returns
+    /// one frozen array of canonical specifiers, and
+    /// `Neo.getBuiltInModule(specifier)` returns the cached registry object
+    /// (frozen for every module except `neo:console`, which is the live mutable
+    /// `globalThis.console` object) whose named exports share identity with the
+    /// module namespace. The namespace itself is a distinct object. A bare name,
+    /// another
     /// scheme, or a non-string argument does not return a module; a non-string
     /// name throws `TypeError`. With default features off the registry and list
     /// are empty. It does not claim the V8 runtime's full built-in surface.
@@ -536,14 +549,9 @@ impl Runtime {
                 }
                 #[cfg(not(feature = "neo-console"))]
                 {
-                    let write = Function::new(ctx.clone(), |stream: String, text: String| {
-                        match stream.as_str() {
-                            "err" => eprintln!("{text}"),
-                            _ => println!("{text}"),
-                        }
-                    })?;
+                    let print = Function::new(ctx.clone(), host_print)?;
                     let installer: Function<'_> = ctx.eval(FALLBACK_CONSOLE_SHIM)?;
-                    let _: Value<'_> = installer.call((write,))?;
+                    let _: Value<'_> = installer.call((print,))?;
                 }
                 crate::neo::install(
                     &ctx,

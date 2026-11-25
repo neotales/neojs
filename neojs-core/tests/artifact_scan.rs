@@ -20,11 +20,11 @@ const CHARS_SEQUENCE_ONE_HEX: &str =
 /// `FROM_INDEX_NOT_INTEGER` from the Rust `strings` implementation and binding.
 const STRINGS_SEQUENCE_ONE_HEX: &str = "66726f6d496e646578206d75737420626520616e20696e7465676572";
 
-/// `const CHAR_STATE = Symbol("charSliceState");` from `slices.impl.js`.
+/// `const CHAR_STATE = Symbol("charSliceState");` from `neojs-builtins/src/slices.js`.
 const SLICES_SEQUENCE_ONE_HEX: &str =
     "636f6e737420434841525f5354415445203d2053796d626f6c282263686172536c696365537461746522293b";
 /// `throw makeTypeError("slices target must be an Array or a typed array");`
-/// from `slices.impl.js`.
+/// from `neojs-builtins/src/slices.js`.
 const SLICES_SEQUENCE_TWO_HEX: &str = "7468726f77206d616b65547970654572726f722822736c6963657320746172676574206d75737420626520616e204172726179206f72206120747970656420617272617922293b";
 
 /// A string that is always in the shim, proving the scan reads real source bytes.

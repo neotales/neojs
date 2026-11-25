@@ -60,9 +60,11 @@
 //!   `neo:path`, `neo:slices`, `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`,
 //!   `neo:uuid/v4`, and `neo:uuid/v7`.
 //!   `Neo.getBuiltInModulesList()` returns one frozen array of canonical
-//!   specifiers, and `Neo.getBuiltInModule(specifier)` returns the frozen
-//!   registry object whose named exports share identity with the module
-//!   namespace exports; the namespace itself is a distinct object. A bare name
+//!   specifiers, and `Neo.getBuiltInModule(specifier)` returns the cached
+//!   registry object (frozen for every module except `neo:console`, which is
+//!   the live mutable `globalThis.console` object) whose named exports share
+//!   identity with the module namespace exports; the namespace itself is a
+//!   distinct object. A bare name
 //!   or another scheme returns `undefined`; a non-string name throws
 //!   `TypeError`. With `default-features = false` the registry and list are
 //!   empty and no module source is compiled in. The implementations come from

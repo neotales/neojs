@@ -71,7 +71,7 @@ interface NeoGlobal {
 }
 
 /**
- * Global minimal console output object installed by `neojs-lite` (QuickJS).
+ * Global console output object installed by `neojs-lite` (QuickJS).
  */
 declare const console: NeoConsole;
 

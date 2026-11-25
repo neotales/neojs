@@ -30,6 +30,20 @@ console.log(value);
     runtime.run_file(&file).expect("run file");
 }
 
+#[test]
+fn console_handles_lone_surrogates_in_all_feature_builds() {
+    let mut runtime = Runtime::new().expect("runtime");
+    runtime
+        .run_source(
+            "surrogate.js",
+            r#"
+console.log("a\uD800b");
+console.error("x\uDFFFy");
+"#,
+        )
+        .expect("lone surrogate console output must succeed");
+}
+
 #[cfg(feature = "neo-chars")]
 fn expected_list() -> (String, usize) {
     let mut entries = Vec::new();

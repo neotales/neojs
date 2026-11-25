@@ -11,9 +11,10 @@ authors.workspace = true
 readme = "README.md"
 
 [features]
-# A default Lite build keeps the shared `neo:assert`, `neo:chars`, `neo:crypto`,
-# `neo:fs`, `neo:os`, `neo:ssh`, `neo:strings`, `neo:test`, and `neo:uuid`
-# (`neo:uuid`, `neo:uuid/v4`, `neo:uuid/v7`) modules plus erasable TypeScript
+# A default Lite build keeps the shared `neo:assert`, `neo:chars`, `neo:console`,
+# `neo:crypto`, `neo:fs`, `neo:os`, `neo:path`, `neo:slices`, `neo:ssh`,
+# `neo:strings`, `neo:test`, and `neo:uuid` (`neo:uuid`, `neo:uuid/v4`,
+# `neo:uuid/v7`) modules plus erasable TypeScript stripping (`typescript`). A
 # stripping (`typescript`). A consumer that wants the smallest QuickJS runtime
 # can disable default features; the CLI below selects the features explicitly
 # so a change to these defaults cannot silently change what the command

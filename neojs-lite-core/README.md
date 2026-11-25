@@ -102,9 +102,10 @@ canonical shared modules `neo:assert`, `neo:chars`, `neo:console`, `neo:crypto`
 `neo:ssh`, `neo:strings`, `neo:test`, `neo:uuid`, `neo:uuid/v4`, and
 `neo:uuid/v7`.
 `Neo.getBuiltInModulesList()` returns one frozen array of canonical specifiers,
-and `Neo.getBuiltInModule(specifier)` returns the frozen registry object whose
-named exports share identity with the module namespace. The namespace itself is
-a distinct object. With `default-features = false` the registry and list are
+and `Neo.getBuiltInModule(specifier)` returns the cached registry object (frozen
+for every module except `neo:console`, which is the live mutable
+`globalThis.console` object) whose named exports share identity with the module
+namespace. The namespace itself is a distinct object. With `default-features = false` the registry and list are
 empty and no shared module is compiled in. A bare name, another scheme, a query
 or fragment, or any unimplemented specifier returns `undefined`; a non-string
 name throws `TypeError`. The `Neo` object and the global property are frozen and

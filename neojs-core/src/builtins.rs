@@ -191,9 +191,10 @@ const SLICES_REGISTRY_TOKEN: &str = "// __NEO_SLICES_REGISTRY_ENTRY__";
 /// entry installed by `crate::strings::install` at the `strings` position. The
 /// objects and every function are native V8 values; no ECMAScript
 /// implementation or facade is spliced in.
-/// `neo-slices` splices the separate `slices.impl.js` source and registry entry;
-/// it implies `neo-chars` because `CharSlice` captures `chars.toUpper` and
-/// `chars.toLower`, and reads the native object through the same entries global.
+/// `neo-slices` splices the shared `neojs_builtins::slices::FACTORY_SOURCE`
+/// and registry entry; it implies `neo-chars` because `CharSlice` captures
+/// `chars.toUpper` and `chars.toLower`, and reads the native object through the
+/// same entries global.
 /// A disabled module's registry entry, loader entry, and name are all absent.
 pub(crate) fn neo_shim() -> String {
     let shim = NEO_SHIM_SOURCE

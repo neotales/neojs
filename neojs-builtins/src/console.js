@@ -6,19 +6,28 @@
     //
     // `log`, `debug`, and `info` write to stdout (`isError = false`); `warn`
     // and `error` write to stderr (`isError = true`). Strings print unchanged,
-    // bigints print with a trailing `n`, typed arrays print their type and up
-    // to ten elements, and objects format as indented JSON when serializable.
+    // bigints print with a trailing `n`, genuine typed arrays print their
+    // intrinsic type and up to ten elements, and objects format as indented
+    // JSON when serializable, falling back safely without invoking tampered
+    // prototypes or `Array[Symbol.species]`.
     //
     // Intrinsics are captured at installation time so later global mutation
     // cannot alter formatting.
     const makeTypeError = TypeError;
+    const getPrototypeOf = Object.getPrototypeOf;
+    const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
     const mathMin = Math.min;
-    const isView = ArrayBuffer.isView;
-    const NativeDataView = typeof DataView === "function" ? DataView : null;
     const stringify = JSON.stringify;
     const toNativeString = String;
-    const arrayMap = Function.prototype.call.bind(Array.prototype.map);
-    const arrayJoin = Function.prototype.call.bind(Array.prototype.join);
+    const objectToString = Function.prototype.call.bind(Object.prototype.toString);
+
+    const typedArrayPrototype = getPrototypeOf(Uint8Array.prototype);
+    const typedArrayLengthOf = Function.prototype.call.bind(
+        getOwnPropertyDescriptor(typedArrayPrototype, "length").get,
+    );
+    const typedArrayTagOf = Function.prototype.call.bind(
+        getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag).get,
+    );
 
     if (
         !host ||
@@ -34,30 +43,59 @@
     const print = host.print;
     const target = host.target;
 
+    const typedArrayTag = (value) => {
+        try {
+            return typedArrayTagOf(value);
+        } catch {
+            return undefined;
+        }
+    };
+
+    const safeString = (value) => {
+        try {
+            return toNativeString(value);
+        } catch {
+            try {
+                return objectToString(value);
+            } catch {
+                return "[unprintable]";
+            }
+        }
+    };
+
     const format = (value) => {
         if (typeof value === "string") return value;
         if (typeof value === "bigint") return `${value}n`;
         if (typeof value === "symbol" || typeof value === "function") {
-            return toNativeString(value);
+            return safeString(value);
         }
-        if (isView(value) && (NativeDataView === null || !(value instanceof NativeDataView))) {
-            const count = mathMin(value.length, 10);
-            const elements = [];
+        const tag = typedArrayTag(value);
+        if (tag !== undefined) {
+            const length = typedArrayLengthOf(value);
+            const count = mathMin(length, 10);
+            let elements = "";
             for (let index = 0; index < count; index += 1) {
-                elements[index] = value[index];
+                if (index > 0) elements += ", ";
+                elements += value[index];
             }
-            return `${value.constructor.name}(${value.length}) [${arrayJoin(elements, ", ")}]`;
+            return `${tag}(${length}) [${elements}]`;
         }
         try {
             const json = stringify(value, null, 2);
-            return json === undefined ? toNativeString(value) : json;
+            return json === undefined ? safeString(value) : json;
         } catch {
-            return toNativeString(value);
+            return safeString(value);
         }
     };
 
     const writer = (isError) => (...args) => {
-        print(`${arrayJoin(arrayMap(args, format), " ")}\n`, isError);
+        let output = "";
+        for (let index = 0; index < args.length; index += 1) {
+            if (index > 0) output += " ";
+            output += format(args[index]);
+        }
+        output += "\n";
+        print(output, isError);
     };
 
     target.log = writer(false);
