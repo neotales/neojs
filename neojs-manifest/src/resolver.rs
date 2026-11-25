@@ -133,6 +133,11 @@ impl ImportResolver {
         })
     }
 
+    /// Returns the root manifest or workspace directory associated with this resolver.
+    pub fn root_dir(&self) -> &Path {
+        &self.root.dir
+    }
+
     /// Resolves `specifier` according to the documented precedence order.
     ///
     /// # Errors

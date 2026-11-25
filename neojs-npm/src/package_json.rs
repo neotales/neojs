@@ -255,8 +255,12 @@ pub struct PackageJson {
     pub imports: Option<IndexMap<String, ExportsField>>,
     /// `"main"` fallback path.
     pub main: Option<String>,
+    /// `"module"` ESM fallback path.
+    pub module: Option<String>,
     /// `"dependencies"` map.
     pub dependencies: BTreeMap<String, String>,
+    /// `"devDependencies"` map (used only by root project `package.json`, never published deps).
+    pub dev_dependencies: BTreeMap<String, String>,
     /// `"optionalDependencies"` map.
     pub optional_dependencies: BTreeMap<String, String>,
     /// `"peerDependencies"` map.
@@ -321,7 +325,9 @@ impl PackageJson {
             exports: raw.exports,
             imports: raw.imports,
             main: raw.main,
+            module: raw.module,
             dependencies: raw.dependencies,
+            dev_dependencies: raw.dev_dependencies,
             optional_dependencies: raw.optional_dependencies,
             peer_dependencies: raw.peer_dependencies,
             peer_dependencies_meta: raw.peer_dependencies_meta,
@@ -362,6 +368,12 @@ impl PackageJson {
         self.dependencies.contains_key(name)
             || self.optional_dependencies.contains_key(name)
             || self.peer_dependencies.contains_key(name)
+    }
+
+    /// Returns `true` if `name` is declared in `dependencies`, `devDependencies`,
+    /// `optionalDependencies`, or `peerDependencies` (for root project `package.json`).
+    pub fn is_declared_project_dependency(&self, name: &str) -> bool {
+        self.is_declared_dependency(name) || self.dev_dependencies.contains_key(name)
     }
 
     /// Builds a [`ScriptAudit`] summarizing ignored lifecycle scripts and native exclusions.
@@ -411,7 +423,9 @@ struct RawPackageJson {
     exports: Option<ExportsField>,
     imports: Option<IndexMap<String, ExportsField>>,
     main: Option<String>,
+    module: Option<String>,
     dependencies: BTreeMap<String, String>,
+    dev_dependencies: BTreeMap<String, String>,
     optional_dependencies: BTreeMap<String, String>,
     peer_dependencies: BTreeMap<String, String>,
     peer_dependencies_meta: BTreeMap<String, PeerDependencyMeta>,
@@ -459,8 +473,12 @@ impl<'de> Deserialize<'de> for RawPackageJson {
                             out.imports = map.next_value::<Option<NoDupIndexMap>>()?.map(|m| m.0);
                         }
                         "main" => out.main = map.next_value()?,
+                        "module" => out.module = map.next_value()?,
                         "dependencies" => {
                             out.dependencies = map.next_value::<NoDupStringMap>()?.0;
+                        }
+                        "devDependencies" => {
+                            out.dev_dependencies = map.next_value::<NoDupStringMap>()?.0;
                         }
                         "optionalDependencies" => {
                             out.optional_dependencies = map.next_value::<NoDupStringMap>()?.0;

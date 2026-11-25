@@ -36,6 +36,7 @@
 
 pub mod cas;
 pub mod exports;
+pub mod lockfile;
 pub mod package_json;
 pub mod resolver;
 pub mod semver;
@@ -48,6 +49,9 @@ pub use cas::{CasDigest, CasError, CasStore, sha256_hex};
 pub use exports::{
     ACTIVE_CONDITIONS, ExportsError, ExportsResolver, PackageImportTarget, ResolvedPackageFile,
 };
+pub use lockfile::{
+    LOCKFILE_NAME, LOCKFILE_VERSION, LockedPackage, Lockfile, LockfileError, MAX_LOCKFILE_BYTES,
+};
 pub use package_json::{
     ExportsField, LIFECYCLE_SCRIPT_HOOKS, MAX_PACKAGE_JSON_BYTES, PackageJson, PackageJsonError,
     PeerDependencyMeta, ScriptAudit, TargetPlatform,
@@ -56,7 +60,7 @@ pub use resolver::{
     DEFAULT_REGISTRY_ORIGIN, LoadedNpmModule, MAX_DISCOVERY_DEPTH, NpmGraphResolver,
     NpmReferrerResolution, NpmRegistry, NpmRootRequest, Packument, PackumentDist, PackumentVersion,
     ProjectPackageResolver, ProjectResolution, RemoteNpmRegistry, ResolvedNpmGraph,
-    ResolvedNpmPackage, ResolverError,
+    ResolvedNpmPackage, ResolverError, resolve_requests_with_lockfile,
 };
 pub use semver::{
     MAX_COMPARATORS_PER_CLAUSE, MAX_CONSTRAINT_BYTES, MAX_OR_CLAUSES, NpmRange, NpmVersion,

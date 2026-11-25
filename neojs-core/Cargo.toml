@@ -19,7 +19,7 @@ authors.workspace = true
 # under `neo-slices`, so it is not embedded in a disabled binary. Features are
 # additive and unify across the dependency graph; this is surface selection,
 # not a sandbox.
-default = ["neo-chars", "neo-db", "neo-slices", "neo-strings", "neo-template"]
+default = ["neo-chars", "neo-db", "neo-slices", "neo-strings", "neo-template", "npm"]
 # The native `chars` binding and its canonical V8 registration. This enables
 # the shared `chars` module in `neojs-builtins`.
 neo-chars = ["neojs-builtins/chars"]
@@ -34,6 +34,8 @@ neo-strings = ["neojs-builtins/strings"]
 # The `neo:template` Go text/template + Sprig module backed by
 # `neojs-template-core`. Opt-outable with `--no-default-features`.
 neo-template = ["dep:neojs-template-core", "dep:serde_json"]
+# Opt-outable `npm:` and `package.json` CAS-backed module resolution.
+npm = ["dep:neojs-npm"]
 # Test-only fault injection for the peer-close reply branch. Never enabled by a
 # normal build; `neojs` enables it only for its own dev/test targets.
 test-support = ["neojs-crypto-core/test-support", "neojs-remote/test-support", "neojs-ssh-core/test-support"]
@@ -48,6 +50,7 @@ neojs-dbapi = { workspace = true, optional = true }
 neojs-fs-core.workspace = true
 neojs-manifest.workspace = true
 neojs-module-policy = { version = "0.0.0-alpha.0", path = "../neojs-module-policy", features = ["typescript"] }
+neojs-npm = { workspace = true, optional = true }
 neojs-remote.workspace = true
 neojs-ssh-core.workspace = true
 neojs-template-core = { workspace = true, optional = true }
@@ -59,12 +62,15 @@ tokio.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 # Enables the vendored deno_core test-only seam for the lazy-ESM collision
 # test. Normal builds do not enable this feature.
 deno_core = { workspace = true, features = ["native_module_testing"] }
 ed25519-dalek = { version = "3.0.0", features = ["pkcs8"] }
+flate2.workspace = true
 neojs-dts.workspace = true
 neotales-ssh.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros"] }

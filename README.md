@@ -1756,7 +1756,8 @@ schema validation, canonical import-specifier normalization (`gh:`, `github:`, `
 `neojs-manifest` into their loaders and CLIs (`--config <path>`, `--no-config`, and upward
 discovery). Only local `file:` referrers consult `ImportResolver`, remote targets in `imports`
 (`https:`, `gh:`, `jsr:`) remain gated by `--allow-remote` in `neojs` (and are rejected in
-`neojs-lite`), `include`/`exclude` matching is not implemented, and `npm:` and `node:` remain
+`neojs-lite`), `include`/`exclude` matching is not implemented, `npm:` targets work in `neojs`
+when the `npm` feature is enabled (and are rejected in `neojs-lite`), and `node:` remains
 rejected at runtime.
 
 ### QuickJS runtime: neojs-lite-core
@@ -1858,7 +1859,12 @@ Features outside this list are not implemented.
   rejected by extension. CommonJS is rejected by the `.cjs` and `.cts` extensions; a `.js` file
   that uses `require`, `module`, or `exports` fails as JavaScript. Transpile anything else to an
   ECMAScript module first.
-- `node:`, `npm:`, `http:`, `data:`, and `blob:` imports are rejected. `gh:` and `github:`
+- `node:`, `http:`, `data:`, and `blob:` imports are rejected. `npm:` specifiers, nearest
+  `package.json` dependencies/`devDependencies`/`#imports`, and `neo.lock` v1 are supported in
+  `neojs` (with the default `npm` feature; opt-outable at compile time via `--no-default-features`
+  and at runtime via `--no-npm`) via the verified CAS cache with zero `node_modules` and zero
+  install-script execution (`--offline` forbids network fetches; `--frozen-lockfile` requires
+  `neo.lock`). `gh:` and `github:`
   imports are rejected unless the runtime is created with remote loading enabled (`neojs
   --allow-remote`, or `NEOJS_ALLOW_REMOTE=1`); when enabled, a validated specifier is rewritten to
   one credential-free `https://raw.githubusercontent.com/owner/repo/ref/path` URL and loaded as

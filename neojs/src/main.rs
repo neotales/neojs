@@ -6,6 +6,8 @@ use std::process::ExitCode;
 
 use neojs_core::Error;
 use neojs_core::ImportResolver;
+#[cfg(feature = "npm")]
+use neojs_core::NpmOptions;
 use neojs_core::RemoteOptions;
 use neojs_core::Runtime;
 use neojs_core::RuntimeOptions;
@@ -46,16 +48,18 @@ fn main() -> ExitCode {
             input,
             allow_remote,
             config,
+            npm,
         } => match resolve_allow_remote(allow_remote) {
-            Ok(allow_remote) => run(input, allow_remote, &config),
+            Ok(allow_remote) => run(input, allow_remote, &config, npm),
             Err(message) => startup_failure(&message),
         },
         Command::Test {
             patterns,
             allow_remote,
             config,
+            npm,
         } => match resolve_allow_remote(allow_remote) {
-            Ok(allow_remote) => run_tests(&patterns, allow_remote, &config),
+            Ok(allow_remote) => run_tests(&patterns, allow_remote, &config, npm),
             Err(message) => startup_failure(&message),
         },
         Command::Types { profile, out_dir } => run_types(profile, out_dir.as_deref()),
@@ -72,17 +76,36 @@ fn startup_failure(message: &str) -> ExitCode {
     ExitCode::from(EXIT_STARTUP_FAILURE)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NpmFlags {
+    enabled: bool,
+    frozen_lockfile: bool,
+    offline: bool,
+}
+
+impl Default for NpmFlags {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            frozen_lockfile: false,
+            offline: false,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Run {
         input: Input,
         allow_remote: AllowRemote,
         config: ConfigChoice,
+        npm: NpmFlags,
     },
     Test {
         patterns: Vec<String>,
         allow_remote: AllowRemote,
         config: ConfigChoice,
+        npm: NpmFlags,
     },
     Types {
         profile: Profile,
@@ -202,6 +225,8 @@ enum Input {
 fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
     let mut allow_remote = AllowRemote::Unspecified;
     let mut config = ConfigChoice::Auto;
+    #[cfg_attr(not(feature = "npm"), allow(unused_mut))]
+    let mut npm = NpmFlags::default();
     let mut index = 0;
     while let Some(argument) = args.get(index) {
         match argument.to_str() {
@@ -212,6 +237,35 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
             Some("--no-allow-remote") => {
                 allow_remote.choose(AllowRemote::Disabled)?;
                 index += 1;
+            }
+            Some("--no-npm") => {
+                #[cfg(not(feature = "npm"))]
+                return Err("`--no-npm` requires `neojs` built with the `npm` feature".to_string());
+                #[cfg(feature = "npm")]
+                {
+                    npm.enabled = false;
+                    index += 1;
+                }
+            }
+            Some("--frozen-lockfile") => {
+                #[cfg(not(feature = "npm"))]
+                return Err(
+                    "`--frozen-lockfile` requires `neojs` built with the `npm` feature".to_string(),
+                );
+                #[cfg(feature = "npm")]
+                {
+                    npm.frozen_lockfile = true;
+                    index += 1;
+                }
+            }
+            Some("--offline") => {
+                #[cfg(not(feature = "npm"))]
+                return Err("`--offline` requires `neojs` built with the `npm` feature".to_string());
+                #[cfg(feature = "npm")]
+                {
+                    npm.offline = true;
+                    index += 1;
+                }
             }
             Some("--no-config") => {
                 config.set_disabled()?;
@@ -255,13 +309,20 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
                     input: classify_input(&rest[1]),
                     allow_remote,
                     config,
+                    npm,
                 });
             }
-            "test" => return parse_test_args(&rest[1..], allow_remote, config),
+            "test" => return parse_test_args(&rest[1..], allow_remote, config, npm),
             "types" => {
                 if allow_remote != AllowRemote::Unspecified || config != ConfigChoice::Auto {
                     return Err(
                         "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--config`, or `--no-config`"
+                            .to_string(),
+                    );
+                }
+                if npm != NpmFlags::default() {
+                    return Err(
+                        "`types` does not accept `--no-npm`, `--frozen-lockfile`, or `--offline`"
                             .to_string(),
                     );
                 }
@@ -281,21 +342,23 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
         input: classify_input(first),
         allow_remote,
         config,
+        npm,
     })
 }
 
 /// Parses `neojs test <file-or-glob>...`.
 ///
 /// Every argument is a pattern. `--allow-remote`, `--no-allow-remote`,
-/// `--config <path>`, and `--no-config` may appear before or after `test` and
-/// apply to each selected file's fresh runtime. `--` ends option parsing so a
-/// pattern beginning with `-`, including one named `--allow-remote`, can still
-/// be named. The command requires at least one pattern; discovery defaults are
-/// deliberately absent.
+/// `--no-npm`, `--frozen-lockfile`, `--offline`, `--config <path>`, and
+/// `--no-config` may appear before or after `test` and apply to each selected
+/// file's fresh runtime. `--` ends option parsing so a pattern beginning with
+/// `-`, including one named `--allow-remote`, can still be named. The command
+/// requires at least one pattern; discovery defaults are deliberately absent.
 fn parse_test_args(
     args: &[OsString],
     mut allow_remote: AllowRemote,
     mut config: ConfigChoice,
+    #[cfg_attr(not(feature = "npm"), allow(unused_mut))] mut npm: NpmFlags,
 ) -> Result<Command, String> {
     if args.len() == 1 && matches!(args[0].to_str(), Some("-h" | "--help")) {
         return Ok(Command::Help);
@@ -321,6 +384,38 @@ fn parse_test_args(
             allow_remote.choose(AllowRemote::Disabled)?;
             index += 1;
             continue;
+        }
+        if !after_double_dash && value == "--no-npm" {
+            #[cfg(not(feature = "npm"))]
+            return Err("`--no-npm` requires `neojs` built with the `npm` feature".to_string());
+            #[cfg(feature = "npm")]
+            {
+                npm.enabled = false;
+                index += 1;
+                continue;
+            }
+        }
+        if !after_double_dash && value == "--frozen-lockfile" {
+            #[cfg(not(feature = "npm"))]
+            return Err(
+                "`--frozen-lockfile` requires `neojs` built with the `npm` feature".to_string(),
+            );
+            #[cfg(feature = "npm")]
+            {
+                npm.frozen_lockfile = true;
+                index += 1;
+                continue;
+            }
+        }
+        if !after_double_dash && value == "--offline" {
+            #[cfg(not(feature = "npm"))]
+            return Err("`--offline` requires `neojs` built with the `npm` feature".to_string());
+            #[cfg(feature = "npm")]
+            {
+                npm.offline = true;
+                index += 1;
+                continue;
+            }
         }
         if !after_double_dash && value == "--no-config" {
             config.set_disabled()?;
@@ -359,6 +454,7 @@ fn parse_test_args(
         patterns,
         allow_remote,
         config,
+        npm,
     })
 }
 
@@ -616,7 +712,7 @@ fn discover_resolver_for_entry(entry_path: &Path) -> Result<Option<ImportResolve
     Ok(Some(ImportResolver::from_manifest(&discovered)))
 }
 
-fn run(input: Input, allow_remote: bool, config: &ConfigChoice) -> ExitCode {
+fn run(input: Input, allow_remote: bool, config: &ConfigChoice, npm: NpmFlags) -> ExitCode {
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
         Err(message) => {
@@ -638,7 +734,7 @@ fn run(input: Input, allow_remote: bool, config: &ConfigChoice) -> ExitCode {
         }
     };
 
-    let mut runtime = match create_runtime(allow_remote, resolver) {
+    let mut runtime = match create_runtime(allow_remote, resolver, npm) {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("neojs: {error}");
@@ -659,8 +755,8 @@ fn run(input: Input, allow_remote: bool, config: &ConfigChoice) -> ExitCode {
     }
 }
 
-/// Creates a runtime, with remote and JSR loading only when explicitly enabled
-/// and an optional `neo.jsonc` [`ImportResolver`].
+/// Creates a runtime, with remote and JSR loading only when explicitly enabled,
+/// an optional `neo.jsonc` [`ImportResolver`], and npm policy flags.
 ///
 /// Each call gets its own default [`RemoteOptions`], so a fresh runtime also
 /// gets a fresh remote request, module, and byte budget. The default package
@@ -669,6 +765,7 @@ fn run(input: Input, allow_remote: bool, config: &ConfigChoice) -> ExitCode {
 fn create_runtime(
     allow_remote: bool,
     import_resolver: Option<ImportResolver>,
+    npm: NpmFlags,
 ) -> Result<Runtime, Error> {
     let mut options = RuntimeOptions::new();
     if allow_remote {
@@ -677,6 +774,16 @@ fn create_runtime(
     if let Some(resolver) = import_resolver {
         options = options.with_import_resolver(resolver);
     }
+    #[cfg(feature = "npm")]
+    {
+        let npm_options = NpmOptions::new()
+            .with_enabled(npm.enabled)
+            .with_frozen_lockfile(npm.frozen_lockfile)
+            .with_offline(npm.offline);
+        options = options.with_npm(npm_options);
+    }
+    #[cfg(not(feature = "npm"))]
+    let _ = npm;
     Runtime::with_options(options)
 }
 
@@ -726,7 +833,12 @@ impl TestTotals {
 /// and the test queue cannot leak between files. With `allow_remote`, every
 /// fresh runtime can also load `https:` modules, with its own default remote
 /// limits and the shared user-profile package cache.
-fn run_tests(patterns: &[String], allow_remote: bool, config: &ConfigChoice) -> ExitCode {
+fn run_tests(
+    patterns: &[String],
+    allow_remote: bool,
+    config: &ConfigChoice,
+    npm: NpmFlags,
+) -> ExitCode {
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
         Err(message) => {
@@ -763,7 +875,7 @@ fn run_tests(patterns: &[String], allow_remote: bool, config: &ConfigChoice) -> 
     let mut failed_files = 0usize;
     for (file, resolver) in files.iter().zip(resolvers) {
         println!("test {}:", file.display());
-        let mut runtime = match create_runtime(allow_remote, resolver) {
+        let mut runtime = match create_runtime(allow_remote, resolver, npm) {
             Ok(runtime) => runtime,
             Err(error) => {
                 eprintln!("neojs: {error}");
@@ -869,6 +981,36 @@ Examples:
 /// which the last line points at. The options and every remote-flag placement
 /// must stay in step with the current dev parser.
 fn help() -> String {
+    #[cfg(feature = "npm")]
+    let npm_options = "\
+  --allow-remote   allow https:, gh:, and github: entry and imports, and
+                   jsr:/npm: network fetches; off by default
+  --no-allow-remote
+                   force remote loading off, overriding NEOJS_ALLOW_REMOTE
+  --no-npm         disable npm: and package.json module resolution
+  --frozen-lockfile
+                   refuse npm resolutions not pinned in neo.lock
+  --offline        refuse network fetches; serve npm packages strictly from CAS";
+    #[cfg(not(feature = "npm"))]
+    let npm_options = "\
+  --allow-remote   allow https:, gh:, and github: entry and imports, and
+                   jsr: imports; off by default
+  --no-allow-remote
+                   force remote loading off, overriding NEOJS_ALLOW_REMOTE";
+
+    #[cfg(feature = "npm")]
+    let npm_summary = "\
+user cache. JSR metadata and files use the same HTTPS limits and cache. `npm:`
+specifiers, `package.json` dependencies/`#imports`, and `neo.lock` resolve
+without `node_modules` or install scripts via the verified CAS cache
+(offline by default; use `--allow-remote` to fetch missing packages,
+`--frozen-lockfile` to require `neo.lock`, `--offline` to forbid network, or
+`--no-npm` to disable). `node:` is not implemented. Local modules discover";
+    #[cfg(not(feature = "npm"))]
+    let npm_summary = "\
+user cache. JSR metadata and files use the same HTTPS limits and cache. npm:
+and node: are not implemented (npm support was disabled at compile time). Local modules discover";
+
     format!(
         "\
 neojs {}
@@ -886,10 +1028,7 @@ Usage:
                                   emit TypeScript declarations (.d.ts)
 
 Options:
-  --allow-remote   allow https:, gh:, and github: entry and imports, and
-                   jsr: imports; off by default
-  --no-allow-remote
-                   force remote loading off, overriding NEOJS_ALLOW_REMOTE
+{npm_options}
   --config <path>  use an explicit neo.jsonc manifest instead of discovery
   --no-config      disable automatic neo.jsonc manifest discovery
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -920,9 +1059,9 @@ jsr:@scope/name[@version][/subpath] imports from the public JSR registry;
 before or after `test`. A gh:/github: specifier becomes a
 raw.githubusercontent.com https: URL. It is not SSRF protection, not a host
 allowlist, and not a sandbox. Downloads are cached under `neojs/packages` in the
-user cache. JSR metadata and files use the same HTTPS limits and cache. npm:
-and node: are not implemented. Local modules discover `neo.jsonc` upward for
-`imports` and `workspaces` unless `--config` or `--no-config` is passed.
+{npm_summary}
+`neo.jsonc` upward for `imports` and `workspaces` unless `--config` or
+`--no-config` is passed.
 
 `neojs test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
@@ -949,6 +1088,7 @@ mod tests {
     use super::AllowRemote;
     use super::Command;
     use super::ConfigChoice;
+    use super::NpmFlags;
     use super::parse_args;
     use super::parse_boolean_env;
     use neojs_dts::Profile;
@@ -968,6 +1108,7 @@ mod tests {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Enabled,
                 config: ConfigChoice::Auto,
+                npm: NpmFlags::default(),
             })
         );
     }
@@ -980,6 +1121,7 @@ mod tests {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Enabled,
                 config: ConfigChoice::Auto,
+                npm: NpmFlags::default(),
             })
         );
     }
@@ -996,6 +1138,7 @@ mod tests {
                     patterns: vec!["a.test.js".to_string()],
                     allow_remote: AllowRemote::Disabled,
                     config: ConfigChoice::Auto,
+                    npm: NpmFlags::default(),
                 })
             );
         }
@@ -1009,6 +1152,7 @@ mod tests {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Auto,
+                npm: NpmFlags::default(),
             })
         );
     }
@@ -1024,6 +1168,7 @@ mod tests {
                 ],
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Auto,
+                npm: NpmFlags::default(),
             })
         );
     }
@@ -1057,8 +1202,76 @@ mod tests {
                 input: super::Input::Path("main.js".into()),
                 allow_remote: AllowRemote::Disabled,
                 config: ConfigChoice::Auto,
+                npm: NpmFlags::default(),
             })
         );
+    }
+
+    #[cfg(feature = "npm")]
+    #[test]
+    fn npm_flags_parse_for_run_and_test_and_reject_types() {
+        assert_eq!(
+            parse_args(args(&[
+                "--no-npm",
+                "--frozen-lockfile",
+                "--offline",
+                "main.js"
+            ])),
+            Ok(Command::Run {
+                input: super::Input::Path("main.js".into()),
+                allow_remote: AllowRemote::Unspecified,
+                config: ConfigChoice::Auto,
+                npm: NpmFlags {
+                    enabled: false,
+                    frozen_lockfile: true,
+                    offline: true,
+                },
+            })
+        );
+        assert_eq!(
+            parse_args(args(&[
+                "test",
+                "--frozen-lockfile",
+                "--offline",
+                "a.test.js"
+            ])),
+            Ok(Command::Test {
+                patterns: vec!["a.test.js".to_string()],
+                allow_remote: AllowRemote::Unspecified,
+                config: ConfigChoice::Auto,
+                npm: NpmFlags {
+                    enabled: true,
+                    frozen_lockfile: true,
+                    offline: true,
+                },
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["--offline", "types"])),
+            Err(
+                "`types` does not accept `--no-npm`, `--frozen-lockfile`, or `--offline`"
+                    .to_string()
+            )
+        );
+    }
+
+    #[cfg(not(feature = "npm"))]
+    #[test]
+    fn npm_flags_reject_when_compiled_without_npm_feature() {
+        for flag in ["--no-npm", "--frozen-lockfile", "--offline"] {
+            assert_eq!(
+                parse_args(args(&[flag, "main.js"])),
+                Err(format!(
+                    "`{flag}` requires `neojs` built with the `npm` feature"
+                ))
+            );
+            assert_eq!(
+                parse_args(args(&["test", flag, "a.test.js"])),
+                Err(format!(
+                    "`{flag}` requires `neojs` built with the `npm` feature"
+                ))
+            );
+        }
     }
 
     #[test]
@@ -1069,6 +1282,7 @@ mod tests {
                 input: super::Input::Path("main.js".into()),
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Explicit(PathBuf::from("custom.jsonc")),
+                npm: NpmFlags::default(),
             })
         );
         assert_eq!(
@@ -1077,6 +1291,7 @@ mod tests {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Explicit(PathBuf::from("custom.jsonc")),
+                npm: NpmFlags::default(),
             })
         );
         assert_eq!(
@@ -1085,6 +1300,7 @@ mod tests {
                 patterns: vec!["a.test.js".to_string()],
                 allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Disabled,
+                npm: NpmFlags::default(),
             })
         );
         assert_eq!(

@@ -1667,6 +1667,36 @@ fn prints_the_compact_help() {
 }
 
 fn expected_help() -> String {
+    #[cfg(feature = "npm")]
+    let npm_options = "\
+  --allow-remote   allow https:, gh:, and github: entry and imports, and
+                   jsr:/npm: network fetches; off by default
+  --no-allow-remote
+                   force remote loading off, overriding NEOJS_ALLOW_REMOTE
+  --no-npm         disable npm: and package.json module resolution
+  --frozen-lockfile
+                   refuse npm resolutions not pinned in neo.lock
+  --offline        refuse network fetches; serve npm packages strictly from CAS";
+    #[cfg(not(feature = "npm"))]
+    let npm_options = "\
+  --allow-remote   allow https:, gh:, and github: entry and imports, and
+                   jsr: imports; off by default
+  --no-allow-remote
+                   force remote loading off, overriding NEOJS_ALLOW_REMOTE";
+
+    #[cfg(feature = "npm")]
+    let npm_summary = "\
+user cache. JSR metadata and files use the same HTTPS limits and cache. `npm:`
+specifiers, `package.json` dependencies/`#imports`, and `neo.lock` resolve
+without `node_modules` or install scripts via the verified CAS cache
+(offline by default; use `--allow-remote` to fetch missing packages,
+`--frozen-lockfile` to require `neo.lock`, `--offline` to forbid network, or
+`--no-npm` to disable). `node:` is not implemented. Local modules discover";
+    #[cfg(not(feature = "npm"))]
+    let npm_summary = "\
+user cache. JSR metadata and files use the same HTTPS limits and cache. npm:
+and node: are not implemented (npm support was disabled at compile time). Local modules discover";
+
     format!(
         "\
 neojs {}
@@ -1684,10 +1714,7 @@ Usage:
                                   emit TypeScript declarations (.d.ts)
 
 Options:
-  --allow-remote   allow https:, gh:, and github: entry and imports, and
-                   jsr: imports; off by default
-  --no-allow-remote
-                   force remote loading off, overriding NEOJS_ALLOW_REMOTE
+{npm_options}
   --config <path>  use an explicit neo.jsonc manifest instead of discovery
   --no-config      disable automatic neo.jsonc manifest discovery
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
@@ -1718,9 +1745,9 @@ jsr:@scope/name[@version][/subpath] imports from the public JSR registry;
 before or after `test`. A gh:/github: specifier becomes a
 raw.githubusercontent.com https: URL. It is not SSRF protection, not a host
 allowlist, and not a sandbox. Downloads are cached under `neojs/packages` in the
-user cache. JSR metadata and files use the same HTTPS limits and cache. npm:
-and node: are not implemented. Local modules discover `neo.jsonc` upward for
-`imports` and `workspaces` unless `--config` or `--no-config` is passed.
+{npm_summary}
+`neo.jsonc` upward for `imports` and `workspaces` unless `--config` or
+`--no-config` is passed.
 
 `neojs test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
@@ -4460,4 +4487,260 @@ fn types_subcommand_help_and_error_cases() {
         "{}",
         stderr(&extra)
     );
+}
+
+#[cfg(feature = "npm")]
+mod npm_cli_tests {
+    use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use neojs_npm::{
+        CasStore, DEFAULT_REGISTRY_ORIGIN, LockedPackage, Lockfile, NpmLimits, TarballIngestor,
+    };
+    use sha2::{Digest, Sha512};
+    use std::collections::BTreeMap;
+
+    fn tar_header(name: &str, typeflag: u8, size: usize) -> [u8; 512] {
+        let mut header = [0u8; 512];
+        let name_bytes = name.as_bytes();
+        let copy_len = name_bytes.len().min(100);
+        header[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        let size_str = format!("{size:011o}\0");
+        header[124..136].copy_from_slice(size_str.as_bytes());
+        header[136..148].copy_from_slice(b"00000000000\0");
+        header[148..156].copy_from_slice(b"        ");
+        header[156] = typeflag;
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let sum: u32 = header.iter().map(|&b| u32::from(b)).sum();
+        let csum = format!("{sum:06o}\0 ");
+        header[148..156].copy_from_slice(csum.as_bytes());
+        header
+    }
+
+    fn build_tgz(files: &[(&str, &str)]) -> (Vec<u8>, String) {
+        use std::io::Write as _;
+
+        let mut tar_buf = Vec::new();
+        for (rel_path, content) in files {
+            let full = format!("package/{rel_path}");
+            let bytes = content.as_bytes();
+            tar_buf.extend_from_slice(&tar_header(&full, b'0', bytes.len()));
+            if !bytes.is_empty() {
+                tar_buf.extend_from_slice(bytes);
+                let pad = (512 - (bytes.len() % 512)) % 512;
+                tar_buf.resize(tar_buf.len() + pad, 0);
+            }
+        }
+        tar_buf.resize(tar_buf.len() + 1024, 0);
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(&tar_buf).unwrap();
+        let tgz = gz.finish().unwrap();
+        let sri = format!("sha512-{}", BASE64_STANDARD.encode(Sha512::digest(&tgz)));
+        (tgz, sri)
+    }
+
+    fn seed_package(cas: &CasStore, pkg_json: &str, files: &[(&str, &str)]) -> (String, String) {
+        let mut all = vec![("package.json", pkg_json)];
+        all.extend_from_slice(files);
+        let (tgz, sri) = build_tgz(&all);
+        let tree = TarballIngestor::new(cas.clone(), NpmLimits::default())
+            .ingest(DEFAULT_REGISTRY_ORIGIN, &sri, &tgz)
+            .expect("ingest package into CAS");
+        (sri, tree.tree_sha256)
+    }
+
+    #[test]
+    fn npm_cli_runs_cas_package_json_transitive_and_frozen_offline_without_node_modules() {
+        let xdg_cache = TempDir::new().unwrap();
+        let cas = CasStore::new(xdg_cache.path().join("neojs").join("packages"));
+
+        let (b_sri, b_tree) = seed_package(
+            &cas,
+            r#"{"name":"pkg-b","version":"1.2.0","type":"module","exports":"./b.mjs"}"#,
+            &[("b.mjs", "export const suffix = 'from-b';\n")],
+        );
+
+        let project = Project::new();
+        let marker = project.path("postinstall-marker");
+        let marker_escaped = marker
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let a_pkg_json = format!(
+            r#"{{"name":"@acme/greeter","version":"1.0.0","type":"module","exports":{{".":"./index.mjs","./format":"./format.mjs"}},"dependencies":{{"pkg-b":"^1.0.0"}},"scripts":{{"postinstall":"touch {marker_escaped}"}}}}"#
+        );
+        let (a_sri, a_tree) = seed_package(
+            &cas,
+            &a_pkg_json,
+            &[
+                (
+                    "index.mjs",
+                    "import { suffix } from 'pkg-b'; import { fmt } from './format.mjs'; export const greet = (n) => fmt(`${n}-${suffix}`);\n",
+                ),
+                ("format.mjs", "export const fmt = (s) => `[${s}]`;\n"),
+            ],
+        );
+
+        let mut lock = Lockfile::new();
+        lock.specifiers.insert(
+            "@acme/greeter@^1.0.0".to_owned(),
+            "@acme/greeter@1.0.0".to_owned(),
+        );
+        lock.packages.insert(
+            "@acme/greeter@1.0.0".to_owned(),
+            LockedPackage {
+                version: "1.0.0".to_owned(),
+                integrity: a_sri,
+                tree_sha256: Some(a_tree),
+                tarball_url: "https://registry.npmjs.org/@acme/greeter/-/1.0.0.tgz".to_owned(),
+                dependencies: BTreeMap::from([("pkg-b".to_owned(), "pkg-b@1.2.0".to_owned())]),
+            },
+        );
+        lock.packages.insert(
+            "pkg-b@1.2.0".to_owned(),
+            LockedPackage {
+                version: "1.2.0".to_owned(),
+                integrity: b_sri,
+                tree_sha256: Some(b_tree),
+                tarball_url: "https://registry.npmjs.org/pkg-b/-/1.2.0.tgz".to_owned(),
+                dependencies: BTreeMap::new(),
+            },
+        );
+        lock.write_atomic(&project.path("neo.lock")).unwrap();
+
+        project.write(
+            "package.json",
+            r#"{"name":"cli-app","type":"module","dependencies":{"@acme/greeter":"^1.0.0"}}"#,
+        );
+        let main = project.write(
+            "main.ts",
+            r#"
+import { greet } from "@acme/greeter";
+import { fmt } from "@acme/greeter/format";
+import { greet as npmGreet } from "npm:@acme/greeter@^1.0.0";
+console.log(greet("neo"));
+console.log(fmt("sub"));
+console.log(npmGreet("explicit"));
+"#,
+        );
+
+        let cache_str = xdg_cache.path().to_str().unwrap();
+        let main_str = main.to_str().unwrap();
+
+        let out = run_args_with_env(
+            &["--frozen-lockfile", "--offline", main_str],
+            &[("XDG_CACHE_HOME", cache_str)],
+        );
+        assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+        assert_eq!(stdout(&out), "[neo-from-b]\n[sub]\n[explicit-from-b]\n");
+        assert!(!project.path("node_modules").exists());
+        assert!(!marker.exists(), "postinstall script must never run");
+
+        // `--no-npm` disables both `npm:` and `package.json` bare specifiers.
+        let disabled_out =
+            run_args_with_env(&["--no-npm", main_str], &[("XDG_CACHE_HOME", cache_str)]);
+        assert_eq!(disabled_out.status.code(), Some(1));
+        assert!(
+            stderr(&disabled_out).contains("bare module specifiers")
+                || stderr(&disabled_out).contains("disabled"),
+            "{}",
+            stderr(&disabled_out)
+        );
+
+        // Tampering with neo.lock integrity fails closed under `--frozen-lockfile`.
+        let mut bad_lock = lock;
+        bad_lock
+            .packages
+            .get_mut("@acme/greeter@1.0.0")
+            .unwrap()
+            .integrity = format!("sha512-{}", BASE64_STANDARD.encode([0x22; 64]));
+        bad_lock.write_atomic(&project.path("neo.lock")).unwrap();
+
+        let tampered_out = run_args_with_env(
+            &["--frozen-lockfile", "--offline", main_str],
+            &[("XDG_CACHE_HOME", cache_str)],
+        );
+        assert_eq!(tampered_out.status.code(), Some(1));
+    }
+
+    #[test]
+    fn npm_cli_frozen_lockfile_fails_when_lockfile_or_entry_missing() {
+        let project = Project::new();
+        let main = project.write("main.js", r#"import "npm:lodash@^4.17.21";"#);
+        let out = run_args(&["--frozen-lockfile", main.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(
+            stderr(&out).contains("neo.lock"),
+            "stderr: {}",
+            stderr(&out)
+        );
+    }
+
+    #[test]
+    fn npm_cli_local_hash_imports_and_self_ref_succeed_without_home_or_xdg_cache() {
+        let project = Project::new();
+        project.write(
+            "package.json",
+            r##"{
+                "name": "local-app",
+                "type": "module",
+                "exports": { "./self": "./src/msg.ts" },
+                "imports": { "#msg": "./src/msg.ts" }
+            }"##,
+        );
+        project.write("src/msg.ts", "export const msg: string = 'no-cas-ok';\n");
+        let main = project.write(
+            "main.ts",
+            r##"
+import { msg as a } from "#msg";
+import { msg as b } from "local-app/self";
+console.log(`${a}:${b}`);
+"##,
+        );
+        let out = neojs_command()
+            .env_remove("HOME")
+            .env_remove("XDG_CACHE_HOME")
+            .env_remove("USERPROFILE")
+            .arg(&main)
+            .output()
+            .expect("spawn neojs");
+        assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+        assert_eq!(stdout(&out), "no-cas-ok:no-cas-ok\n");
+    }
+}
+
+#[cfg(not(feature = "npm"))]
+#[test]
+fn npm_cli_rejects_npm_when_compiled_without_npm_feature() {
+    let project = Project::new();
+    let main = project.write("main.js", r#"import "npm:lodash@^4.17.21";"#);
+    let out = run_file(&main);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("npm: modules are not implemented"),
+        "{}",
+        stderr(&out)
+    );
+
+    for flag in ["--no-npm", "--frozen-lockfile", "--offline"] {
+        let flag_out = run_args(&[flag, main.to_str().unwrap()]);
+        assert_eq!(
+            flag_out.status.code(),
+            Some(2),
+            "{flag}: {}",
+            stderr(&flag_out)
+        );
+        assert!(
+            stderr(&flag_out).contains("requires `neojs` built with the `npm` feature"),
+            "{flag}: {}",
+            stderr(&flag_out)
+        );
+    }
 }

@@ -45,6 +45,8 @@ use crate::loader::FileModuleLoader;
 use crate::loader::ModuleFormat;
 use crate::loader::PreparedEntry;
 use crate::loader::module_format;
+#[cfg(feature = "npm")]
+use crate::npm_loader::NpmOptions;
 use crate::path::neojs_path;
 use crate::remote_redact::redact_core_error;
 use crate::ssh::neojs_ssh;
@@ -167,6 +169,8 @@ impl TestReport {
 pub struct RuntimeOptions {
     remote: Option<RemoteOptions>,
     import_resolver: Option<ImportResolver>,
+    #[cfg(feature = "npm")]
+    npm: NpmOptions,
 }
 
 impl RuntimeOptions {
@@ -189,6 +193,41 @@ impl RuntimeOptions {
     /// [`RuntimeOptions::with_remote`].
     pub fn with_import_resolver(mut self, resolver: ImportResolver) -> Self {
         self.import_resolver = Some(resolver);
+        self
+    }
+
+    /// Configures `npm:` and `package.json` module resolution.
+    #[cfg(feature = "npm")]
+    pub fn with_npm(mut self, options: NpmOptions) -> Self {
+        self.npm = options;
+        self
+    }
+
+    /// Disables `npm:` and `package.json` module resolution at runtime.
+    #[cfg(feature = "npm")]
+    pub fn without_npm(mut self) -> Self {
+        self.npm = self.npm.with_enabled(false);
+        self
+    }
+
+    /// Refuses npm resolution not already pinned in `neo.lock`.
+    #[cfg(feature = "npm")]
+    pub fn with_frozen_lockfile(mut self, frozen: bool) -> Self {
+        self.npm = self.npm.with_frozen_lockfile(frozen);
+        self
+    }
+
+    /// Refuses network fetches for npm packages, serving strictly from `CasStore`.
+    #[cfg(feature = "npm")]
+    pub fn with_offline(mut self, offline: bool) -> Self {
+        self.npm = self.npm.with_offline(offline);
+        self
+    }
+
+    /// Overrides the `CasStore` root directory used for npm packages.
+    #[cfg(feature = "npm")]
+    pub fn with_npm_cache_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.npm = self.npm.with_cache_dir(dir);
         self
     }
 }
@@ -392,11 +431,23 @@ impl Runtime {
 
     /// Creates a runtime configured by [`RuntimeOptions`].
     ///
-    /// Combines optional remote loading and an optional `neo.jsonc`
-    /// [`ImportResolver`] without implicit filesystem manifest discovery.
+    /// Combines optional remote loading, an optional `neo.jsonc`
+    /// [`ImportResolver`], and npm options without implicit `neo.jsonc` discovery.
     pub fn with_options(options: RuntimeOptions) -> Result<Self, Error> {
+        let remote_cache_dir = options
+            .remote
+            .as_ref()
+            .and_then(|r| r.cache_dir().map(Path::to_path_buf));
         let remote = options.remote.map(RemoteClient::new);
-        Self::build(console_shim(), neo_shim(), remote, options.import_resolver)
+        Self::build(
+            console_shim(),
+            neo_shim(),
+            remote,
+            remote_cache_dir,
+            options.import_resolver,
+            #[cfg(feature = "npm")]
+            options.npm,
+        )
     }
 
     /// Creates a runtime over an injected remote transport.
@@ -418,13 +469,7 @@ impl Runtime {
             + Sync
             + 'static,
     {
-        let transport = neojs_remote::test_transport(fetch);
-        Self::build(
-            console_shim(),
-            neo_shim(),
-            Some(RemoteClient::with_transport(options, transport)),
-            None,
-        )
+        Self::with_options_and_transport(RuntimeOptions::new().with_remote(options), fetch)
     }
 
     /// Creates a runtime over an injected remote transport and an
@@ -450,12 +495,46 @@ impl Runtime {
             + Sync
             + 'static,
     {
+        Self::with_options_and_transport(
+            RuntimeOptions::new()
+                .with_remote(options)
+                .with_import_resolver(resolver),
+            fetch,
+        )
+    }
+
+    /// Creates a runtime configured by [`RuntimeOptions`] over an injected
+    /// remote transport (for `test-support` only).
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn with_options_and_transport<F>(options: RuntimeOptions, fetch: F) -> Result<Self, Error>
+    where
+        F: Fn(
+                &str,
+                std::time::Duration,
+                Option<&str>,
+                Option<&str>,
+            ) -> Result<neojs_remote::TestRemoteResponse, String>
+            + Send
+            + Sync
+            + 'static,
+    {
         let transport = neojs_remote::test_transport(fetch);
+        let remote_cache_dir = options
+            .remote
+            .as_ref()
+            .and_then(|r| r.cache_dir().map(Path::to_path_buf));
+        let remote = options
+            .remote
+            .map(|opts| RemoteClient::with_transport(opts, transport));
         Self::build(
             console_shim(),
             neo_shim(),
-            Some(RemoteClient::with_transport(options, transport)),
-            Some(resolver),
+            remote,
+            remote_cache_dir,
+            options.import_resolver,
+            #[cfg(feature = "npm")]
+            options.npm,
         )
     }
 
@@ -503,9 +582,22 @@ impl Runtime {
         console: impl Into<String>,
         builtins: String,
         remote: Option<RemoteClient>,
+        remote_cache_dir: Option<std::path::PathBuf>,
         import_resolver: Option<ImportResolver>,
+        #[cfg(feature = "npm")] npm_options: NpmOptions,
     ) -> Result<Self, Error> {
-        let files = Rc::new(FileModuleLoader::new(remote.clone(), import_resolver));
+        #[cfg(feature = "npm")]
+        let files = Rc::new(FileModuleLoader::with_npm(
+            remote.clone(),
+            remote_cache_dir,
+            import_resolver,
+            npm_options,
+        ));
+        #[cfg(not(feature = "npm"))]
+        let files = {
+            let _ = remote_cache_dir;
+            Rc::new(FileModuleLoader::new(remote.clone(), import_resolver))
+        };
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match remote.clone() {
             Some(remote_client) => Rc::new(JsrModuleLoader::new(
                 Rc::new(RemoteRegistry::new(remote_client)),

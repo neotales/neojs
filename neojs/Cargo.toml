@@ -10,9 +10,13 @@ rust-version.workspace = true
 authors.workspace = true
 
 [features]
-default = ["neo-template"]
+default = ["neo-db", "neo-template", "npm"]
+# Enables `neo:db` in `neojs-core`. Opt-outable with `--no-default-features`.
+neo-db = ["neojs-core/neo-db"]
 # Enables `neo:template` in `neojs-core`. Opt-outable with `--no-default-features`.
 neo-template = ["neojs-core/neo-template"]
+# Opt-outable `npm:` and `package.json` CAS-backed module resolution.
+npm = ["neojs-core/npm"]
 
 [dependencies]
 neojs-core = { version = "0.0.0-alpha.0", path = "../neojs-core", default-features = false, features = ["neo-chars", "neo-slices", "neo-strings"] }
@@ -22,10 +26,14 @@ neojs-manifest.workspace = true
 neojs-module-policy = { version = "0.0.0-alpha.0", path = "../neojs-module-policy", features = ["test-glob"] }
 
 [dev-dependencies]
+base64.workspace = true
+flate2.workspace = true
 # The duplicate dependency enables the test-only fault injection for this
 # package's tests. A normal `cargo build -p neojs` does not include dev-deps.
-neojs-core = { version = "0.0.0-alpha.0", path = "../neojs-core", features = ["test-support"] }
+neojs-core = { version = "0.0.0-alpha.0", path = "../neojs-core", default-features = false, features = ["test-support"] }
+neojs-npm.workspace = true
 neotales-ssh.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 url.workspace = true

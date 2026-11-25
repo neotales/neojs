@@ -2034,11 +2034,15 @@ dependencies = [
 name = "neojs"
 version = "0.0.0-alpha.0"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
  "neojs-core",
  "neojs-dts",
  "neojs-manifest",
  "neojs-module-policy",
+ "neojs-npm",
  "neotales-ssh",
+ "sha2 0.11.1",
  "tempfile",
  "tokio",
  "url",
@@ -2058,9 +2062,11 @@ dependencies = [
 name = "neojs-core"
 version = "0.0.0-alpha.0"
 dependencies = [
+ "base64 0.22.1",
  "deno_core",
  "deno_error",
  "ed25519-dalek",
+ "flate2",
  "getrandom 0.4.3",
  "neojs-builtins",
  "neojs-crypto-core",
@@ -2069,6 +2075,7 @@ dependencies = [
  "neojs-fs-core",
  "neojs-manifest",
  "neojs-module-policy",
+ "neojs-npm",
  "neojs-remote",
  "neojs-ssh-core",
  "neojs-template-core",
