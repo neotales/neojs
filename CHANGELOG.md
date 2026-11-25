@@ -7,54 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.0.0-alpha.0] - 2026-11-24
+## [0.0.0-alpha.0] - 2026-11-25
 
-> **Alpha Pre-Release Notice:** `v0.0.0-alpha.0` is an early alpha pre-release. Public Rust and JavaScript APIs may change before `0.1.0` and `1.0.0`. Crates are not published to crates.io (`publish = false` across all workspace members).
+> **Alpha Pre-Release Notice:** `v0.0.0-alpha.0` is the inaugural `vaeljs` alpha pre-release. Public Rust and JavaScript APIs may change before `0.1.0` and `1.0.0`. All 17 workspace crates remain `publish = false` (no crates.io publishing yet).
 
 ### Added
 
-- **Dual-Engine Runtimes:**
-  - `vaeljs` / `vaeljs-core`: V8-backed ECMAScript module runtime via vendored `deno_core 0.413.0` and `v8 150.4.0`.
-  - `vaeljs-lite` / `vaeljs-lite-core`: QuickJS-backed ECMAScript module runtime via `rquickjs 0.14.0` with zero V8/Tokio dependencies.
-  - Shared erasable TypeScript stripping (`.ts`, `.mts`) via `deno_ast` in `vaeljs-module-policy` across both `vaeljs` and `vaeljs-lite` (type-checking and transpilation transforms remain out of scope).
-- **Shared Built-in Modules (both `vaeljs` and `vaeljs-lite`):**
-  - `vael:assert`: Shared assertion helpers and rejection/error assertions.
-  - `vael:chars`: Unicode `General_Category` character classification and case helpers.
-  - `vael:crypto`: Engine-neutral synchronous primitives via `vaeljs-crypto-core` (13 exports shared on both `vaeljs` and `vaeljs-lite`: `generateEnvelopeKey`, `randomBytes`, `encrypt`, `decrypt`, `createEncryptor`, `createDecryptor`, `createHash`, `createHmac`, `pbkdf2`, `bcryptHash`, `bcryptVerify`, `shamirSplit`, `shamirCombine`; plus 7 `*Async` worker-pool exports on `vaeljs` V8).
-  - `vael:fs`: Engine-neutral core filesystem operations via `vaeljs-fs-core` (14 exports: `readFile`, `readTextFile`, `writeFile`, `writeTextFile`, `writeFileAtomic`, `exists`, `stat`, `lstat`, `readDir`, `mkdir`, `remove`, `rename`, `copyFile`, `realpath`).
-  - `vael:os`: Target `platform` and `arch` constants.
-  - `vael:ssh`: Synchronous SSH client via `vaeljs-ssh-core` (`neotales-ssh`) with mandatory host trust verification and bounded execution.
-  - `vael:strings`: Unicode-aware string helpers.
-  - `vael:test`: Shared test registration and execution API (`test(...)`).
-  - `vael:uuid`: RFC 9562 v4 and v7 UUID generation (`vael:uuid`, `vael:uuid/v4`, `vael:uuid/v7`) backed by fallible OS CSPRNG (`getrandom`).
-- **V8-Only Built-in Modules (`vaeljs` / `vaeljs-core`):**
-  - `vael:age`: Age v1 encryption and decryption (`neotales-age`).
-  - `vael:console`: Structured console output module.
-  - `vael:cron`: Cron expression parsing and scheduling.
-  - `vael:crypto`: Asynchronous worker-pool APIs (`hashAsync`, `hmacAsync`, `pbkdf2Async`, `bcryptHashAsync`, `bcryptVerifyAsync`, `shamirSplitAsync`, `shamirCombineAsync`) in addition to the 13 synchronous primitives.
-  - `vael:path`: Cross-platform path manipulation helpers.
-  - `vael:slices`: Character slice utilities built on `vael:chars`.
-  - `vael:stdio`: Standard I/O stream helpers.
-- **CLI, Manifest, Remote Loading & Type Declarations:**
-  - `vjs test` and `vjs-lite test`: Deterministic glob expansion and shared JS/TS test runner (`tests/js/shared/`).
-  - `vjs types` and `vjs-lite types`: Bundled TypeScript `.d.ts` declarations (`vaeljs-dts`) for `v8` and `lite` profiles (`--profile <v8|lite>`, `--out-dir <dir>`), verified by live runtime CI drift tests (`dts_drift`).
-  - `vael.jsonc` support (`vaeljs-manifest`): Bounded upward manifest discovery, `imports` maps, `workspaces` resolution, and `--config <path>` / `--no-config` CLI flags on both `vjs` and `vjs-lite`.
-  - Remote module loading on `vaeljs` (`vaeljs-remote`): Opt-in `--allow-remote` / `VAELJS_ALLOW_REMOTE` support for `https:`, `gh:`/`github:`, and `jsr:` specifiers with SHA-256 verification, redirect pointers, and offline cache reads.
-- **Foundational Engine-Neutral Crates (not yet wired to CLI):**
-  - `vaeljs-npm`: Phase 1 ESM-only no-`node_modules` specifier parser, SemVer matching, `package.json`/`exports` resolver, and content-addressed tarball ingestor.
-  - `vaeljs-dbapi`: Driver-neutral SQL Rust foundation with SQLite provider (`neotales-dbapi` / `neotales-dbapi-sqlite`).
+- **Shippable Binaries & Release Packaging (`vjs` & `vjs-lite`):**
+  - `vjs` (`vaeljs` / `vaeljs-core`): V8-backed ECMAScript module runtime via vendored `deno_core 0.413.0` and `v8 150.4.0`.
+  - `vjs-lite` (`vaeljs-lite` / `vaeljs-lite-core`): QuickJS-backed ECMAScript module runtime via `rquickjs 0.14.0` with zero V8, Tokio, or Hyper dependencies.
+  - `[profile.release]` enables `strip = "symbols"` across all 6 release targets (`linux`/`macos`/`windows` × `amd64`/`arm64`), bundling `LICENSE.md`, profile-matched TypeScript `types/`, and `SHA256SUMS.txt`. All 17 `vaeljs*` workspace crates remain `publish = false`.
+- **`vael:*` Standard Library & `Vael` Global (20 modules on `vjs`, 15 sync modules on `vjs-lite`):**
+  - **`vael:http` (`vjs`):** Go 1.22+-style `ServeMux` router, pure `(req, ctx) => Response` handlers, ergonomic builders/errors/middleware, traversal-proof `.static()`, `hyper 1` HTTP/1.1 server, and zero-socket in-process `.fetch()`.
+  - **`vael:db` (`vjs`):** Uniform `@name`/`?` parameterized SQLite database client over `vaeljs-dbapi` (`neotales-dbapi` / `neotales-dbapi-sqlite`) with atomic transactions and redacted error surfaces.
+  - **`vael:template` (both `vjs` and `vjs-lite`):** Go `text/template` and Sprig helpers over `neotales-gotmpl` & `neotales-sprig` (`vaeljs-template-core`) with XSS-safe `htmlEscape: true`.
+  - **Shared modules (both `vjs` and `vjs-lite`):** `vael:assert`, `vael:chars`, `vael:console`, `vael:crypto` (13 synchronous primitives via `vaeljs-crypto-core`, plus 7 `*Async` worker-pool APIs on `vjs`), `vael:fs` (`vaeljs-fs-core`), `vael:os`, `vael:path`, `vael:slices`, `vael:ssh` (`vaeljs-ssh-core` / `neotales-ssh` with mandatory host trust verification and bounded execution), `vael:strings`, `vael:test`, and `vael:uuid` (`vael:uuid`, `vael:uuid/v4`, `vael:uuid/v7` backed by fallible `getrandom`).
+  - **Additional V8-only modules (`vjs`):** `vael:age` (`neotales-age`), `vael:cron`, and `vael:stdio`.
+- **`npm:` / `package.json` / `vael.lock` v1 / `.npmrc`:**
+  - Zero `node_modules` directory, zero auto-run install or lifecycle scripts, and content-addressed verified CAS tarball caching via `vaeljs-npm`.
+  - Deterministic `vael.lock` v1 resolution with `--frozen-lockfile`, `--offline`, and `--no-npm` CLI controls.
+  - `.npmrc` scoped registry routing and HTTPS-only Bearer/Basic auth (`${ENV_VAR}` interpolation, cross-origin and out-of-scope redirect auth stripping, zero token leakage).
+- **Opt-Outable `node:*` Automation Compatibility (`node-compat`, `--no-node-compat`):**
+  - 11 modules on `vjs` (`node:buffer`, `node:child_process`, `node:crypto`, `node:fs`, `node:fs/promises`, `node:os`, `node:path`, `node:path/posix`, `node:path/win32`, `node:process`, `node:url`) and 10 sync modules on `vjs-lite` (all except `node:fs/promises`), backed by `vaeljs-node-core`.
+- **Frameworkless Go-Style WebApp Prototype (`examples/webapp/`):**
+  - Runnable zero-framework TypeScript web application combining `vael:http`, `vael:db`, `vael:template`, `vael:uuid`, and `vael:crypto`, verified with `vjs test examples/webapp/app.test.ts`.
+- **TypeScript, Manifests, Remote Loading & Testing:**
+  - Shared erasable TypeScript stripping (`.ts`, `.mts`) via `deno_ast` (`vaeljs-module-policy`) on both `vjs` and `vjs-lite`.
+  - `vjs types` and `vjs-lite types` `.d.ts` bundles (`vaeljs-dts`, `--profile <v8|lite>`, `--out-dir <dir>`), verified 1:1 against live runtime exports by `dts_drift` tests.
+  - `vael.jsonc` manifests & workspaces (`vaeljs-manifest`): bounded upward discovery, `imports` maps, `workspaces` resolution, and `--config <path>` / `--no-config`.
+  - Remote module loading on `vjs` (`vaeljs-remote`): opt-in `--allow-remote` / `VAELJS_ALLOW_REMOTE` for `https:`, `gh:`/`github:`, and `jsr:` with SHA-256 verification and offline cache reads.
+  - `vjs test` and `vjs-lite test`: deterministic glob expansion and 14 shared JS+TS test files (81 tests in `tests/js/shared/`) passing identically on both engines.
 
 ### Security & Policy
 
-- Remote module loading is disabled by default (`--no-allow-remote` overrides `VAELJS_ALLOW_REMOTE`); `vaeljs-lite` stays strictly local/workspace-only.
-- Canonical `vael:` module specifiers and fail-closed `vaeljs-module-policy` validation across both runtimes.
+- Remote module loading and remote npm fetches are disabled by default (`--no-allow-remote` overrides `VAELJS_ALLOW_REMOTE`); `vjs-lite` stays strictly local/workspace-only.
+- Canonical `vael:` and `node:` module specifiers, fail-closed `vaeljs-module-policy` validation, and `--no-node-compat` opt-out across both runtimes.
 - `publish = false` enforced across all 17 workspace crates; all workspace versions aligned to `0.0.0-alpha.0`.
 
-### Known Limitations
+### Known Limitations & Deferred Scope
 
 - Pre-release APIs across Rust crates and `vael:*` modules may change before `0.1.0` and `1.0.0`.
-- Crates are not published to crates.io (`publish = false`).
-- `npm:` runtime wiring, `node:*` compatibility modules, `vael.lock`, `vael:os/dirs`, `vael:fs/acl`, and `vjs lsp` are not included in `0.0.0-alpha.0` and are planned for subsequent alpha releases.
+- **Explicitly deferred beyond `0.0.0-alpha.0`:** crates.io publishing (`publish = false`), network DB drivers (Postgres, MySQL, MariaDB, and SQL Server remain feature-deferred), `vael:os/dirs`, `vael:fs/acl`, `vael:archive`, `vjs lsp`, and cute dragon mascot / logo assets.
 
 [Unreleased]: https://github.com/neotales/vaeljs/compare/v0.0.0-alpha.0...HEAD
 [0.0.0-alpha.0]: https://github.com/neotales/vaeljs/releases/tag/v0.0.0-alpha.0

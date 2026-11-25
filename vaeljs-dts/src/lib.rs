@@ -4,17 +4,18 @@
 //! This crate embeds profile-accurate TypeScript declarations for `globalThis.Vael`,
 //! `globalThis.console`, and every built-in `vael:*` module via `include_str!`.
 //! It has zero JavaScript engine dependencies and zero runtime dependencies
-//! beyond `std`, so `vaeljs lsp`, `vjs types`, release archive staging, and
+//! beyond `std`, so `vjs lsp`, `vjs types`, release archive staging, and
 //! runtime CI drift tests can consume it without linking V8 or QuickJS.
 //!
 //! # Profiles
 //!
-//! * [`Profile::V8`] targets the full `vaeljs` binary (`Vael.engine === "vael"`,
-//!   `console.{log,debug,info,warn,error}`, and all 18 `vael:*` built-in
-//!   modules).
-//! * [`Profile::Lite`] targets the `vaeljs-lite` binary
-//!   (`Vael.engine === "vael-lite"`, `console.{log,debug,info,warn,error}`, and
-//!   the 15 Lite `vael:*` built-in modules).
+//! * [`Profile::V8`] targets the full `vjs` (`vaeljs`) binary (`Vael.engine === "vael"`,
+//!   `console.{log,debug,info,warn,error}`, 20 `vael:*` built-in modules, and
+//!   11 `node:*` compatibility modules — 31 modules total).
+//! * [`Profile::Lite`] targets the `vjs-lite` (`vaeljs-lite`) binary
+//!   (`Vael.engine === "vael-lite"`, `console.{log,debug,info,warn,error}`,
+//!   15 `vael:*` built-in modules, and 10 `node:*` compatibility modules —
+//!   25 modules total).
 //!
 //! # Example
 //!
@@ -43,12 +44,13 @@ use std::path::{Component, Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Profile {
-    /// Full V8-backed `vaeljs` runtime (`engine: "vael"`, 5 `console` methods,
-    /// and all 18 `vael:*` built-ins).
+    /// Full V8-backed `vjs` (`vaeljs`) runtime (`engine: "vael"`, 5 `console`
+    /// methods, 20 `vael:*` built-ins, and 11 `node:*` compatibility modules —
+    /// 31 modules total).
     V8,
-    /// QuickJS-backed `vaeljs-lite` runtime (`engine: "vael-lite"`,
-    /// `console.{log,debug,info,warn,error}`, and the 15 Lite `vael:*`
-    /// built-ins).
+    /// QuickJS-backed `vjs-lite` (`vaeljs-lite`) runtime (`engine: "vael-lite"`,
+    /// `console.{log,debug,info,warn,error}`, 15 `vael:*` built-ins, and 10
+    /// `node:*` compatibility modules — 25 modules total).
     Lite,
 }
 

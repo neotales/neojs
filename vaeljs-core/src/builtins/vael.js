@@ -2953,7 +2953,7 @@
     // `@neotales/path`. See `vaeljs-core/THIRD_PARTY_NOTICES.md` for the exact
     // upstream revision, the adapted files, and the MIT notices. It is not a
     // drop-in replacement for Node's `path`, `@neotales/path`, or NeoLiteJS
-    // `vael:path`.
+    // `neo:path`.
     //
     // Scope: POSIX and Windows lexical operations only. The module does not read or
     // write files, check existence, resolve symlinks or junctions, read environment

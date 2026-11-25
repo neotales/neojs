@@ -51,7 +51,7 @@ Each hash is of the exact file in this directory tree.
 ```
 
 The document's `manifest` checksums match the files below. Its `moduleGraph2`
-field is retained unmodified; neojs does not interpret it.
+field is retained unmodified; vaeljs does not interpret it.
 
 ### `chars/0.0.0/...`
 
