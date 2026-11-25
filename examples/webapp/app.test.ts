@@ -1,5 +1,5 @@
 import assert from "neo:assert";
-import { type LogEntry, serve } from "neo:http";
+import { type LogEntry, serve, type Server } from "neo:http";
 import { dirname, join } from "neo:path";
 import test from "neo:test";
 import { fileURLToPath } from "node:url";
@@ -80,6 +80,32 @@ test("SSR form POST /tasks, signed flash cookie, toggle, and delete", async () =
       body: "title=+++",
     });
     assert.strictEquals(blankRes.status, 400);
+
+    // Over-long title (> 200 chars) is rejected with 400 before DB write.
+    const tooLongRes = await app.mux.fetch("/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `title=${"a".repeat(201)}`,
+    });
+    assert.strictEquals(tooLongRes.status, 400);
+
+    // 200-char multi-byte title succeeds and truncates flash cookie safely.
+    const maxTitle = "🚀".repeat(200);
+    const maxRes = await app.mux.fetch("/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `title=${encodeURIComponent(maxTitle)}`,
+    });
+    assert.strictEquals(maxRes.status, 303);
+    const maxFlashCookie = extractCookiePair(maxRes.headerValues("set-cookie")[0]);
+    const maxHome = await app.mux.fetch("/", {
+      headers: { Cookie: maxFlashCookie },
+    });
+    assert.strictEquals(maxHome.status, 200);
+    assert.ok(maxHome.text().includes("…"));
+    const maxList = await app.mux.fetch("/api/tasks");
+    const maxTaskId = maxList.json<{ tasks: Task[] }>().tasks[0].id;
+    await app.mux.fetch(`/tasks/${maxTaskId}/delete`, { method: "POST" });
 
     // Valid form submission creates task, returns 303, and sets signed flash cookie.
     const createRes = await app.mux.fetch("/tasks", {
@@ -320,15 +346,18 @@ test("Middleware attaches security headers, request ID, and structured logs", as
 
 test("Live loopback server binds ephemeral port and shuts down cleanly", async () => {
   const { db, app } = await setupApp();
-  const server = serve({ host: "127.0.0.1", port: 0 }, app.mux);
+  let server: Server | undefined;
   try {
+    server = serve({ host: "127.0.0.1", port: 0 }, app.mux);
     assert.strictEquals(server.host, "127.0.0.1");
     assert.ok(server.port > 0, `expected ephemeral port > 0, got ${server.port}`);
     assert.strictEquals(server.addr, `127.0.0.1:${server.port}`);
     assert.strictEquals(server.url, `http://127.0.0.1:${server.port}`);
   } finally {
-    await server.close();
-    await server.finished;
+    if (server) {
+      await server.close();
+      await server.finished;
+    }
     await db.close();
   }
 });

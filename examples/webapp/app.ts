@@ -43,6 +43,16 @@ export interface WebApp {
 }
 
 const FLASH_COOKIE_NAME = "flash";
+const MAX_TITLE_LENGTH = 200;
+const MAX_FLASH_PREVIEW_CHARS = 80;
+
+function formatFlashPreview(prefix: string, title: string): string {
+  const chars = Array.from(title);
+  const preview = chars.length > MAX_FLASH_PREVIEW_CHARS
+    ? `${chars.slice(0, MAX_FLASH_PREVIEW_CHARS - 1).join("")}…`
+    : title;
+  return `${prefix}: ${preview}`;
+}
 
 function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) {
@@ -106,6 +116,12 @@ function assertNonEmptyTitle(raw: unknown): string {
   const trimmed = raw.trim();
   if (trimmed.length === 0) {
     throw badRequest("task title must not be empty", "INVALID_TITLE");
+  }
+  if (Array.from(trimmed).length > MAX_TITLE_LENGTH) {
+    throw badRequest(
+      `task title must be at most ${MAX_TITLE_LENGTH} characters`,
+      "TITLE_TOO_LONG",
+    );
   }
   return trimmed;
 }
@@ -172,7 +188,10 @@ export function createApp({
     const res = redirect("/", 303);
     return setCookie(res, {
       name: FLASH_COOKIE_NAME,
-      value: signFlashCookie(`Created task: ${task.title}`, cookieSecret),
+      value: signFlashCookie(
+        formatFlashPreview("Created task", task.title),
+        cookieSecret,
+      ),
       path: "/",
       httpOnly: true,
       sameSite: "Lax",
@@ -188,7 +207,10 @@ export function createApp({
     const label = updated.done ? "Completed" : "Reopened";
     return setCookie(redirect("/", 303), {
       name: FLASH_COOKIE_NAME,
-      value: signFlashCookie(`${label}: ${updated.title}`, cookieSecret),
+      value: signFlashCookie(
+        formatFlashPreview(label, updated.title),
+        cookieSecret,
+      ),
       path: "/",
       httpOnly: true,
       sameSite: "Lax",

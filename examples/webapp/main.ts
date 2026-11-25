@@ -1,4 +1,4 @@
-import { serve } from "neo:http";
+import { serve, type Server } from "neo:http";
 import { dirname, join } from "neo:path";
 import { env } from "node:process";
 import { fileURLToPath } from "node:url";
@@ -26,11 +26,15 @@ const here = dirname(fileURLToPath(import.meta.url));
 const staticDir = join(here, "public");
 
 const db = await openTaskDb(dbPath);
+let server: Server | undefined;
 try {
   const app = createApp({ db, staticDir });
-  const server = serve({ host, port }, app.mux);
+  server = serve({ host, port }, app.mux);
   console.log(`Listening on ${server.url}`);
   await server.finished;
 } finally {
+  if (server) {
+    await server.close();
+  }
   await db.close();
 }
