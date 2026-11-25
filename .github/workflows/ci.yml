@@ -1,8 +1,6 @@
 # Continuous integration for neojs.
 #
-# Action versions use pinned major tags because this workflow was authored
-# offline without network access to resolve GitHub commit SHAs.
-# TODO(ci): Pin all `uses:` references to immutable 40-char commit SHAs once online.
+# All GitHub Actions are pinned to immutable 40-char commit SHAs (Node 24).
 
 name: CI
 
@@ -37,7 +35,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Verify toolchain pin matches eng/size/toolchain
         run: |
@@ -56,7 +54,7 @@ jobs:
           rustup default "${RUST_TOOLCHAIN}"
 
       - name: Cache Cargo dependencies and build artifacts
-        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -119,7 +117,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install pinned Rust toolchain
         run: |
@@ -128,7 +126,7 @@ jobs:
           rustup default "${RUST_TOOLCHAIN}"
 
       - name: Cache Cargo dependencies and build artifacts
-        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Run V8 workspace tests
         run: cargo test --locked
@@ -150,7 +148,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install pinned Rust toolchain
         run: |
@@ -159,7 +157,7 @@ jobs:
           rustup default "${RUST_TOOLCHAIN}"
 
       - name: Cache Cargo dependencies and build artifacts
-        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Test neojs-builtins (all features)
         run: cargo test --locked -p neojs-builtins --all-features
@@ -208,7 +206,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install pinned Rust toolchain
         run: |
@@ -217,7 +215,7 @@ jobs:
           rustup default "${RUST_TOOLCHAIN}"
 
       - name: Cache Cargo dependencies and build artifacts
-        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Verify V8 graph excludes QuickJS
         run: |
@@ -309,7 +307,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install pinned Rust toolchain
         run: |
@@ -318,7 +316,7 @@ jobs:
           rustup default "${RUST_TOOLCHAIN}"
 
       - name: Cache Cargo dependencies and build artifacts
-        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Populate Cargo cache for offline size-tracker tests
         run: cargo fetch --locked

@@ -1,15 +1,14 @@
-# Tag-only 6-target release build, packaging, and smoke verification for neojs.
+# Tag-only 6-target release build, packaging, smoke verification, and GitHub Release publishing for neojs.
 #
 # Security & release boundary:
-# - Permissions are strictly `contents: read`; no secrets, signing keys, or
-#   publish tokens are accessed or stored in this workflow.
-# - Signing and publishing release artifacts (GitHub Releases, checksum
-#   attestations, future OS code-signing, and any future crates.io publishing)
-#   belong exclusively to `system-admin` outside this workflow.
-#
-# Action versions use pinned major tags because this workflow was authored
-# offline without network access to resolve GitHub commit SHAs.
-# TODO(ci): Pin all `uses:` references to immutable 40-char commit SHAs once online.
+# - Workflow-level permissions are `contents: read`, so `verify-tag` and all 6
+#   `build` matrix jobs remain strictly read-only.
+# - Only `publish-release` grants `contents: write` to create/update the GitHub
+#   Release with the 12 archives and `SHA256SUMS.txt` via `GITHUB_TOKEN` (no
+#   external secrets).
+# - Checksum signing/attestations, OS code-signing, and any future crates.io
+#   publishing remain outside this workflow (`publish = false` on all crates).
+# - All GitHub Actions are pinned to immutable 40-char commit SHAs (Node 24).
 
 name: Release
 
@@ -38,7 +37,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout tag
-        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -50,7 +49,7 @@ jobs:
             echo "ERROR: tag '${tag}' must start with 'v'" >&2
             exit 1
           fi
-          # actions/checkout@v4 fetches +${GITHUB_SHA}:refs/tags/${tag} (a lightweight
+          # actions/checkout fetches +${GITHUB_SHA}:refs/tags/${tag} (a lightweight
           # ref to the commit SHA) on tag pushes, so re-fetch the real tag object.
           git fetch --force --no-tags origin "+refs/tags/${tag}:refs/tags/${tag}"
           obj_type=$(git cat-file -t "refs/tags/${tag}")
@@ -81,7 +80,7 @@ jobs:
           rustup default "${RUST_TOOLCHAIN}"
 
       - name: Cache Cargo dependencies and build artifacts
-        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Verify all workspace versions and publish = false guard
         run: |
@@ -123,7 +122,7 @@ jobs:
           test -f dist-types/lite/index.d.ts
 
       - name: Upload canonical TypeScript declarations
-        uses: actions/upload-artifact@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-types
           path: dist-types/
@@ -165,7 +164,7 @@ jobs:
             archive: zip
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install pinned Rust toolchain and target
         shell: bash
@@ -176,7 +175,7 @@ jobs:
           rustup target add "${{ matrix.target }}"
 
       - name: Cache Cargo dependencies and build artifacts
-        uses: Swatinem/rust-cache@v2 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.slug }}
 
@@ -209,7 +208,7 @@ jobs:
           fi
 
       - name: Download canonical TypeScript declarations
-        uses: actions/download-artifact@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-types
           path: dist-types
@@ -432,21 +431,26 @@ jobs:
           }
 
       - name: Upload target archives
-        uses: actions/upload-artifact@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-archives-${{ matrix.slug }}
           path: dist/*
           retention-days: 7
           if-no-files-found: error
 
-  package-checksums:
-    name: Package Checksums and Release Bundle
+  publish-release:
+    name: Package Checksums and Publish GitHub Release
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
+      - name: Checkout tagged repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Download all target archives
-        uses: actions/download-artifact@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-archives-*
           path: dist
@@ -468,9 +472,79 @@ jobs:
           sha256sum -c SHA256SUMS.txt
 
       - name: Upload combined release bundle
-        uses: actions/upload-artifact@v4 # TODO(ci): pin to full 40-char commit SHA once online
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-bundle-${{ github.ref_name }}
           path: dist/
           retention-days: 30
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          tag_version="${tag#v}"
+
+          notes_file=$(mktemp)
+          trap 'rm -f "${notes_file}"' EXIT
+
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="${tag_version}" '
+              BEGIN {
+                prefix = "## [" ver "]"
+                in_section = 0
+              }
+              !in_section && index($0, prefix) == 1 {
+                next_char = substr($0, length(prefix) + 1, 1)
+                if (length($0) == length(prefix) || next_char ~ /[[:space:]-]/) {
+                  in_section = 1
+                  next
+                }
+              }
+              in_section && (/^##[[:space:]]/ || /^\[[^]]+\]:[[:space:]]/) {
+                exit
+              }
+              in_section {
+                lines[++n] = $0
+              }
+              END {
+                start = 1
+                while (start <= n && lines[start] ~ /^[[:space:]]*$/) start++
+                end = n
+                while (end >= start && lines[end] ~ /^[[:space:]]*$/) end--
+                for (i = start; i <= end; i++) print lines[i]
+              }
+            ' CHANGELOG.md > "${notes_file}"
+          fi
+
+          if [ ! -s "${notes_file}" ]; then
+            printf 'Release `%s`.\n\nSee `CHANGELOG.md` for release notes and `SHA256SUMS.txt` for archive checksums.\n' "${tag}" > "${notes_file}"
+          fi
+
+          prerelease_args=()
+          if [[ "${tag}" == *-* ]]; then
+            prerelease_args=(--prerelease)
+          fi
+
+          shopt -s nullglob
+          assets=(dist/neojs-*.tar.gz dist/neojs-*.zip dist/SHA256SUMS.txt)
+          if [ "${#assets[@]}" -ne 13 ]; then
+            echo "ERROR: expected 13 release assets (12 archives + SHA256SUMS.txt), found ${#assets[@]}" >&2
+            ls -la dist/ >&2
+            exit 1
+          fi
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${assets[@]}" --clobber
+            gh release edit "${tag}" --title "${tag}" --notes-file "${notes_file}" ${prerelease_args[@]+"${prerelease_args[@]}"}
+          else
+            gh release create "${tag}" "${assets[@]}" --title "${tag}" --notes-file "${notes_file}" --verify-tag ${prerelease_args[@]+"${prerelease_args[@]}"}
+          fi
+
+          asset_count=$(gh release view "${tag}" --json assets --jq '.assets | length')
+          if [ "${asset_count}" -ne 13 ]; then
+            echo "ERROR: expected 13 attached assets on release '${tag}', found ${asset_count}" >&2
+            exit 1
+          fi

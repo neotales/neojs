@@ -1,5 +1,10 @@
 # GitHub Actions Workflows
 
+All GitHub Actions referenced in `ci.yml` and `release.yml` are pinned by
+immutable 40-character commit SHAs to Node 24 releases (`actions/checkout` v7.0.1,
+`actions/upload-artifact` v7.0.2, `actions/download-artifact` v8.0.2, and
+`Swatinem/rust-cache` v2.9.3).
+
 ## `ci.yml`
 
 Runs on pushes to `dev` and `main`, and on pull requests targeting `dev` or `main`.
@@ -55,9 +60,12 @@ Jobs:
 
 ## `release.yml`
 
-Tag-only (`v*`) 6-target release build, packaging, and smoke verification workflow
-with `permissions: contents: read` only (zero secrets, signing keys, or publish
-tokens).
+Tag-only (`v*`) 6-target release build, packaging, smoke verification, and
+GitHub Release publishing workflow. Workflow-level permissions are strictly
+`contents: read` so `verify-tag` and all 6 `build` matrix jobs remain
+read-only; `contents: write` is granted exclusively to `publish-release` to
+create or update the GitHub Release via `GITHUB_TOKEN` (zero external secrets;
+no crates.io publishing).
 
 Jobs:
 - **verify-tag (`ubuntu-24.04`)**:
@@ -94,10 +102,17 @@ Jobs:
       checks `LICENSE.md` and `types/index.d.ts`, and runs the native smoke suite
       under `arch -x86_64` when Rosetta 2 is available.
   - Uploads `release-archives-<slug>`.
-- **package-checksums (`needs: build`, `ubuntu-24.04`)**:
-  - Downloads all 12 archives into `dist/`, asserts exact count `== 12`, generates
-    sorted `SHA256SUMS.txt` via `sha256sum`, verifies `sha256sum -c SHA256SUMS.txt`,
-    and uploads `release-bundle-<tag>` (`retention-days: 30`).
+- **publish-release (`needs: build`, `ubuntu-24.04`, `permissions: contents: write`)**:
+  - Checks out the tagged repository (`CHANGELOG.md`), downloads all 12 archives
+    into `dist/`, asserts exact count `== 12`, generates sorted `SHA256SUMS.txt`
+    via `sha256sum`, verifies `sha256sum -c SHA256SUMS.txt`, and uploads
+    `release-bundle-<tag>` (`retention-days: 30`).
+  - Extracts the `## [<tag_version>]` section from `CHANGELOG.md` (with a
+    concise fallback referencing `CHANGELOG.md` and `SHA256SUMS.txt`), marks
+    tags containing `-` with `--prerelease`, idempotently creates or updates the
+    GitHub Release via `gh release` using `GITHUB_TOKEN` with all 13 assets
+    (12 archives + `SHA256SUMS.txt`) attached, and verifies the published asset
+    count equals `13`.
 
 ### Documented failure modes (`release.yml`)
 - **Lightweight tag pushed**: `git cat-file -t refs/tags/<tag>` returns `commit`
@@ -105,13 +120,15 @@ Jobs:
 - **Version or `publish = false` mismatch**: Any workspace crate `.version` differs
   from `${GITHUB_REF_NAME#v}` or lacks `publish = false` (`publish != []`).
   Align all workspace manifests before tagging.
-- **Unpinned Action SHAs**: `uses:` references currently carry
-  `# TODO(ci): pin to full 40-char commit SHA once online`; resolve and pin
-  40-char commit SHAs once online before cutting public releases.
 - **Cross-compiled target runtime smoke gaps**: If Rosetta 2 is absent on `macos-15`,
   `macos-amd64` falls back to binary-header/`otool` checks and still requires a
   native macOS x86_64 smoke pass before promoting the release.
-- **Signing & publishing (`system-admin` boundary)**: This workflow never signs
-  artifacts, opens GitHub Releases, or publishes crates. Coordinate with
-  `system-admin` to pick up `release-bundle-<tag>`, sign/attest `SHA256SUMS.txt`,
-  and create the GitHub Release (`publish = false` blocks crates.io publishing).
+- **GitHub Release publish or asset-count failure**: Re-running `publish-release`
+  is idempotent (`gh release upload --clobber` + `gh release edit` when the
+  release already exists, otherwise `gh release create --verify-tag`), and fails
+  if fewer or more than 13 assets are attached.
+- **Signing, attestation & crates.io (`system-admin` boundary)**: This workflow
+  never signs artifacts, generates checksum attestations, or publishes crates
+  (`publish = false` blocks crates.io publishing). Coordinate with `system-admin`
+  outside this workflow for signing, attestations, or any future crates.io
+  publishing.
