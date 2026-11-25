@@ -1,0 +1,32 @@
+---
+title: VaelJS
+description: Fast, secure JavaScript & TypeScript runtimes for automation, webapps, and embedding — vjs (V8) and vjs-lite (QuickJS).
+template: splash
+hero:
+  tagline: Fast, secure JavaScript & TypeScript runtimes for automation, Go-style web apps, and Rust embedding — vjs (V8) and vjs-lite (QuickJS).
+  actions:
+    - text: Get Started
+      link: /getting-started/quickstart/
+      icon: right-arrow
+    - text: Download Releases
+      link: https://github.com/neotales/vaeljs/releases
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+<CardGrid stagger>
+  <Card title="Dual Runtimes: vjs & vjs-lite" icon="rocket">
+    Run full async servers and workloads on <strong>vjs</strong> (V8), or embed and script synchronous automation with zero V8/Tokio overhead on <strong>vjs-lite</strong> (QuickJS).
+  </Card>
+  <Card title="Zero-Framework WebApps" icon="setting">
+    Build Go-style HTTP services using <code>vael:http</code> <code>ServeMux</code>, immutable <code>(req, ctx) =&gt; Response</code> handlers, SQLite via <code>vael:db</code>, and XSS-safe <code>vael:template</code>.
+  </Card>
+  <Card title="Secure npm & Node Automation" icon="approve-check">
+    Import <code>npm:</code> packages without <code>node_modules</code> or lifecycle scripts via a SHA-256/512 CAS cache, <code>vael.lock</code> v1, and opt-outable <code>node:*</code> modules.
+  </Card>
+  <Card title="Embed in Rust" icon="puzzle">
+    Link <code>vaeljs-lite-core</code> for a compact QuickJS runtime with granular <code>--no-default-features</code> selection and shared erasable TypeScript stripping.
+  </Card>
+</CardGrid>
