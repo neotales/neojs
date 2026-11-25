@@ -15,6 +15,7 @@ members = [
     "neojs-remote",
     "neojs-npm",
     "neojs-ssh-core",
+    "neojs-template-core",
     "neojs-lite-core",
     "neojs-lite",
 ]
@@ -41,6 +42,7 @@ default-members = [
     "neojs-remote",
     "neojs-npm",
     "neojs-ssh-core",
+    "neojs-template-core",
 ]
 
 [workspace.package]
@@ -137,6 +139,10 @@ neotales-ssh = "=0.0.0-alpha.1"
 # Both are alpha releases of the same version, so they are pinned exactly.
 neotales-dbapi = "=0.0.0-alpha.0"
 neotales-dbapi-sqlite = "=0.0.0-alpha.0"
+# Pure Go text/template engine and deterministic Sprig helper library. Both are
+# alpha releases with unstable Rust APIs, so they are pinned exactly.
+neotales-gotmpl = "=0.0.0-alpha.1"
+neotales-sprig = "=0.0.0-alpha.1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 tempfile = "3"

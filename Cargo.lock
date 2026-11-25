@@ -2239,6 +2239,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "neojs-template-core"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "neotales-gotmpl",
+ "neotales-sprig",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "neotales-age"
 version = "0.0.0-alpha.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2290,6 +2300,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "neotales-gotmpl"
+version = "0.0.0-alpha.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a08406b6043f4ecea269cd4ef3e7e59a303cf7b0bb9a9d0d08ef9a5ae5187ee"
+
+[[package]]
 name = "neotales-resilience"
 version = "0.0.0-alpha.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2303,6 +2319,12 @@ name = "neotales-retry"
 version = "0.0.0-alpha.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "beaabe828a2743fa7273e20c6c2855646426b067ba882a9506db8936a0ad4c39"
+
+[[package]]
+name = "neotales-sprig"
+version = "0.0.0-alpha.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c43d8b07359cab22318439af9da297a1a17b9b86dda33e4b23c4f91f840709cd"
 
 [[package]]
 name = "neotales-ssh"
