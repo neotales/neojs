@@ -46,6 +46,25 @@ fn run_child_mode(mode: &str) -> ! {
             std::thread::sleep(Duration::from_secs(10));
             std::process::exit(0);
         }
+        "sleep_3s" => {
+            std::thread::sleep(Duration::from_secs(3));
+            std::process::exit(0);
+        }
+        "grandchild_pipe_inherit" => {
+            let exe = std::env::current_exe().unwrap();
+            let mut out = std::io::stdout().lock();
+            out.write_all(b"parent-before-grandchild\n").unwrap();
+            out.flush().unwrap();
+            let mut _grandchild = std::process::Command::new(exe)
+                .env("NEOJS_NODE_CORE_CHILD_MODE", "sleep_3s")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+            std::process::exit(0);
+        }
         "noisy_truncate" => {
             let out_payload = vec![b'A'; 256 * 1024];
             let err_payload = vec![b'B'; 256 * 1024];
@@ -174,5 +193,23 @@ fn main() {
     );
     assert!(out_str.contains("custom=neo;path=false"), "{out_str}");
 
-    println!("spawn_harness: all 6 child_process integration scenarios passed");
+    // 7. Grandchild inheriting stdout/stderr pipes does not hang spawn_sync on timeout
+    let gc_start = std::time::Instant::now();
+    let gc = spawn_self(
+        "grandchild_pipe_inherit",
+        &[],
+        SpawnOptions {
+            timeout_ms: Some(150),
+            ..SpawnOptions::default()
+        },
+    );
+    assert!(gc.timed_out);
+    assert!(
+        gc_start.elapsed() < Duration::from_millis(1_500),
+        "spawn_sync hung on grandchild pipe inheritance: {:?}",
+        gc_start.elapsed()
+    );
+    assert_eq!(gc.stdout, b"parent-before-grandchild\n");
+
+    println!("spawn_harness: all 7 child_process integration scenarios passed");
 }

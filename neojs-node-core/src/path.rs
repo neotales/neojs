@@ -719,7 +719,7 @@ fn parse_posix(path: &str) -> ParsedPath {
             start_part
         };
         let has_ext = start_dot.is_some_and(|sd| {
-            pre_dot_state != 0 && !(pre_dot_state == 1 && sd == e - 1 && sd == start_part + 1)
+            pre_dot_state != 0 && !(pre_dot_state == 1 && sd == e - 1 && sd == component_start + 1)
         });
         if has_ext {
             let sd = start_dot.unwrap_or(e);
@@ -1487,6 +1487,27 @@ mod tests {
         assert_eq!(extname(Style::Posix, ".index.html").unwrap(), ".html");
         assert_eq!(extname(Style::Posix, "index.").unwrap(), ".");
         assert_eq!(extname(Style::Posix, "..").unwrap(), "");
+        assert_eq!(extname(Style::Posix, "/..").unwrap(), "");
+        assert_eq!(
+            parse(Style::Posix, "/..").unwrap(),
+            ParsedPath {
+                root: "/".to_owned(),
+                dir: "/".to_owned(),
+                base: "..".to_owned(),
+                ext: String::new(),
+                name: "..".to_owned(),
+            }
+        );
+        assert_eq!(
+            parse(Style::Posix, "/../").unwrap(),
+            ParsedPath {
+                root: "/".to_owned(),
+                dir: "/".to_owned(),
+                base: "..".to_owned(),
+                ext: String::new(),
+                name: "..".to_owned(),
+            }
+        );
         assert_eq!(relative(Style::Posix, "/a/b", "/a/b").unwrap(), "");
     }
 

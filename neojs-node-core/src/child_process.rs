@@ -11,12 +11,15 @@ use std::io::{self, Write as _};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::error::{NodeCoreError, map_io_error};
 
 /// Default capture cap per output stream (`10 MiB`).
 pub const DEFAULT_MAX_BUFFER: usize = 10 * 1024 * 1024;
+
+const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(75);
 
 /// Configuration for [`spawn_sync`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,64 +122,78 @@ pub fn spawn_sync(
     let stderr_pipe = child.stderr.take();
 
     let max_buf = opts.max_buffer;
-    let truncated = AtomicBool::new(false);
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
+    let truncated = Arc::new(AtomicBool::new(false));
+
+    let stdin_signal = stdin_pipe
+        .zip(opts.stdin.as_deref())
+        .map(|(mut pipe, data)| {
+            let payload = data.to_vec();
+            let signal = Arc::new((Mutex::new(false), Condvar::new()));
+            let worker_signal = Arc::clone(&signal);
+            std::thread::spawn(move || {
+                let _ = pipe.write_all(&payload);
+                drop(pipe);
+                let (lock, cvar) = &*worker_signal;
+                let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+                *done = true;
+                cvar.notify_all();
+            });
+            signal
+        });
+
+    let stdout_state = stdout_pipe.map(|pipe| spawn_reader(pipe, max_buf, Arc::clone(&truncated)));
+    let stderr_state = stderr_pipe.map(|pipe| spawn_reader(pipe, max_buf, Arc::clone(&truncated)));
+
     let mut timed_out = false;
     let mut exit_status: Option<ExitStatus> = None;
     let mut wait_error: Option<io::Error> = None;
+
+    match wait_with_timeout(&mut child, opts.timeout_ms) {
+        Ok((status, did_timeout)) => {
+            exit_status = Some(status);
+            timed_out = did_timeout;
+        }
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            wait_error = Some(err);
+        }
+    }
+
+    let grace_deadline = if timed_out || wait_error.is_some() {
+        Instant::now().checked_add(PIPE_DRAIN_GRACE)
+    } else {
+        None
+    };
+
+    if let Some(signal) = stdin_signal {
+        wait_for_done(&signal, grace_deadline);
+    }
+
     let mut read_error: Option<io::Error> = None;
-
-    std::thread::scope(|scope| {
-        let stdin_handle = stdin_pipe
-            .zip(opts.stdin.as_deref())
-            .map(|(mut pipe, data)| {
-                scope.spawn(move || {
-                    let _ = pipe.write_all(data);
-                    drop(pipe);
-                })
-            });
-
-        let stdout_handle =
-            stdout_pipe.map(|pipe| scope.spawn(|| drain_bounded(pipe, max_buf, &truncated)));
-        let stderr_handle =
-            stderr_pipe.map(|pipe| scope.spawn(|| drain_bounded(pipe, max_buf, &truncated)));
-
-        match wait_with_timeout(&mut child, opts.timeout_ms) {
-            Ok((status, did_timeout)) => {
-                exit_status = Some(status);
-                timed_out = did_timeout;
-            }
-            Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                wait_error = Some(err);
-            }
+    let stdout = if let Some(state) = stdout_state {
+        let (buf, err) = collect_stream(&state, grace_deadline);
+        if read_error.is_none() {
+            read_error = err;
         }
-
-        if let Some(handle) = stdin_handle {
-            let _ = handle.join();
+        buf
+    } else {
+        Vec::new()
+    };
+    let stderr = if let Some(state) = stderr_state {
+        let (buf, err) = collect_stream(&state, grace_deadline);
+        if read_error.is_none() {
+            read_error = err;
         }
-        if let Some(handle) = stdout_handle {
-            match handle.join() {
-                Ok(Ok(buf)) => stdout = buf,
-                Ok(Err(err)) if read_error.is_none() => read_error = Some(err),
-                _ => {}
-            }
-        }
-        if let Some(handle) = stderr_handle {
-            match handle.join() {
-                Ok(Ok(buf)) => stderr = buf,
-                Ok(Err(err)) if read_error.is_none() => read_error = Some(err),
-                _ => {}
-            }
-        }
-    });
+        buf
+    } else {
+        Vec::new()
+    };
 
     if let Some(err) = wait_error {
         return Err(NodeCoreError::ProcessError {
             context: "wait for child process",
-            reason: err.to_string(),
+            reason: "failed while waiting for child".to_owned(),
             source: Some(err),
         });
     }
@@ -185,7 +202,7 @@ pub fn spawn_sync(
     {
         return Err(NodeCoreError::ProcessError {
             context: "read child process output",
-            reason: err.to_string(),
+            reason: "failed while reading child output".to_owned(),
             source: Some(err),
         });
     }
@@ -255,36 +272,115 @@ fn validate_spawn_inputs(
             }
         }
     }
+    if let Some(ms) = opts.timeout_ms {
+        deadline_from_duration(Instant::now(), Duration::from_millis(ms))?;
+    }
     Ok(())
 }
 
-fn drain_bounded(
-    mut reader: impl std::io::Read,
+fn deadline_from_duration(now: Instant, duration: Duration) -> Result<Instant, NodeCoreError> {
+    now.checked_add(duration)
+        .ok_or(NodeCoreError::InvalidInput {
+            reason: "timeout_ms overflows monotonic clock",
+        })
+}
+
+#[derive(Default)]
+struct StreamState {
+    buf: Vec<u8>,
+    done: bool,
+    err: Option<io::Error>,
+}
+
+fn spawn_reader(
+    mut reader: impl std::io::Read + Send + 'static,
     max_buffer: usize,
-    truncated: &AtomicBool,
-) -> io::Result<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                let remaining = max_buffer.saturating_sub(out.len());
-                if remaining > 0 {
-                    let take = n.min(remaining);
-                    out.extend_from_slice(&chunk[..take]);
-                    if take < n {
+    truncated: Arc<AtomicBool>,
+) -> Arc<(Mutex<StreamState>, Condvar)> {
+    let shared = Arc::new((Mutex::new(StreamState::default()), Condvar::new()));
+    let worker_shared = Arc::clone(&shared);
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => {
+                    let (lock, cvar) = &*worker_shared;
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    state.done = true;
+                    cvar.notify_all();
+                    break;
+                }
+                Ok(n) => {
+                    let (lock, _) = &*worker_shared;
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let remaining = max_buffer.saturating_sub(state.buf.len());
+                    if remaining > 0 {
+                        let take = n.min(remaining);
+                        state.buf.extend_from_slice(&chunk[..take]);
+                        if take < n {
+                            truncated.store(true, Ordering::Relaxed);
+                        }
+                    } else {
                         truncated.store(true, Ordering::Relaxed);
                     }
-                } else {
-                    truncated.store(true, Ordering::Relaxed);
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => {
+                    let (lock, cvar) = &*worker_shared;
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    state.err = Some(err);
+                    state.done = true;
+                    cvar.notify_all();
+                    break;
                 }
             }
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err) => return Err(err),
+        }
+    });
+    shared
+}
+
+fn wait_for_done(signal: &(Mutex<bool>, Condvar), deadline: Option<Instant>) {
+    let (lock, cvar) = signal;
+    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    match deadline {
+        None => {
+            let _guard = cvar.wait_while(guard, |done| !*done);
+        }
+        Some(dl) => {
+            let remaining = dl.saturating_duration_since(Instant::now());
+            if !*guard && !remaining.is_zero() {
+                let _guard = cvar.wait_timeout_while(guard, remaining, |done| !*done);
+            }
         }
     }
-    Ok(out)
+}
+
+fn collect_stream(
+    shared: &(Mutex<StreamState>, Condvar),
+    deadline: Option<Instant>,
+) -> (Vec<u8>, Option<io::Error>) {
+    let (lock, cvar) = shared;
+    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = match deadline {
+        None => cvar
+            .wait_while(guard, |s| !s.done)
+            .unwrap_or_else(|e| e.into_inner()),
+        Some(dl) => {
+            let remaining = dl.saturating_duration_since(Instant::now());
+            if !s_done(&guard) && !remaining.is_zero() {
+                cvar.wait_timeout_while(guard, remaining, |s| !s.done)
+                    .map(|(g, _)| g)
+                    .unwrap_or_else(|e| e.into_inner().0)
+            } else {
+                guard
+            }
+        }
+    };
+    (std::mem::take(&mut state.buf), state.err.take())
+}
+
+fn s_done(state: &StreamState) -> bool {
+    state.done
 }
 
 fn wait_with_timeout(child: &mut Child, timeout_ms: Option<u64>) -> io::Result<(ExitStatus, bool)> {
@@ -292,7 +388,14 @@ fn wait_with_timeout(child: &mut Child, timeout_ms: Option<u64>) -> io::Result<(
         return Ok((child.wait()?, false));
     };
 
-    let deadline = Instant::now() + Duration::from_millis(ms);
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(ms))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "timeout_ms overflows monotonic clock",
+            )
+        })?;
     let mut sleep_dur = Duration::from_millis(1);
 
     loop {
@@ -396,5 +499,22 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code(), NodeCoreErrorCode::NotFound);
+    }
+
+    #[test]
+    fn huge_timeout_ms_returns_invalid_input_instead_of_panicking() {
+        let err = deadline_from_duration(Instant::now(), Duration::MAX).unwrap_err();
+        assert_eq!(err.code(), NodeCoreErrorCode::InvalidInput);
+
+        let opts = SpawnOptions {
+            timeout_ms: Some(u64::MAX),
+            ..SpawnOptions::default()
+        };
+        if let Err(err) = spawn_sync("neojs_nonexistent_binary_999999", &[], &opts) {
+            assert!(matches!(
+                err.code(),
+                NodeCoreErrorCode::InvalidInput | NodeCoreErrorCode::NotFound
+            ));
+        }
     }
 }

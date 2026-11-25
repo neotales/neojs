@@ -171,8 +171,8 @@ pub fn tmpdir() -> PathBuf {
 /// * On Windows: reads `COMPUTERNAME`, falling back to `HOSTNAME`.
 /// * On Linux: reads `/proc/sys/kernel/hostname`, falling back to
 ///   `/etc/hostname` and `HOSTNAME`.
-/// * On other Unix targets (such as macOS and BSD): checks `HOSTNAME` and
-///   `/etc/hostname`, then runs `hostname` as a fallback.
+/// * On other Unix targets (such as macOS and BSD): checks `/etc/hostname` and
+///   `HOSTNAME`, then falls back to `/bin/hostname` with a short timeout.
 ///
 /// # Example
 ///
@@ -214,14 +214,20 @@ pub fn hostname() -> Result<String, NodeCoreError> {
 
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        if let Some(name) = non_empty_env_utf8("HOSTNAME")? {
-            return Ok(name);
-        }
         if let Some(name) = read_trimmed_hostname_file("/etc/hostname") {
             return Ok(name);
         }
-        if let Ok(output) = std::process::Command::new("hostname").output()
-            && output.status.success()
+        if let Some(name) = non_empty_env_utf8("HOSTNAME")? {
+            return Ok(name);
+        }
+        let opts = crate::child_process::SpawnOptions {
+            timeout_ms: Some(1_000),
+            max_buffer: 4_096,
+            ..crate::child_process::SpawnOptions::default()
+        };
+        if let Ok(output) = crate::child_process::spawn_sync("/bin/hostname", &[], &opts)
+            && !output.timed_out
+            && output.status == Some(0)
         {
             let text =
                 String::from_utf8(output.stdout).map_err(|_| NodeCoreError::InvalidUtf8 {

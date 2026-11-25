@@ -77,6 +77,11 @@ pub fn file_url_to_path(url_str: &str) -> Result<PathBuf, NodeCoreError> {
             reason: "file URL path must not contain encoded NUL or path separators",
         });
     }
+    if is_bare_drive_url_path(raw_path) {
+        return Err(NodeCoreError::InvalidUrl {
+            reason: "file URL with a Windows drive letter must include a path separator after ':'",
+        });
+    }
 
     #[cfg(not(windows))]
     {
@@ -96,6 +101,11 @@ pub fn file_url_to_path(url_str: &str) -> Result<PathBuf, NodeCoreError> {
             reason: "file URL could not be converted to a local filesystem path",
         })?;
 
+    if !path.is_absolute() {
+        return Err(NodeCoreError::InvalidUrl {
+            reason: "file URL must resolve to an absolute local path",
+        });
+    }
     if path.as_os_str().as_encoded_bytes().contains(&0) {
         return Err(NodeCoreError::InvalidUrl {
             reason: "decoded file path must not contain a NUL byte",
@@ -153,6 +163,24 @@ pub fn path_to_file_url(path: impl AsRef<Path>) -> Result<String, NodeCoreError>
     Ok(url.into())
 }
 
+fn is_bare_drive_url_path(raw_path: &str) -> bool {
+    let bytes = raw_path.as_bytes();
+    if bytes.len() < 3 || bytes[0] != b'/' || !bytes[1].is_ascii_alphabetic() {
+        return false;
+    }
+    if bytes[2] == b':' {
+        return bytes.get(3).copied() != Some(b'/');
+    }
+    if bytes.len() >= 5
+        && bytes[2] == b'%'
+        && bytes[3] == b'3'
+        && bytes[4].eq_ignore_ascii_case(&b'a')
+    {
+        return bytes.get(5).copied() != Some(b'/');
+    }
+    false
+}
+
 fn contains_disallowed_percent_escape(raw_path: &str) -> bool {
     let bytes = raw_path.as_bytes();
     let mut i = 0;
@@ -198,6 +226,18 @@ mod tests {
         );
         assert_eq!(
             file_url_to_path("file:///tmp/a%00b").unwrap_err().code(),
+            NodeCoreErrorCode::InvalidUrl
+        );
+        assert_eq!(
+            file_url_to_path("file:///C:").unwrap_err().code(),
+            NodeCoreErrorCode::InvalidUrl
+        );
+        assert_eq!(
+            file_url_to_path("file:///c:rel").unwrap_err().code(),
+            NodeCoreErrorCode::InvalidUrl
+        );
+        assert_eq!(
+            file_url_to_path("file:///C%3A").unwrap_err().code(),
             NodeCoreErrorCode::InvalidUrl
         );
         assert_eq!(

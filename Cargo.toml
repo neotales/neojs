@@ -92,9 +92,6 @@ neojs-fs-core = { version = "0.0.0-alpha.0", path = "neojs-fs-core" }
 # `neo.jsonc` JSONC parsing, bounded upward discovery, workspace expansion, and
 # pure import-map/workspace resolution.
 neojs-manifest = { version = "0.0.0-alpha.0", path = "neojs-manifest" }
-# Engine-neutral shared Rust backend for `node:*` built-in modules. Has no JS
-# engine or Tokio dependency.
-neojs-node-core = { version = "0.0.0-alpha.0", path = "neojs-node-core" }
 # Engine-neutral HTTPS transport, global cache, GitHub normalization, and JSR
 # resolution. Has no JS engine dependency; `network` enables `ureq` + `rustls`.
 neojs-remote = { version = "0.0.0-alpha.0", path = "neojs-remote" }
