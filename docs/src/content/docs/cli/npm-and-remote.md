@@ -1,6 +1,6 @@
 ---
 title: npm & Remote Loading
-description: Zero-node_modules npm package loading via CAS and vael.lock, .npmrc scoped registries, and opt-in jsr:/gh:/https: imports in vjs.
+description: "Zero-node_modules npm package loading via CAS and vael.lock, .npmrc scoped registries, and opt-in jsr:, gh:, and https: imports in vjs."
 ---
 
 `vjs` supports `npm:` packages, project `package.json` dependencies, and remote `jsr:`, `gh:`, and `https:` imports—without creating `node_modules` or running lifecycle scripts. `vjs-lite` rejects all remote and `npm:` imports.
