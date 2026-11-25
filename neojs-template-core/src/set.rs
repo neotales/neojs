@@ -128,12 +128,20 @@ impl TemplateSet {
             .ok_or_else(|| TemplateError::TemplateNotFound(name.to_owned()))?;
         let typed_data = json_object_to_map(data)?;
 
-        let resolved_defs = self.resolve_definitions(name, entry);
-        let combined = self.compose_combined_source(&entry.main_body, &resolved_defs)?;
+        let root_body = entry
+            .defines
+            .get(name)
+            .map_or(entry.main_body.as_str(), |part| part.body.as_str());
+        let resolved_defs = self.resolve_definitions(name, entry, root_body)?;
+        let combined = self.compose_combined_source(root_body, &resolved_defs)?;
 
-        let parse_opts = self
-            .options
-            .to_parse_options(combined.len().max(self.options.max_source_length));
+        let parse_opts = if self.options.html_escape {
+            self.options
+                .to_parse_options(combined.len().max(self.options.max_source_length))
+        } else {
+            self.options
+                .to_parse_options(self.options.max_source_length)
+        };
         let functions = build_func_map(&self.options);
         let compiled = neotales_gotmpl::Template::parse_with_options(&combined, parse_opts)?
             .with_funcs(functions);
@@ -147,18 +155,28 @@ impl TemplateSet {
         &self,
         entry_name: &str,
         entry: &DecomposedTemplate,
-    ) -> BTreeMap<String, String> {
+        root_body: &str,
+    ) -> Result<BTreeMap<String, String>, TemplateError> {
         let mut defs: BTreeMap<String, String> = BTreeMap::new();
         let mut queue: VecDeque<String> = VecDeque::new();
         let mut visited_entries: BTreeSet<String> = BTreeSet::new();
         visited_entries.insert(entry_name.to_owned());
 
         // 1. Entry template's own explicit `{{define}}` blocks take precedence.
+        // Skip emitting a duplicate self-definition for `entry_name` itself
+        // since `root_body` is already rendered as the root template (it will
+        // still be materialized below if actually invoked by `{{template}}`).
         for (def_name, part) in &entry.defines {
-            defs.insert(def_name.clone(), part.body.clone());
-            enqueue_calls(&part.calls, &mut queue);
+            if def_name == entry_name {
+                enqueue_calls(&part.calls, &mut queue);
+            } else {
+                defs.insert(def_name.clone(), part.body.clone());
+                enqueue_calls(&part.calls, &mut queue);
+            }
         }
-        enqueue_calls(&entry.main_calls, &mut queue);
+        if !entry.defines.contains_key(entry_name) {
+            enqueue_calls(&entry.main_calls, &mut queue);
+        }
 
         // Track block defaults gathered from the entry and reached templates so
         // they fill in gaps after explicit defines on reached templates, without
@@ -168,6 +186,11 @@ impl TemplateSet {
 
         while let Some(callee) = queue.pop_front() {
             if defs.contains_key(&callee) {
+                continue;
+            }
+
+            if callee == entry_name {
+                defs.insert(callee, root_body.to_owned());
                 continue;
             }
 
@@ -204,10 +227,24 @@ impl TemplateSet {
             } else if let Some(blk_part) = available_block_defaults.get(&callee).cloned() {
                 defs.insert(callee.clone(), blk_part.body);
                 enqueue_calls(&blk_part.calls, &mut queue);
-            } else if let Some(part) = self.find_define_in_other_entries(&callee, &visited_entries)
+            } else if let Some((bundle_name, bundle, part)) =
+                self.find_define_in_other_entries(&callee, &visited_entries)?
             {
+                visited_entries.insert(bundle_name.to_owned());
                 defs.insert(callee.clone(), part.body.clone());
                 enqueue_calls(&part.calls, &mut queue);
+
+                for (sub_name, sub_part) in &bundle.defines {
+                    if sub_name != entry_name && !defs.contains_key(sub_name) {
+                        defs.insert(sub_name.clone(), sub_part.body.clone());
+                        enqueue_calls(&sub_part.calls, &mut queue);
+                    }
+                }
+                for (blk_name, blk_part) in &bundle.block_defaults {
+                    available_block_defaults
+                        .entry(blk_name.clone())
+                        .or_insert_with(|| blk_part.clone());
+                }
             }
         }
 
@@ -217,23 +254,29 @@ impl TemplateSet {
             defs.entry(blk_name).or_insert(blk_part.body);
         }
 
-        defs
+        Ok(defs)
     }
 
     fn find_define_in_other_entries<'a>(
         &'a self,
         def_name: &str,
         visited_entries: &BTreeSet<String>,
-    ) -> Option<&'a TemplatePart> {
+    ) -> Result<Option<(&'a str, &'a DecomposedTemplate, &'a TemplatePart)>, TemplateError> {
+        let mut found: Option<(&'a str, &'a DecomposedTemplate, &'a TemplatePart)> = None;
         for (entry_name, decomposed) in &self.entries {
             if visited_entries.contains(entry_name) {
                 continue;
             }
             if let Some(part) = decomposed.defines.get(def_name) {
-                return Some(part);
+                if found.is_some() {
+                    return Err(TemplateError::Parse(format!(
+                        "ambiguous template definition: {def_name}"
+                    )));
+                }
+                found = Some((entry_name.as_str(), decomposed, part));
             }
         }
-        None
+        Ok(found)
     }
 
     fn compose_combined_source(
@@ -241,7 +284,23 @@ impl TemplateSet {
         main_body: &str,
         defs: &BTreeMap<String, String>,
     ) -> Result<String, TemplateError> {
-        let mut combined = String::new();
+        let mut pre_escape_len = main_body.len();
+        for (def_name, def_body) in defs {
+            pre_escape_len = pre_escape_len
+                .saturating_add("{{define ".len())
+                .saturating_add(format_go_string(def_name).len())
+                .saturating_add("}}".len())
+                .saturating_add(def_body.len())
+                .saturating_add("{{end}}".len());
+        }
+        if pre_escape_len > self.options.max_source_length {
+            return Err(TemplateError::LimitExceeded(format!(
+                "composed template source length {pre_escape_len} exceeds limit {}",
+                self.options.max_source_length
+            )));
+        }
+
+        let mut combined = String::with_capacity(pre_escape_len);
         for (def_name, def_body) in defs {
             let processed_body = if self.options.html_escape {
                 rewrite_html_escape(def_body)?

@@ -519,4 +519,171 @@ fn json_conversion_and_sprig_call_adapter() {
 
     // Unknown helper returns an error.
     assert!(sprig_call("definitelyNotAHelper", &[]).is_err());
+
+    // Large u64, nested object conversion, and NaN/Inf handling through sprig_call.
+    let nested = json_to_template_value(&json!({
+        "big": u64::MAX,
+        "min": i64::MIN,
+        "nested": { "arr": [1, true, { "k": "v" }] }
+    }));
+    assert!(matches!(nested, Value::Map(_)));
+
+    assert_eq!(
+        sprig_call("toString", &[Value::Number(f64::NAN)]).unwrap(),
+        Value::String(Value::Number(f64::NAN).render())
+    );
+    assert_eq!(
+        sprig_call("toString", &[Value::Float(f64::NAN)]).unwrap(),
+        Value::String(Value::Float(f64::NAN).render())
+    );
+    assert_eq!(
+        sprig_call("toString", &[Value::Float(f64::INFINITY)]).unwrap(),
+        Value::String("+Inf".to_owned())
+    );
+    assert_eq!(
+        sprig_call("toString", &[Value::Float(f64::NEG_INFINITY)]).unwrap(),
+        Value::String("-Inf".to_owned())
+    );
+}
+
+#[test]
+fn template_set_handles_nested_control_flow_self_define_cycles_and_bundles() {
+    // 1. Nested if/range/with inside define and block.
+    let mut set = TemplateSet::new(TemplateOptions::default());
+    set.add(
+        "nested",
+        "{{define \"list_item\"}}{{if .active}}<li>{{with .label}}{{.}}{{end}}</li>{{end}}{{end}}{{block \"wrapper\" .}}<ul>{{range .items}}{{template \"list_item\" .}}{{end}}</ul>{{end}}",
+    )
+    .unwrap();
+    assert_eq!(
+        set.render(
+            "nested",
+            &json!({
+                "items": [
+                    { "active": true, "label": "One" },
+                    { "active": false, "label": "Two" },
+                    { "active": true, "label": "Three" }
+                ]
+            })
+        )
+        .unwrap(),
+        "<ul><li>One</li><li>Three</li></ul>"
+    );
+
+    // 2. Entry's own {{define "<name>"}} renders as root body without duplicating itself.
+    let mut self_def = TemplateSet::new(TemplateOptions::default());
+    self_def
+        .add("foo", "{{define \"foo\"}}defined:{{.x}}{{end}}outer")
+        .unwrap();
+    assert_eq!(
+        self_def.render("foo", &json!({ "x": "ok" })).unwrap(),
+        "defined:ok"
+    );
+
+    // 3. Static cycle rejection across templates in TemplateSet.
+    let mut cyclic = TemplateSet::new(TemplateOptions::default());
+    cyclic.add("a", "{{template \"b\" .}}").unwrap();
+    cyclic.add("b", "{{template \"a\" .}}").unwrap();
+    assert!(matches!(
+        cyclic.render("a", &json!({})),
+        Err(TemplateError::Parse(_))
+    ));
+
+    // 4. Partial-bundle entry preserving its own block_defaults.
+    let mut bundled = TemplateSet::new(TemplateOptions::default());
+    bundled
+        .add(
+            "bundle",
+            "{{define \"card\"}}<div class=\"card\">{{block \"card_footer\" .}}default-footer{{end}}</div>{{end}}",
+        )
+        .unwrap()
+        .add("page", "{{template \"card\" .}}")
+        .unwrap()
+        .add(
+            "custom_page",
+            "{{define \"card_footer\"}}custom-footer{{end}}{{template \"card\" .}}",
+        )
+        .unwrap();
+    assert_eq!(
+        bundled.render("page", &json!({})).unwrap(),
+        "<div class=\"card\">default-footer</div>"
+    );
+    assert_eq!(
+        bundled.render("custom_page", &json!({})).unwrap(),
+        "<div class=\"card\">custom-footer</div>"
+    );
+
+    // 5. Ambiguous cross-entry define rejection.
+    let mut ambiguous = TemplateSet::new(TemplateOptions::default());
+    ambiguous
+        .add("bundle_a", "{{define \"shared\"}}A{{end}}")
+        .unwrap()
+        .add("bundle_b", "{{define \"shared\"}}B{{end}}")
+        .unwrap()
+        .add("caller", "{{template \"shared\" .}}")
+        .unwrap();
+    assert!(matches!(
+        ambiguous.render("caller", &json!({})),
+        Err(TemplateError::Parse(_))
+    ));
+}
+
+#[test]
+fn template_set_enforces_max_source_length_on_composed_render() {
+    let opts = TemplateOptions {
+        max_source_length: 40,
+        ..TemplateOptions::default()
+    };
+    let mut set = TemplateSet::new(opts);
+    // Each entry individually is <= 40 bytes, but combined exceeds 40 bytes.
+    set.add("part", "012345678901234567890123456789").unwrap();
+    set.add("main", "{{template \"part\" .}}abcdefgh").unwrap();
+    assert!(matches!(
+        set.render("main", &json!({})),
+        Err(TemplateError::LimitExceeded(_))
+    ));
+}
+
+#[test]
+fn template_escape_sequences_in_define_and_template_names() {
+    let mut set = TemplateSet::new(TemplateOptions::default());
+    // \x41, \u0042, \103 all decode to "ABC".
+    set.add(
+        "p",
+        "{{define \"\\x41\\u0042\\103\"}}decoded{{end}}{{template \"ABC\" .}}",
+    )
+    .unwrap();
+    assert_eq!(set.render("p", &json!({})).unwrap(), "decoded");
+
+    // Standalone block with \x41 name.
+    assert_eq!(
+        render(
+            "{{block \"\\x41\" .}}ok{{end}}",
+            &json!({}),
+            &TemplateOptions::default()
+        )
+        .unwrap(),
+        "ok"
+    );
+
+    // Invalid escape sequence is rejected.
+    assert!(matches!(
+        render(
+            "{{block \"\\q\" .}}no{{end}}",
+            &json!({}),
+            &TemplateOptions::default()
+        ),
+        Err(TemplateError::Parse(_))
+    ));
+}
+
+#[test]
+fn template_set_preserves_whitespace_boundary_across_removed_define() {
+    let mut set = TemplateSet::new(TemplateOptions::default());
+    set.add("page", "A  {{define \"x\"}}X{{end}}  {{- .name}}")
+        .unwrap();
+    assert_eq!(
+        set.render("page", &json!({ "name": "Neo" })).unwrap(),
+        "A  Neo"
+    );
 }

@@ -77,6 +77,10 @@ fn single_rendered_arg(name: &str, arguments: &[Value]) -> Result<String, Gotmpl
 
 /// Registers `escapeHtml`, `htmlEscape`, `safeHtml`, and (when `html_escape`
 /// is `true`) the auto-escape helper into `functions`.
+///
+/// When `html_escape` is `true`, `escapeHtml` and `htmlEscape` return a
+/// `safeHtml`-marked value so auto-escaping does not double-escape their output;
+/// when `html_escape` is `false`, they return a plain `Value::String`.
 pub(crate) fn register_html_helpers(functions: &mut FuncMap, html_escape: bool) {
     for alias in ["escapeHtml", "htmlEscape"] {
         let name = alias.to_owned();

@@ -1,6 +1,7 @@
 //! Structured errors returned by template compilation, composition, and rendering.
 
 /// Errors produced while parsing, composing, or rendering templates.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TemplateError {
     /// Template syntax or structure could not be parsed.

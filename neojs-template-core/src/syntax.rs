@@ -191,49 +191,83 @@ fn control_expression<'a>(action: &'a str, keyword: &str) -> Option<&'a str> {
     is_template_space(first).then(|| rest.trim_start_matches(is_template_space))
 }
 
+fn read_radix_escape(
+    chars: &mut std::str::CharIndices<'_>,
+    count: usize,
+    radix: u32,
+) -> Option<u32> {
+    let mut value = 0_u32;
+    for _ in 0..count {
+        let (_, ch) = chars.next()?;
+        let digit = ch.to_digit(radix).filter(|_| ch.is_ascii_hexdigit())?;
+        value = value * radix + digit;
+    }
+    Some(value)
+}
+
+fn append_unicode_escape(
+    out: &mut Vec<u8>,
+    chars: &mut std::str::CharIndices<'_>,
+    count: usize,
+) -> Option<()> {
+    let value = read_radix_escape(chars, count, 16)?;
+    let ch = char::from_u32(value)?;
+    let mut encoded = [0_u8; 4];
+    out.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+    Some(())
+}
+
+fn decode_quoted_bytes(after_quote: &str) -> Option<(String, &str)> {
+    let mut out = Vec::new();
+    let mut chars = after_quote.char_indices();
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '\n' {
+            return None;
+        }
+        if ch == '"' {
+            let decoded = String::from_utf8(out).ok()?;
+            return Some((decoded, &after_quote[idx + 1..]));
+        }
+        if ch != '\\' {
+            let mut encoded = [0_u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+            continue;
+        }
+        match chars.next()?.1 {
+            'a' => out.push(0x07),
+            'b' => out.push(0x08),
+            'f' => out.push(0x0c),
+            'n' => out.push(b'\n'),
+            'r' => out.push(b'\r'),
+            't' => out.push(b'\t'),
+            'v' => out.push(0x0b),
+            '\\' => out.push(b'\\'),
+            '"' => out.push(b'"'),
+            'x' => out.push(u8::try_from(read_radix_escape(&mut chars, 2, 16)?).ok()?),
+            'u' => append_unicode_escape(&mut out, &mut chars, 4)?,
+            'U' => append_unicode_escape(&mut out, &mut chars, 8)?,
+            first @ '0'..='7' => {
+                let mut value = u32::from(first as u8 - b'0');
+                for _ in 0..2 {
+                    let (_, digit) = chars.next()?;
+                    if !matches!(digit, '0'..='7') {
+                        return None;
+                    }
+                    value = value * 8 + u32::from(digit as u8 - b'0');
+                }
+                out.push(u8::try_from(value).ok()?);
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 fn parse_first_string_literal(input: &str) -> Result<(String, &str), TemplateError> {
     let trimmed = input.trim_start_matches(is_template_space);
     if let Some(after_quote) = trimmed.strip_prefix('"') {
-        let mut out = String::new();
-        let mut chars = after_quote.char_indices();
-        while let Some((idx, ch)) = chars.next() {
-            if ch == '\n' {
-                return Err(TemplateError::Parse(
-                    "invalid quoted template literal".to_owned(),
-                ));
-            }
-            if ch == '"' {
-                let rest = &after_quote[idx + 1..];
-                return Ok((out, rest));
-            }
-            if ch == '\\' {
-                let Some((_, esc)) = chars.next() else {
-                    return Err(TemplateError::Parse(
-                        "invalid quoted template literal".to_owned(),
-                    ));
-                };
-                match esc {
-                    'a' => out.push('\x07'),
-                    'b' => out.push('\x08'),
-                    'f' => out.push('\x0c'),
-                    'n' => out.push('\n'),
-                    'r' => out.push('\r'),
-                    't' => out.push('\t'),
-                    'v' => out.push('\x0b'),
-                    '\\' => out.push('\\'),
-                    '"' => out.push('"'),
-                    other => {
-                        out.push('\\');
-                        out.push(other);
-                    }
-                }
-            } else {
-                out.push(ch);
-            }
-        }
-        Err(TemplateError::Parse(
-            "invalid quoted template literal".to_owned(),
-        ))
+        decode_quoted_bytes(after_quote)
+            .ok_or_else(|| TemplateError::Parse("invalid quoted template literal".to_owned()))
     } else if let Some(after_tick) = trimmed.strip_prefix('`') {
         let Some(end_idx) = after_tick.find('`') else {
             return Err(TemplateError::Parse(
@@ -428,6 +462,105 @@ fn handle_define_action<'a>(
     Ok(false)
 }
 
+fn format_action_slice(source: &str, action: Action<'_>, trim_left: bool) -> String {
+    if trim_left == action.trim_left {
+        return source[action.start..action.end].to_owned();
+    }
+    let left = if trim_left { "{{- " } else { "{{ " };
+    let right = if action.trim_right { " -}}" } else { " }}" };
+    format!("{left}{}{right}", action.body)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_control_block<'a>(
+    source: &'a str,
+    tokens: &[Token<'a>],
+    pos: &mut usize,
+    action: Action<'a>,
+    effective_trim_left: bool,
+    depth: usize,
+    state: &mut ParserState,
+    calls: &mut BTreeSet<String>,
+    output: &mut String,
+) -> Result<(), TemplateError> {
+    check_nesting(depth + 1, state.max_nesting_depth)?;
+    output.push_str(&format_action_slice(source, action, effective_trim_left));
+    let (inner, inner_calls, outcome) =
+        parse_segment(source, tokens, pos, true, false, depth + 1, state)?;
+    calls.extend(inner_calls);
+    output.push_str(&inner);
+    if let BlockOutcome::End {
+        trim_left,
+        trim_right,
+    } = outcome
+    {
+        let left = if trim_left { "{{- " } else { "{{ " };
+        let right = if trim_right { " -}}" } else { " }}" };
+        output.push_str(left);
+        output.push_str("end");
+        output.push_str(right);
+    }
+    Ok(())
+}
+
+fn is_control_block(body: &str) -> bool {
+    control_expression(body, "if").is_some()
+        || control_expression(body, "range").is_some()
+        || control_expression(body, "with").is_some()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_regular_action<'a>(
+    source: &'a str,
+    tokens: &[Token<'a>],
+    pos: &mut usize,
+    action: Action<'a>,
+    effective_trim_left: bool,
+    depth: usize,
+    state: &mut ParserState,
+    calls: &mut BTreeSet<String>,
+    output: &mut String,
+) -> Result<(bool, Option<usize>), TemplateError> {
+    if let Some(rest) = control_expression(action.body, "block") {
+        let mut adjusted = action;
+        adjusted.trim_left = effective_trim_left;
+        let (name, call_site) =
+            handle_block_action(source, tokens, pos, adjusted, rest, depth, state)?;
+        calls.insert(name);
+        output.push_str(&call_site);
+        return Ok((false, None));
+    }
+    if let Some(rest) = control_expression(action.body, "define") {
+        let mut adjusted = action;
+        adjusted.trim_left = effective_trim_left;
+        let trim_next =
+            handle_define_action(source, tokens, pos, adjusted, rest, depth, state, output)?;
+        let boundary = state.extract_defines.then_some(output.len());
+        return Ok((trim_next, boundary));
+    }
+    if is_control_block(action.body) {
+        handle_control_block(
+            source,
+            tokens,
+            pos,
+            action,
+            effective_trim_left,
+            depth,
+            state,
+            calls,
+            output,
+        )?;
+        return Ok((false, None));
+    }
+    if let Some(rest) = control_expression(action.body, "template")
+        && let Ok((name, _)) = parse_first_string_literal(rest)
+    {
+        calls.insert(name);
+    }
+    output.push_str(&format_action_slice(source, action, effective_trim_left));
+    Ok((false, None))
+}
+
 fn parse_segment<'a>(
     source: &'a str,
     tokens: &[Token<'a>],
@@ -440,6 +573,9 @@ fn parse_segment<'a>(
     let mut output = String::new();
     let mut calls = BTreeSet::new();
     let mut trim_next_leading_space = false;
+    // Byte offset in `output` immediately before an extracted `{{define}}` block.
+    // A subsequent `{{- ...}}` action must not trim whitespace before this boundary.
+    let mut protected_len: Option<usize> = None;
 
     while *pos < tokens.len() {
         let token = tokens[*pos];
@@ -454,6 +590,9 @@ fn parse_segment<'a>(
                     text
                 };
                 output.push_str(slice);
+                if !slice.chars().all(is_template_space) {
+                    protected_len = None;
+                }
             }
             Token::Comment(raw) => {
                 trim_next_leading_space = false;
@@ -461,6 +600,13 @@ fn parse_segment<'a>(
             }
             Token::Action(action) => {
                 trim_next_leading_space = false;
+                let mut effective_trim_left = action.trim_left;
+
+                if effective_trim_left && let Some(bound) = protected_len {
+                    output.truncate(bound);
+                    effective_trim_left = false;
+                }
+                protected_len = None;
 
                 if action.body == "end" {
                     if stop_on_end {
@@ -468,12 +614,12 @@ fn parse_segment<'a>(
                             output,
                             calls,
                             BlockOutcome::End {
-                                trim_left: action.trim_left,
+                                trim_left: effective_trim_left,
                                 trim_right: action.trim_right,
                             },
                         ));
                     }
-                    output.push_str(&source[action.start..action.end]);
+                    output.push_str(&format_action_slice(source, action, effective_trim_left));
                     continue;
                 }
 
@@ -483,55 +629,21 @@ fn parse_segment<'a>(
                             "unexpected `else` in block or define action".to_owned(),
                         ));
                     }
-                    output.push_str(&source[action.start..action.end]);
+                    output.push_str(&format_action_slice(source, action, effective_trim_left));
                     continue;
                 }
 
-                if let Some(rest) = control_expression(action.body, "block") {
-                    let (name, call_site) =
-                        handle_block_action(source, tokens, pos, action, rest, depth, state)?;
-                    calls.insert(name);
-                    output.push_str(&call_site);
-                } else if let Some(rest) = control_expression(action.body, "define") {
-                    trim_next_leading_space = handle_define_action(
-                        source,
-                        tokens,
-                        pos,
-                        action,
-                        rest,
-                        depth,
-                        state,
-                        &mut output,
-                    )?;
-                } else if control_expression(action.body, "if").is_some()
-                    || control_expression(action.body, "range").is_some()
-                    || control_expression(action.body, "with").is_some()
-                {
-                    check_nesting(depth + 1, state.max_nesting_depth)?;
-                    output.push_str(&source[action.start..action.end]);
-                    let (inner, inner_calls, outcome) =
-                        parse_segment(source, tokens, pos, true, false, depth + 1, state)?;
-                    calls.extend(inner_calls);
-                    output.push_str(&inner);
-                    if let BlockOutcome::End {
-                        trim_left,
-                        trim_right,
-                    } = outcome
-                    {
-                        let left = if trim_left { "{{- " } else { "{{ " };
-                        let right = if trim_right { " -}}" } else { " }}" };
-                        output.push_str(left);
-                        output.push_str("end");
-                        output.push_str(right);
-                    }
-                } else {
-                    if let Some(rest) = control_expression(action.body, "template")
-                        && let Ok((name, _)) = parse_first_string_literal(rest)
-                    {
-                        calls.insert(name);
-                    }
-                    output.push_str(&source[action.start..action.end]);
-                }
+                (trim_next_leading_space, protected_len) = handle_regular_action(
+                    source,
+                    tokens,
+                    pos,
+                    action,
+                    effective_trim_left,
+                    depth,
+                    state,
+                    &mut calls,
+                    &mut output,
+                )?;
             }
         }
     }
@@ -671,5 +783,19 @@ mod tests {
         let lowered = lower_standalone(src, 100).unwrap();
         assert!(!lowered.contains("default"));
         assert!(lowered.contains("override"));
+    }
+
+    #[test]
+    fn preserves_boundary_when_extracting_define_before_left_trim() {
+        let src = "A  {{define \"x\"}}X{{end}}  {{- .name}}";
+        let decomposed = decompose_template(src, true, 100).unwrap();
+        assert_eq!(decomposed.main_body, "A  {{ .name }}");
+    }
+
+    #[test]
+    fn decodes_hex_unicode_and_octal_escapes_in_names() {
+        let src = "{{define \"\\x41\\u0042\\U00000043\\104\"}}ok{{end}}";
+        let decomposed = decompose_template(src, true, 100).unwrap();
+        assert!(decomposed.defines.contains_key("ABCD"));
     }
 }

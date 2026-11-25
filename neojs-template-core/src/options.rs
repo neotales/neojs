@@ -26,6 +26,10 @@ pub struct TemplateOptions {
     pub hermetic: bool,
     /// Enable automatic HTML escaping for rendered template expressions while
     /// preserving values marked with `safeHtml` (default: `false`).
+    ///
+    /// Note that when enabled, each rendered output expression invokes an
+    /// internal auto-escape pipeline stage, which counts as one helper
+    /// invocation against [`Self::max_function_calls`].
     pub html_escape: bool,
     /// Maximum accepted template source length in UTF-8 bytes (default: `1_048_576`).
     pub max_source_length: usize,
