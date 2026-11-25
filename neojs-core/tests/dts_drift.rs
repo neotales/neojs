@@ -1,5 +1,6 @@
 #![cfg(all(
     feature = "neo-chars",
+    feature = "neo-db",
     feature = "neo-slices",
     feature = "neo-strings",
     feature = "neo-template"

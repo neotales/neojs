@@ -19,9 +19,9 @@ members = [
     "neojs-lite-core",
     "neojs-lite",
 ]
-# The vendored crate is a path dependency and a standalone package; it must not
+# The vendored crates are path dependencies and standalone packages; they must not
 # inherit this workspace's manifest or lint configuration.
-exclude = ["vendor/deno_core"]
+exclude = ["vendor/deno_core", "vendor/neotales-dbapi"]
 # The V8 runtime is the default build. QuickJS crates are opt-in with `-p`, so
 # `cargo build`, `cargo test`, and `cargo clippy` without a package selection do
 # not compile QuickJS or put `rquickjs` in the default dependency graph.
@@ -65,6 +65,10 @@ authors = ["NeoTales", "x0craft"]
 # an upstream release exposes the same seam.
 [patch.crates-io]
 deno_core = { path = "vendor/deno_core" }
+# Pinned copy of `neotales-dbapi` 0.0.0-alpha.0 with `Row::columns` and
+# `Row::column_name` exposed so `neo:db` can materialize JS row objects.
+# Documented in `vendor/neotales-dbapi/PATCH.md`.
+neotales-dbapi = { path = "vendor/neotales-dbapi" }
 
 [workspace.dependencies]
 aes = { version = "0.9.4", default-features = false }
@@ -91,6 +95,8 @@ neojs-builtins = { version = "0.0.0-alpha.0", path = "neojs-builtins" }
 neojs-crypto-core = { version = "0.0.0-alpha.0", path = "neojs-crypto-core" }
 # Engine-neutral TypeScript declaration (.d.ts) bundles for V8 and QuickJS.
 neojs-dts = { version = "0.0.0-alpha.0", path = "neojs-dts" }
+# Driver-neutral SQL API with strict JSON configuration and SQLite provider.
+neojs-dbapi = { version = "0.0.0-alpha.0", path = "neojs-dbapi" }
 # Engine-neutral core filesystem operations for `neo:fs`.
 neojs-fs-core = { version = "0.0.0-alpha.0", path = "neojs-fs-core" }
 # `neo.jsonc` JSONC parsing, bounded upward discovery, workspace expansion, and

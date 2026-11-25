@@ -19,10 +19,12 @@ authors.workspace = true
 # under `neo-slices`, so it is not embedded in a disabled binary. Features are
 # additive and unify across the dependency graph; this is surface selection,
 # not a sandbox.
-default = ["neo-chars", "neo-slices", "neo-strings", "neo-template"]
+default = ["neo-chars", "neo-db", "neo-slices", "neo-strings", "neo-template"]
 # The native `chars` binding and its canonical V8 registration. This enables
 # the shared `chars` module in `neojs-builtins`.
 neo-chars = ["neojs-builtins/chars"]
+# The `neo:db` built-in module backed by `neojs-dbapi` (SQLite by default).
+neo-db = ["dep:neojs-dbapi", "dep:serde_json"]
 # `slices` and its loader/registry entries. It cannot be built without `chars`:
 # `CharSlice` captures `chars.toUpper` and `chars.toLower`.
 neo-slices = ["neo-chars", "neojs-builtins/slices"]
@@ -42,6 +44,7 @@ deno_error.workspace = true
 getrandom.workspace = true
 neojs-builtins = { workspace = true, features = ["assert", "console", "os", "path", "test", "uuid"] }
 neojs-crypto-core.workspace = true
+neojs-dbapi = { workspace = true, optional = true }
 neojs-fs-core.workspace = true
 neojs-manifest.workspace = true
 neojs-module-policy = { version = "0.0.0-alpha.0", path = "../neojs-module-policy", features = ["typescript"] }

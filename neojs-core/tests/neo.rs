@@ -18,14 +18,11 @@ fn expected_specifiers() -> String {
     if cfg!(feature = "neo-chars") {
         entries.push("neo:chars");
     }
-    entries.extend([
-        "neo:console",
-        "neo:cron",
-        "neo:crypto",
-        "neo:fs",
-        "neo:os",
-        "neo:path",
-    ]);
+    entries.extend(["neo:console", "neo:cron", "neo:crypto"]);
+    if cfg!(feature = "neo-db") {
+        entries.push("neo:db");
+    }
+    entries.extend(["neo:fs", "neo:os", "neo:path"]);
     if cfg!(feature = "neo-slices") {
         entries.push("neo:slices");
     }

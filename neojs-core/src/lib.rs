@@ -396,6 +396,8 @@ mod crypto;
 mod crypto_cipher;
 mod crypto_hash;
 mod crypto_shamir;
+#[cfg(feature = "neo-db")]
+mod db;
 mod error;
 mod fs;
 // The transport-backed loader for the private JSR resolver. `Runtime::new` does

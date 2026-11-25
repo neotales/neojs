@@ -1226,12 +1226,32 @@ fn reports_an_unknown_neo_module_and_lists_the_implemented_ones() {
     let message = stderr(&output);
     assert!(message.contains("neo:nope"), "{message}");
     assert!(message.contains("not implemented"), "{message}");
-    let expected_list = if cfg!(feature = "neo-template") {
-        "neojs implements neo:age, neo:assert, neo:chars, neo:console, neo:cron, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:stdio, neo:strings, neo:template, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7"
-    } else {
-        "neojs implements neo:age, neo:assert, neo:chars, neo:console, neo:cron, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:stdio, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7"
-    };
-    assert!(message.contains(expected_list), "{message}");
+    let mut expected_specifiers = vec![
+        "neo:age",
+        "neo:assert",
+        "neo:chars",
+        "neo:console",
+        "neo:cron",
+        "neo:crypto",
+    ];
+    if cfg!(feature = "neo-db") {
+        expected_specifiers.push("neo:db");
+    }
+    expected_specifiers.extend([
+        "neo:fs",
+        "neo:os",
+        "neo:path",
+        "neo:slices",
+        "neo:ssh",
+        "neo:stdio",
+        "neo:strings",
+    ]);
+    if cfg!(feature = "neo-template") {
+        expected_specifiers.push("neo:template");
+    }
+    expected_specifiers.extend(["neo:test", "neo:uuid", "neo:uuid/v4", "neo:uuid/v7"]);
+    let expected_list = format!("neojs implements {}", expected_specifiers.join(", "));
+    assert!(message.contains(&expected_list), "{message}");
 }
 
 #[test]
@@ -1684,7 +1704,7 @@ file. .js, .mjs, .ts, and .mts run. TypeScript is stripped, not type checked:
 only erasable syntax is accepted (no enum, namespace, or other transforms), and
 .tsx, .jsx, .cts, and declaration files are rejected.
 
-The age, assert, chars, console, cron, crypto, os, path,
+The age, assert, chars, console, cron, crypto, db, fs, os, path,
 slices, ssh, stdio, strings, test, and uuid built-in modules are implemented,
 including the uuid/v4 and uuid/v7 subpaths. Import one by its canonical `neo:`
 specifier, such as `neo:age` and `neo:test`; a bare name is not a built-in

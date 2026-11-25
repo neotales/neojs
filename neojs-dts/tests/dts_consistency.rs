@@ -26,6 +26,7 @@ const V8_SPECIFIERS: &[&str] = &[
     "neo:console",
     "neo:cron",
     "neo:crypto",
+    "neo:db",
     "neo:fs",
     "neo:os",
     "neo:path",
@@ -58,7 +59,7 @@ const LITE_SPECIFIERS: &[&str] = &[
     "neo:uuid/v7",
 ];
 
-const V8_ONLY_SPECIFIERS: &[&str] = &["neo:age", "neo:cron", "neo:stdio"];
+const V8_ONLY_SPECIFIERS: &[&str] = &["neo:age", "neo:cron", "neo:db", "neo:stdio"];
 
 /// Validates balanced delimiters `{}` / `()` / `[]` and closed comments/strings
 /// across a `.d.ts` source string.

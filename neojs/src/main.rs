@@ -906,7 +906,7 @@ file. .js, .mjs, .ts, and .mts run. TypeScript is stripped, not type checked:
 only erasable syntax is accepted (no enum, namespace, or other transforms), and
 .tsx, .jsx, .cts, and declaration files are rejected.
 
-The age, assert, chars, console, cron, crypto, os, path,
+The age, assert, chars, console, cron, crypto, db, fs, os, path,
 slices, ssh, stdio, strings, test, and uuid built-in modules are implemented,
 including the uuid/v4 and uuid/v7 subpaths. Import one by its canonical `neo:`
 specifier, such as `neo:age` and `neo:test`; a bare name is not a built-in

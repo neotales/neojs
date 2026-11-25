@@ -178,6 +178,19 @@ const SLICES_IMPL_TOKEN: &str = "// __NEO_SLICES_IMPL__";
 /// The marker replaced with the `slices` registry entry.
 const SLICES_REGISTRY_TOKEN: &str = "// __NEO_SLICES_REGISTRY_ENTRY__";
 
+/// The marker replaced with the `db` implementation source.
+///
+/// The implementation is not part of [`NEO_SHIM_SOURCE`]. It is compiled in
+/// only when `neo-db` is enabled, so a disabled build does not carry its bytes.
+const DB_IMPL_TOKEN: &str = "// __NEO_DB_IMPL__";
+
+/// The marker replaced with the `db` registry entry.
+const DB_REGISTRY_TOKEN: &str = "// __NEO_DB_REGISTRY_ENTRY__";
+
+/// Source for the `neo:db` registry object, compiled only when `neo-db` is enabled.
+#[cfg(feature = "neo-db")]
+const DB_IMPL_SOURCE: &str = include_str!("builtins/db.impl.js");
+
 /// The marker replaced with the `template` implementation source.
 const TEMPLATE_IMPL_TOKEN: &str = "// __NEO_TEMPLATE_IMPL__";
 
@@ -245,6 +258,15 @@ pub(crate) fn neo_shim() -> String {
         .replace(SLICES_IMPL_TOKEN, "")
         .replace(SLICES_REGISTRY_TOKEN, "");
 
+    #[cfg(feature = "neo-db")]
+    let shim = shim
+        .replace(DB_IMPL_TOKEN, &format!("const db = {DB_IMPL_SOURCE};"))
+        .replace(DB_REGISTRY_TOKEN, "[\"neo:db\", db],");
+    #[cfg(not(feature = "neo-db"))]
+    let shim = shim
+        .replace(DB_IMPL_TOKEN, "")
+        .replace(DB_REGISTRY_TOKEN, "");
+
     #[cfg(feature = "neo-template")]
     let shim = shim
         .replace(TEMPLATE_IMPL_TOKEN, include_str!("builtins/template.js"))
@@ -261,6 +283,8 @@ pub(crate) fn neo_shim() -> String {
     debug_assert!(!shim.contains(NATIVE_STRINGS_TOKEN));
     debug_assert!(!shim.contains(SLICES_IMPL_TOKEN));
     debug_assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
+    debug_assert!(!shim.contains(DB_IMPL_TOKEN));
+    debug_assert!(!shim.contains(DB_REGISTRY_TOKEN));
     debug_assert!(!shim.contains(TEMPLATE_IMPL_TOKEN));
     debug_assert!(!shim.contains(TEMPLATE_REGISTRY_TOKEN));
     shim
@@ -378,6 +402,17 @@ pub(crate) const CRYPTO_SPECIFIER: &str = "neo:crypto";
 /// [`crate::crypto_cipher`], [`crate::crypto_hash`], and
 /// [`crate::crypto_shamir`].
 const CRYPTO_MODULE: &str = include_str!("builtins/crypto.esm.js");
+
+/// The canonical module specifier for the `db` built-in.
+///
+/// Only `neo:db` resolves to this URL. With `neo-db` off, the specifier is
+/// absent from the name and source tables and the loader rejects it.
+#[cfg(feature = "neo-db")]
+pub(crate) const DB_SPECIFIER: &str = "neo:db";
+
+/// The ECMAScript module source served for [`DB_SPECIFIER`].
+#[cfg(feature = "neo-db")]
+const DB_MODULE: &str = include_str!("builtins/db.esm.js");
 
 /// The canonical module specifier for the `fs` built-in.
 ///
@@ -576,6 +611,8 @@ const BUILTINS: &[(&str, &str)] = &[
     ("console", CONSOLE_SPECIFIER),
     ("cron", CRON_SPECIFIER),
     ("crypto", CRYPTO_SPECIFIER),
+    #[cfg(feature = "neo-db")]
+    ("db", DB_SPECIFIER),
     ("fs", FS_SPECIFIER),
     ("os", OS_SPECIFIER),
     ("path", PATH_SPECIFIER),
@@ -640,6 +677,8 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         CONSOLE_SPECIFIER => Some(CONSOLE_MODULE),
         CRON_SPECIFIER => Some(CRON_MODULE),
         CRYPTO_SPECIFIER => Some(CRYPTO_MODULE),
+        #[cfg(feature = "neo-db")]
+        DB_SPECIFIER => Some(DB_MODULE),
         FS_SPECIFIER => Some(FS_MODULE),
         OS_SPECIFIER => Some(OS_MODULE),
         PATH_SPECIFIER => Some(PATH_MODULE),
@@ -682,9 +721,9 @@ mod tests {
     use super::resolve;
     use super::resolve_name;
     use super::{
-        ASSERT_IMPL_TOKEN, NATIVE_ENTRIES_TOKEN, NATIVE_STRINGS_TOKEN, PATH_IMPL_TOKEN,
-        SLICES_IMPL_TOKEN, SLICES_REGISTRY_TOKEN, TEMPLATE_IMPL_TOKEN, TEMPLATE_REGISTRY_TOKEN,
-        TEST_IMPL_TOKEN,
+        ASSERT_IMPL_TOKEN, DB_IMPL_TOKEN, DB_REGISTRY_TOKEN, NATIVE_ENTRIES_TOKEN,
+        NATIVE_STRINGS_TOKEN, PATH_IMPL_TOKEN, SLICES_IMPL_TOKEN, SLICES_REGISTRY_TOKEN,
+        TEMPLATE_IMPL_TOKEN, TEMPLATE_REGISTRY_TOKEN, TEST_IMPL_TOKEN,
     };
     use deno_core::url::Url;
 
@@ -740,6 +779,8 @@ mod tests {
         assert!(!shim.contains(NATIVE_STRINGS_TOKEN));
         assert!(!shim.contains(SLICES_IMPL_TOKEN));
         assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
+        assert!(!shim.contains(DB_IMPL_TOKEN));
+        assert!(!shim.contains(DB_REGISTRY_TOKEN));
         assert!(!shim.contains(TEMPLATE_IMPL_TOKEN));
         assert!(!shim.contains(TEMPLATE_REGISTRY_TOKEN));
         assert!(
@@ -839,6 +880,29 @@ mod tests {
                 "the disabled slices registry entry is present"
             );
         }
+
+        #[cfg(feature = "neo-db")]
+        {
+            assert!(
+                shim.contains("op_neo_db_open"),
+                "the db implementation is missing"
+            );
+            assert!(
+                shim.contains("[\"neo:db\", db],"),
+                "the db registry entry is missing"
+            );
+        }
+        #[cfg(not(feature = "neo-db"))]
+        {
+            assert!(
+                !shim.contains("op_neo_db_open"),
+                "the disabled db implementation is present"
+            );
+            assert!(
+                !shim.contains("[\"neo:db\", db],"),
+                "the disabled db registry entry is present"
+            );
+        }
     }
 
     /// A disabled module must be absent from both the name table the loader
@@ -848,6 +912,7 @@ mod tests {
         let chars = Url::parse("neo:chars").expect("valid chars specifier");
         let strings = Url::parse("neo:strings").expect("valid strings specifier");
         let slices = Url::parse("neo:slices").expect("valid slices specifier");
+        let db = Url::parse("neo:db").expect("valid db specifier");
 
         #[cfg(feature = "neo-chars")]
         {
@@ -889,6 +954,19 @@ mod tests {
             assert_eq!(super::resolve("neo:slices"), None);
             assert!(super::source(&slices).is_none());
             assert!(!super::implemented_specifiers().contains("neo:slices"));
+        }
+
+        #[cfg(feature = "neo-db")]
+        {
+            assert_eq!(super::resolve("neo:db"), Some(super::DB_SPECIFIER));
+            assert!(super::source(&db).is_some());
+            assert!(super::implemented_specifiers().contains("neo:db"));
+        }
+        #[cfg(not(feature = "neo-db"))]
+        {
+            assert_eq!(super::resolve("neo:db"), None);
+            assert!(super::source(&db).is_none());
+            assert!(!super::implemented_specifiers().contains("neo:db"));
         }
     }
 }

@@ -3000,6 +3000,7 @@
         observePromise: cryptoOps.op_neo_assert_observe_promise,
     });
     // __NEO_SLICES_IMPL__
+    // __NEO_DB_IMPL__
     // __NEO_TEMPLATE_IMPL__
 
     const testCore = Deno.core;
@@ -3026,6 +3027,7 @@
         ["neo:console", consoleModule],
         ["neo:cron", cron],
         ["neo:crypto", crypto],
+        // __NEO_DB_REGISTRY_ENTRY__
         ["neo:fs", fs],
         ["neo:os", os],
         ["neo:path", path],

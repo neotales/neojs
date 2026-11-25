@@ -33,6 +33,7 @@ interface NeoBuiltInModuleMap {
   "neo:console": typeof import("neo:console")["default"];
   "neo:cron": typeof import("neo:cron");
   "neo:crypto": typeof import("neo:crypto");
+  "neo:db": typeof import("neo:db");
   "neo:fs": typeof import("neo:fs");
   "neo:os": typeof import("neo:os");
   "neo:path": typeof import("neo:path");
