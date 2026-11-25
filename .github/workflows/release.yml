@@ -421,9 +421,24 @@ jobs:
                 throw "$($entry.Name) --unknown-flag exited $($proc.ExitCode), expected 2"
               }
 
-              & $entry.Bin test @sharedTests
-              if ($LASTEXITCODE -ne 0) {
-                throw "$($entry.Name) shared JS/TS tests failed (exit $LASTEXITCODE)"
+              $prevEap = $ErrorActionPreference
+              $ErrorActionPreference = "Continue"
+              try {
+                $testOut = & $entry.Bin test @sharedTests 2>&1 | ForEach-Object { "$_" }
+                $testRc = $LASTEXITCODE
+              } finally {
+                $ErrorActionPreference = $prevEap
+              }
+              $testOut | ForEach-Object { Write-Host $_ }
+              if ($testRc -ne 0) {
+                $tailLines = @($testOut | Where-Object { $_.Trim().Length -gt 0 } | Select-Object -Last 15)
+                $summary = if ($tailLines.Count -gt 0) {
+                  (($tailLines -join "`n") -replace "%", "%25" -replace "`r", "" -replace "`n", "%0A")
+                } else {
+                  "exit $testRc (no output captured)"
+                }
+                Write-Host "::error title=Windows smoke failed ($slug / $($entry.Name))::$summary"
+                throw "$($entry.Name) shared JS/TS tests failed (exit $testRc)"
               }
             }
           } finally {

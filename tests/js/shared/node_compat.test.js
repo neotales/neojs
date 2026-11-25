@@ -165,16 +165,17 @@ test("node:path, node:path/posix, and node:path/win32 work identically on both e
     assert.strictEquals(pathWin32.dirname("C:\\foo\\bar.txt"), "C:\\foo");
     assert.strictEquals(pathWin32.default.sep, "\\");
 
+    const native = osPlatform() === "win32" ? win32 : posix;
     assert.strictEquals(
         normalize(resolve("a", "b", "..", "c")),
         resolve("a", "c"),
     );
-    assert.strictEquals(dirname("/a/b"), posix.dirname("/a/b"));
-    assert.strictEquals(basename("/a/b.js"), "b.js");
-    assert.strictEquals(extname("/a/b.js"), ".js");
-    assert.strictEquals(isAbsolute("/a"), true);
-    assert.strictEquals(relative("/a/b", "/a/b/c"), "c");
-    assert.strictEquals(format(parse("/a/b.js")), "/a/b.js");
+    assert.strictEquals(dirname("/a/b"), native.dirname("/a/b"));
+    assert.strictEquals(basename("/a/b.js"), native.basename("/a/b.js"));
+    assert.strictEquals(extname("/a/b.js"), native.extname("/a/b.js"));
+    assert.strictEquals(isAbsolute("/a"), native.isAbsolute("/a"));
+    assert.strictEquals(relative("/a/b", "/a/b/c"), native.relative("/a/b", "/a/b/c"));
+    assert.strictEquals(format(parse("/a/b.js")), native.format(native.parse("/a/b.js")));
 });
 
 test("node:os exposes platform metadata", () => {
@@ -294,48 +295,90 @@ test("node:fs sync file operations roundtrip cleanly", () => {
 test("node:child_process spawnSync and execFileSync handle stdout, stderr, exit codes, timeout, and maxBuffer", () => {
     assert.strictEquals(typeof childDefault.spawnSync, "function");
 
-    const ok = spawnSync("sh", ["-c", "printf 'hello-out'; printf 'hello-err' >&2"], {
-        encoding: "utf8",
-    });
-    assert.strictEquals(ok.status, 0);
-    assert.strictEquals(ok.signal, null);
-    assert.strictEquals(ok.timedOut, false);
-    assert.strictEquals(ok.stdout, "hello-out");
-    assert.strictEquals(ok.stderr, "hello-err");
-
-    const stdinRes = spawnSync("sh", ["-c", "cat"], {
-        input: "pipe-data",
-        encoding: "utf8",
-    });
-    assert.strictEquals(stdinRes.status, 0);
-    assert.strictEquals(stdinRes.stdout, "pipe-data");
-
-    const rawRes = spawnSync("sh", ["-c", "printf 'xy'"]);
-    assert.strictEquals(rawRes.status, 0);
-    assert.strictEquals(Buffer.isBuffer(rawRes.stdout), true);
-    assert.strictEquals(rawRes.stdout.toString("utf8"), "xy");
-
-    assert.strictEquals(
-        execFileSync("sh", ["-c", "printf 'exec-ok'"], { encoding: "utf8" }),
-        "exec-ok",
-    );
-
-    let failedErr;
+    const dir = mkdtempSync(join(tmpdir(), "vaeljs-cp-"));
     try {
-        execFileSync("sh", ["-c", "printf 'bad-err' >&2; exit 3"], { encoding: "utf8" });
-    } catch (err) {
-        failedErr = err;
+        const outErrScript = join(dir, "out_err.js");
+        writeFileSync(
+            outErrScript,
+            'console.log("hello-out");\nconsole.error("hello-err");\n',
+            "utf8",
+        );
+
+        const rawScript = join(dir, "raw.js");
+        writeFileSync(rawScript, 'console.log("xy");\n', "utf8");
+
+        const execOkScript = join(dir, "exec_ok.js");
+        writeFileSync(execOkScript, 'console.log("exec-ok");\n', "utf8");
+
+        const fail3Script = join(dir, "fail3.js");
+        writeFileSync(
+            fail3Script,
+            'import { exit } from "node:process";\nconsole.error("bad-err");\nexit(3);\n',
+            "utf8",
+        );
+
+        const slowScript = join(dir, "slow.js");
+        writeFileSync(
+            slowScript,
+            "const end = Date.now() + 5000;\nwhile (Date.now() < end) {}\n",
+            "utf8",
+        );
+
+        const bigScript = join(dir, "big.js");
+        writeFileSync(bigScript, 'console.log("x".repeat(512));\n', "utf8");
+
+        const ok = spawnSync(argv[0], [outErrScript], { encoding: "utf8" });
+        assert.strictEquals(ok.status, 0);
+        assert.strictEquals(ok.signal, null);
+        assert.strictEquals(ok.timedOut, false);
+        assert.strictEquals(ok.stdout.trim(), "hello-out");
+        assert.strictEquals(ok.stderr.trim(), "hello-err");
+
+        if (osPlatform() === "win32") {
+            const stdinRes = spawnSync("findstr.exe", ["^"], {
+                input: "pipe-data\r\n",
+                encoding: "utf8",
+            });
+            assert.strictEquals(stdinRes.status, 0);
+            assert.strictEquals(stdinRes.stdout.trim(), "pipe-data");
+        } else {
+            const stdinRes = spawnSync("cat", [], {
+                input: "pipe-data",
+                encoding: "utf8",
+            });
+            assert.strictEquals(stdinRes.status, 0);
+            assert.strictEquals(stdinRes.stdout, "pipe-data");
+        }
+
+        const rawRes = spawnSync(argv[0], [rawScript]);
+        assert.strictEquals(rawRes.status, 0);
+        assert.strictEquals(Buffer.isBuffer(rawRes.stdout), true);
+        assert.strictEquals(rawRes.stdout.toString("utf8").trim(), "xy");
+
+        assert.strictEquals(
+            execFileSync(argv[0], [execOkScript], { encoding: "utf8" }).trim(),
+            "exec-ok",
+        );
+
+        let failedErr;
+        try {
+            execFileSync(argv[0], [fail3Script], { encoding: "utf8" });
+        } catch (err) {
+            failedErr = err;
+        }
+        assert.ok(failedErr instanceof Error);
+        assert.strictEquals(failedErr.status, 3);
+        assert.strictEquals(failedErr.stderr.trim(), "bad-err");
+
+        const timedOut = spawnSync(argv[0], [slowScript], { timeout: 100 });
+        assert.strictEquals(timedOut.timedOut, true);
+
+        const overflow = spawnSync(argv[0], [bigScript], { maxBuffer: 64 });
+        assert.strictEquals(overflow.status, 0);
+        assert.strictEquals(overflow.stdout.length, 64);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
     }
-    assert.ok(failedErr instanceof Error);
-    assert.strictEquals(failedErr.status, 3);
-    assert.strictEquals(failedErr.stderr, "bad-err");
-
-    const timedOut = spawnSync("sh", ["-c", "sleep 2"], { timeout: 50 });
-    assert.strictEquals(timedOut.timedOut, true);
-
-    const overflow = spawnSync("sh", ["-c", "head -c 256 /dev/zero"], { maxBuffer: 64 });
-    assert.strictEquals(overflow.status, 0);
-    assert.strictEquals(overflow.stdout.length, 64);
 });
 
 test("node:buffer encodes, decodes, allocates, and concatenates", () => {
@@ -393,7 +436,7 @@ test("node:url provides URL, URLSearchParams, fileURLToPath, and pathToFileURL",
     sp.sort();
     assert.strictEquals(sp.toString(), "a=1&k=2&k=3");
 
-    const roundtripPath = "/tmp/hello world/test.txt";
+    const roundtripPath = join(tmpdir(), "hello world", "test.txt");
     const fileUrl = pathToFileURL(roundtripPath);
     assert.strictEquals(fileUrl.protocol, "file:");
     assert.strictEquals(fileURLToPath(fileUrl), roundtripPath);
@@ -459,13 +502,21 @@ test("node:child_process rejects truthy shell options and bounds arg/env tamperi
     for (const shellOpt of [true, "sh", 1]) {
         let err;
         try {
-            spawnSync("sh", ["-c", "echo nope"], { shell: shellOpt });
+            spawnSync(argv[0], ["--version"], { shell: shellOpt });
         } catch (caught) {
             err = caught;
         }
         assert.ok(err instanceof Error);
         assert.strictEquals(err.code, "ERR_UNSUPPORTED");
     }
+
+    const dir = mkdtempSync(join(tmpdir(), "vaeljs-cp-tamper-"));
+    const fail7Script = join(dir, "fail7.js");
+    writeFileSync(
+        fail7Script,
+        'import { exit } from "node:process";\nexit(7);\n',
+        "utf8",
+    );
 
     const tamperedProtoDesc = Object.getOwnPropertyDescriptor(Object.prototype, "code");
     Object.defineProperty(Object.prototype, "code", {
@@ -477,7 +528,7 @@ test("node:child_process rejects truthy shell options and bounds arg/env tamperi
     try {
         let childErr;
         try {
-            execFileSync("sh", ["-c", "exit 7"]);
+            execFileSync(argv[0], [fail7Script]);
         } catch (caught) {
             childErr = caught;
         }
@@ -489,5 +540,6 @@ test("node:child_process rejects truthy shell options and bounds arg/env tamperi
         } else {
             delete Object.prototype.code;
         }
+        rmSync(dir, { recursive: true, force: true });
     }
 });
