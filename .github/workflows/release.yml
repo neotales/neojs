@@ -50,9 +50,17 @@ jobs:
             echo "ERROR: tag '${tag}' must start with 'v'" >&2
             exit 1
           fi
+          # actions/checkout@v4 fetches +${GITHUB_SHA}:refs/tags/${tag} (a lightweight
+          # ref to the commit SHA) on tag pushes, so re-fetch the real tag object.
+          git fetch --force --no-tags origin "+refs/tags/${tag}:refs/tags/${tag}"
           obj_type=$(git cat-file -t "refs/tags/${tag}")
           if [ "${obj_type}" != "tag" ]; then
             echo "ERROR: tag '${tag}' is a '${obj_type}' (lightweight tag); release builds require an annotated tag." >&2
+            exit 1
+          fi
+          tag_commit=$(git rev-parse "refs/tags/${tag}^{commit}")
+          if [ "${tag_commit}" != "${GITHUB_SHA}" ]; then
+            echo "ERROR: tag '${tag}' resolves to commit '${tag_commit}', expected checked-out commit '${GITHUB_SHA}'." >&2
             exit 1
           fi
 
