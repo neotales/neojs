@@ -537,14 +537,17 @@ jobs:
           fi
 
           if gh release view "${tag}" >/dev/null 2>&1; then
-            gh release upload "${tag}" "${assets[@]}" --clobber
-            gh release edit "${tag}" --title "${tag}" --notes-file "${notes_file}" ${prerelease_args[@]+"${prerelease_args[@]}"}
-          else
-            gh release create "${tag}" "${assets[@]}" --title "${tag}" --notes-file "${notes_file}" --verify-tag ${prerelease_args[@]+"${prerelease_args[@]}"}
+            gh release delete "${tag}" --yes
           fi
+          gh release create "${tag}" "${assets[@]}" \
+            --title "${tag}" \
+            --notes-file "${notes_file}" \
+            --verify-tag \
+            "${prerelease_args[@]}"
 
-          asset_count=$(gh release view "${tag}" --json assets --jq '.assets | length')
-          if [ "${asset_count}" -ne 13 ]; then
-            echo "ERROR: expected 13 attached assets on release '${tag}', found ${asset_count}" >&2
+          release_meta=$(gh release view "${tag}" --json isDraft,assets --jq '"\(.isDraft) \(.assets | length)"')
+          read -r is_draft asset_count <<<"${release_meta}"
+          if [ "${is_draft}" != "false" ] || [ "${asset_count}" -ne 13 ]; then
+            echo "ERROR: expected published release (isDraft=false) with 13 attached assets on '${tag}', found isDraft=${is_draft}, assets=${asset_count}" >&2
             exit 1
           fi

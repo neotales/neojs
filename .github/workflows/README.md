@@ -114,10 +114,11 @@ Jobs:
     `release-bundle-<tag>` (`retention-days: 30`).
   - Extracts the `## [<tag_version>]` section from `CHANGELOG.md` (with a
     concise fallback referencing `CHANGELOG.md` and `SHA256SUMS.txt`), marks
-    tags containing `-` with `--prerelease`, idempotently creates or updates the
-    GitHub Release via `gh release` using `GITHUB_TOKEN` with all 13 assets
-    (12 archives + `SHA256SUMS.txt`) attached, and verifies the published asset
-    count equals `13`.
+    tags containing `-` with `--prerelease`, idempotently deletes any existing
+    release (`gh release delete --yes`, preserving the git tag) before running
+    `gh release create --verify-tag` using `GITHUB_TOKEN` with all 13 assets
+    (12 archives + `SHA256SUMS.txt`) attached, and verifies `isDraft == false`
+    and the attached asset count equals `13`.
 
 ### Documented failure modes (`release.yml`)
 - **Lightweight tag pushed**: `git cat-file -t refs/tags/<tag>` returns `commit`
@@ -129,9 +130,10 @@ Jobs:
   `macos-amd64` falls back to binary-header/`otool` checks and still requires a
   native macOS x86_64 smoke pass before promoting the release.
 - **GitHub Release publish or asset-count failure**: Re-running `publish-release`
-  is idempotent (`gh release upload --clobber` + `gh release edit` when the
-  release already exists, otherwise `gh release create --verify-tag`), and fails
-  if fewer or more than 13 assets are attached.
+  is idempotent (`gh release delete --yes` without `--cleanup-tag` removes any
+  pre-existing draft or stale-asset release while preserving the git tag, then
+  `gh release create --verify-tag` creates a fresh published release), and fails
+  if `isDraft` is not `false` or fewer/more than 13 assets are attached.
 - **Signing, attestation & crates.io (`system-admin` boundary)**: This workflow
   never signs artifacts, generates checksum attestations, or publishes crates
   (`publish = false` blocks crates.io publishing). Coordinate with `system-admin`
