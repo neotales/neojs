@@ -19,11 +19,13 @@ use neojs_module_policy::is_path_specifier;
 use neojs_npm::{
     CasStore, DEFAULT_REGISTRY_ORIGIN, ExportsResolver, LOCKFILE_NAME, LoadedNpmModule, Lockfile,
     MAX_DISCOVERY_DEPTH, NpmLimits, NpmReferrerResolution, NpmRootRequest, NpmSpecifier,
-    PackageName, ProjectPackageResolver, ProjectResolution, RemoteNpmRegistry, ResolvedNpmGraph,
-    ResolverError, TargetPlatform, VersionConstraint, resolve_requests_with_lockfile,
-    split_bare_package_specifier,
+    NpmrcConfig, PackageName, ProjectPackageResolver, ProjectResolution, RemoteNpmRegistry,
+    ResolvedNpmGraph, ResolverError, TargetPlatform, VersionConstraint,
+    resolve_requests_with_lockfile_and_npmrc, split_bare_package_specifier,
 };
 use neojs_remote::{RemoteClient, RemoteOptions};
+
+const NPMRC_NAME: &str = ".npmrc";
 
 /// Runtime configuration for `npm:` and `package.json` module resolution.
 #[derive(Clone, Debug)]
@@ -33,6 +35,7 @@ pub struct NpmOptions {
     offline: bool,
     cache_dir: Option<PathBuf>,
     registry_origin: String,
+    registry_origin_overridden: bool,
 }
 
 impl Default for NpmOptions {
@@ -43,6 +46,7 @@ impl Default for NpmOptions {
             offline: false,
             cache_dir: None,
             registry_origin: DEFAULT_REGISTRY_ORIGIN.to_owned(),
+            registry_origin_overridden: false,
         }
     }
 }
@@ -84,6 +88,7 @@ impl NpmOptions {
     /// Overrides the npm registry origin URL (defaults to `https://registry.npmjs.org`).
     pub fn with_registry_origin(mut self, origin: impl Into<String>) -> Self {
         self.registry_origin = origin.into().trim_end_matches('/').to_owned();
+        self.registry_origin_overridden = true;
         self
     }
 
@@ -139,6 +144,7 @@ pub(crate) struct NpmLoader {
     graph: RefCell<Option<ResolvedNpmGraph>>,
     projects: RefCell<BTreeMap<PathBuf, Option<ProjectPackageResolver>>>,
     lockfiles: RefCell<BTreeMap<PathBuf, LockfileSlot>>,
+    npmrcs: RefCell<BTreeMap<PathBuf, NpmrcConfig>>,
 }
 
 impl NpmLoader {
@@ -161,6 +167,7 @@ impl NpmLoader {
             graph: RefCell::new(None),
             projects: RefCell::new(BTreeMap::new()),
             lockfiles: RefCell::new(BTreeMap::new()),
+            npmrcs: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -185,7 +192,7 @@ impl NpmLoader {
         let project_dir = project.as_ref().map(|proj| proj.root_dir().to_path_buf());
         let lock_dir = self.ensure_lockfile_slot(&referrer_dir, project_dir.as_deref())?;
 
-        self.ensure_request_resolved(&req, &lock_dir, project.as_ref())?;
+        self.ensure_request_resolved(&req, &referrer_dir, &lock_dir, project.as_ref())?;
         let graph_borrow = self.graph.borrow();
         let graph = graph_borrow
             .as_ref()
@@ -273,7 +280,7 @@ impl NpmLoader {
             optional,
         };
         let lock_dir = self.ensure_lockfile_slot(&referrer_dir, Some(project.root_dir()))?;
-        self.ensure_request_resolved(&req, &lock_dir, Some(&project))?;
+        self.ensure_request_resolved(&req, &referrer_dir, &lock_dir, Some(&project))?;
 
         let graph_borrow = self.graph.borrow();
         let graph = graph_borrow
@@ -402,9 +409,40 @@ impl NpmLoader {
         Ok(lock_dir)
     }
 
+    fn discover_npmrc_dir(&self, referrer_dir: &Path, project_dir: Option<&Path>) -> PathBuf {
+        if let Some(dir) = project_dir {
+            return dir.to_path_buf();
+        }
+        if let Some(dir) = &self.manifest_root {
+            return dir.clone();
+        }
+        if let Some(dir) = find_existing_npmrc_dir(referrer_dir) {
+            return dir;
+        }
+        referrer_dir.to_path_buf()
+    }
+
+    fn load_npmrc_for_dir(&self, project_dir: &Path) -> Result<NpmrcConfig, String> {
+        let key = std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+        if let Some(cached) = self.npmrcs.borrow().get(&key) {
+            return Ok(cached.clone());
+        }
+        let home_dir = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .filter(|val| !val.is_empty())
+            .map(PathBuf::from);
+        let config = NpmrcConfig::load_for_project(&key, home_dir.as_deref(), &|name| {
+            std::env::var(name).ok()
+        })
+        .map_err(|err| err.to_string())?;
+        self.npmrcs.borrow_mut().insert(key, config.clone());
+        Ok(config)
+    }
+
     fn ensure_request_resolved(
         &self,
         req: &NpmRootRequest,
+        referrer_dir: &Path,
         lock_dir: &Path,
         project: Option<&ProjectPackageResolver>,
     ) -> Result<(), String> {
@@ -418,10 +456,24 @@ impl NpmLoader {
             return Ok(());
         }
 
+        let npmrc_dir = self.discover_npmrc_dir(referrer_dir, project.map(|p| p.root_dir()));
+        let npmrc = self.load_npmrc_for_dir(&npmrc_dir)?;
+        let effective_origin =
+            if !self.options.registry_origin_overridden && npmrc.has_explicit_default_registry() {
+                npmrc.default_registry_origin().to_owned()
+            } else {
+                self.options.registry_origin.clone()
+            };
+
         let cas = self.cas_store()?;
         let registry = if !self.options.offline {
             self.remote.as_ref().map(|client| {
-                RemoteNpmRegistry::with_client(&self.options.registry_origin, client.clone())
+                RemoteNpmRegistry::with_client_and_npmrc(
+                    &effective_origin,
+                    client.clone(),
+                    npmrc.clone(),
+                    self.options.registry_origin_overridden,
+                )
             })
         } else {
             None
@@ -442,16 +494,18 @@ impl NpmLoader {
         });
 
         let (sub_graph, modified) = loop {
-            match resolve_requests_with_lockfile(
+            match resolve_requests_with_lockfile_and_npmrc(
                 &requests,
                 &mut slot.lockfile,
                 &cas,
                 registry_ref,
-                &self.options.registry_origin,
+                &effective_origin,
                 self.options.frozen_lockfile,
                 self.options.offline,
                 NpmLimits::default(),
                 &TargetPlatform::current(),
+                Some(&npmrc),
+                self.options.registry_origin_overridden,
             ) {
                 Ok(res) => break res,
                 Err(ResolverError::MissingPeerDependency { ref peer, .. })
@@ -516,9 +570,17 @@ fn file_referrer_dir(referrer: &str) -> Result<PathBuf, String> {
 }
 
 fn find_existing_lockfile_dir(start_dir: &Path) -> Option<PathBuf> {
+    find_existing_file_dir(start_dir, LOCKFILE_NAME)
+}
+
+fn find_existing_npmrc_dir(start_dir: &Path) -> Option<PathBuf> {
+    find_existing_file_dir(start_dir, NPMRC_NAME)
+}
+
+fn find_existing_file_dir(start_dir: &Path, file_name: &str) -> Option<PathBuf> {
     let mut current = std::fs::canonicalize(start_dir).ok()?;
     for _ in 0..MAX_DISCOVERY_DEPTH {
-        let candidate = current.join(LOCKFILE_NAME);
+        let candidate = current.join(file_name);
         if std::fs::symlink_metadata(&candidate).is_ok() {
             return Some(current);
         }

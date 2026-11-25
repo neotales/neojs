@@ -38,11 +38,11 @@ pub mod remote;
 pub use github::github_url;
 #[cfg(any(test, feature = "test-support"))]
 pub use remote::TestRemoteResponse;
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub use remote::test_transport;
 pub use remote::{
     Cache, DEFAULT_MAX_REDIRECTS, FetchedModule, OfflineModule, Redactions, RemoteClient,
     RemoteError, RemoteOptions, RemoteRequest, RemoteResponse, RemoteTransport, diagnostic_url,
     display_url, validate_url,
 };
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use remote::{test_transport, test_transport_with_auth};

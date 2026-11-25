@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Engine-independent `npm:` package resolution, verification, and virtual
 //! graph core for `neojs`.
 //!
@@ -37,6 +38,7 @@
 pub mod cas;
 pub mod exports;
 pub mod lockfile;
+pub mod npmrc;
 pub mod package_json;
 pub mod resolver;
 pub mod semver;
@@ -52,6 +54,7 @@ pub use exports::{
 pub use lockfile::{
     LOCKFILE_NAME, LOCKFILE_VERSION, LockedPackage, Lockfile, LockfileError, MAX_LOCKFILE_BYTES,
 };
+pub use npmrc::{MAX_NPMRC_BYTES, NpmrcConfig, NpmrcError, RedactedSecret, RegistryAuth};
 pub use package_json::{
     ExportsField, LIFECYCLE_SCRIPT_HOOKS, MAX_PACKAGE_JSON_BYTES, PackageJson, PackageJsonError,
     PeerDependencyMeta, ScriptAudit, TargetPlatform,
@@ -61,6 +64,7 @@ pub use resolver::{
     NpmReferrerResolution, NpmRegistry, NpmRootRequest, Packument, PackumentDist, PackumentVersion,
     ProjectPackageResolver, ProjectResolution, RemoteNpmRegistry, ResolvedNpmGraph,
     ResolvedNpmPackage, ResolverError, resolve_requests_with_lockfile,
+    resolve_requests_with_lockfile_and_npmrc,
 };
 pub use semver::{
     MAX_COMPARATORS_PER_CLAUSE, MAX_CONSTRAINT_BYTES, MAX_OR_CLAUSES, NpmRange, NpmVersion,

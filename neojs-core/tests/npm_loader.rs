@@ -1040,6 +1040,161 @@ if (plugTag !== "plug+host-1") throw new Error("sibling peer failed");
         .run_file(&main)
         .expect("frozen offline run succeeds with peer ctx");
     }
+
+    #[test]
+    fn project_npmrc_routes_private_scoped_package_with_bearer_auth_in_v8() {
+        let project = TempDir::new().unwrap();
+        let cache = TempDir::new().unwrap();
+
+        let (tgz, sri) = build_package_tgz(&[
+            (
+                "package.json",
+                r#"{
+                    "name": "@private/pkg",
+                    "version": "1.0.0",
+                    "type": "module",
+                    "exports": { ".": "./index.mjs" }
+                }"#,
+            ),
+            (
+                "index.mjs",
+                "export const secretMessage = (who) => `private:${who}`;\n",
+            ),
+        ]);
+
+        let expected_auth = "Bearer neo_priv_tok_42";
+        let packument = serde_json::json!({
+            "name": "@private/pkg",
+            "dist-tags": { "latest": "1.0.0" },
+            "versions": {
+                "1.0.0": {
+                    "version": "1.0.0",
+                    "dist": {
+                        "tarball": "https://private.registry.test/org/@private/pkg/-/1.0.0.tgz",
+                        "integrity": sri
+                    }
+                }
+            }
+        });
+        let packument_bytes = serde_json::to_vec(&packument).unwrap();
+
+        let seen = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let seen_clone = Arc::clone(&seen);
+        let tgz_clone = tgz.clone();
+        let pack_clone = packument_bytes.clone();
+
+        let auth_transport = move |url: &str,
+                                   _timeout: std::time::Duration,
+                                   _if_none_match: Option<&str>,
+                                   _if_modified_since: Option<&str>,
+                                   authorization: Option<&str>| {
+            seen_clone
+                .lock()
+                .unwrap()
+                .push((url.to_owned(), authorization.map(str::to_owned)));
+            if authorization != Some(expected_auth) {
+                return Ok(TestRemoteResponse {
+                    status: 401,
+                    body: b"unauthorized".to_vec(),
+                    ..Default::default()
+                });
+            }
+            if url == "https://private.registry.test/org/@private%2fpkg" {
+                Ok(TestRemoteResponse {
+                    status: 200,
+                    declared_length: Some(pack_clone.len() as u64),
+                    cache_control: Some("max-age=60".to_owned()),
+                    body: pack_clone.clone(),
+                    ..Default::default()
+                })
+            } else if url == "https://private.registry.test/org/@private/pkg/-/1.0.0.tgz" {
+                Ok(TestRemoteResponse {
+                    status: 200,
+                    declared_length: Some(tgz_clone.len() as u64),
+                    cache_control: Some("max-age=60".to_owned()),
+                    body: tgz_clone.clone(),
+                    ..Default::default()
+                })
+            } else {
+                Ok(TestRemoteResponse {
+                    status: 404,
+                    body: b"not found".to_vec(),
+                    ..Default::default()
+                })
+            }
+        };
+
+        write_file(
+            project.path(),
+            ".npmrc",
+            "@private:registry=https://private.registry.test/org/\n//private.registry.test/org/:_authToken=neo_priv_tok_42\n",
+        );
+        write_file(
+            project.path(),
+            "package.json",
+            r#"{"name":"priv-consumer","type":"module","dependencies":{"@private/pkg":"^1.0.0"}}"#,
+        );
+        let main = write_file(
+            project.path(),
+            "src/main.ts",
+            r#"
+import { secretMessage } from "@private/pkg";
+if (secretMessage("v8") !== "private:v8") throw new Error("unexpected result");
+"#,
+        );
+
+        // Default no-remote mode must NEVER hit network even with .npmrc present.
+        let no_remote_err =
+            Runtime::with_options(RuntimeOptions::new().with_npm_cache_dir(cache.path()))
+                .unwrap()
+                .run_file(&main)
+                .expect_err("no-remote mode must fail closed without network");
+        assert!(
+            no_remote_err.to_string().contains("--allow-remote"),
+            "{no_remote_err}"
+        );
+
+        // Live remote run with mock transport routes @private/pkg to custom HTTPS registry with Bearer auth.
+        let opts =
+            RuntimeOptions::new().with_remote(RemoteOptions::new().with_cache_dir(cache.path()));
+        Runtime::with_options_and_auth_transport(opts, auth_transport.clone())
+            .unwrap()
+            .run_file(&main)
+            .expect("private scoped package loads into V8 via .npmrc");
+
+        assert!(!project.path().join("node_modules").exists());
+        let recorded = seen.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![
+                (
+                    "https://private.registry.test/org/@private%2fpkg".to_owned(),
+                    Some(expected_auth.to_owned()),
+                ),
+                (
+                    "https://private.registry.test/org/@private/pkg/-/1.0.0.tgz".to_owned(),
+                    Some(expected_auth.to_owned()),
+                ),
+            ]
+        );
+
+        let lock_raw = fs::read_to_string(project.path().join("neo.lock")).unwrap();
+        assert!(!lock_raw.contains("neo_priv_tok_42"));
+
+        // --offline --frozen-lockfile succeeds with zero network requests even with .npmrc present.
+        let count_before = seen.lock().unwrap().len();
+        Runtime::with_options_and_auth_transport(
+            RuntimeOptions::new()
+                .with_remote(RemoteOptions::new().with_cache_dir(cache.path()))
+                .with_offline(true)
+                .with_frozen_lockfile(true),
+            auth_transport,
+        )
+        .unwrap()
+        .run_file(&main)
+        .expect("offline frozen run succeeds without network");
+        assert_eq!(seen.lock().unwrap().len(), count_before);
+    }
 }
 
 #[cfg(not(feature = "npm"))]

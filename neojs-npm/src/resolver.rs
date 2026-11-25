@@ -13,6 +13,7 @@ use url::Url;
 use crate::cas::{CasError, CasStore, sha256_hex};
 use crate::exports::{ExportsError, ExportsResolver};
 use crate::lockfile::{LockedPackage, Lockfile, LockfileError};
+use crate::npmrc::{NpmrcConfig, NpmrcError};
 use crate::package_json::{
     MAX_PACKAGE_JSON_BYTES, PackageJson, PackageJsonError, PeerDependencyMeta, ScriptAudit,
     TargetPlatform,
@@ -137,6 +138,10 @@ pub enum ResolverError {
     /// Lockfile parse, read, write, or integrity verification error.
     #[error("{0}")]
     Lockfile(#[from] LockfileError),
+
+    /// `.npmrc` configuration or registry authentication error.
+    #[error("{0}")]
+    Npmrc(#[from] NpmrcError),
 
     /// Resolution refused because `--frozen-lockfile` requires an existing lockfile entry.
     #[error("frozen lockfile violation: {reason}")]
@@ -275,6 +280,12 @@ pub trait NpmRegistry {
     /// Returns the registry origin URL (e.g. `"https://registry.npmjs.org"`).
     fn registry_origin(&self) -> &str;
 
+    /// Returns the registry origin URL (without trailing `/`) used for
+    /// `package_name`. Defaults to [`Self::registry_origin`].
+    fn registry_origin_for_package(&self, _package_name: &PackageName) -> &str {
+        self.registry_origin()
+    }
+
     /// Fetches the abbreviated packument for `package_name`.
     fn fetch_packument(&self, package_name: &PackageName) -> Result<Packument, ResolverError>;
 
@@ -282,15 +293,18 @@ pub trait NpmRegistry {
     fn fetch_tarball(&self, tarball_url: &str, integrity: &str) -> Result<Vec<u8>, ResolverError>;
 }
 
-/// [`NpmRegistry`] implementation backed by [`neojs_remote::RemoteClient`].
+/// [`NpmRegistry`] implementation backed by [`neojs_remote::RemoteClient`]
+/// and optional `.npmrc` scoped registry / authentication rules.
 ///
 /// Available via [`RemoteNpmRegistry::with_client`] in all builds, and via
 /// `RemoteNpmRegistry::new` when the `network` feature is enabled.
 #[derive(Clone)]
 pub struct RemoteNpmRegistry {
     origin: String,
+    origin_overridden: bool,
     client: neojs_remote::RemoteClient,
     limits: NpmLimits,
+    npmrc: NpmrcConfig,
 }
 
 impl RemoteNpmRegistry {
@@ -305,11 +319,55 @@ impl RemoteNpmRegistry {
 
     /// Creates a registry client backed by a caller-provided [`neojs_remote::RemoteClient`].
     pub fn with_client(origin: impl Into<String>, client: neojs_remote::RemoteClient) -> Self {
+        let trimmed = origin.into().trim_end_matches('/').to_owned();
+        let origin_overridden = trimmed != DEFAULT_REGISTRY_ORIGIN;
         Self {
-            origin: origin.into().trim_end_matches('/').to_owned(),
+            origin: trimmed,
+            origin_overridden,
             client,
             limits: NpmLimits::default(),
+            npmrc: NpmrcConfig::default(),
         }
+    }
+
+    /// Creates a registry client configured with `.npmrc` routing and
+    /// HTTPS-only authentication rules.
+    ///
+    /// When `origin_overridden` is `false` and `npmrc` specifies `registry=...`,
+    /// the `.npmrc` default registry replaces `origin`.
+    pub fn with_client_and_npmrc(
+        origin: impl Into<String>,
+        client: neojs_remote::RemoteClient,
+        npmrc: NpmrcConfig,
+        origin_overridden: bool,
+    ) -> Self {
+        let trimmed = origin.into().trim_end_matches('/').to_owned();
+        let effective_origin = if !origin_overridden && npmrc.has_explicit_default_registry() {
+            npmrc.default_registry_origin().to_owned()
+        } else {
+            trimmed
+        };
+        Self {
+            origin: effective_origin,
+            origin_overridden,
+            client,
+            limits: NpmLimits::default(),
+            npmrc,
+        }
+    }
+
+    /// Applies `.npmrc` scoped registry routing and HTTPS-only auth rules.
+    pub fn with_npmrc(mut self, npmrc: NpmrcConfig) -> Self {
+        if !self.origin_overridden && npmrc.has_explicit_default_registry() {
+            self.origin = npmrc.default_registry_origin().to_owned();
+        }
+        self.npmrc = npmrc;
+        self
+    }
+
+    /// Returns the attached [`NpmrcConfig`].
+    pub fn npmrc(&self) -> &NpmrcConfig {
+        &self.npmrc
     }
 
     /// Overrides resource limits used when parsing packuments.
@@ -317,10 +375,43 @@ impl RemoteNpmRegistry {
         self.limits = limits;
         self
     }
+
+    fn base_registry_url_for_package(
+        &self,
+        package_name: &PackageName,
+    ) -> Result<Url, ResolverError> {
+        if let Some(scoped) = self
+            .npmrc
+            .scoped_registry_for_package(package_name.as_str())
+        {
+            return Ok(scoped.clone());
+        }
+        if !self.origin_overridden && self.npmrc.has_explicit_default_registry() {
+            return Ok(self.npmrc.default_registry().clone());
+        }
+        let base = format!("{}/", self.origin.trim_end_matches('/'));
+        Url::parse(&base).map_err(|err| ResolverError::Registry {
+            package: package_name.to_string(),
+            reason: err.to_string(),
+        })
+    }
 }
 
 impl NpmRegistry for RemoteNpmRegistry {
     fn registry_origin(&self) -> &str {
+        &self.origin
+    }
+
+    fn registry_origin_for_package(&self, package_name: &PackageName) -> &str {
+        if let Some(scoped) = self
+            .npmrc
+            .scoped_registry_origin_for_package(package_name.as_str())
+        {
+            return scoped;
+        }
+        if !self.origin_overridden && self.npmrc.has_explicit_default_registry() {
+            return self.npmrc.default_registry_origin();
+        }
         &self.origin
     }
 
@@ -330,18 +421,29 @@ impl NpmRegistry for RemoteNpmRegistry {
         } else {
             package_name.as_str().to_owned()
         };
-        let url_str = format!("{}/{encoded_name}", self.origin);
-        let url = Url::parse(&url_str).map_err(|err| ResolverError::Registry {
-            package: package_name.to_string(),
-            reason: err.to_string(),
-        })?;
-        let fetched = self
-            .client
-            .fetch(&url)
+        let base_url = self.base_registry_url_for_package(package_name)?;
+        let url = base_url
+            .join(&encoded_name)
             .map_err(|err| ResolverError::Registry {
                 package: package_name.to_string(),
                 reason: err.to_string(),
             })?;
+        let matched = self.npmrc.auth_with_scope_for_url(&url)?;
+        let auth_header = matched.map(|(auth, _)| auth.authorization_header_value());
+        let matched_prefix = matched.map(|(_, prefix)| prefix);
+        let fetched = match (auth_header.as_deref(), matched_prefix) {
+            (Some(header), Some(prefix)) => {
+                self.client
+                    .fetch_with_scoped_authorization(&url, Some(header.as_str()), &|next| {
+                        NpmrcConfig::path_prefix_matches(prefix, next)
+                    })
+            }
+            _ => self.client.fetch_with_authorization(&url, None),
+        }
+        .map_err(|err| ResolverError::Registry {
+            package: package_name.to_string(),
+            reason: err.to_string(),
+        })?;
         Packument::parse_bytes(&fetched.body, self.limits.max_packument_bytes)
     }
 
@@ -351,13 +453,22 @@ impl NpmRegistry for RemoteNpmRegistry {
             reason: err.to_string(),
         })?;
         let display = neojs_remote::display_url(&url);
-        let fetched = self
-            .client
-            .fetch(&url)
-            .map_err(|err| ResolverError::Registry {
-                package: display,
-                reason: err.to_string(),
-            })?;
+        let matched = self.npmrc.auth_with_scope_for_url(&url)?;
+        let auth_header = matched.map(|(auth, _)| auth.authorization_header_value());
+        let matched_prefix = matched.map(|(_, prefix)| prefix);
+        let fetched = match (auth_header.as_deref(), matched_prefix) {
+            (Some(header), Some(prefix)) => {
+                self.client
+                    .fetch_with_scoped_authorization(&url, Some(header.as_str()), &|next| {
+                        NpmrcConfig::path_prefix_matches(prefix, next)
+                    })
+            }
+            _ => self.client.fetch_with_authorization(&url, None),
+        }
+        .map_err(|err| ResolverError::Registry {
+            package: display,
+            reason: err.to_string(),
+        })?;
         Ok(fetched.body)
     }
 }
@@ -877,7 +988,6 @@ impl<'a, R: NpmRegistry + ?Sized> NpmGraphResolver<'a, R> {
 
         let mut state = ResolutionState {
             resolver: self,
-            registry_origin: origin.clone(),
             packuments: BTreeMap::new(),
             artifacts: BTreeMap::new(),
             nodes: Vec::new(),
@@ -992,8 +1102,8 @@ impl<'a, R: NpmRegistry + ?Sized> NpmGraphResolver<'a, R> {
 
             let pkg = ResolvedNpmPackage {
                 instance_id: instance_id.clone(),
-                registry_host: registry_host.clone(),
-                registry_origin: origin.clone(),
+                registry_host: node.registry_host.clone(),
+                registry_origin: node.registry_origin.clone(),
                 name: node.name.clone(),
                 version: node.version.clone(),
                 ctx: node.ctx.clone(),
@@ -1009,7 +1119,7 @@ impl<'a, R: NpmRegistry + ?Sized> NpmGraphResolver<'a, R> {
             };
             by_url_identity.insert(
                 (
-                    registry_host.clone(),
+                    node.registry_host.clone(),
                     node.name.clone(),
                     node.version.clone(),
                     node.ctx.clone(),
@@ -1041,6 +1151,8 @@ impl<'a, R: NpmRegistry + ?Sized> NpmGraphResolver<'a, R> {
 }
 
 struct LoadedArtifact {
+    registry_origin: String,
+    registry_host: String,
     version: String,
     tarball_url: String,
     integrity: String,
@@ -1050,6 +1162,8 @@ struct LoadedArtifact {
 }
 
 struct WorkingNode {
+    registry_origin: String,
+    registry_host: String,
     name: PackageName,
     version: String,
     tarball_url: String,
@@ -1073,7 +1187,6 @@ struct StackFrame {
 
 struct ResolutionState<'a, R: NpmRegistry + ?Sized> {
     resolver: &'a NpmGraphResolver<'a, R>,
-    registry_origin: String,
     packuments: BTreeMap<PackageName, Packument>,
     artifacts: BTreeMap<String, LoadedArtifact>,
     nodes: Vec<WorkingNode>,
@@ -1109,6 +1222,24 @@ impl<'a, R: NpmRegistry + ?Sized> ResolutionState<'a, R> {
             return Ok(&self.artifacts[&art_key]);
         }
 
+        let pkg_origin = self
+            .resolver
+            .registry
+            .registry_origin_for_package(name)
+            .trim_end_matches('/')
+            .to_owned();
+        let pkg_origin_url = Url::parse(&pkg_origin).map_err(|err| ResolverError::Registry {
+            package: name.to_string(),
+            reason: err.to_string(),
+        })?;
+        let pkg_host = pkg_origin_url
+            .host_str()
+            .ok_or_else(|| ResolverError::Registry {
+                package: name.to_string(),
+                reason: "registry origin has no host".to_owned(),
+            })?
+            .to_owned();
+
         let integrity = meta
             .dist
             .integrity
@@ -1119,7 +1250,7 @@ impl<'a, R: NpmRegistry + ?Sized> ResolutionState<'a, R> {
 
         let cas = self.resolver.ingestor.cas();
         let tree = if let Some(cached_tree) =
-            PackageTree::load_verified(cas.cache_root(), &self.registry_origin, integrity, None)?
+            PackageTree::load_verified(cas.cache_root(), &pkg_origin, integrity, None)?
         {
             cached_tree
         } else {
@@ -1129,7 +1260,7 @@ impl<'a, R: NpmRegistry + ?Sized> ResolutionState<'a, R> {
                 .fetch_tarball(&meta.dist.tarball, integrity)?;
             self.resolver
                 .ingestor
-                .ingest(&self.registry_origin, integrity, &tgz)?
+                .ingest(&pkg_origin, integrity, &tgz)?
         };
 
         let pkg_entry = tree
@@ -1155,6 +1286,8 @@ impl<'a, R: NpmRegistry + ?Sized> ResolutionState<'a, R> {
         self.artifacts.insert(
             art_key.clone(),
             LoadedArtifact {
+                registry_origin: pkg_origin,
+                registry_host: pkg_host,
                 version: meta.version.clone(),
                 tarball_url: meta.dist.tarball.clone(),
                 integrity: tree.integrity.clone(),
@@ -1173,6 +1306,8 @@ impl<'a, R: NpmRegistry + ?Sized> ResolutionState<'a, R> {
         peer_scope: &BTreeMap<PackageName, usize>,
     ) -> Result<usize, ResolverError> {
         let art = &self.artifacts[art_key];
+        let registry_origin = art.registry_origin.clone();
+        let registry_host = art.registry_host.clone();
         let version = art.version.clone();
         let tarball_url = art.tarball_url.clone();
         let integrity = art.integrity.clone();
@@ -1232,6 +1367,8 @@ impl<'a, R: NpmRegistry + ?Sized> ResolutionState<'a, R> {
 
         let node_id = self.nodes.len();
         self.nodes.push(WorkingNode {
+            registry_origin,
+            registry_host,
             name: name.clone(),
             version: version.clone(),
             tarball_url,
@@ -1854,6 +1991,37 @@ pub fn resolve_requests_with_lockfile<R: NpmRegistry + ?Sized>(
     limits: NpmLimits,
     platform: &TargetPlatform,
 ) -> Result<(ResolvedNpmGraph, bool), ResolverError> {
+    resolve_requests_with_lockfile_and_npmrc(
+        requests,
+        lockfile,
+        cas,
+        registry,
+        registry_origin,
+        frozen_lockfile,
+        offline,
+        limits,
+        platform,
+        None,
+        false,
+    )
+}
+
+/// Resolves `requests` against `lockfile` and `cas` with optional `.npmrc`
+/// scoped-registry origin routing for both live and offline/locked runs.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_requests_with_lockfile_and_npmrc<R: NpmRegistry + ?Sized>(
+    requests: &[NpmRootRequest],
+    lockfile: &mut Lockfile,
+    cas: &CasStore,
+    registry: Option<&R>,
+    registry_origin: &str,
+    frozen_lockfile: bool,
+    offline: bool,
+    limits: NpmLimits,
+    platform: &TargetPlatform,
+    npmrc: Option<&NpmrcConfig>,
+    registry_origin_overridden: bool,
+) -> Result<(ResolvedNpmGraph, bool), ResolverError> {
     let origin = registry_origin.trim_end_matches('/').to_owned();
     let mut graph = ResolvedNpmGraph::new(&origin, cas.clone())?;
     let registry_host = graph.registry_host.clone();
@@ -1890,6 +2058,8 @@ pub fn resolve_requests_with_lockfile<R: NpmRegistry + ?Sized>(
                 registry: if offline { None } else { registry },
                 registry_origin: &origin,
                 registry_host: &registry_host,
+                npmrc,
+                registry_origin_overridden,
                 frozen_lockfile,
                 offline,
                 limits,
@@ -1993,12 +2163,52 @@ struct LockedContext<'a, R: NpmRegistry + ?Sized> {
     registry: Option<&'a R>,
     registry_origin: &'a str,
     registry_host: &'a str,
+    npmrc: Option<&'a NpmrcConfig>,
+    registry_origin_overridden: bool,
     frozen_lockfile: bool,
     offline: bool,
     limits: NpmLimits,
     platform: &'a TargetPlatform,
     visited_keys: &'a mut BTreeMap<String, String>,
     graph: &'a mut ResolvedNpmGraph,
+}
+
+fn locked_package_origin_and_host<R: NpmRegistry + ?Sized>(
+    expected_name: &PackageName,
+    ctx: &LockedContext<'_, R>,
+) -> Result<(String, String), ResolverError> {
+    let pkg_origin = if let Some(reg) = ctx.registry {
+        reg.registry_origin_for_package(expected_name)
+            .trim_end_matches('/')
+            .to_owned()
+    } else if let Some(cfg) = ctx.npmrc {
+        if !ctx.registry_origin_overridden {
+            cfg.registry_origin_for_package(expected_name.as_str())
+                .to_owned()
+        } else {
+            cfg.scoped_registry_origin_for_package(expected_name.as_str())
+                .unwrap_or(ctx.registry_origin)
+                .to_owned()
+        }
+    } else {
+        ctx.registry_origin.to_owned()
+    };
+
+    if pkg_origin == ctx.registry_origin {
+        return Ok((pkg_origin, ctx.registry_host.to_owned()));
+    }
+    let origin_url = Url::parse(&pkg_origin).map_err(|err| ResolverError::Registry {
+        package: expected_name.to_string(),
+        reason: err.to_string(),
+    })?;
+    let host = origin_url
+        .host_str()
+        .ok_or_else(|| ResolverError::Registry {
+            package: expected_name.to_string(),
+            reason: "registry origin has no host".to_owned(),
+        })?
+        .to_owned();
+    Ok((pkg_origin, host))
 }
 
 fn load_locked_package<R: NpmRegistry + ?Sized>(
@@ -2028,6 +2238,8 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
     let pkg_ctx = extract_lock_ctx(expected_name, &locked.version, pkg_key);
     let instance_id = format!("{expected_name}@{}~{pkg_ctx}", locked.version);
 
+    let (pkg_origin, pkg_host) = locked_package_origin_and_host(expected_name, ctx)?;
+
     // Load and verify `.tree` from CAS (or fetch tarball when permitted).
     let _ = parse_sha512_sri(&locked.integrity)?;
     if ctx.frozen_lockfile && locked.tree_sha256.is_none() {
@@ -2039,7 +2251,7 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
     }
     let tree = match PackageTree::load_verified(
         ctx.cas.cache_root(),
-        ctx.registry_origin,
+        &pkg_origin,
         &locked.integrity,
         locked.tree_sha256.as_deref(),
     )? {
@@ -2075,9 +2287,7 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
                 meta.dist.tarball.clone()
             };
             let tgz = reg.fetch_tarball(&tarball_url, &locked.integrity)?;
-            let tree = ctx
-                .ingestor
-                .ingest(ctx.registry_origin, &locked.integrity, &tgz)?;
+            let tree = ctx.ingestor.ingest(&pkg_origin, &locked.integrity, &tgz)?;
             if let Some(expected_tree_sha256) = &locked.tree_sha256
                 && expected_tree_sha256 != &tree.tree_sha256
             {
@@ -2223,8 +2433,8 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
 
     let resolved = ResolvedNpmPackage {
         instance_id: instance_id.clone(),
-        registry_host: ctx.registry_host.to_owned(),
-        registry_origin: ctx.registry_origin.to_owned(),
+        registry_host: pkg_host.clone(),
+        registry_origin: pkg_origin,
         name: expected_name.clone(),
         version: locked.version.clone(),
         ctx: pkg_ctx,
@@ -2241,7 +2451,7 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
 
     ctx.graph.by_url_identity.insert(
         (
-            ctx.registry_host.to_owned(),
+            pkg_host,
             resolved.name.clone(),
             resolved.version.clone(),
             resolved.ctx.clone(),
