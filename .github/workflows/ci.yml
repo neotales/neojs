@@ -255,13 +255,14 @@ jobs:
             exit 1
           fi
 
-      - name: Verify QuickJS graph excludes V8 and deno_core
+      - name: Verify QuickJS graph excludes V8, deno_core, tokio, and hyper
         run: |
           set -euo pipefail
           lite_tree=$(cargo tree --locked -p vaeljs-lite --prefix none)
-          if grep -Eq '^(deno_core|deno_v8|v8) v' <<<"${lite_tree}"; then
-            echo "ERROR: vaeljs-lite graph unexpectedly contains V8 or deno_core" >&2
-            grep -E '^(deno_core|deno_v8|v8) v' <<<"${lite_tree}" >&2
+          forbidden='^(deno_core|deno_v8|v8|tokio|hyper) v'
+          if grep -Eq "${forbidden}" <<<"${lite_tree}"; then
+            echo "ERROR: vaeljs-lite graph unexpectedly contains V8, deno_core, tokio, or hyper" >&2
+            grep -E "${forbidden}" <<<"${lite_tree}" >&2
             exit 1
           fi
 
@@ -282,25 +283,34 @@ jobs:
             exit 1
           fi
 
-      - name: Verify engine-neutral shared crates exclude engines and tokio
+      - name: Verify engine-neutral shared crates exclude engines (and tokio/hyper where sync)
         run: |
           set -euo pipefail
+          js_engines='deno_core|deno_v8|v8|rquickjs|rquickjs-core|rquickjs-sys'
           for pkg in \
             vaeljs-builtins \
             vaeljs-crypto-core \
-            vaeljs-dbapi \
             vaeljs-fs-core \
             vaeljs-http-core \
             vaeljs-node-core \
             vaeljs-ssh-core \
             vaeljs-template-core; do
             tree=$(cargo tree --locked -e normal -p "${pkg}" --prefix none)
-            if grep -Eq '^(deno_core|deno_v8|v8|rquickjs|rquickjs-core|rquickjs-sys|tokio) v' <<<"${tree}"; then
-              echo "ERROR: ${pkg} normal graph unexpectedly contains a JS engine or tokio" >&2
-              grep -E '^(deno_core|deno_v8|v8|rquickjs|rquickjs-core|rquickjs-sys|tokio) v' <<<"${tree}" >&2
+            if grep -Eq "^(${js_engines}|tokio|hyper) v" <<<"${tree}"; then
+              echo "ERROR: ${pkg} normal graph unexpectedly contains a JS engine, tokio, or hyper" >&2
+              grep -E "^(${js_engines}|tokio|hyper) v" <<<"${tree}" >&2
               exit 1
             fi
           done
+
+          # vaeljs-dbapi wraps async neotales-dbapi-sqlite/sqlx (which depends on tokio),
+          # so it must remain free of JS engines without forbidding tokio.
+          dbapi_tree=$(cargo tree --locked -e normal -p vaeljs-dbapi --prefix none)
+          if grep -Eq "^(${js_engines}) v" <<<"${dbapi_tree}"; then
+            echo "ERROR: vaeljs-dbapi normal graph unexpectedly contains a JS engine" >&2
+            grep -E "^(${js_engines}) v" <<<"${dbapi_tree}" >&2
+            exit 1
+          fi
 
       - name: Verify offline vaeljs-remote and vaeljs-npm exclude ureq and engines
         run: |
