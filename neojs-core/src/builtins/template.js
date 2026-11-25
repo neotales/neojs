@@ -10,6 +10,8 @@
         const opTemplateEscapeHtml = templateOps.op_neo_template_escape_html;
         const opTemplateRelease = templateOps.op_neo_template_release;
         const opTemplateSetRelease = templateOps.op_neo_template_set_release;
+        const opRegisterDisallowedProtos =
+            templateOps.op_neo_template_register_disallowed_protos;
         const finalizationRegister = Function.prototype.call.bind(
             FinalizationRegistry.prototype.register,
         );
@@ -107,6 +109,13 @@
         }
         freeze(TemplateSet.prototype);
         freeze(TemplateSet);
+
+        const disallowedProtos = [Template.prototype, TemplateSet.prototype];
+        if (typeof WeakRef === "function") disallowedProtos.push(WeakRef.prototype);
+        if (typeof FinalizationRegistry === "function") {
+            disallowedProtos.push(FinalizationRegistry.prototype);
+        }
+        opRegisterDisallowedProtos(disallowedProtos);
 
         function render(source, data, options) {
             return unwrapValue(opTemplateRender(source, data, options));

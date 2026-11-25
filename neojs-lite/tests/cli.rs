@@ -67,10 +67,12 @@ console.log(typeof Neo.getBuiltInModule("neo:uuid"));
 
     let output = run(&[file.as_os_str()]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(
-        stdout(&output),
+    let expected = if cfg!(feature = "neo-template") {
         "neo-lite\n15\ntrue\nundefined\nundefined\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\n"
-    );
+    } else {
+        "neo-lite\n14\ntrue\nundefined\nundefined\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nundefined\nobject\n"
+    };
+    assert_eq!(stdout(&output), expected);
     assert_eq!(stderr(&output), "");
 }
 

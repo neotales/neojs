@@ -287,3 +287,74 @@ test("structured errors carry documented .code values for invalid inputs and hos
     expectTemplateError(() => escapeHtml("bad\uD800"), "INVALID_DATA");
     expectTemplateError(() => render("{{.s}}", { s: "bad\uD800" }), "INVALID_DATA");
 });
+
+test("regression: resists Array.prototype/Error.prototype tampering, sparse giant arrays, and exotic data objects", () => {
+    // 1. Array.prototype["0"] setter on set.names()
+    const set = createTemplateSet().add("beta", "b").add("alpha", "a");
+    Object.defineProperty(Array.prototype, "0", {
+        set() {
+            throw new Error("Array.prototype[0] setter hijacked!");
+        },
+        configurable: true,
+    });
+    try {
+        assert.equals(set.names(), ["alpha", "beta"]);
+    } finally {
+        delete Array.prototype[0];
+    }
+
+    // 2. Error.prototype.code and Object.prototype.code tampering
+    Object.defineProperty(Error.prototype, "code", {
+        value: "FORGED",
+        writable: false,
+        configurable: true,
+    });
+    Object.defineProperty(Object.prototype, "code", {
+        set() {
+            throw new Error("Object.prototype.code setter hijacked!");
+        },
+        configurable: true,
+    });
+    try {
+        expectTemplateError(() => render("hi", {}, { unknownOpt: true }), "INVALID_DATA");
+        expectTemplateError(() => render("hi", {}, { sprig: "no" }), "INVALID_DATA");
+        expectTemplateError(() => render("hi", {}, new Proxy({}, {})), "INVALID_DATA");
+        expectTemplateError(() => render("{{if}}", {}), "PARSE");
+    } finally {
+        delete Error.prototype.code;
+        delete Object.prototype.code;
+    }
+
+    // 3. Giant array length (0x80000000) must fail cleanly without panic
+    const giant = [];
+    giant.length = 0x80000000;
+    expectTemplateError(() => render("hi", { items: giant }), "INVALID_DATA");
+
+    // 4. Multi-key sparse array bypassing single-array node limit
+    const holey = new Array(30000);
+    expectTemplateError(
+        () => render("hi", { a: holey, b: holey, c: holey, d: holey }),
+        "INVALID_DATA",
+    );
+
+    // 5. Proxy arrays (top-level and nested)
+    expectTemplateError(() => render("hi", new Proxy([], {})), "INVALID_DATA");
+    expectTemplateError(() => render("hi", { items: new Proxy([], {}) }), "INVALID_DATA");
+
+    // 6. Disallowed exotic objects (WeakMap, WeakRef, Template, TemplateSet, ModuleNamespace)
+    const compiled = compile("x");
+    const tmplSet = createTemplateSet();
+    expectTemplateError(() => render("hi", new WeakMap()), "INVALID_DATA");
+    expectTemplateError(() => render("hi", { wm: new WeakMap() }), "INVALID_DATA");
+    expectTemplateError(() => render("hi", compiled), "INVALID_DATA");
+    expectTemplateError(() => render("hi", { t: compiled }), "INVALID_DATA");
+    expectTemplateError(() => render("hi", tmplSet), "INVALID_DATA");
+    expectTemplateError(() => render("hi", { s: tmplSet }), "INVALID_DATA");
+    expectTemplateError(() => render("hi", templateNs), "INVALID_DATA");
+    expectTemplateError(() => render("hi", { ns: templateNs }), "INVALID_DATA");
+    if (typeof WeakRef === "function") {
+        const wr = new WeakRef({});
+        expectTemplateError(() => render("hi", wr), "INVALID_DATA");
+        expectTemplateError(() => render("hi", { wr }), "INVALID_DATA");
+    }
+});

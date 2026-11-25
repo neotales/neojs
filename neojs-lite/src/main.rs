@@ -686,6 +686,11 @@ Examples:
     )
 }
 
+#[cfg(feature = "neo-template")]
+const BUILTIN_MODULES_HELP: &str = "  neo:assert, neo:chars, neo:console, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:strings, neo:template, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7";
+#[cfg(not(feature = "neo-template"))]
+const BUILTIN_MODULES_HELP: &str = "  neo:assert, neo:chars, neo:console, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7";
+
 fn help() -> String {
     format!(
         "\
@@ -709,7 +714,7 @@ Options:
   --               End option parsing, for a file or pattern beginning with `-`
 
 Built-in modules:
-  neo:assert, neo:chars, neo:console, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:strings, neo:template, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7
+{}
 
 Modules are ECMAScript modules, and relative imports resolve from the importing
 file. .js, .mjs, .ts, and .mts run. TypeScript is stripped, not type checked:
@@ -732,7 +737,8 @@ Exit codes:
      an unreadable or unsupported entry file, or a test file or glob that could
      not be expanded
 ",
-        env!("CARGO_PKG_VERSION")
+        env!("CARGO_PKG_VERSION"),
+        BUILTIN_MODULES_HELP
     )
 }
 

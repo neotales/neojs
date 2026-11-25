@@ -4,8 +4,9 @@
 //! layout/partial composition, and resource limits live in the engine-neutral
 //! [`neojs_template_core`] crate. This module validates V8 arguments, converts
 //! plain options and bounded JSON data without running user getters or Proxy
-//! traps, stores compiled templates and template sets in `ResourceTable`, and
-//! returns null-prototype outcome objects to [`crate::builtins`].
+//! traps, stores compiled templates and template sets in `ResourceTable` under a
+//! per-runtime handle cap, and returns null-prototype outcome objects to
+//! [`crate::builtins`].
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -16,6 +17,7 @@ use neojs_template_core::{CompiledTemplate, TemplateError, TemplateOptions, Temp
 const MAX_SAFE_INTEGER_F64: f64 = 9_007_199_254_740_991.0;
 const MAX_DATA_DEPTH: usize = 128;
 const MAX_DATA_NODES: usize = 100_000;
+const MAX_TEMPLATE_HANDLES: usize = 4_096;
 
 #[derive(Debug)]
 enum BindingError {
@@ -42,6 +44,13 @@ fn template_error_code(err: &TemplateError) -> &'static str {
     }
 }
 
+#[derive(Default)]
+struct TemplateHandleCount(usize);
+
+struct DisallowedPrototypes {
+    protos: Vec<v8::Global<v8::Value>>,
+}
+
 struct CompiledTemplateResource {
     template: CompiledTemplate,
 }
@@ -59,6 +68,28 @@ struct TemplateSetResource {
 impl Resource for TemplateSetResource {
     fn name(&self) -> Cow<'_, str> {
         "neo::template::TemplateSet".into()
+    }
+}
+
+fn acquire_handle_slot(state: &mut OpState) -> Result<(), BindingError> {
+    let count = if let Some(counter) = state.try_borrow::<TemplateHandleCount>() {
+        counter.0
+    } else {
+        state.put(TemplateHandleCount::default());
+        0
+    };
+    if count >= MAX_TEMPLATE_HANDLES {
+        return Err(BindingError::Template(TemplateError::LimitExceeded(
+            format!("open template handle count exceeds limit {MAX_TEMPLATE_HANDLES}"),
+        )));
+    }
+    state.borrow_mut::<TemplateHandleCount>().0 = count + 1;
+    Ok(())
+}
+
+fn release_handle_slot(state: &mut OpState) {
+    if let Some(counter) = state.try_borrow_mut::<TemplateHandleCount>() {
+        counter.0 = counter.0.saturating_sub(1);
     }
 }
 
@@ -448,11 +479,25 @@ fn opt_usize(
     Ok(())
 }
 
-fn is_disallowed_data_object(value: v8::Local<'_, v8::Value>) -> bool {
-    value.is_function()
+fn is_disallowed_data_object(
+    scope: &v8::PinScope<'_, '_>,
+    state: &OpState,
+    value: v8::Local<'_, v8::Value>,
+) -> bool {
+    if value.is_function()
         || value.is_proxy()
         || value.is_map()
         || value.is_set()
+        || value.is_weak_map()
+        || value.is_weak_set()
+        || value.is_arguments_object()
+        || value.is_generator_object()
+        || value.is_module_namespace_object()
+        || value.is_map_iterator()
+        || value.is_set_iterator()
+        || value.is_wasm_memory_object()
+        || value.is_wasm_module_object()
+        || value.is_external()
         || value.is_date()
         || value.is_reg_exp()
         || value.is_promise()
@@ -465,27 +510,44 @@ fn is_disallowed_data_object(value: v8::Local<'_, v8::Value>) -> bool {
         || value.is_number_object()
         || value.is_string_object()
         || value.is_boolean_object()
+    {
+        return true;
+    }
+    if let Ok(object) = v8::Local::<v8::Object>::try_from(value)
+        && let Some(proto) = object.get_prototype(scope)
+        && let Some(disallowed) = state.try_borrow::<DisallowedPrototypes>()
+    {
+        for blocked in &disallowed.protos {
+            let blocked_local = v8::Local::new(scope, blocked);
+            if proto == blocked_local {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn js_data_to_json<'s>(
     scope: &v8::PinScope<'s, '_>,
+    state: &OpState,
     value: v8::Local<'s, v8::Value>,
 ) -> Result<serde_json::Value, BindingError> {
     if value.is_undefined() {
         return Ok(serde_json::Value::Object(serde_json::Map::new()));
     }
-    if !value.is_object() || value.is_array() || is_disallowed_data_object(value) {
+    if !value.is_object() || value.is_array() || is_disallowed_data_object(scope, state, value) {
         return Err(BindingError::Template(TemplateError::InvalidData(
             "template data must be a JSON object".to_owned(),
         )));
     }
     let mut nodes = 0usize;
     let mut ancestors = Vec::new();
-    js_value_to_json(scope, value, 0, &mut nodes, &mut ancestors)
+    js_value_to_json(scope, state, value, 0, &mut nodes, &mut ancestors)
 }
 
 fn js_value_to_json<'s>(
     scope: &v8::PinScope<'s, '_>,
+    state: &OpState,
     value: v8::Local<'s, v8::Value>,
     depth: usize,
     nodes: &mut usize,
@@ -545,7 +607,7 @@ fn js_value_to_json<'s>(
     if value.is_undefined()
         || value.is_symbol()
         || value.is_big_int()
-        || is_disallowed_data_object(value)
+        || is_disallowed_data_object(scope, state, value)
     {
         return Err(BindingError::Template(TemplateError::InvalidData(
             "template data contains an unsupported value".to_owned(),
@@ -598,13 +660,33 @@ fn js_value_to_json<'s>(
                     match own_descriptor_field(scope, desc, "value")? {
                         Some(elem) if !elem.is_undefined() => {
                             let converted =
-                                js_value_to_json(scope, elem, depth + 1, nodes, ancestors)?;
+                                js_value_to_json(scope, state, elem, depth + 1, nodes, ancestors)?;
                             out.push(converted);
                         }
-                        _ => out.push(serde_json::Value::Null),
+                        _ => {
+                            if *nodes >= MAX_DATA_NODES {
+                                ancestors.pop();
+                                return Err(BindingError::Template(TemplateError::InvalidData(
+                                    format!(
+                                        "template data exceeds maximum node count {MAX_DATA_NODES}"
+                                    ),
+                                )));
+                            }
+                            *nodes += 1;
+                            out.push(serde_json::Value::Null);
+                        }
                     }
                 }
-                _ => out.push(serde_json::Value::Null),
+                _ => {
+                    if *nodes >= MAX_DATA_NODES {
+                        ancestors.pop();
+                        return Err(BindingError::Template(TemplateError::InvalidData(format!(
+                            "template data exceeds maximum node count {MAX_DATA_NODES}"
+                        ))));
+                    }
+                    *nodes += 1;
+                    out.push(serde_json::Value::Null);
+                }
             }
         }
         ancestors.pop();
@@ -681,7 +763,7 @@ fn js_value_to_json<'s>(
                 "template data key must be a string",
                 TemplateError::InvalidData,
             )?;
-            let converted = js_value_to_json(scope, field, depth + 1, nodes, ancestors)?;
+            let converted = js_value_to_json(scope, state, field, depth + 1, nodes, ancestors)?;
             map.insert(key, converted);
         }
         ancestors.pop();
@@ -693,9 +775,31 @@ fn js_value_to_json<'s>(
     )))
 }
 
+#[op2(fast)]
+fn op_neo_template_register_disallowed_protos(
+    scope: &mut v8::PinScope<'_, '_>,
+    state: &mut OpState,
+    protos: v8::Local<'_, v8::Value>,
+) {
+    if state.try_borrow::<DisallowedPrototypes>().is_some() {
+        return;
+    }
+    let Ok(array) = v8::Local::<v8::Array>::try_from(protos) else {
+        return;
+    };
+    let mut globals = Vec::with_capacity(array.length() as usize);
+    for index in 0..array.length() {
+        if let Some(item) = array.get_index(scope, index) {
+            globals.push(v8::Global::new(scope, item));
+        }
+    }
+    state.put(DisallowedPrototypes { protos: globals });
+}
+
 #[op2]
 fn op_neo_template_render<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i>,
+    state: &OpState,
     source: v8::Local<'s, v8::Value>,
     data: v8::Local<'s, v8::Value>,
     options: v8::Local<'s, v8::Value>,
@@ -709,7 +813,7 @@ fn op_neo_template_render<'s, 'i>(
             TemplateError::InvalidData,
         )?;
         let options = parse_options(scope, options)?;
-        let data = js_data_to_json(scope, data)?;
+        let data = js_data_to_json(scope, state, data)?;
         let rendered = neojs_template_core::render(&source, &data, &options)?;
         v8_string(scope, &rendered)
     })();
@@ -733,6 +837,7 @@ fn op_neo_template_compile<'s, 'i>(
         )?;
         let options = parse_options(scope, options)?;
         let compiled = CompiledTemplate::compile(&source, &options)?;
+        acquire_handle_slot(state)?;
         let rid = state
             .resource_table
             .add(CompiledTemplateResource { template: compiled });
@@ -757,7 +862,7 @@ fn op_neo_template_compiled_render<'s, 'i>(
                     "invalid compiled template handle".to_owned(),
                 ))
             })?;
-        let data = js_data_to_json(scope, data)?;
+        let data = js_data_to_json(scope, state, data)?;
         let rendered = resource.template.render(&data)?;
         v8_string(scope, &rendered)
     })();
@@ -773,6 +878,7 @@ fn op_neo_template_set_create<'s, 'i>(
     let result = (|| {
         let options = parse_options(scope, options)?;
         let set = TemplateSet::new(options);
+        acquire_handle_slot(state)?;
         let rid = state.resource_table.add(TemplateSetResource {
             set: RefCell::new(set),
         });
@@ -842,7 +948,7 @@ fn op_neo_template_set_render<'s, 'i>(
             "template name must be a string",
             TemplateError::InvalidName,
         )?;
-        let data = js_data_to_json(scope, data)?;
+        let data = js_data_to_json(scope, state, data)?;
         let rendered = resource.set.borrow().render(&name, &data)?;
         v8_string(scope, &rendered)
     })();
@@ -865,13 +971,11 @@ fn op_neo_template_set_names<'s, 'i>(
                 ))
             })?;
         let names = resource.set.borrow().names();
-        let array = v8::Array::new(scope, i32::try_from(names.len()).unwrap_or(i32::MAX));
-        for (index, name) in names.iter().enumerate() {
-            let value = v8_string(scope, name)?;
-            #[allow(clippy::cast_possible_truncation)]
-            array.set_index(scope, index as u32, value);
+        let mut elements = Vec::with_capacity(names.len());
+        for name in &names {
+            elements.push(v8_string(scope, name)?);
         }
-        Ok(array.into())
+        Ok(v8::Array::new_with_elements(scope, &elements).into())
     })();
     outcome_value(scope, result)
 }
@@ -897,17 +1001,26 @@ fn op_neo_template_escape_html<'s, 'i>(
 
 #[op2(fast)]
 fn op_neo_template_release(state: &mut OpState, #[smi] id: ResourceId) {
-    let _ = state.resource_table.take::<CompiledTemplateResource>(id);
+    if state
+        .resource_table
+        .take::<CompiledTemplateResource>(id)
+        .is_ok()
+    {
+        release_handle_slot(state);
+    }
 }
 
 #[op2(fast)]
 fn op_neo_template_set_release(state: &mut OpState, #[smi] id: ResourceId) {
-    let _ = state.resource_table.take::<TemplateSetResource>(id);
+    if state.resource_table.take::<TemplateSetResource>(id).is_ok() {
+        release_handle_slot(state);
+    }
 }
 
 deno_core::extension!(
     neojs_template,
     ops = [
+        op_neo_template_register_disallowed_protos,
         op_neo_template_render,
         op_neo_template_compile,
         op_neo_template_compiled_render,

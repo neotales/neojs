@@ -1226,12 +1226,12 @@ fn reports_an_unknown_neo_module_and_lists_the_implemented_ones() {
     let message = stderr(&output);
     assert!(message.contains("neo:nope"), "{message}");
     assert!(message.contains("not implemented"), "{message}");
-    assert!(
-        message.contains(
-            "neojs implements neo:age, neo:assert, neo:chars, neo:console, neo:cron, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:stdio, neo:strings, neo:template, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7"
-        ),
-        "{message}"
-    );
+    let expected_list = if cfg!(feature = "neo-template") {
+        "neojs implements neo:age, neo:assert, neo:chars, neo:console, neo:cron, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:stdio, neo:strings, neo:template, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7"
+    } else {
+        "neojs implements neo:age, neo:assert, neo:chars, neo:console, neo:cron, neo:crypto, neo:fs, neo:os, neo:path, neo:slices, neo:ssh, neo:stdio, neo:strings, neo:test, neo:uuid, neo:uuid/v4, neo:uuid/v7"
+    };
+    assert!(message.contains(expected_list), "{message}");
 }
 
 #[test]

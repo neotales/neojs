@@ -319,16 +319,13 @@ fn parse_template_options<'js>(
         Err(rquickjs::Error::Exception) => {
             let caught = ctx.catch();
             if let Some(obj) = caught.as_object() {
-                let has_code = obj.contains_key("code").unwrap_or(false);
-                if !has_code {
-                    let _ = obj.prop(
-                        "code",
-                        Property::from("INVALID_DATA")
-                            .writable()
-                            .enumerable()
-                            .configurable(),
-                    );
-                }
+                let _ = obj.prop(
+                    "code",
+                    Property::from("INVALID_DATA")
+                        .writable()
+                        .enumerable()
+                        .configurable(),
+                );
             }
             Err(ctx.throw(caught))
         }
@@ -488,26 +485,39 @@ fn js_value_to_json<'js>(
                 ),
             ));
         }
-        let array = Array::from_value(value.clone()).map_err(|_| {
-            throw_template_error(
+        let raw = ctx.as_raw().as_ptr();
+        let mut raw_len: i64 = 0;
+        let rc = unsafe { qjs::JS_GetLength(raw, value.as_raw(), &mut raw_len) };
+        if rc < 0 {
+            if ctx.has_exception() {
+                let _ = ctx.catch();
+            }
+            return Err(throw_template_error(
                 ctx,
-                TemplateError::InvalidData("invalid array in template data".to_owned()),
-            )
-        })?;
-        let len = array.len();
-        if len > MAX_DATA_NODES - *nodes {
+                TemplateError::InvalidData("invalid array length in template data".to_owned()),
+            ));
+        }
+        if raw_len < 0 || raw_len > (MAX_DATA_NODES - *nodes) as i64 {
             return Err(throw_template_error(
                 ctx,
                 TemplateError::InvalidData(format!(
-                    "template data array length {len} exceeds maximum node budget"
+                    "template data array length {raw_len} exceeds maximum node budget"
                 )),
             ));
         }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let len = raw_len as usize;
         ancestors.push(value.clone());
-        let raw = ctx.as_raw().as_ptr();
         let mut out = Vec::with_capacity(len);
         for index in 0..len {
-            let atom = unsafe { qjs::JS_NewAtomUInt32(raw, index as u32) };
+            let idx_u32 = u32::try_from(index).map_err(|_| {
+                ancestors.pop();
+                throw_template_error(
+                    ctx,
+                    TemplateError::InvalidData("array index overflow in template data".to_owned()),
+                )
+            })?;
+            let atom = unsafe { qjs::JS_NewAtomUInt32(raw, idx_u32) };
             if atom == qjs::JS_ATOM_NULL {
                 ancestors.pop();
                 return Err(rquickjs::Error::Unknown);
@@ -527,6 +537,16 @@ fn js_value_to_json<'js>(
                 ));
             }
             if found == 0 {
+                if *nodes >= MAX_DATA_NODES {
+                    ancestors.pop();
+                    return Err(throw_template_error(
+                        ctx,
+                        TemplateError::InvalidData(format!(
+                            "template data exceeds maximum node count {MAX_DATA_NODES}"
+                        )),
+                    ));
+                }
+                *nodes += 1;
                 out.push(serde_json::Value::Null);
                 continue;
             }
@@ -544,6 +564,16 @@ fn js_value_to_json<'js>(
                 ));
             }
             if elem.is_undefined() {
+                if *nodes >= MAX_DATA_NODES {
+                    ancestors.pop();
+                    return Err(throw_template_error(
+                        ctx,
+                        TemplateError::InvalidData(format!(
+                            "template data exceeds maximum node count {MAX_DATA_NODES}"
+                        )),
+                    ));
+                }
+                *nodes += 1;
                 out.push(serde_json::Value::Null);
             } else {
                 let converted =
@@ -851,8 +881,32 @@ fn create_template_set<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<Obj
                 })?;
             let names = cls.borrow().0.borrow().names();
             let array = Array::new(ctx.clone())?;
+            let raw = ctx.as_raw().as_ptr();
             for (index, name) in names.iter().enumerate() {
-                array.set(index, name.as_str())?;
+                let idx = u32::try_from(index).map_err(|_| {
+                    throw_template_error(
+                        &ctx,
+                        TemplateError::LimitExceeded("template set name count overflow".to_owned()),
+                    )
+                })?;
+                let val = JsString::from_str(ctx.clone(), name)?.into_value();
+                let rc = unsafe {
+                    let dup = qjs::JS_DupValue(raw, val.as_raw());
+                    qjs::JS_DefinePropertyValueUint32(
+                        raw,
+                        array.as_raw(),
+                        idx,
+                        dup,
+                        qjs::JS_PROP_C_W_E as std::ffi::c_int,
+                    )
+                };
+                if rc < 0 {
+                    return Err(if ctx.has_exception() {
+                        rquickjs::Error::Exception
+                    } else {
+                        rquickjs::Error::Unknown
+                    });
+                }
             }
             Ok(array)
         },

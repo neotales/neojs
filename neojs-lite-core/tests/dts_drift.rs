@@ -132,6 +132,8 @@ for (const specifier of list) {{
                 if (ns.default !== reg) throw new Error(`${{specifier}} default != reg`);
             }} else if (specifier === "neo:console") {{
                 if (ns.default !== reg) throw new Error(`${{specifier}} default != reg`);
+            }} else if (specifier === "neo:template") {{
+                if (ns.default !== reg) throw new Error(`${{specifier}} default != reg`);
             }} else if (specifier === "neo:test") {{
                 if (ns.default !== reg.test) throw new Error(`${{specifier}} default != reg.test`);
             }} else if (specifier === "neo:uuid/v4") {{
