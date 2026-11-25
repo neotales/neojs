@@ -27,6 +27,7 @@ const V8_SPECIFIERS: &[&str] = &[
     "neo:cron",
     "neo:crypto",
     "neo:fs",
+    "neo:http",
     "neo:os",
     "neo:path",
     "neo:slices",
@@ -56,7 +57,7 @@ const LITE_SPECIFIERS: &[&str] = &[
     "neo:uuid/v7",
 ];
 
-const V8_ONLY_SPECIFIERS: &[&str] = &["neo:age", "neo:cron", "neo:stdio"];
+const V8_ONLY_SPECIFIERS: &[&str] = &["neo:age", "neo:cron", "neo:http", "neo:stdio"];
 
 /// Validates balanced delimiters `{}` / `()` / `[]` and closed comments/strings
 /// across a `.d.ts` source string.
@@ -155,9 +156,18 @@ fn contains_identifier_word(haystack: &str, needle: &str) -> bool {
 }
 
 fn assert_no_forbidden_globals(label: &str, source: &str) {
+    // `ServeMux.fetch` is an instance method on `ServeMux` inside `neo:http`,
+    // not a global `fetch` function. Strip those exact member occurrences
+    // before running the global-identifier word scan.
+    let sanitized = source
+        .replace(
+            "fetch(input: string | FetchInput, init?: FetchInit): Promise<HttpResponse>;",
+            "",
+        )
+        .replace(".fetch(", ".(");
     for forbidden in FORBIDDEN_GLOBALS {
         assert!(
-            !contains_identifier_word(source, forbidden),
+            !contains_identifier_word(&sanitized, forbidden),
             "{label}: forbidden global identifier `{forbidden}` found"
         );
     }

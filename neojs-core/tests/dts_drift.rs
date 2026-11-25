@@ -1,4 +1,9 @@
-#![cfg(all(feature = "neo-chars", feature = "neo-slices", feature = "neo-strings"))]
+#![cfg(all(
+    feature = "neo-chars",
+    feature = "neo-http",
+    feature = "neo-slices",
+    feature = "neo-strings"
+))]
 
 //! Live runtime CI drift test proving 1:1 parity between `neojs-dts` V8
 //! declarations (`Profile::V8`) and the live V8 `Runtime::new()` built-in

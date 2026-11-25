@@ -93,6 +93,8 @@ neojs-crypto-core = { version = "0.0.0-alpha.0", path = "neojs-crypto-core" }
 neojs-dts = { version = "0.0.0-alpha.0", path = "neojs-dts" }
 # Engine-neutral core filesystem operations for `neo:fs`.
 neojs-fs-core = { version = "0.0.0-alpha.0", path = "neojs-fs-core" }
+# Engine-neutral core HTTP primitives for `neo:http`.
+neojs-http-core = { version = "0.0.0-alpha.0", path = "neojs-http-core" }
 # `neo.jsonc` JSONC parsing, bounded upward discovery, workspace expansion, and
 # pure import-map/workspace resolution.
 neojs-manifest = { version = "0.0.0-alpha.0", path = "neojs-manifest" }
@@ -110,8 +112,12 @@ libc = "0.2.191"
 # graph through `deno_ast`; this pins the reviewed 0.3.4 version.
 glob = "0.3.4"
 getrandom = "0.4"
+http = "1"
+http-body-util = "0.1"
 # HTTP date parsing for cache freshness and `Age` handling. Small, MIT/Apache-2.0.
 httpdate = "1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1"] }
 # SHA-2 and HMAC are the RustCrypto crates already linked transitively by the
 # neotales age and SSH backends. The `neo:crypto` hash surface uses the same
 # reviewed versions directly.
@@ -144,7 +150,7 @@ neotales-dbapi-sqlite = "=0.0.0-alpha.0"
 neotales-gotmpl = "=0.0.0-alpha.1"
 neotales-sprig = "=0.0.0-alpha.1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sync", "signal"] }
 tempfile = "3"
 # RFC 9562 UUID layout, version/variant bit setting, and canonical formatting.
 # The crate's own `new_v4` and `now_v7` helpers panic when the operating system

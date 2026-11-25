@@ -3016,6 +3016,8 @@
     const testModule = testHarness.module;
     const testEnsureHandler = testHarness.ensureHandler;
 
+    // __NEO_HTTP_IMPL__
+
     // The key is the canonical `neo:` specifier the loader serves. A bare
     // registry name is never a key: bare imports are not built-in modules.
     const modules = new Map([
@@ -3026,6 +3028,7 @@
         ["neo:cron", cron],
         ["neo:crypto", crypto],
         ["neo:fs", fs],
+        // __NEO_HTTP_REGISTRY_ENTRY__
         ["neo:os", os],
         ["neo:path", path],
         // __NEO_SLICES_REGISTRY_ENTRY__

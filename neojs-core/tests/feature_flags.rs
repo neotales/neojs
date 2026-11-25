@@ -191,3 +191,63 @@ if (imported) throw new Error("neo:strings was importable while disabled");
 "#)
     .expect("strings absent");
 }
+
+#[test]
+#[cfg(feature = "neo-http")]
+fn http_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (!list.includes("neo:http")) {
+    throw new Error(`http is missing from the list: ${JSON.stringify(list)}`);
+}
+if (list.includes("http")) {
+    throw new Error(`a bare http name is listed: ${JSON.stringify(list)}`);
+}
+const registry = Neo.getBuiltInModule("neo:http");
+if (registry === undefined || typeof registry !== "object") {
+    throw new Error("the http registry object is missing");
+}
+if (Neo.getBuiltInModule("http") !== undefined) {
+    throw new Error("the registry accepted a bare http name");
+}
+const namespace = await import("neo:http");
+if (namespace === registry) {
+    throw new Error("the ES module namespace must be distinct from the registry object");
+}
+if (namespace.createRouter !== registry.createRouter || namespace.serve !== registry.serve) {
+    throw new Error("the namespace export is not the registry function");
+}
+const mux = namespace.createRouter().get("/ping", () => namespace.json({ pong: true }));
+const res = await mux.fetch("/ping");
+if (res.status !== 200 || res.json().pong !== true) {
+    throw new Error("neo:http mux.fetch failed");
+}
+"#)
+    .expect("http feature");
+}
+
+#[test]
+#[cfg(not(feature = "neo-http"))]
+fn http_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Neo.getBuiltInModulesList();
+if (list.includes("neo:http") || list.includes("http")) {
+    throw new Error(`http is still listed: ${JSON.stringify(list)}`);
+}
+if (Neo.getBuiltInModule("neo:http") !== undefined) {
+    throw new Error("the canonical http registry object is still present");
+}
+if (Neo.getBuiltInModule("http") !== undefined) {
+    throw new Error("a bare http name returned a module");
+}
+let imported = false;
+try {
+    await import("neo:http");
+    imported = true;
+} catch {
+    // Expected: the loader has no http entry.
+}
+if (imported) throw new Error("neo:http was importable while disabled");
+"#)
+    .expect("http absent");
+}

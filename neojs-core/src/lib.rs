@@ -398,6 +398,8 @@ mod crypto_hash;
 mod crypto_shamir;
 mod error;
 mod fs;
+#[cfg(feature = "neo-http")]
+mod http;
 // The transport-backed loader for the private JSR resolver. `Runtime::new` does
 // not install it, so a public `jsr:` import requires the remote-loading opt-in.
 // The engine-neutral JSR core, remote transport, cache, and GitHub parser live
