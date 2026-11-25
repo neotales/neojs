@@ -1,13 +1,32 @@
+/**
+ * Structural equality, identity, error, and rejection assertions.
+ *
+ * @since 0.0.0-alpha.0
+ */
 declare module "vael:assert" {
   /**
    * Options accepted by `new AssertionError(message, options)`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface AssertionErrorOptions {
-    /** Assertion operator name (defaults to `"assert"`). */
+    /**
+     * Assertion operator name (defaults to `"assert"`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     operator?: string;
-    /** Observed value, if applicable. */
+    /**
+     * Observed value, if applicable.
+     *
+     * @since 0.0.0-alpha.0
+     */
     actual?: unknown;
-    /** Expected value or matcher, if applicable. */
+    /**
+     * Expected value or matcher, if applicable.
+     *
+     * @since 0.0.0-alpha.0
+     */
     expected?: unknown;
   }
 
@@ -15,18 +34,52 @@ declare module "vael:assert" {
    * Error thrown when a `vael:assert` assertion fails.
    *
    * Carries `code = "VAEL_ASSERT"`, `name = "AssertionError"`, and `operator`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export class AssertionError extends Error {
+    /**
+     * Error name (`"AssertionError"`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     override name: "AssertionError";
+    /**
+     * Machine-readable error code (`"VAEL_ASSERT"`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     code: "VAEL_ASSERT";
+    /**
+     * Assertion operator name.
+     *
+     * @since 0.0.0-alpha.0
+     */
     operator: string;
+    /**
+     * Observed value, if applicable.
+     *
+     * @since 0.0.0-alpha.0
+     */
     actual?: unknown;
+    /**
+     * Expected value or matcher, if applicable.
+     *
+     * @since 0.0.0-alpha.0
+     */
     expected?: unknown;
+    /**
+     * Construct an `AssertionError`.
+     *
+     * @since 0.0.0-alpha.0
+     */
     constructor(message?: string, options?: AssertionErrorOptions);
   }
 
   /**
    * Callable `assert` object exposing all assertion helpers as properties.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface VaelAssert {
     /**
@@ -34,18 +87,30 @@ declare module "vael:assert" {
      *
      * @throws {TypeError} when `message` is not a string or arity is wrong.
      * @throws {AssertionError} (`code = "VAEL_ASSERT"`) when `value` is falsy.
+     * @since 0.0.0-alpha.0
      */
     (value: unknown, message?: string): asserts value;
+    /** @since 0.0.0-alpha.0 */
     readonly AssertionError: typeof AssertionError;
+    /** @since 0.0.0-alpha.0 */
     readonly ok: VaelAssert;
+    /** @since 0.0.0-alpha.0 */
     readonly equals: typeof equals;
+    /** @since 0.0.0-alpha.0 */
     readonly notEquals: typeof notEquals;
+    /** @since 0.0.0-alpha.0 */
     readonly strictEquals: typeof strictEquals;
+    /** @since 0.0.0-alpha.0 */
     readonly notStrictEquals: typeof notStrictEquals;
+    /** @since 0.0.0-alpha.0 */
     readonly fail: typeof fail;
+    /** @since 0.0.0-alpha.0 */
     readonly throws: typeof throws;
+    /** @since 0.0.0-alpha.0 */
     readonly doesNotThrow: typeof doesNotThrow;
+    /** @since 0.0.0-alpha.0 */
     readonly rejects: typeof rejects;
+    /** @since 0.0.0-alpha.0 */
     readonly doesNotReject: typeof doesNotReject;
   }
 
@@ -54,13 +119,22 @@ declare module "vael:assert" {
    *
    * @throws {TypeError} when `message` is not a string or arity is wrong.
    * @throws {AssertionError} (`code = "VAEL_ASSERT"`) when `value` is falsy.
+   * @since 0.0.0-alpha.0
    */
   export const assert: VaelAssert;
 
-  /** Default export: the callable `assert` function with all assertion properties. */
+  /**
+   * Default export: the callable `assert` function with all assertion properties.
+   *
+   * @since 0.0.0-alpha.0
+   */
   export default assert;
 
-  /** Alias for `assert` (identical function object). */
+  /**
+   * Alias for `assert` (identical function object).
+   *
+   * @since 0.0.0-alpha.0
+   */
   export const ok: VaelAssert;
 
   /**
@@ -71,6 +145,7 @@ declare module "vael:assert" {
    *
    * @throws {TypeError} when `message` is not a string or arity is wrong.
    * @throws {AssertionError} (`code = "VAEL_ASSERT"`) when values differ.
+   * @since 0.0.0-alpha.0
    */
   export function equals(actual: unknown, expected: unknown, message?: string): void;
 
@@ -79,6 +154,7 @@ declare module "vael:assert" {
    *
    * @throws {TypeError} when `message` is not a string or arity is wrong.
    * @throws {AssertionError} (`code = "VAEL_ASSERT"`) when values are structurally equal.
+   * @since 0.0.0-alpha.0
    */
   export function notEquals(actual: unknown, expected: unknown, message?: string): void;
 
@@ -87,6 +163,7 @@ declare module "vael:assert" {
    *
    * @throws {TypeError} when `message` is not a string or arity is wrong.
    * @throws {AssertionError} (`code = "VAEL_ASSERT"`) when `Object.is(actual, expected)` is false.
+   * @since 0.0.0-alpha.0
    */
   export function strictEquals(actual: unknown, expected: unknown, message?: string): void;
 
@@ -95,6 +172,7 @@ declare module "vael:assert" {
    *
    * @throws {TypeError} when `message` is not a string or arity is wrong.
    * @throws {AssertionError} (`code = "VAEL_ASSERT"`) when `Object.is(actual, expected)` is true.
+   * @since 0.0.0-alpha.0
    */
   export function notStrictEquals(actual: unknown, expected: unknown, message?: string): void;
 
@@ -103,6 +181,7 @@ declare module "vael:assert" {
    *
    * @throws {TypeError} when `message` is not a string or arity is wrong.
    * @throws {AssertionError} always.
+   * @since 0.0.0-alpha.0
    */
   export function fail(message?: string): never;
 
@@ -114,6 +193,7 @@ declare module "vael:assert" {
    *
    * @throws {TypeError} on invalid arguments or Promise-returning callback.
    * @throws {AssertionError} (`code = "VAEL_ASSERT"`) when `callback` does not throw or mismatches.
+   * @since 0.0.0-alpha.0
    */
   export function throws<E>(
     callback: () => unknown,
@@ -126,6 +206,7 @@ declare module "vael:assert" {
    *
    * @throws {TypeError} on invalid arguments or Promise-returning callback.
    * @throws {AssertionError} (`code = "VAEL_ASSERT"`) when `callback` does not throw or mismatches.
+   * @since 0.0.0-alpha.0
    */
   export function throws(
     callback: () => unknown,
@@ -141,6 +222,7 @@ declare module "vael:assert" {
    *
    * @throws {TypeError} on invalid arguments or Promise-returning callback.
    * @throws {AssertionError} (`code = "VAEL_ASSERT"`) when `callback` throws.
+   * @since 0.0.0-alpha.0
    */
   export function doesNotThrow<T>(callback: () => T, message?: string): T;
 
@@ -150,6 +232,7 @@ declare module "vael:assert" {
    *
    * @throws {TypeError} when arguments are invalid.
    * @throws {AssertionError} (`code = "VAEL_ASSERT"`) when `callback` fulfills, returns non-thenable, or mismatches.
+   * @since 0.0.0-alpha.0
    */
   export function rejects<E>(
     callback: () => unknown,
@@ -162,6 +245,7 @@ declare module "vael:assert" {
    *
    * @throws {TypeError} when arguments are invalid.
    * @throws {AssertionError} (`code = "VAEL_ASSERT"`) when `callback` fulfills, returns non-thenable, or mismatches.
+   * @since 0.0.0-alpha.0
    */
   export function rejects(
     callback: () => unknown,
@@ -175,6 +259,7 @@ declare module "vael:assert" {
    *
    * @throws {TypeError} when arguments are invalid.
    * @throws {AssertionError} (`code = "VAEL_ASSERT"`) when `callback` throws, rejects, or returns non-thenable.
+   * @since 0.0.0-alpha.0
    */
   export function doesNotReject<T>(callback: () => PromiseLike<T>, message?: string): Promise<T>;
 }

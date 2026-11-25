@@ -1,6 +1,13 @@
+/**
+ * UTC five-field cron scheduler and next-occurrence calculator.
+ *
+ * @since 0.0.0-alpha.0
+ */
 declare module "vael:cron" {
   /**
    * Error codes reported on `CronError.code`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export type CronErrorCode =
     | "VAEL_CRON_EXPRESSION"
@@ -11,15 +18,34 @@ declare module "vael:cron" {
   /**
    * Error thrown for invalid cron expressions, job limits, missing future
    * occurrences, or invalid cron arguments.
+   *
+   * @since 0.0.0-alpha.0
    */
   export class CronError extends Error {
+    /**
+     * Error name (`"CronError"`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     override name: "CronError";
+    /**
+     * Machine-readable cron error code.
+     *
+     * @since 0.0.0-alpha.0
+     */
     code: CronErrorCode;
+    /**
+     * Construct a `CronError`.
+     *
+     * @since 0.0.0-alpha.0
+     */
     constructor(code: CronErrorCode, message: string);
   }
 
   /**
    * Scheduler lifecycle event passed to `options.onEvent`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export type CronEvent =
     | {
@@ -49,11 +75,15 @@ declare module "vael:cron" {
 
   /**
    * Options accepted by `cron(expression, callback, options)`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface CronOptions {
     /**
      * Observer invoked with frozen `overlap`, `missed`, or `error` events.
      * Errors thrown by `onEvent` itself are discarded so the schedule stays alive.
+     *
+     * @since 0.0.0-alpha.0
      */
     onEvent?: (event: CronEvent) => void;
   }
@@ -63,11 +93,15 @@ declare module "vael:cron" {
    *
    * Undisposed jobs keep the event loop alive. `[Symbol.dispose]` is also
    * installed as an alias for `dispose` when `Symbol.dispose` exists in the engine.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface CronJob {
     /**
      * Cancel any pending timer wait and release the host job resource.
      * Idempotent; does not interrupt a callback that is already running.
+     *
+     * @since 0.0.0-alpha.0
      */
     dispose(): void;
   }
@@ -85,6 +119,7 @@ declare module "vael:cron" {
    * @throws {TypeError} on invalid arguments or unknown options.
    * @throws {CronError} with `code` `"VAEL_CRON_EXPRESSION"`, `"VAEL_CRON_LIMIT"`,
    * `"VAEL_CRON_NO_OCCURRENCE"`, or `"VAEL_CRON_ARGUMENT"`.
+   * @since 0.0.0-alpha.0
    */
   export function cron(
     expression: string,
@@ -101,6 +136,7 @@ declare module "vael:cron" {
    * @throws {TypeError} when `expression` or `after` has an invalid type.
    * @throws {RangeError} when `after` is an invalid `Date` or non-finite number.
    * @throws {CronError} with `code` `"VAEL_CRON_EXPRESSION"` or `"VAEL_CRON_ARGUMENT"`.
+   * @since 0.0.0-alpha.0
    */
   export function next(expression: string, after?: Date | number): Date | null;
 }

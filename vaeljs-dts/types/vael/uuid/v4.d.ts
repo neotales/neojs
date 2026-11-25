@@ -1,3 +1,8 @@
+/**
+ * RFC 9562 version 4 (random) UUID generator.
+ *
+ * @since 0.0.0-alpha.0
+ */
 declare module "vael:uuid/v4" {
   /**
    * Generate a canonical lowercase RFC 9562 version 4 (random) UUID string
@@ -7,9 +12,14 @@ declare module "vael:uuid/v4" {
    *
    * @throws {TypeError} when any argument is supplied.
    * @throws {Error} with `code = "VAEL_UUID_RANDOM"` when the OS CSPRNG fails.
+   * @since 0.0.0-alpha.0
    */
   export function v4(): string;
 
-  /** Default export: identical to `v4`. */
+  /**
+   * Default export: identical to `v4`.
+   *
+   * @since 0.0.0-alpha.0
+   */
   export default v4;
 }

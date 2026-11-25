@@ -10,6 +10,6 @@ deterministically (`Workspace::load`), and resolves import-map and workspace
 a JavaScript runtime, apply `include`/`exclude`, fetch packages, or implement
 npm, JSR, GitHub, or Node loading.
 
-See `docs/vael-jsonc.md` in the repository for the exact syntax, status, and open
+See <https://vaeljs.com/architecture/vael-jsonc-spec/> for the exact syntax, status, and open
 ambiguities. The public Rust API is documented on `Manifest`,
 `discover_manifest`, `Workspace`, `ImportResolver`, and `normalize_specifier`.

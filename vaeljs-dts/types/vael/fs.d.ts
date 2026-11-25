@@ -1,6 +1,13 @@
+/**
+ * Bounded synchronous filesystem operations and atomic file writes.
+ *
+ * @since 0.0.0-alpha.0
+ */
 declare module "vael:fs" {
   /**
    * Stable machine-readable `VAEL_FS_*` error codes exposed on `Error.code`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export type FsErrorCode =
     | "VAEL_FS_NOT_FOUND"
@@ -17,118 +24,156 @@ declare module "vael:fs" {
 
   /**
    * Options controlling `readFile` and `readTextFile`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface ReadOptions {
     /**
      * Maximum number of bytes allowed when reading a file (default: unlimited).
      * Files larger than `maxBytes` fail with `VAEL_FS_TOO_LARGE` without
      * unbounded allocation.
+     *
+     * @since 0.0.0-alpha.0
      */
     maxBytes?: number;
   }
 
   /**
    * Options controlling `writeFile` and `writeTextFile`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface WriteOptions {
-    /** Create the file if it does not already exist (default: `true`). */
+    /**
+     * Create the file if it does not already exist (default: `true`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     create?: boolean;
     /**
      * Require exclusive creation and fail with `VAEL_FS_ALREADY_EXISTS` if the
      * file already exists (default: `false`).
+     *
+     * @since 0.0.0-alpha.0
      */
     createNew?: boolean;
     /**
      * Append writes to the end of the file instead of truncating it
      * (default: `false`). Combining `createNew: true` and `append: true` fails
      * with `VAEL_FS_INVALID_ARGUMENT`.
+     *
+     * @since 0.0.0-alpha.0
      */
     append?: boolean;
   }
 
   /**
    * Options controlling `writeFileAtomic`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface AtomicWriteOptions {
     /**
      * Call `sync_all` on the temporary file (and best-effort on its parent
      * directory on Unix) before replacing the target (default: `true`).
+     *
+     * @since 0.0.0-alpha.0
      */
     sync?: boolean;
     /**
      * Replace an existing target entry if present (default: `true`). When
      * `false`, any existing entry (including a symlink) fails with
      * `VAEL_FS_ALREADY_EXISTS` without clobbering.
+     *
+     * @since 0.0.0-alpha.0
      */
     overwrite?: boolean;
   }
 
   /**
    * Options controlling `mkdir`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface MkdirOptions {
     /**
      * Create missing parent directories and succeed if the directory already
      * exists (default: `false`).
+     *
+     * @since 0.0.0-alpha.0
      */
     recursive?: boolean;
   }
 
   /**
    * Options controlling `remove`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface RemoveOptions {
     /**
      * Recursively remove directory contents without following symbolic links
      * (default: `false`).
+     *
+     * @since 0.0.0-alpha.0
      */
     recursive?: boolean;
   }
 
   /**
    * Options controlling `copyFile`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface CopyOptions {
     /**
      * Overwrite the destination file if it already exists (default: `false`).
      * When `false`, existing targets fail with `VAEL_FS_ALREADY_EXISTS` without
      * TOCTOU clobbering.
+     *
+     * @since 0.0.0-alpha.0
      */
     overwrite?: boolean;
   }
 
   /**
    * Snapshot metadata returned by `stat` and `lstat`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface FileInfo {
-    /** Whether the entry is a regular file. */
+    /** Whether the entry is a regular file. @since 0.0.0-alpha.0 */
     isFile: boolean;
-    /** Whether the entry is a directory. */
+    /** Whether the entry is a directory. @since 0.0.0-alpha.0 */
     isDirectory: boolean;
-    /** Whether the entry is a symbolic link (always `false` for `stat`). */
+    /** Whether the entry is a symbolic link (always `false` for `stat`). @since 0.0.0-alpha.0 */
     isSymlink: boolean;
-    /** Size of the entry in bytes. */
+    /** Size of the entry in bytes. @since 0.0.0-alpha.0 */
     size: number;
     /**
      * Last modification time in whole milliseconds since the Unix epoch, or
      * `null` if unavailable from the filesystem or outside signed 64-bit range.
+     *
+     * @since 0.0.0-alpha.0
      */
     modifiedMs: number | null;
-    /** Whether the entry's permissions mark it as read-only. */
+    /** Whether the entry's permissions mark it as read-only. @since 0.0.0-alpha.0 */
     readonly: boolean;
   }
 
   /**
    * Snapshot directory entry returned in sorted order by `readDir`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface DirEntry {
-    /** Single path component name (valid UTF-8). */
+    /** Single path component name (valid UTF-8). @since 0.0.0-alpha.0 */
     name: string;
-    /** Whether the entry is a regular file (does not follow symlinks). */
+    /** Whether the entry is a regular file (does not follow symlinks). @since 0.0.0-alpha.0 */
     isFile: boolean;
-    /** Whether the entry is a directory (does not follow symlinks). */
+    /** Whether the entry is a directory (does not follow symlinks). @since 0.0.0-alpha.0 */
     isDirectory: boolean;
-    /** Whether the entry is a symbolic link. */
+    /** Whether the entry is a symbolic link. @since 0.0.0-alpha.0 */
     isSymlink: boolean;
   }
 
@@ -142,6 +187,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode` on filesystem or validation failure.
+   * @since 0.0.0-alpha.0
    */
   export function readFile(path: string, options?: ReadOptions): Uint8Array;
 
@@ -154,6 +200,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode` on filesystem, UTF-8, or validation failure.
+   * @since 0.0.0-alpha.0
    */
   export function readTextFile(path: string, options?: ReadOptions): string;
 
@@ -167,6 +214,7 @@ declare module "vael:fs" {
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode` (`VAEL_FS_INVALID_ARGUMENT` if both
    * `createNew` and `append` are `true`).
+   * @since 0.0.0-alpha.0
    */
   export function writeFile(path: string, bytes: Uint8Array, options?: WriteOptions): void;
 
@@ -176,6 +224,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode`.
+   * @since 0.0.0-alpha.0
    */
   export function writeTextFile(path: string, text: string, options?: WriteOptions): void;
 
@@ -189,6 +238,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode`.
+   * @since 0.0.0-alpha.0
    */
   export function writeFileAtomic(
     path: string,
@@ -205,6 +255,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode`.
+   * @since 0.0.0-alpha.0
    */
   export function exists(path: string): boolean;
 
@@ -213,6 +264,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode` (`VAEL_FS_NOT_FOUND` if missing or dangling symlink).
+   * @since 0.0.0-alpha.0
    */
   export function stat(path: string): FileInfo;
 
@@ -225,6 +277,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode`.
+   * @since 0.0.0-alpha.0
    */
   export function lstat(path: string): FileInfo;
 
@@ -237,6 +290,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode`.
+   * @since 0.0.0-alpha.0
    */
   export function readDir(path: string): DirEntry[];
 
@@ -248,6 +302,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode`.
+   * @since 0.0.0-alpha.0
    */
   export function mkdir(path: string, options?: MkdirOptions): void;
 
@@ -260,6 +315,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode`.
+   * @since 0.0.0-alpha.0
    */
   export function remove(path: string, options?: RemoveOptions): void;
 
@@ -268,6 +324,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode`.
+   * @since 0.0.0-alpha.0
    */
   export function rename(from: string, to: string): void;
 
@@ -280,6 +337,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode` (`VAEL_FS_IS_A_DIRECTORY` if `from` is a directory).
+   * @since 0.0.0-alpha.0
    */
   export function copyFile(from: string, to: string, options?: CopyOptions): void;
 
@@ -289,6 +347,7 @@ declare module "vael:fs" {
    *
    * @throws {TypeError} on wrong argument types.
    * @throws {Error} with `code: FsErrorCode`.
+   * @since 0.0.0-alpha.0
    */
   export function realpath(path: string): string;
 }

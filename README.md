@@ -46,7 +46,7 @@ Remote loading (`https:`, `gh:`, `github:`, `jsr:`, and network `npm:` fetches) 
 | **`npm:` / `jsr:` / `https:` / `gh:`** | Yes (`npm:` offline-first; remote opt-in) | Local & `vael.jsonc` workspaces only |
 | **Embedding Footprint** | Full V8 + Tokio + Hyper (`vaeljs-core`) | Small, zero-V8 / zero-Tokio (`vaeljs-lite-core`) |
 
-See [vjs vs vjs-lite](docs/src/content/docs/getting-started/vjs-vs-vjs-lite.md) for the complete module and flag matrix.
+See [vjs vs vjs-lite](https://vaeljs.com/getting-started/vjs-vs-vjs-lite/) for the complete module and flag matrix.
 
 ## Built-in Modules Overview
 
@@ -54,18 +54,18 @@ Built-ins are imported strictly by canonical `vael:*` or `node:*` specifiers (ba
 
 | Module(s) | Summary | Engine | Reference |
 | --- | --- | --- | --- |
-| `vael:http` | Go 1.22+ `ServeMux`, middleware, `.static()`, `serve()`, zero-socket `.fetch()` | `vjs` | [vael:http](docs/src/content/docs/modules/vael-http.md) |
-| `vael:db` | SQLite (`openSqlite`), `@name`/`?` bindings, `transaction()` | `vjs` | [vael:db](docs/src/content/docs/modules/vael-db.md) |
-| `vael:template` | Go `text/template` + Sprig helpers with `htmlEscape` | Both | [vael:template](docs/src/content/docs/modules/vael-template.md) |
-| `vael:fs` | Bounded sync filesystem ops & `writeFileAtomic` | Both | [vael:fs](docs/src/content/docs/modules/vael-fs.md) |
-| `vael:ssh` | Sync SSH exec with mandatory host trust (`hostKey` / `knownHosts`) | Both | [vael:ssh](docs/src/content/docs/modules/vael-ssh.md) |
-| `vael:crypto` | AES-GCM/CBC, SHA-2, HMAC, PBKDF2, bcrypt, Shamir (13 sync; +7 async on `vjs`) | Both | [vael:crypto](docs/src/content/docs/modules/vael-crypto.md) |
-| `vael:age` | X25519 binary age v1 encryption & decryption | `vjs` | [vael:age](docs/src/content/docs/modules/vael-age.md) |
-| `vael:os`, `vael:path` | Host target constants and lexical POSIX/Win32 path utilities | Both | [os & path](docs/src/content/docs/modules/vael-os-path.md) |
-| `vael:chars`, `vael:strings`, `vael:slices` | Unicode char classes, ASCII case-folding, live array/char slices | Both | [text & slices](docs/src/content/docs/modules/vael-text.md) |
-| `vael:test`, `vael:assert` | Registration test runner and structural/Promise assertions | Both | [test & assert](docs/src/content/docs/modules/vael-testing.md) |
-| `vael:cron`, `vael:console`, `vael:stdio`, `vael:uuid` | UTC cron (`vjs`), formatted console, stdio (`vjs`), UUID v4/v7 | Both / `vjs` | [utilities](docs/src/content/docs/modules/vael-utilities.md) |
-| `node:*` | `buffer`, `child_process`, `crypto`, `fs`, `fs/promises` (`vjs`), `os`, `path`, `process`, `url` | Both | [node compat](docs/src/content/docs/modules/node-compat.md) |
+| `vael:http` | Go 1.22+ `ServeMux`, middleware, `.static()`, `serve()`, zero-socket `.fetch()` | `vjs` | [vael:http](https://vaeljs.com/modules/vael-http/) |
+| `vael:db` | SQLite (`openSqlite`), `@name`/`?` bindings, `transaction()` | `vjs` | [vael:db](https://vaeljs.com/modules/vael-db/) |
+| `vael:template` | Go `text/template` + Sprig helpers with `htmlEscape` | Both | [vael:template](https://vaeljs.com/modules/vael-template/) |
+| `vael:fs` | Bounded sync filesystem ops & `writeFileAtomic` | Both | [vael:fs](https://vaeljs.com/modules/vael-fs/) |
+| `vael:ssh` | Sync SSH exec with mandatory host trust (`hostKey` / `knownHosts`) | Both | [vael:ssh](https://vaeljs.com/modules/vael-ssh/) |
+| `vael:crypto` | AES-GCM/CBC, SHA-2, HMAC, PBKDF2, bcrypt, Shamir (13 sync; +7 async on `vjs`) | Both | [vael:crypto](https://vaeljs.com/modules/vael-crypto/) |
+| `vael:age` | X25519 binary age v1 encryption & decryption | `vjs` | [vael:age](https://vaeljs.com/modules/vael-age/) |
+| `vael:os`, `vael:path` | Host target constants and lexical POSIX/Win32 path utilities | Both | [os & path](https://vaeljs.com/modules/vael-os-path/) |
+| `vael:chars`, `vael:strings`, `vael:slices` | Unicode char classes, ASCII case-folding, live array/char slices | Both | [text & slices](https://vaeljs.com/modules/vael-text/) |
+| `vael:test`, `vael:assert` | Registration test runner and structural/Promise assertions | Both | [test & assert](https://vaeljs.com/modules/vael-testing/) |
+| `vael:cron`, `vael:console`, `vael:stdio`, `vael:uuid` | UTC cron (`vjs`), formatted console, stdio (`vjs`), UUID v4/v7 | Both / `vjs` | [utilities](https://vaeljs.com/modules/vael-utilities/) |
+| `node:*` | `buffer`, `child_process`, `crypto`, `fs`, `fs/promises` (`vjs`), `os`, `path`, `process`, `url` | Both | [node compat](https://vaeljs.com/modules/node-compat/) |
 
 ## Embedding in Rust (`vaeljs-lite-core`)
 
@@ -80,7 +80,7 @@ fn main() -> Result<(), vaeljs_lite_core::Error> {
 }
 ```
 
-Granular Cargo features (`--no-default-features` + `vael-fs`, `vael-crypto`, `vael-template`, `manifest`, `typescript`, etc.) let you select the exact surface compiled in. See the [Embedding Guide](docs/src/content/docs/guides/embedding-vaeljs-lite.md).
+Granular Cargo features (`--no-default-features` + `vael-fs`, `vael-crypto`, `vael-template`, `manifest`, `typescript`, etc.) let you select the exact surface compiled in. See the [Embedding Guide](https://vaeljs.com/guides/embedding-vaeljs-lite/).
 
 ## Building & Testing from Source
 
@@ -104,14 +104,14 @@ cargo clippy --locked --all-targets -- -D warnings
 
 Prebuilt release archives for 6 targets (`linux`, `macos`, `windows` × `amd64`, `arm64`) with `SHA256SUMS.txt` and bundled `types/` are published on [GitHub Releases](https://github.com/neotales/vaeljs/releases).
 
-## Documentation (`docs/`)
+## Documentation
 
-The Starlight documentation site lives in [`docs/`](docs/):
+The VaelJS documentation site lives at [**vaeljs.com**](https://vaeljs.com) and is maintained in [`neotales/vaeljs-site`](https://github.com/neotales/vaeljs-site) (see [`docs/README.md`](docs/README.md); [`vaeljs-dts/types/`](vaeljs-dts/types/) remains the API and `@since` source of truth in this repository):
 
-- **Getting Started:** [Installation](docs/src/content/docs/getting-started/installation.md) · [Quickstart](docs/src/content/docs/getting-started/quickstart.md) · [vjs vs vjs-lite](docs/src/content/docs/getting-started/vjs-vs-vjs-lite.md)
-- **CLI & Config:** [Commands & Flags](docs/src/content/docs/cli/commands.md) · [vael.jsonc & Workspaces](docs/src/content/docs/cli/vael-jsonc.md) · [npm & Remote Loading](docs/src/content/docs/cli/npm-and-remote.md)
-- **Guides:** [Automation](docs/src/content/docs/guides/automation.md) · [Go-Style WebApps](docs/src/content/docs/guides/webapps.md) · [Embedding vaeljs-lite](docs/src/content/docs/guides/embedding-vaeljs-lite.md)
-- **Architecture Notes:** [Database API](docs/db-api.md) · [`vael.jsonc` Spec](docs/vael-jsonc.md) · [ESM/npm Design](docs/esm-npm-proposal.md)
+- **Getting Started:** [Installation](https://vaeljs.com/getting-started/installation/) · [Quickstart](https://vaeljs.com/getting-started/quickstart/) · [vjs vs vjs-lite](https://vaeljs.com/getting-started/vjs-vs-vjs-lite/)
+- **CLI & Config:** [Commands & Flags](https://vaeljs.com/cli/commands/) · [vael.jsonc & Workspaces](https://vaeljs.com/cli/vael-jsonc/) · [npm & Remote Loading](https://vaeljs.com/cli/npm-and-remote/)
+- **Guides & Modules:** [Automation](https://vaeljs.com/guides/automation/) · [Go-Style WebApps](https://vaeljs.com/guides/webapps/) · [Embedding vaeljs-lite](https://vaeljs.com/guides/embedding-vaeljs-lite/) · [Modules Overview](https://vaeljs.com/modules/overview/)
+- **Architecture, Roadmap & Blog:** [Database API](https://vaeljs.com/architecture/db-api/) · [`vael.jsonc` Spec](https://vaeljs.com/architecture/vael-jsonc-spec/) · [ESM/npm Design](https://vaeljs.com/architecture/esm-and-npm/) · [Roadmap](https://vaeljs.com/roadmap/) · [Blog](https://vaeljs.com/blog/)
 
 ## License
 

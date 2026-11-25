@@ -1,18 +1,41 @@
+/**
+ * Synchronous SSH command execution with mandatory host-key verification.
+ *
+ * @since 0.0.0-alpha.0
+ */
 declare module "vael:ssh" {
-  /** Maximum command byte length accepted by `SshConnection.exec` (64 KiB). */
+  /**
+   * Maximum command byte length accepted by `SshConnection.exec` (64 KiB).
+   *
+   * @since 0.0.0-alpha.0
+   */
   export const MAX_COMMAND_BYTES: 65536;
 
-  /** Maximum captured stdout byte length returned by `SshConnection.exec` (8 MiB). */
+  /**
+   * Maximum captured stdout byte length returned by `SshConnection.exec` (8 MiB).
+   *
+   * @since 0.0.0-alpha.0
+   */
   export const MAX_OUTPUT_BYTES: 8388608;
 
-  /** Default TCP/handshake connect timeout in milliseconds (`15_000`). */
+  /**
+   * Default TCP/handshake connect timeout in milliseconds (`15_000`).
+   *
+   * @since 0.0.0-alpha.0
+   */
   export const DEFAULT_CONNECT_TIMEOUT_MS: 15000;
 
-  /** Default per-command execution timeout in milliseconds (`30_000`). */
+  /**
+   * Default per-command execution timeout in milliseconds (`30_000`).
+   *
+   * @since 0.0.0-alpha.0
+   */
   export const DEFAULT_EXEC_TIMEOUT_MS: 30000;
 
   /**
    * Error codes reported on `SshError.code` (`name = "SshError"`).
+   *
+   * @since 0.0.0-alpha.0
    */
   export type SshErrorCode =
     | "VAEL_SSH_ARGUMENT"
@@ -34,6 +57,8 @@ declare module "vael:ssh" {
 
   /**
    * Mandatory host-trust pin: supply **exactly one** of `hostKey` or `knownHosts`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export type SshHostTrustOptions =
     | {
@@ -50,6 +75,8 @@ declare module "vael:ssh" {
   /**
    * Authentication method: supply **exactly one** of `password`, `privateKey`,
    * or `agent: true`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export type SshAuthOptions =
     | {
@@ -83,6 +110,8 @@ declare module "vael:ssh" {
 
   /**
    * Options accepted by `connect(options)`. Unknown keys throw `TypeError`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export type SshConnectOptions = {
     /** Remote hostname or IP address. */
@@ -100,20 +129,24 @@ declare module "vael:ssh" {
 
   /**
    * Result returned by `SshConnection.exec(command)`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface SshExecResult {
-    /** Captured remote stdout bytes (at most `MAX_OUTPUT_BYTES`). Remote stderr is discarded. */
+    /** Captured remote stdout bytes (at most `MAX_OUTPUT_BYTES`). Remote stderr is discarded. @since 0.0.0-alpha.0 */
     stdout: Uint8Array;
-    /** Remote exit status code. */
+    /** Remote exit status code. @since 0.0.0-alpha.0 */
     status: number;
   }
 
   /**
    * Synchronous, authenticated SSH command-execution connection returned by
    * `connect(options)`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface SshConnection {
-    /** Whether this connection is closed and can no longer run commands. */
+    /** Whether this connection is closed and can no longer run commands. @since 0.0.0-alpha.0 */
     readonly closed: boolean;
 
     /**
@@ -128,12 +161,15 @@ declare module "vael:ssh" {
      * @throws {Error} (`name = "SshError"`) with `code` `"VAEL_SSH_CLOSED"`,
      * `"VAEL_SSH_LIMIT"`, `"VAEL_SSH_TIMEOUT"`, `"VAEL_SSH_IO"`,
      * `"VAEL_SSH_SESSION"`, or `"VAEL_SSH_INTERNAL"`.
+     * @since 0.0.0-alpha.0
      */
     exec(command: string | Uint8Array): SshExecResult;
 
     /**
      * Close the underlying socket. Idempotent; does not send an SSH disconnect
      * packet. Subsequent `exec` calls throw `VAEL_SSH_CLOSED`.
+     *
+     * @since 0.0.0-alpha.0
      */
     close(): void;
   }
@@ -147,6 +183,7 @@ declare module "vael:ssh" {
    * @throws {TypeError} on invalid options or unknown option keys.
    * @throws {RangeError} on out-of-range port or timeout values.
    * @throws {Error} (`name = "SshError"`) with `code: SshErrorCode`.
+   * @since 0.0.0-alpha.0
    */
   export function connect(options: SshConnectOptions): SshConnection;
 }

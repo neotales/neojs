@@ -17,7 +17,7 @@
 //!
 //! A JavaScript/Node adapter is deliberately not part of this crate. The
 //! default dependency graph contains no V8, `deno_core`, or `vaeljs-core`
-//! dependency. See `docs/db-api.md` in the repository for the boundary and the
+//! dependency. See <https://vaeljs.com/architecture/db-api/> for the boundary and the
 //! reason it is deferred.
 //!
 //! # Example

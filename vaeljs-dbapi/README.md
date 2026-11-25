@@ -19,7 +19,7 @@ configuration parses, but `Db::open` returns `DriverUnavailable` without opening
 There is no placeholder provider behind those names.
 
 There is no JavaScript or Node adapter in this crate yet. The default dependency graph contains
-no V8, `deno_core`, or `vaeljs-core` dependency. See [`docs/db-api.md`](../docs/db-api.md) for the
+no V8, `deno_core`, or `vaeljs-core` dependency. See the [Database API architecture note](https://vaeljs.com/architecture/db-api/) for the
 deferred boundary and the reason.
 
 ## Install

@@ -1,12 +1,21 @@
+/**
+ * Bounded synchronous byte readers, writers, and standard output streams.
+ *
+ * @since 0.0.0-alpha.0
+ */
 declare module "vael:stdio" {
   /**
    * Maximum byte capacity of one memory-backed stream or single `writeSync`
    * chunk (`8 MiB` / `8_388_608` bytes).
+   *
+   * @since 0.0.0-alpha.0
    */
   export const MAX_BYTES: 8388608;
 
   /**
    * Error codes reported on `StdioError.code` (`name = "StdioError"`).
+   *
+   * @since 0.0.0-alpha.0
    */
   export type StdioErrorCode =
     | "VAEL_STDIO_DETACHED"
@@ -19,6 +28,8 @@ declare module "vael:stdio" {
 
   /**
    * Synchronous reader over an owned snapshot copy of a `Uint8Array`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export class Readable {
     /**
@@ -26,13 +37,14 @@ declare module "vael:stdio" {
      *
      * @throws {TypeError} when `bytes` is not a `Uint8Array` or arity is wrong.
      * @throws {Error} (`name = "StdioError"`) with `code` `"VAEL_STDIO_DETACHED"` or `"VAEL_STDIO_LIMIT"`.
+     * @since 0.0.0-alpha.0
      */
     constructor(bytes: Uint8Array);
 
-    /** Remaining unread bytes (`0` at EOF and after `close()`). */
+    /** Remaining unread bytes (`0` at EOF and after `close()`). @since 0.0.0-alpha.0 */
     readonly remaining: number;
 
-    /** Whether `close()` has been called. */
+    /** Whether `close()` has been called. @since 0.0.0-alpha.0 */
     readonly closed: boolean;
 
     /**
@@ -43,37 +55,43 @@ declare module "vael:stdio" {
      * @throws {TypeError} when `target` is not a `Uint8Array` or arity is wrong.
      * @throws {Error} (`name = "StdioError"`) with `code` `"VAEL_STDIO_CLOSED"`,
      * `"VAEL_STDIO_DETACHED"`, or `"VAEL_STDIO_ARGUMENT"` (empty `target`).
+     * @since 0.0.0-alpha.0
      */
     readSync(target: Uint8Array): number;
 
-    /** Release the owned byte snapshot. Idempotent. */
+    /** Release the owned byte snapshot. Idempotent. @since 0.0.0-alpha.0 */
     close(): void;
   }
 
   /**
    * Synchronous byte writer (either a bounded in-memory buffer or a shared
    * host stream `stdout`/`stderr`).
+   *
+   * @since 0.0.0-alpha.0
    */
   export class Writable {
     /**
      * Create an empty memory-backed writer (capacity bounded by `MAX_BYTES`).
      *
      * @throws {TypeError} when any argument is supplied.
+     * @since 0.0.0-alpha.0
      */
     constructor();
 
-    /** Stream backing kind. */
+    /** Stream backing kind. @since 0.0.0-alpha.0 */
     readonly kind: "memory" | "stdout" | "stderr";
 
     /**
      * Bytes retained by a memory writer (`0` for host streams or after `close()`).
+     *
+     * @since 0.0.0-alpha.0
      */
     readonly length: number;
 
-    /** Whether `close()` has been called. */
+    /** Whether `close()` has been called. @since 0.0.0-alpha.0 */
     readonly closed: boolean;
 
-    /** Whether `end()` or `close()` has been called. */
+    /** Whether `end()` or `close()` has been called. @since 0.0.0-alpha.0 */
     readonly ended: boolean;
 
     /**
@@ -84,10 +102,11 @@ declare module "vael:stdio" {
      * @throws {TypeError} on invalid argument type or arity.
      * @throws {Error} (`name = "StdioError"`) with `code` `"VAEL_STDIO_CLOSED"`,
      * `"VAEL_STDIO_ENDED"`, `"VAEL_STDIO_DETACHED"`, `"VAEL_STDIO_LIMIT"`, or `"VAEL_STDIO_WRITE"`.
+     * @since 0.0.0-alpha.0
      */
     writeSync(chunk: Uint8Array | string): number;
 
-    /** Stop accepting writes while keeping memory-backed content readable. Idempotent. */
+    /** Stop accepting writes while keeping memory-backed content readable. Idempotent. @since 0.0.0-alpha.0 */
     end(): void;
 
     /**
@@ -95,19 +114,30 @@ declare module "vael:stdio" {
      *
      * @throws {Error} (`name = "StdioError"`) with `code` `"VAEL_STDIO_CLOSED"`
      * or `"VAEL_STDIO_NOT_MEMORY"` (when called on `stdout` or `stderr`).
+     * @since 0.0.0-alpha.0
      */
     toUint8Array(): Uint8Array;
 
     /**
      * Release memory-backed content and retire the writer. Idempotent.
      * Does not close the underlying OS file descriptor for `stdout`/`stderr`.
+     *
+     * @since 0.0.0-alpha.0
      */
     close(): void;
   }
 
-  /** Shared host writer targeting the current runtime's standard output. */
+  /**
+   * Shared host writer targeting the current runtime's standard output.
+   *
+   * @since 0.0.0-alpha.0
+   */
   export const stdout: Writable;
 
-  /** Shared host writer targeting the current runtime's standard error. */
+  /**
+   * Shared host writer targeting the current runtime's standard error.
+   *
+   * @since 0.0.0-alpha.0
+   */
   export const stderr: Writable;
 }

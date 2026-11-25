@@ -1,16 +1,33 @@
+/**
+ * X25519 binary age v1 encryption, decryption, and keypair utilities.
+ *
+ * @since 0.0.0-alpha.0
+ */
 declare module "vael:age" {
   /**
    * Generated X25519 age keypair in standard Bech32 text form.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface AgeIdentity {
-    /** Secret identity string (`AGE-SECRET-KEY-1...`). Keep confidential. */
+    /**
+     * Secret identity string (`AGE-SECRET-KEY-1...`). Keep confidential.
+     *
+     * @since 0.0.0-alpha.0
+     */
     identity: string;
-    /** Public recipient string (`age1...`). */
+    /**
+     * Public recipient string (`age1...`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     recipient: string;
   }
 
   /**
    * Error codes thrown by `vael:age` operations on `Error.code`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export type AgeErrorCode =
     | "VAEL_AGE_IDENTITY"
@@ -30,6 +47,7 @@ declare module "vael:age" {
    * @returns A `{ identity, recipient }` pair (`AGE-SECRET-KEY-1...` / `age1...`).
    * @throws {TypeError} when any argument is supplied.
    * @throws {Error} with `code = "VAEL_AGE_RANDOM"` when the OS CSPRNG fails.
+   * @since 0.0.0-alpha.0
    */
   export function generateIdentity(): AgeIdentity;
 
@@ -44,6 +62,7 @@ declare module "vael:age" {
    * @param identity Bech32 X25519 identity string (max 512 bytes).
    * @throws {TypeError} when `identity` is not a string or arity is wrong.
    * @throws {Error} with `code` `"VAEL_AGE_IDENTITY"`, `"VAEL_AGE_UNSUPPORTED"`, or `"VAEL_AGE_INTERNAL"`.
+   * @since 0.0.0-alpha.0
    */
   export function identityToRecipient(identity: string): string;
 
@@ -60,6 +79,7 @@ declare module "vael:age" {
    * @throws {TypeError} when an argument has the wrong type or arity is wrong.
    * @throws {Error} with `code` `"VAEL_AGE_RECIPIENT"`, `"VAEL_AGE_UNSUPPORTED"`,
    * `"VAEL_AGE_LIMIT"`, `"VAEL_AGE_RANDOM"`, `"VAEL_AGE_DETACHED"`, or `"VAEL_AGE_INTERNAL"`.
+   * @since 0.0.0-alpha.0
    */
   export function encrypt(recipient: string, plaintext: Uint8Array): Uint8Array;
 
@@ -77,6 +97,7 @@ declare module "vael:age" {
    * @throws {Error} with `code` `"VAEL_AGE_AUTH"`, `"VAEL_AGE_FORMAT"`,
    * `"VAEL_AGE_IDENTITY"`, `"VAEL_AGE_IDENTITY_MISMATCH"`, `"VAEL_AGE_UNSUPPORTED"`,
    * `"VAEL_AGE_LIMIT"`, `"VAEL_AGE_DETACHED"`, or `"VAEL_AGE_INTERNAL"`.
+   * @since 0.0.0-alpha.0
    */
   export function decrypt(identity: string, ciphertext: Uint8Array): Uint8Array;
 }

@@ -1,46 +1,77 @@
+/**
+ * Symmetric AES-256 encryption, SHA-2 hashes/HMACs, PBKDF2, bcrypt, and Shamir secret sharing.
+ *
+ * @since 0.0.0-alpha.0
+ */
 declare module "vael:crypto" {
   /**
    * Supported SHA-2 hash and HMAC algorithms (case-insensitive).
+   *
+   * @since 0.0.0-alpha.0
    */
   export type HashAlgorithm = "sha256" | "sha384" | "sha512" | (string & {});
 
   /**
    * Supported symmetric cipher algorithms (case-insensitive).
+   *
+   * @since 0.0.0-alpha.0
    */
   export type CipherAlgorithm = "aes-256-cbc" | "aes-256-gcm" | (string & {});
 
   /**
    * Supported string input encoding (UTF-8 only, case-insensitive).
+   *
+   * @since 0.0.0-alpha.0
    */
   export type InputEncoding = "utf8" | "utf-8" | (string & {});
 
   /**
    * Supported digest output encodings (case-insensitive).
+   *
+   * @since 0.0.0-alpha.0
    */
   export type DigestEncoding = "hex" | "base64" | "base64url" | "latin1" | "binary" | (string & {});
 
   /**
    * Options accepted by `createEncryptor` and `createDecryptor` (`aes-256-cbc`
    * only; `aes-256-gcm` accepts no options).
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface CipherOptions {
-    /** Enable or disable PKCS#7 padding for `aes-256-cbc` (default: `true`). */
+    /**
+     * Enable or disable PKCS#7 padding for `aes-256-cbc` (default: `true`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     padding?: boolean;
   }
 
   /**
    * Frozen share record produced by `shamirSplit` / `shamirSplitAsync` and
    * consumed by `shamirCombine` / `shamirCombineAsync`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface ShamirShare {
-    /** One-based GF(256) share index (`1..=255`). */
+    /**
+     * One-based GF(256) share index (`1..=255`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     readonly index: number;
-    /** Share bytes (same length as the secret; record property is frozen, array elements remain mutable). */
+    /**
+     * Share bytes (same length as the secret; record property is frozen, array elements remain mutable).
+     *
+     * @since 0.0.0-alpha.0
+     */
     readonly value: Uint8Array;
   }
 
   /**
    * Error codes reported on `Error.code` by `vael:crypto` operations.
+   *
+   * @since 0.0.0-alpha.0
    */
   export type CryptoErrorCode =
     | "VAEL_CRYPTO_KEY"
@@ -72,6 +103,8 @@ declare module "vael:crypto" {
    *
    * Call `close()` or `dispose()` in a `finally` block (even after `final()`)
    * to stay within the per-runtime open-object (64) and buffered-byte (64 MiB) caps.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface Cipher {
     /**
@@ -80,6 +113,7 @@ declare module "vael:crypto" {
      *
      * @throws {TypeError} on wrong argument types or supplying an encoding with binary input.
      * @throws {Error} with `code` `"VAEL_CRYPTO_CLOSED"`, `"VAEL_CRYPTO_STATE"`, `"VAEL_CRYPTO_LIMIT"`, or `"VAEL_CRYPTO_DETACHED"`.
+     * @since 0.0.0-alpha.0
      */
     update(data: Uint8Array | string, encoding?: InputEncoding): Uint8Array;
 
@@ -90,6 +124,7 @@ declare module "vael:crypto" {
      *
      * @throws {TypeError} when any argument is supplied.
      * @throws {Error} with `code` `"VAEL_CRYPTO_CLOSED"`, `"VAEL_CRYPTO_STATE"`, `"VAEL_CRYPTO_AUTH"`, `"VAEL_CRYPTO_PADDING"`, `"VAEL_CRYPTO_TAG"`, or `"VAEL_CRYPTO_LIMIT"`.
+     * @since 0.0.0-alpha.0
      */
     final(): Uint8Array;
 
@@ -98,6 +133,7 @@ declare module "vael:crypto" {
      * `update` or `final`; max 8 MiB).
      *
      * @throws {Error} with `code` `"VAEL_CRYPTO_CLOSED"`, `"VAEL_CRYPTO_STATE"`, `"VAEL_CRYPTO_UNSUPPORTED"`, or `"VAEL_CRYPTO_LIMIT"`.
+     * @since 0.0.0-alpha.0
      */
     setAAD(aad: Uint8Array): this;
 
@@ -106,6 +142,7 @@ declare module "vael:crypto" {
      * (`aes-256-gcm` decryptors only).
      *
      * @throws {Error} with `code` `"VAEL_CRYPTO_CLOSED"`, `"VAEL_CRYPTO_STATE"`, `"VAEL_CRYPTO_UNSUPPORTED"`, or `"VAEL_CRYPTO_TAG"`.
+     * @since 0.0.0-alpha.0
      */
     setAuthTag(tag: Uint8Array): this;
 
@@ -114,6 +151,7 @@ declare module "vael:crypto" {
      * (`aes-256-gcm` encryptors only, after `final()`).
      *
      * @throws {Error} with `code` `"VAEL_CRYPTO_CLOSED"`, `"VAEL_CRYPTO_STATE"`, or `"VAEL_CRYPTO_UNSUPPORTED"`.
+     * @since 0.0.0-alpha.0
      */
     getAuthTag(): Uint8Array;
 
@@ -121,16 +159,23 @@ declare module "vael:crypto" {
      * Enable or disable CBC PKCS#7 padding before `final()` (`aes-256-cbc` only).
      *
      * @throws {Error} with `code` `"VAEL_CRYPTO_CLOSED"`, `"VAEL_CRYPTO_STATE"`, or `"VAEL_CRYPTO_UNSUPPORTED"`.
+     * @since 0.0.0-alpha.0
      */
     setAutoPadding(enabled: boolean): this;
 
     /**
      * Release this cipher's native slot and buffered bytes. Idempotent.
      * Later calls throw `VAEL_CRYPTO_CLOSED`.
+     *
+     * @since 0.0.0-alpha.0
      */
     close(): void;
 
-    /** Alias for `close()`. Idempotent. */
+    /**
+     * Alias for `close()`. Idempotent.
+     *
+     * @since 0.0.0-alpha.0
+     */
     dispose(): void;
   }
 
@@ -140,6 +185,8 @@ declare module "vael:crypto" {
    *
    * Open digest objects are capped at 1024 per runtime; call `close()` or
    * `dispose()` if not calling `digest()`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export interface Hash {
     /**
@@ -147,6 +194,7 @@ declare module "vael:crypto" {
      *
      * @throws {TypeError} on wrong argument types or supplying an encoding with binary input.
      * @throws {Error} with `code` `"VAEL_CRYPTO_CLOSED"`, `"VAEL_CRYPTO_DIGESTED"`, `"VAEL_CRYPTO_LIMIT"`, or `"VAEL_CRYPTO_DETACHED"`.
+     * @since 0.0.0-alpha.0
      */
     update(data: Uint8Array | string, encoding?: InputEncoding): this;
 
@@ -154,6 +202,7 @@ declare module "vael:crypto" {
      * Consume the hash state and return raw digest bytes.
      *
      * @throws {Error} with `code` `"VAEL_CRYPTO_CLOSED"`, `"VAEL_CRYPTO_DIGESTED"`, or `"VAEL_CRYPTO_LIMIT"`.
+     * @since 0.0.0-alpha.0
      */
     digest(): Uint8Array;
     /**
@@ -161,13 +210,22 @@ declare module "vael:crypto" {
      *
      * @throws {TypeError} on unsupported encoding (checked before consuming state).
      * @throws {Error} with `code` `"VAEL_CRYPTO_CLOSED"`, `"VAEL_CRYPTO_DIGESTED"`, or `"VAEL_CRYPTO_LIMIT"`.
+     * @since 0.0.0-alpha.0
      */
     digest(encoding: DigestEncoding): string;
 
-    /** Release native state without producing a digest. Idempotent. */
+    /**
+     * Release native state without producing a digest. Idempotent.
+     *
+     * @since 0.0.0-alpha.0
+     */
     close(): void;
 
-    /** Alias for `close()`. Idempotent. */
+    /**
+     * Alias for `close()`. Idempotent.
+     *
+     * @since 0.0.0-alpha.0
+     */
     dispose(): void;
   }
 
@@ -178,6 +236,7 @@ declare module "vael:crypto" {
    *
    * @throws {TypeError} when any argument is supplied.
    * @throws {Error} with `code = "VAEL_CRYPTO_RANDOM"` when the CSPRNG fails.
+   * @since 0.0.0-alpha.0
    */
   export function generateEnvelopeKey(): Uint8Array;
 
@@ -188,6 +247,7 @@ declare module "vael:crypto" {
    * @throws {TypeError} when `length` is not a number or arity is wrong.
    * @throws {RangeError} when `length` is not an integer in `0..=8_388_608`.
    * @throws {Error} with `code = "VAEL_CRYPTO_RANDOM"` when the CSPRNG fails.
+   * @since 0.0.0-alpha.0
    */
   export function randomBytes(length: number): Uint8Array;
 
@@ -200,6 +260,7 @@ declare module "vael:crypto" {
    * @param associatedData Optional authenticated non-encrypted bytes (max 8 MiB).
    * @throws {TypeError} on invalid argument types or arity.
    * @throws {Error} with `code` `"VAEL_CRYPTO_KEY"`, `"VAEL_CRYPTO_RANDOM"`, `"VAEL_CRYPTO_LIMIT"`, or `"VAEL_CRYPTO_DETACHED"`.
+   * @since 0.0.0-alpha.0
    */
   export function encrypt(
     key: Uint8Array,
@@ -217,6 +278,7 @@ declare module "vael:crypto" {
    * @param associatedData Must match the value passed to `encrypt`.
    * @throws {TypeError} on invalid argument types or arity.
    * @throws {Error} with `code` `"VAEL_CRYPTO_AUTH"`, `"VAEL_CRYPTO_FORMAT"`, `"VAEL_CRYPTO_KEY"`, `"VAEL_CRYPTO_LIMIT"`, or `"VAEL_CRYPTO_DETACHED"`.
+   * @since 0.0.0-alpha.0
    */
   export function decrypt(
     key: Uint8Array,
@@ -233,6 +295,7 @@ declare module "vael:crypto" {
    * @param options CBC only (`{ padding?: boolean }`).
    * @throws {TypeError} on invalid arguments or unsupported options.
    * @throws {Error} with `code` `"VAEL_CRYPTO_ALGORITHM"`, `"VAEL_CRYPTO_KEY"`, `"VAEL_CRYPTO_IV"`, `"VAEL_CRYPTO_DETACHED"`, or `"VAEL_CRYPTO_TOO_MANY_OBJECTS"`.
+   * @since 0.0.0-alpha.0
    */
   export function createEncryptor(
     algorithm: CipherAlgorithm,
@@ -252,6 +315,7 @@ declare module "vael:crypto" {
    * @param options CBC only (`{ padding?: boolean }`).
    * @throws {TypeError} on invalid arguments or unsupported options.
    * @throws {Error} with `code` `"VAEL_CRYPTO_ALGORITHM"`, `"VAEL_CRYPTO_KEY"`, `"VAEL_CRYPTO_IV"`, `"VAEL_CRYPTO_DETACHED"`, or `"VAEL_CRYPTO_TOO_MANY_OBJECTS"`.
+   * @since 0.0.0-alpha.0
    */
   export function createDecryptor(
     algorithm: CipherAlgorithm,
@@ -265,6 +329,7 @@ declare module "vael:crypto" {
    *
    * @throws {TypeError} on wrong argument type or arity.
    * @throws {Error} with `code` `"VAEL_CRYPTO_ALGORITHM"` or `"VAEL_CRYPTO_TOO_MANY_OBJECTS"`.
+   * @since 0.0.0-alpha.0
    */
   export function createHash(algorithm: HashAlgorithm): Hash;
 
@@ -274,6 +339,7 @@ declare module "vael:crypto" {
    * @param key Key bytes or UTF-8 string (max 1 MiB).
    * @throws {TypeError} on wrong argument types or arity.
    * @throws {Error} with `code` `"VAEL_CRYPTO_ALGORITHM"`, `"VAEL_CRYPTO_TOO_MANY_OBJECTS"`, `"VAEL_CRYPTO_LIMIT"`, or `"VAEL_CRYPTO_DETACHED"`.
+   * @since 0.0.0-alpha.0
    */
   export function createHmac(algorithm: HashAlgorithm, key: Uint8Array | string): Hash;
 
@@ -282,10 +348,14 @@ declare module "vael:crypto" {
    * jobs / 64 MiB total across async crypto workers; input max 16 MiB).
    *
    * Rejects with `VAEL_CRYPTO_BUSY` if the worker budget is exhausted.
+   *
+   * @since 0.0.0-alpha.0
    */
   export function hashAsync(algorithm: HashAlgorithm, data: Uint8Array | string): Promise<Uint8Array>;
   /**
    * Compute a one-shot encoded SHA-2 digest string on the bounded worker pool.
+   *
+   * @since 0.0.0-alpha.0
    */
   export function hashAsync(
     algorithm: HashAlgorithm,
@@ -296,6 +366,8 @@ declare module "vael:crypto" {
   /**
    * Compute a one-shot HMAC digest on the bounded worker pool (max 64 pending
    * jobs / 64 MiB total).
+   *
+   * @since 0.0.0-alpha.0
    */
   export function hmacAsync(
     algorithm: HashAlgorithm,
@@ -304,6 +376,8 @@ declare module "vael:crypto" {
   ): Promise<Uint8Array>;
   /**
    * Compute a one-shot encoded HMAC digest string on the bounded worker pool.
+   *
+   * @since 0.0.0-alpha.0
    */
   export function hmacAsync(
     algorithm: HashAlgorithm,
@@ -323,6 +397,7 @@ declare module "vael:crypto" {
    * @throws {TypeError} on wrong argument types or arity.
    * @throws {RangeError} when `iterations` or `length` is outside its bounds.
    * @throws {Error} with `code` `"VAEL_CRYPTO_ALGORITHM"`, `"VAEL_CRYPTO_LIMIT"`, or `"VAEL_CRYPTO_DETACHED"`.
+   * @since 0.0.0-alpha.0
    */
   export function pbkdf2(
     algorithm: HashAlgorithm,
@@ -336,6 +411,8 @@ declare module "vael:crypto" {
    * Derive key material using PBKDF2-HMAC-SHA2 on the bounded worker pool.
    *
    * Shares the 64-job / 64 MiB pending async crypto budget (`VAEL_CRYPTO_BUSY`).
+   *
+   * @since 0.0.0-alpha.0
    */
   export function pbkdf2Async(
     algorithm: HashAlgorithm,
@@ -354,12 +431,15 @@ declare module "vael:crypto" {
    * @throws {TypeError} on wrong argument types or arity.
    * @throws {RangeError} when `cost` is not an integer in `4..=16`.
    * @throws {Error} with `code` `"VAEL_CRYPTO_LIMIT"`, `"VAEL_CRYPTO_RANDOM"`, or `"VAEL_CRYPTO_DETACHED"`.
+   * @since 0.0.0-alpha.0
    */
   export function bcryptHash(password: Uint8Array | string, cost?: number): string;
 
   /**
    * Hash a password with bcrypt on the bounded worker pool (`$2b$` format,
    * max 72 bytes, `cost` in `4..=16`, default `10`).
+   *
+   * @since 0.0.0-alpha.0
    */
   export function bcryptHashAsync(password: Uint8Array | string, cost?: number): Promise<string>;
 
@@ -368,11 +448,15 @@ declare module "vael:crypto" {
    * in constant time.
    *
    * Passwords over 72 bytes and malformed or over-cost (> 16) hashes return `false`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export function bcryptVerify(password: Uint8Array | string, hash: string): boolean;
 
   /**
    * Verify `password` against a bcrypt hash on the bounded worker pool.
+   *
+   * @since 0.0.0-alpha.0
    */
   export function bcryptVerifyAsync(password: Uint8Array | string, hash: string): Promise<boolean>;
 
@@ -383,6 +467,8 @@ declare module "vael:crypto" {
    * Shares are **not** authenticated. Limits: `secret` `1..=8 MiB`,
    * `2 <= threshold <= shareCount <= 255`, `secret.length * shareCount <= 64 MiB`.
    * Rejects `SharedArrayBuffer`-backed views with `VAEL_CRYPTO_SHAMIR_SHARED`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export function shamirSplit(
     secret: Uint8Array,
@@ -392,6 +478,8 @@ declare module "vael:crypto" {
 
   /**
    * Split `secret` into GF(256) Shamir shares on the bounded worker pool.
+   *
+   * @since 0.0.0-alpha.0
    */
   export function shamirSplitAsync(
     secret: Uint8Array,
@@ -406,11 +494,14 @@ declare module "vael:crypto" {
    * non-zero length (max 8 MiB per share, 64 MiB total).
    *
    * @param threshold Optional minimum share count (`2..=255`, `<= shares.length`).
+   * @since 0.0.0-alpha.0
    */
   export function shamirCombine(shares: readonly ShamirShare[], threshold?: number): Uint8Array;
 
   /**
    * Reconstruct a secret from GF(256) Shamir shares on the bounded worker pool.
+   *
+   * @since 0.0.0-alpha.0
    */
   export function shamirCombineAsync(
     shares: readonly ShamirShare[],

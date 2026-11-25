@@ -1,6 +1,13 @@
+/**
+ * RFC 9562 UUID v4 and v7 generators backed by the operating system CSPRNG.
+ *
+ * @since 0.0.0-alpha.0
+ */
 declare module "vael:uuid" {
   /**
    * Error codes thrown by `vael:uuid` generators on `Error.code`.
+   *
+   * @since 0.0.0-alpha.0
    */
   export type UuidErrorCode = "VAEL_UUID_RANDOM" | "VAEL_UUID_CLOCK" | "VAEL_UUID_INTERNAL";
 
@@ -10,6 +17,7 @@ declare module "vael:uuid" {
    *
    * @throws {TypeError} when any argument is supplied.
    * @throws {Error} with `code = "VAEL_UUID_RANDOM"` when the OS CSPRNG fails.
+   * @since 0.0.0-alpha.0
    */
   export function v4(): string;
 
@@ -23,6 +31,7 @@ declare module "vael:uuid" {
    *
    * @throws {TypeError} when any argument is supplied.
    * @throws {Error} with `code` `"VAEL_UUID_CLOCK"` or `"VAEL_UUID_RANDOM"`.
+   * @since 0.0.0-alpha.0
    */
   export function v7(): string;
 }

@@ -1,3 +1,8 @@
+/**
+ * Unicode 16.0 case-folding string comparisons and code-point trimming.
+ *
+ * @since 0.0.0-alpha.0
+ */
 declare module "vael:strings" {
   /**
    * Compare `text` and `other` under locale-independent Unicode 16.0 simple
@@ -6,6 +11,7 @@ declare module "vael:strings" {
    * Lone surrogates fold to themselves and never match half of a surrogate pair.
    *
    * @throws {TypeError} when `text` or `other` is not a string.
+   * @since 0.0.0-alpha.0
    */
   export function equalFold(text: string, other: string): boolean;
 
@@ -14,6 +20,7 @@ declare module "vael:strings" {
    * folding.
    *
    * @throws {TypeError} when `text` or `prefix` is not a string.
+   * @since 0.0.0-alpha.0
    */
   export function startsWithFold(text: string, prefix: string): boolean;
 
@@ -22,6 +29,7 @@ declare module "vael:strings" {
    * folding.
    *
    * @throws {TypeError} when `text` or `suffix` is not a string.
+   * @since 0.0.0-alpha.0
    */
   export function endsWithFold(text: string, suffix: string): boolean;
 
@@ -33,6 +41,7 @@ declare module "vael:strings" {
    * @param fromIndex Optional UTF-16 code-unit offset (clamped at `0` and `text.length`; `Infinity` / `-Infinity` clamp, `NaN` and fractions throw `RangeError`).
    * @throws {TypeError} when `text` or `search` is not a string, or `fromIndex` is defined and not a number.
    * @throws {RangeError} when `fromIndex` is `NaN` or a non-integer finite number.
+   * @since 0.0.0-alpha.0
    */
   export function indexOfFold(text: string, search: string, fromIndex?: number): number;
 
@@ -44,6 +53,7 @@ declare module "vael:strings" {
    * @param fromIndex Optional UTF-16 code-unit offset (defaults to `text.length`).
    * @throws {TypeError} when `text` or `search` is not a string, or `fromIndex` is defined and not a number.
    * @throws {RangeError} when `fromIndex` is `NaN` or a non-integer finite number.
+   * @since 0.0.0-alpha.0
    */
   export function lastIndexOfFold(text: string, search: string, fromIndex?: number): number;
 
@@ -54,6 +64,7 @@ declare module "vael:strings" {
    * Preserves lone surrogates in the retained interior.
    *
    * @throws {TypeError} when `text` is not a string, or `chars` is defined and not a string.
+   * @since 0.0.0-alpha.0
    */
   export function trim(text: string, chars?: string): string;
 
@@ -62,6 +73,7 @@ declare module "vael:strings" {
    * when `chars` is omitted).
    *
    * @throws {TypeError} when `text` is not a string, or `chars` is defined and not a string.
+   * @since 0.0.0-alpha.0
    */
   export function trimStart(text: string, chars?: string): string;
 
@@ -70,6 +82,7 @@ declare module "vael:strings" {
    * when `chars` is omitted).
    *
    * @throws {TypeError} when `text` is not a string, or `chars` is defined and not a string.
+   * @since 0.0.0-alpha.0
    */
   export function trimEnd(text: string, chars?: string): string;
 }
