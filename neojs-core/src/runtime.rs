@@ -556,6 +556,39 @@ impl Runtime {
             + 'static,
     {
         let transport = neojs_remote::test_transport(fetch);
+        Self::with_options_and_transport_impl(options, transport)
+    }
+
+    /// Creates a runtime configured by [`RuntimeOptions`] over an injected
+    /// remote transport that also inspects `Authorization` headers (for
+    /// `test-support` only).
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn with_options_and_auth_transport<F>(
+        options: RuntimeOptions,
+        fetch: F,
+    ) -> Result<Self, Error>
+    where
+        F: Fn(
+                &str,
+                std::time::Duration,
+                Option<&str>,
+                Option<&str>,
+                Option<&str>,
+            ) -> Result<neojs_remote::TestRemoteResponse, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let transport = neojs_remote::test_transport_with_auth(fetch);
+        Self::with_options_and_transport_impl(options, transport)
+    }
+
+    #[cfg(feature = "test-support")]
+    fn with_options_and_transport_impl(
+        options: RuntimeOptions,
+        transport: std::sync::Arc<dyn neojs_remote::RemoteTransport>,
+    ) -> Result<Self, Error> {
         let remote_cache_dir = options
             .remote
             .as_ref()

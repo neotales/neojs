@@ -1662,3 +1662,338 @@ fn lockfile_resolution_enforces_tree_hash_package_json_constraints_peers_and_ctx
         "malformed URL leaked: {bad_msg}"
     );
 }
+
+#[test]
+fn npmrc_scoped_routing_auth_env_redirect_stripping_and_offline_replay() {
+    use std::sync::{Arc, Mutex};
+
+    use neojs_npm::{
+        DEFAULT_REGISTRY_ORIGIN, Lockfile, NpmRootRequest, NpmrcConfig, NpmrcError,
+        RemoteNpmRegistry, VersionConstraint, resolve_requests_with_lockfile_and_npmrc,
+    };
+    use neojs_remote::{
+        RemoteClient, RemoteOptions, RemoteRequest, RemoteResponse, RemoteTransport,
+    };
+
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cas = CasStore::new(cache_dir.path());
+
+    // User ~/.npmrc defines a default mirror and fallback auth; project .npmrc
+    // overrides default registry back to npmjs, adds @private + @basic scopes,
+    // configures path-specific auth, and leaves ${MISSING_TOKEN} unset for @unset.
+    fs::write(
+        home.path().join(".npmrc"),
+        r#"
+            registry=https://user-mirror.example.test/
+            //priv.example.test/:_authToken=user_stale_token
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        project.path().join(".npmrc"),
+        r#"
+            # Project overrides user settings
+            registry=https://registry.npmjs.org/
+            @Private:registry=https://priv.example.test/team/
+            @Basic:registry=https://basic.example.test/
+            @Unset:registry=https://unset.example.test/
+            //priv.example.test/:_authToken=root_should_not_win
+            //priv.example.test/team/:_authToken=${TEAM_TOKEN}
+            //basic.example.test/:_auth=${BASIC_CREDS}
+            //unset.example.test/:_authToken=${MISSING_TOKEN}
+        "#,
+    )
+    .unwrap();
+
+    let npmrc =
+        NpmrcConfig::load_for_project(project.path(), Some(home.path()), &|name| match name {
+            "TEAM_TOKEN" => Some("team_secret_token".to_owned()),
+            "BASIC_CREDS" => Some("dXNlcjpwYXNz".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+
+    // Verify Debug output never leaks secrets.
+    let dbg = format!("{npmrc:?}");
+    assert!(!dbg.contains("team_secret_token"));
+    assert!(!dbg.contains("dXNlcjpwYXNz"));
+    assert!(!dbg.contains("user_stale_token"));
+
+    let (pub_tgz, pub_sri) = build_tgz(&[
+        TarEntrySpec::file(
+            "package/package.json",
+            r#"{"name":"pub-lib","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+        ),
+        TarEntrySpec::file("package/index.mjs", "export const pub = 'public';\n"),
+    ]);
+    let (priv_tgz, priv_sri) = build_tgz(&[
+        TarEntrySpec::file(
+            "package/package.json",
+            r#"{"name":"@private/lib","version":"1.0.0","type":"module","exports":"./index.mjs","dependencies":{"pub-lib":"^1.0.0"}}"#,
+        ),
+        TarEntrySpec::file(
+            "package/index.mjs",
+            "import { pub } from 'pub-lib'; export const val = `priv:${pub}`;\n",
+        ),
+    ]);
+    let (basic_tgz, basic_sri) = build_tgz(&[
+        TarEntrySpec::file(
+            "package/package.json",
+            r#"{"name":"@basic/lib","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+        ),
+        TarEntrySpec::file("package/index.mjs", "export const b = 'basic-ok';\n"),
+    ]);
+
+    type RouteEntry = (u16, Option<String>, Vec<u8>);
+    type RequestLog = Vec<(String, Option<String>)>;
+
+    #[derive(Clone, Default)]
+    struct MockAuthTransport {
+        routes: Arc<Mutex<BTreeMap<String, RouteEntry>>>,
+        log: Arc<Mutex<RequestLog>>,
+    }
+    impl RemoteTransport for MockAuthTransport {
+        fn get(&self, request: &RemoteRequest<'_>) -> Result<RemoteResponse, String> {
+            self.log.lock().unwrap().push((
+                request.url.as_str().to_owned(),
+                request.authorization.map(str::to_owned),
+            ));
+            let guard = self.routes.lock().unwrap();
+            if let Some((status, location, body)) = guard.get(request.url.as_str()) {
+                Ok(RemoteResponse {
+                    status: *status,
+                    location: location.clone(),
+                    declared_length: Some(body.len() as u64),
+                    etag: None,
+                    last_modified: None,
+                    cache_control: Some("max-age=60".to_owned()),
+                    date: None,
+                    age: None,
+                    body: Box::new(std::io::Cursor::new(body.clone())),
+                })
+            } else {
+                Ok(RemoteResponse {
+                    status: 404,
+                    location: None,
+                    declared_length: None,
+                    etag: None,
+                    last_modified: None,
+                    cache_control: None,
+                    date: None,
+                    age: None,
+                    body: Box::new(std::io::Cursor::new(b"not found".to_vec())),
+                })
+            }
+        }
+    }
+
+    let transport = MockAuthTransport::default();
+    {
+        let mut r = transport.routes.lock().unwrap();
+        // Public package on registry.npmjs.org
+        let pub_pack = serde_json::json!({
+            "name": "pub-lib",
+            "dist-tags": { "latest": "1.0.0" },
+            "versions": {
+                "1.0.0": {
+                    "version": "1.0.0",
+                    "dist": {
+                        "tarball": "https://registry.npmjs.org/pub-lib/-/1.0.0.tgz",
+                        "integrity": pub_sri
+                    }
+                }
+            }
+        });
+        r.insert(
+            "https://registry.npmjs.org/pub-lib".to_owned(),
+            (200, None, serde_json::to_vec(&pub_pack).unwrap()),
+        );
+        r.insert(
+            "https://registry.npmjs.org/pub-lib/-/1.0.0.tgz".to_owned(),
+            (200, None, pub_tgz),
+        );
+
+        // @private/lib on https://priv.example.test/team/, tarball redirects cross-origin to CDN!
+        let priv_pack = serde_json::json!({
+            "name": "@private/lib",
+            "dist-tags": { "latest": "1.0.0" },
+            "versions": {
+                "1.0.0": {
+                    "version": "1.0.0",
+                    "dependencies": { "pub-lib": "^1.0.0" },
+                    "dist": {
+                        "tarball": "https://priv.example.test/team/@private/lib/-/1.0.0.tgz",
+                        "integrity": priv_sri
+                    }
+                }
+            }
+        });
+        r.insert(
+            "https://priv.example.test/team/@private%2flib".to_owned(),
+            (200, None, serde_json::to_vec(&priv_pack).unwrap()),
+        );
+        r.insert(
+            "https://priv.example.test/team/@private/lib/-/1.0.0.tgz".to_owned(),
+            (
+                302,
+                Some("https://cdn.unrelated.test/blobs/priv-1.0.0.tgz".to_owned()),
+                Vec::new(),
+            ),
+        );
+        r.insert(
+            "https://cdn.unrelated.test/blobs/priv-1.0.0.tgz".to_owned(),
+            (200, None, priv_tgz),
+        );
+
+        // @basic/lib on https://basic.example.test/
+        let basic_pack = serde_json::json!({
+            "name": "@basic/lib",
+            "dist-tags": { "latest": "1.0.0" },
+            "versions": {
+                "1.0.0": {
+                    "version": "1.0.0",
+                    "dist": {
+                        "tarball": "https://basic.example.test/@basic/lib/-/1.0.0.tgz",
+                        "integrity": basic_sri
+                    }
+                }
+            }
+        });
+        r.insert(
+            "https://basic.example.test/@basic%2flib".to_owned(),
+            (200, None, serde_json::to_vec(&basic_pack).unwrap()),
+        );
+        r.insert(
+            "https://basic.example.test/@basic/lib/-/1.0.0.tgz".to_owned(),
+            (200, None, basic_tgz),
+        );
+    }
+
+    let client = RemoteClient::with_transport(
+        RemoteOptions::new().without_cache(),
+        Arc::new(transport.clone()),
+    );
+    let remote_reg =
+        RemoteNpmRegistry::with_client(DEFAULT_REGISTRY_ORIGIN, client).with_npmrc(npmrc.clone());
+
+    let mut lockfile = Lockfile::new();
+    let reqs = vec![
+        NpmRootRequest {
+            name: PackageName::parse("@private/lib").unwrap(),
+            constraint: VersionConstraint::parse("^1.0.0").unwrap(),
+            optional: false,
+        },
+        NpmRootRequest {
+            name: PackageName::parse("@basic/lib").unwrap(),
+            constraint: VersionConstraint::parse("^1.0.0").unwrap(),
+            optional: false,
+        },
+    ];
+    let (graph, modified) = resolve_requests_with_lockfile_and_npmrc(
+        &reqs,
+        &mut lockfile,
+        &cas,
+        Some(&remote_reg),
+        DEFAULT_REGISTRY_ORIGIN,
+        false,
+        false,
+        NpmLimits::default(),
+        &TargetPlatform::current(),
+        Some(&npmrc),
+        false,
+    )
+    .unwrap();
+    assert!(modified);
+
+    let log = transport.log.lock().unwrap().clone();
+    assert!(
+        log.contains(&(
+            "https://priv.example.test/team/@private%2flib".to_owned(),
+            Some("Bearer team_secret_token".to_owned())
+        )),
+        "expected Bearer team_secret_token for @private/lib packument: {log:?}"
+    );
+    assert!(
+        log.contains(&(
+            "https://priv.example.test/team/@private/lib/-/1.0.0.tgz".to_owned(),
+            Some("Bearer team_secret_token".to_owned())
+        )),
+        "expected Bearer team_secret_token for @private/lib tarball: {log:?}"
+    );
+    assert!(
+        log.contains(&(
+            "https://cdn.unrelated.test/blobs/priv-1.0.0.tgz".to_owned(),
+            None
+        )),
+        "cross-origin redirect MUST strip Authorization header: {log:?}"
+    );
+    assert!(
+        log.contains(&("https://registry.npmjs.org/pub-lib".to_owned(), None)),
+        "public package must NOT receive private Authorization header: {log:?}"
+    );
+    assert!(
+        log.contains(&(
+            "https://basic.example.test/@basic%2flib".to_owned(),
+            Some("Basic dXNlcjpwYXNz".to_owned())
+        )),
+        "expected Basic auth for @basic/lib: {log:?}"
+    );
+
+    // Virtual URL of @private/lib uses priv.example.test host, while pub-lib uses registry.npmjs.org.
+    let priv_spec = NpmSpecifier::parse("npm:@private/lib@^1.0.0").unwrap();
+    let priv_url = graph.resolve_root_specifier(&priv_spec).unwrap();
+    assert_eq!(priv_url.host_str(), Some("priv.example.test"));
+    let pub_dep_res = graph
+        .resolve_from_npm_referrer(&priv_url, "pub-lib")
+        .unwrap();
+    match pub_dep_res {
+        NpmReferrerResolution::NpmUrl(url) => {
+            assert_eq!(url.host_str(), Some("registry.npmjs.org"));
+        }
+        other => panic!("expected NpmUrl, got {other:?}"),
+    }
+
+    // Offline replay with lockfile + CAS + npmrc succeeds with zero network calls!
+    let count_before = transport.log.lock().unwrap().len();
+    let (offline_graph, offline_modified) = resolve_requests_with_lockfile_and_npmrc(
+        &reqs,
+        &mut lockfile,
+        &cas,
+        None::<&RemoteNpmRegistry>,
+        DEFAULT_REGISTRY_ORIGIN,
+        true,
+        true,
+        NpmLimits::default(),
+        &TargetPlatform::current(),
+        Some(&npmrc),
+        false,
+    )
+    .unwrap();
+    assert!(!offline_modified);
+    assert_eq!(transport.log.lock().unwrap().len(), count_before);
+    assert!(offline_graph.resolve_root_specifier(&priv_spec).is_ok());
+
+    // Requesting @unset/pkg (whose ${MISSING_TOKEN} is unset) fails closed with MissingAuthEnvVar.
+    let unset_err = remote_reg
+        .fetch_packument(&PackageName::parse("@unset/pkg").unwrap())
+        .unwrap_err();
+    assert!(
+        matches!(
+            unset_err,
+            ResolverError::Npmrc(NpmrcError::MissingAuthEnvVar { ref var_name })
+                if var_name == "MISSING_TOKEN"
+        ),
+        "unexpected error: {unset_err}"
+    );
+
+    // Plaintext http:// tarball URL matching an auth rule fails closed with InsecureAuthUrl.
+    let http_err = remote_reg
+        .fetch_tarball("http://priv.example.test/team/pkg.tgz", "sha512-x")
+        .unwrap_err();
+    assert!(
+        matches!(http_err, ResolverError::Npmrc(NpmrcError::InsecureAuthUrl)),
+        "unexpected error: {http_err}"
+    );
+}
