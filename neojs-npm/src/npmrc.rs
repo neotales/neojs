@@ -215,9 +215,15 @@ impl AuthScope {
         if self.path_prefix == "/" {
             return true;
         }
+        Self::path_prefix_matches(&self.path_prefix, url)
+    }
+
+    fn path_prefix_matches(path_prefix: &str, url: &Url) -> bool {
+        if path_prefix == "/" {
+            return true;
+        }
         let req_path = url.path();
-        req_path.starts_with(&self.path_prefix)
-            || req_path == &self.path_prefix[..self.path_prefix.len() - 1]
+        req_path.starts_with(path_prefix) || req_path == &path_prefix[..path_prefix.len() - 1]
     }
 }
 
@@ -423,7 +429,14 @@ impl NpmrcConfig {
         self.scoped_registries.get(&norm)
     }
 
-    /// Resolves the authentication credential for `url`.
+    /// Returns `true` if `url`'s path matches the normalized `path_prefix`
+    /// on segment boundaries.
+    pub fn path_prefix_matches(path_prefix: &str, url: &Url) -> bool {
+        AuthScope::path_prefix_matches(path_prefix, url)
+    }
+
+    /// Resolves the authentication credential and matched normalized path prefix
+    /// for `url`.
     ///
     /// Enforces HTTPS-only delivery, exact host + port matching, and longest
     /// normalized path-prefix matching.
@@ -433,7 +446,10 @@ impl NpmrcConfig {
     /// - Returns `Err(NpmrcError::MissingAuthEnvVar { .. })` if the best-matching
     ///   HTTPS auth rule referenced an unset `${ENV_VAR}`.
     /// - Returns `Ok(None)` if no auth rule matches `url`.
-    pub fn auth_for_url(&self, url: &Url) -> Result<Option<&RegistryAuth>, NpmrcError> {
+    pub fn auth_with_scope_for_url(
+        &self,
+        url: &Url,
+    ) -> Result<Option<(&RegistryAuth, &str)>, NpmrcError> {
         let mut best: Option<(&AuthScope, &AuthEntry)> = None;
         for (scope, entry) in &self.auth_rules {
             if !scope.matches(url) {
@@ -448,7 +464,7 @@ impl NpmrcConfig {
             }
         }
 
-        let Some((_, entry)) = best else {
+        let Some((scope, entry)) = best else {
             return Ok(None);
         };
 
@@ -457,21 +473,56 @@ impl NpmrcConfig {
         }
 
         match entry {
-            AuthEntry::Ready(auth) => Ok(Some(auth)),
+            AuthEntry::Ready(auth) => Ok(Some((auth, scope.path_prefix.as_str()))),
             AuthEntry::MissingEnvVar { var_name } => Err(NpmrcError::MissingAuthEnvVar {
                 var_name: var_name.clone(),
             }),
         }
     }
+
+    /// Resolves the authentication credential for `url`.
+    ///
+    /// Enforces HTTPS-only delivery, exact host + port matching, and longest
+    /// normalized path-prefix matching.
+    ///
+    /// - Returns `Err(NpmrcError::InsecureAuthUrl)` if an auth rule matches a
+    ///   non-HTTPS URL.
+    /// - Returns `Err(NpmrcError::MissingAuthEnvVar { .. })` if the best-matching
+    ///   HTTPS auth rule referenced an unset `${ENV_VAR}`.
+    /// - Returns `Ok(None)` if no auth rule matches `url`.
+    pub fn auth_for_url(&self, url: &Url) -> Result<Option<&RegistryAuth>, NpmrcError> {
+        self.auth_with_scope_for_url(url)
+            .map(|opt| opt.map(|(auth, _)| auth))
+    }
 }
 
 fn read_optional_npmrc_file(path: &Path) -> Result<Option<Zeroizing<String>>, NpmrcError> {
+    let pre_meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(NpmrcError::Io {
+                operation: "stat",
+                reason: err.to_string(),
+            });
+        }
+    };
+    if pre_meta.file_type().is_symlink() || !pre_meta.is_file() {
+        return Err(NpmrcError::NotRegularFile);
+    }
+
     let mut opts = OpenOptions::new();
     opts.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
 
     let file = match opts.open(path) {
@@ -489,7 +540,7 @@ fn read_optional_npmrc_file(path: &Path) -> Result<Option<Zeroizing<String>>, Np
         operation: "stat",
         reason: err.to_string(),
     })?;
-    if !meta.is_file() {
+    if meta.file_type().is_symlink() || !meta.is_file() {
         return Err(NpmrcError::NotRegularFile);
     }
     if meta.len() > MAX_NPMRC_BYTES as u64 {
@@ -749,10 +800,10 @@ fn build_auth_entry(
     if out.is_empty() {
         return Err(NpmrcError::EmptyAuthValue { line: line_no });
     }
-    if out.bytes().any(|b| b < 0x21 || b == 0x7f) {
+    if out.bytes().any(|b| !b.is_ascii_graphic()) {
         return Err(NpmrcError::InvalidAuthValue {
             line: line_no,
-            reason: "auth credential must not contain whitespace or control characters".to_owned(),
+            reason: "auth credential must contain only visible ASCII characters".to_owned(),
         });
     }
 
@@ -984,11 +1035,21 @@ mod tests {
         assert!(!auth_dbg.contains(secret));
         assert!(auth_dbg.contains("<redacted>"));
 
-        // Invalid value with CR/LF must not echo secret in error.
+        // Invalid value with CR/LF, non-ASCII, or DEL must not echo secret in error.
         let crlf = format!("//a.example.com/:_authToken=\"{secret}\\r\\nX-Inject: 1\"");
         let err = NpmrcConfig::parse(&crlf, &no_env).unwrap_err();
         assert!(!err.to_string().contains(secret));
         assert!(!format!("{err:?}").contains(secret));
+
+        for bad_val in [
+            format!("//a.example.com/:_authToken=\"{secret}é\""),
+            format!("//a.example.com/:_authToken=\"{secret}\x7f\""),
+            format!("//a.example.com/:_authToken=\"{secret}\\t\""),
+        ] {
+            let err = NpmrcConfig::parse(&bad_val, &no_env).unwrap_err();
+            assert!(matches!(err, NpmrcError::InvalidAuthValue { .. }), "{err}");
+            assert!(!err.to_string().contains(secret));
+        }
     }
 
     #[test]
@@ -1036,7 +1097,13 @@ mod tests {
             "https://registry.npmjs.org/"
         );
 
-        // Symlinked .npmrc fails closed via O_NOFOLLOW on Unix.
+        // Directory .npmrc fails closed.
+        let dir_proj = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir_proj.path().join(".npmrc")).unwrap();
+        let dir_err = NpmrcConfig::load_for_project(dir_proj.path(), None, &no_env).unwrap_err();
+        assert_eq!(dir_err, NpmrcError::NotRegularFile);
+
+        // Symlinked .npmrc fails closed via symlink_metadata + O_NOFOLLOW on Unix.
         #[cfg(unix)]
         {
             let sym_proj = tempfile::tempdir().unwrap();
@@ -1044,16 +1111,7 @@ mod tests {
             std::fs::write(&target, "registry=https://example.com/\n").unwrap();
             std::os::unix::fs::symlink(&target, sym_proj.path().join(".npmrc")).unwrap();
             let err = NpmrcConfig::load_for_project(sym_proj.path(), None, &no_env).unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    NpmrcError::Io {
-                        operation: "open",
-                        ..
-                    }
-                ),
-                "{err}"
-            );
+            assert_eq!(err, NpmrcError::NotRegularFile);
         }
     }
 }

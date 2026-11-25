@@ -12,13 +12,21 @@
 //! - When the `network` feature is enabled, TLS is provided by the reviewed
 //!   `rustls` backend through `ureq`, with the Mozilla root store bundled by
 //!   `webpki-roots`. No native or user root store is consulted.
-//! - No cookies, authorization header, referrer, proxy from the environment, or
-//!   client certificate is sent. A URL with a username or password is rejected
-//!   before a request is made, so a credential cannot be forwarded by accident.
+//! - By default (`fetch` and `fetch_entry`), no cookies, authorization
+//!   header, referrer, proxy from the environment, or client certificate is
+//!   sent. A URL with a username or password is rejected before a request is
+//!   made, so a credential cannot be forwarded by accident.
+//! - Callers that perform explicit HTTPS registry authentication
+//!   (`fetch_with_authorization` / `fetch_with_scoped_authorization`) may
+//!   attach an `Authorization` header to the initial HTTPS request; in that
+//!   mode the shared unauthenticated HTTP cache is bypassed completely, and
+//!   `Authorization` is stripped on any cross-origin redirect or any redirect
+//!   rejected by the caller's scope predicate.
 //! - Redirects are followed by neojs, not by the HTTP client, so every hop is
 //!   checked. The target must be `https:`, credential-free, and within the
-//!   configured redirect limit. Cross-origin HTTPS redirects are allowed
-//!   because no credential, cookie, or referrer is sent.
+//!   configured redirect limit. Cross-origin HTTPS redirects are allowed;
+//!   default fetches carry no credential, cookie, or referrer, and
+//!   authenticated fetches strip `Authorization` before following them.
 //! - Idle connection pooling is disabled. `ureq` may otherwise retry a request
 //!   whose reused connection was closed, which would be an invisible extra
 //!   request; every actual request must count against the request budget.
@@ -715,7 +723,7 @@ impl RemoteClient {
 
     /// Fetches one imported module.
     pub fn fetch(&self, requested: &Url) -> Result<FetchedModule, RemoteError> {
-        self.fetch_impl(requested, false, None)
+        self.fetch_impl(requested, false, None, None)
     }
 
     /// Fetches one resource, optionally attaching an `Authorization` header to
@@ -730,7 +738,22 @@ impl RemoteClient {
         requested: &Url,
         authorization: Option<&str>,
     ) -> Result<FetchedModule, RemoteError> {
-        self.fetch_impl(requested, false, authorization)
+        self.fetch_impl(requested, false, authorization, None)
+    }
+
+    /// Fetches one resource with an optional `Authorization` header and a
+    /// caller-supplied `allow_redirect` predicate evaluated on each redirect
+    /// target URL.
+    ///
+    /// `Authorization` is stripped (and never re-attached on later hops) if a
+    /// redirect changes origin OR if `allow_redirect(&next)` returns `false`.
+    pub fn fetch_with_scoped_authorization(
+        &self,
+        requested: &Url,
+        authorization: Option<&str>,
+        allow_redirect: &dyn Fn(&Url) -> bool,
+    ) -> Result<FetchedModule, RemoteError> {
+        self.fetch_impl(requested, false, authorization, Some(allow_redirect))
     }
 
     /// Fetches the entry module before the runtime consumes itself.
@@ -738,7 +761,7 @@ impl RemoteClient {
     /// A failed entry fetch releases its slot, so a preflight failure does not
     /// spend the graph budget.
     pub fn fetch_entry(&self, requested: &Url) -> Result<FetchedModule, RemoteError> {
-        self.fetch_impl(requested, true, None)
+        self.fetch_impl(requested, true, None, None)
     }
 
     /// Fetches a module body, following checked redirects and using the cache.
@@ -751,9 +774,11 @@ impl RemoteClient {
         requested: &Url,
         entry_mode: bool,
         authorization: Option<&str>,
+        redirect_auth_filter: Option<&dyn Fn(&Url) -> bool>,
     ) -> Result<FetchedModule, RemoteError> {
         validate_url(requested)?;
-        if authorization.is_some_and(|a| a.bytes().any(|b| b == b'\r' || b == b'\n' || b == b'\0'))
+        if authorization
+            .is_some_and(|a| a.is_empty() || a.bytes().any(|b| b != b' ' && !b.is_ascii_graphic()))
         {
             return Err(RemoteError::RequestFailed {
                 url: display_url(requested),
@@ -778,7 +803,12 @@ impl RemoteClient {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .insert(key.clone());
         }
-        let result = self.fetch_body(requested, &mut admission, authorization);
+        let result = self.fetch_body(
+            requested,
+            &mut admission,
+            authorization,
+            redirect_auth_filter,
+        );
         if result.is_err() && entry_mode {
             // The runtime has not run any module, so no redaction URL from this
             // failed entry fetch should remain charged.
@@ -820,6 +850,7 @@ impl RemoteClient {
         requested: &Url,
         admission: &mut Admission<'_>,
         authorization: Option<&str>,
+        redirect_auth_filter: Option<&dyn Fn(&Url) -> bool>,
     ) -> Result<FetchedModule, RemoteError> {
         let deadline = Instant::now()
             .checked_add(self.options.timeout)
@@ -883,7 +914,11 @@ impl RemoteClient {
             // Reserve the request before revision-file I/O: a retry cannot
             // avoid the request budget by failing while allocating a token.
             self.budget.charge_request(&self.options)?;
-            let request_generation = self.next_request_generation(&current, deadline);
+            let request_generation = if bypass_cache {
+                None
+            } else {
+                self.next_request_generation(&current, deadline)
+            };
             if redirects == 0 {
                 initial_generation = request_generation.clone();
             }
@@ -1030,7 +1065,9 @@ impl RemoteClient {
                 })?;
                 validate_redirect(&target)?;
                 let next = request_url(&target);
-                if next.origin() != initial_origin {
+                if next.origin() != initial_origin
+                    || redirect_auth_filter.is_some_and(|pred| !pred(&next))
+                {
                     active_auth = None;
                 }
                 current = next;
@@ -5954,8 +5991,124 @@ mod tests {
             ]
         );
 
-        // Authenticated fetch must not populate the unauthenticated HTTP cache.
+        // Authenticated fetch must not populate the unauthenticated HTTP cache
+        // nor create any `.rev`/`.lock` cache artifacts on disk.
         let cache = super::Cache::new(dir.path());
         assert_eq!(cache.load_offline(&url).expect("ok"), None);
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("read cache_dir")
+                .count(),
+            0,
+            "authenticated fetch must perform zero cache disk I/O"
+        );
+    }
+
+    #[test]
+    fn fetch_with_scoped_authorization_strips_on_out_of_scope_same_origin_redirect() {
+        for (redirect_target, expected_third_auth) in [
+            ("https://priv.example.test/other/1.0.0.tgz", None),
+            ("https://priv.example.test/team-evil/1.0.0.tgz", None),
+        ] {
+            let seen = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+            let seen_clone = Arc::clone(&seen);
+            let target_owned = redirect_target.to_owned();
+            let transport =
+                super::test_transport_with_auth(move |url, _timeout, _etag, _ims, auth| {
+                    seen_clone
+                        .lock()
+                        .expect("lock")
+                        .push((url.to_owned(), auth.map(str::to_owned)));
+                    if url == "https://priv.example.test/team/pkg.tgz" {
+                        Ok(super::TestRemoteResponse {
+                            status: 302,
+                            location: Some("https://priv.example.test/team/sub/pkg.tgz".to_owned()),
+                            ..Default::default()
+                        })
+                    } else if url == "https://priv.example.test/team/sub/pkg.tgz" {
+                        Ok(super::TestRemoteResponse {
+                            status: 302,
+                            location: Some(target_owned.clone()),
+                            ..Default::default()
+                        })
+                    } else if url == target_owned {
+                        Ok(super::TestRemoteResponse {
+                            status: 302,
+                            location: Some("https://priv.example.test/team/bounce".to_owned()),
+                            ..Default::default()
+                        })
+                    } else if url == "https://priv.example.test/team/bounce" {
+                        Ok(super::TestRemoteResponse {
+                            status: 200,
+                            body: b"ok".to_vec(),
+                            ..Default::default()
+                        })
+                    } else {
+                        panic!("unexpected URL: {url}");
+                    }
+                });
+
+            let c = RemoteClient::with_transport(RemoteOptions::new().without_cache(), transport);
+            let url = Url::parse("https://priv.example.test/team/pkg.tgz").expect("url");
+            let fetched = c
+                .fetch_with_scoped_authorization(&url, Some("Bearer team_tok"), &|next| {
+                    let p = next.path();
+                    p.starts_with("/team/") || p == "/team"
+                })
+                .expect("fetch succeeds");
+            assert_eq!(fetched.body, b"ok");
+
+            let recorded = seen.lock().expect("lock").clone();
+            assert_eq!(
+                recorded,
+                vec![
+                    (
+                        "https://priv.example.test/team/pkg.tgz".to_owned(),
+                        Some("Bearer team_tok".to_owned())
+                    ),
+                    (
+                        "https://priv.example.test/team/sub/pkg.tgz".to_owned(),
+                        Some("Bearer team_tok".to_owned())
+                    ),
+                    (redirect_target.to_owned(), expected_third_auth),
+                    ("https://priv.example.test/team/bounce".to_owned(), None),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_with_authorization_rejects_non_ascii_and_control_chars() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let called = Arc::new(AtomicUsize::new(0));
+        let called_clone = Arc::clone(&called);
+        let transport = super::test_transport_with_auth(move |_, _, _, _, _| {
+            called_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(super::TestRemoteResponse {
+                status: 200,
+                body: b"ok".to_vec(),
+                ..Default::default()
+            })
+        });
+        let c = RemoteClient::with_transport(RemoteOptions::new().without_cache(), transport);
+        let url = Url::parse("https://priv.example.test/pkg.tgz").expect("url");
+        for bad in [
+            "",
+            "Bearer\ttok",
+            "Bearer tok\r\nX-Evil: 1",
+            "Bearer tok\x00",
+            "Bearer tok\x7f",
+            "Bearer toké",
+        ] {
+            let err = c
+                .fetch_with_authorization(&url, Some(bad))
+                .expect_err("invalid header must fail closed");
+            assert!(
+                matches!(err, RemoteError::RequestFailed { .. }),
+                "unexpected err for {bad:?}: {err}"
+            );
+        }
+        assert_eq!(called.load(Ordering::SeqCst), 0);
     }
 }

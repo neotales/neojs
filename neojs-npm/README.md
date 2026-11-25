@@ -25,4 +25,5 @@ cargo tree --locked -p neojs-npm -e normal
 - `package_json`: bounded `PackageJson` parser (`MAX_PACKAGE_JSON_BYTES = 1 MiB`), ordered `ExportsField`, `ScriptAudit`, and `TargetPlatform`.
 - `exports`: `ExportsResolver` for `exports`, `#imports`, self-reference, restricted `main` fallback, and nearest-`package.json` ESM classification.
 - `cas` & `tarball`: `CasStore`, `TarballIngestor` (SRI `sha512` check + bounded POSIX/ustar/PAX tar reader directly over `flate2::read::GzDecoder`), and `PackageTree`.
+- `npmrc`: bounded `.npmrc` parser (`MAX_NPMRC_BYTES = 256 KiB`), `@scope:registry` routing, HTTPS-only `_authToken`/`_auth` matching with lazy `${ENV_VAR}` resolution, redaction, and `ZeroizeOnDrop`.
 - `resolver`: `NpmRegistry` trait, `RemoteNpmRegistry`, `NpmGraphResolver`, `ResolvedNpmGraph`, and `ProjectPackageResolver`.

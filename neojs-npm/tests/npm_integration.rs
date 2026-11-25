@@ -1996,4 +1996,80 @@ fn npmrc_scoped_routing_auth_env_redirect_stripping_and_offline_replay() {
         matches!(http_err, ResolverError::Npmrc(NpmrcError::InsecureAuthUrl)),
         "unexpected error: {http_err}"
     );
+
+    // Same-origin redirects leaving `/team/` (to `/other/` or `/team-evil/`) must
+    // strip `Authorization` on the redirect target even though `priv.example.test`
+    // also has a `/` fallback rule.
+    for redirect_dst in [
+        "https://priv.example.test/other/priv-1.0.0.tgz",
+        "https://priv.example.test/team-evil/priv-1.0.0.tgz",
+    ] {
+        let seen_redirect = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let seen_clone = Arc::clone(&seen_redirect);
+        struct RedirectCheckTransport {
+            dst: String,
+            log: Arc<Mutex<RequestLog>>,
+        }
+        impl RemoteTransport for RedirectCheckTransport {
+            fn get(&self, request: &RemoteRequest<'_>) -> Result<RemoteResponse, String> {
+                self.log.lock().unwrap().push((
+                    request.url.as_str().to_owned(),
+                    request.authorization.map(str::to_owned),
+                ));
+                if request.url.as_str() == "https://priv.example.test/team/redirect-src.tgz" {
+                    Ok(RemoteResponse {
+                        status: 302,
+                        location: Some(self.dst.clone()),
+                        declared_length: None,
+                        etag: None,
+                        last_modified: None,
+                        cache_control: None,
+                        date: None,
+                        age: None,
+                        body: Box::new(std::io::Cursor::new(Vec::new())),
+                    })
+                } else {
+                    Ok(RemoteResponse {
+                        status: 200,
+                        location: None,
+                        declared_length: Some(3),
+                        etag: None,
+                        last_modified: None,
+                        cache_control: None,
+                        date: None,
+                        age: None,
+                        body: Box::new(std::io::Cursor::new(b"tgz".to_vec())),
+                    })
+                }
+            }
+        }
+        let redirect_client = RemoteClient::with_transport(
+            RemoteOptions::new().without_cache(),
+            Arc::new(RedirectCheckTransport {
+                dst: redirect_dst.to_owned(),
+                log: seen_clone,
+            }),
+        );
+        let redirect_reg = RemoteNpmRegistry::with_client(DEFAULT_REGISTRY_ORIGIN, redirect_client)
+            .with_npmrc(npmrc.clone());
+        let bytes = redirect_reg
+            .fetch_tarball(
+                "https://priv.example.test/team/redirect-src.tgz",
+                "sha512-x",
+            )
+            .unwrap();
+        assert_eq!(bytes, b"tgz");
+        let calls = seen_redirect.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "https://priv.example.test/team/redirect-src.tgz".to_owned(),
+                    Some("Bearer team_secret_token".to_owned()),
+                ),
+                (redirect_dst.to_owned(), None),
+            ],
+            "same-origin out-of-scope redirect to {redirect_dst} must strip Authorization"
+        );
+    }
 }

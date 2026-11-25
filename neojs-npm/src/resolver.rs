@@ -13,7 +13,7 @@ use url::Url;
 use crate::cas::{CasError, CasStore, sha256_hex};
 use crate::exports::{ExportsError, ExportsResolver};
 use crate::lockfile::{LockedPackage, Lockfile, LockfileError};
-use crate::npmrc::{NpmrcConfig, NpmrcError, RegistryAuth};
+use crate::npmrc::{NpmrcConfig, NpmrcError};
 use crate::package_json::{
     MAX_PACKAGE_JSON_BYTES, PackageJson, PackageJsonError, PeerDependencyMeta, ScriptAudit,
     TargetPlatform,
@@ -428,17 +428,22 @@ impl NpmRegistry for RemoteNpmRegistry {
                 package: package_name.to_string(),
                 reason: err.to_string(),
             })?;
-        let auth_header = self
-            .npmrc
-            .auth_for_url(&url)?
-            .map(RegistryAuth::authorization_header_value);
-        let fetched = self
-            .client
-            .fetch_with_authorization(&url, auth_header.as_deref().map(String::as_str))
-            .map_err(|err| ResolverError::Registry {
-                package: package_name.to_string(),
-                reason: err.to_string(),
-            })?;
+        let matched = self.npmrc.auth_with_scope_for_url(&url)?;
+        let auth_header = matched.map(|(auth, _)| auth.authorization_header_value());
+        let matched_prefix = matched.map(|(_, prefix)| prefix);
+        let fetched = match (auth_header.as_deref(), matched_prefix) {
+            (Some(header), Some(prefix)) => {
+                self.client
+                    .fetch_with_scoped_authorization(&url, Some(header.as_str()), &|next| {
+                        NpmrcConfig::path_prefix_matches(prefix, next)
+                    })
+            }
+            _ => self.client.fetch_with_authorization(&url, None),
+        }
+        .map_err(|err| ResolverError::Registry {
+            package: package_name.to_string(),
+            reason: err.to_string(),
+        })?;
         Packument::parse_bytes(&fetched.body, self.limits.max_packument_bytes)
     }
 
@@ -448,17 +453,22 @@ impl NpmRegistry for RemoteNpmRegistry {
             reason: err.to_string(),
         })?;
         let display = neojs_remote::display_url(&url);
-        let auth_header = self
-            .npmrc
-            .auth_for_url(&url)?
-            .map(RegistryAuth::authorization_header_value);
-        let fetched = self
-            .client
-            .fetch_with_authorization(&url, auth_header.as_deref().map(String::as_str))
-            .map_err(|err| ResolverError::Registry {
-                package: display,
-                reason: err.to_string(),
-            })?;
+        let matched = self.npmrc.auth_with_scope_for_url(&url)?;
+        let auth_header = matched.map(|(auth, _)| auth.authorization_header_value());
+        let matched_prefix = matched.map(|(_, prefix)| prefix);
+        let fetched = match (auth_header.as_deref(), matched_prefix) {
+            (Some(header), Some(prefix)) => {
+                self.client
+                    .fetch_with_scoped_authorization(&url, Some(header.as_str()), &|next| {
+                        NpmrcConfig::path_prefix_matches(prefix, next)
+                    })
+            }
+            _ => self.client.fetch_with_authorization(&url, None),
+        }
+        .map_err(|err| ResolverError::Registry {
+            package: display,
+            reason: err.to_string(),
+        })?;
         Ok(fetched.body)
     }
 }
