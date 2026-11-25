@@ -2121,6 +2121,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "neojs-http-core"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "neojs-lite"
 version = "0.0.0-alpha.0"
 dependencies = [
