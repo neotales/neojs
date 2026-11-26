@@ -1,6 +1,24 @@
 /**
  * Node-compatible synchronous and async child process execution without a shell.
  *
+ * Available in `vjs` (`vjs-lite` omits async `execFile` and exposes only
+ * synchronous `spawnSync` and `execFileSync`). Enabled by default unless
+ * `--no-node-compat` is passed.
+ *
+ * For safety, executables are invoked directly without spawning a shell;
+ * passing `shell: true` fails with `ERR_UNSUPPORTED`.
+ *
+ * @example
+ * ```ts
+ * import { execFile, spawnSync } from "node:child_process";
+ *
+ * const syncRes = spawnSync("echo", ["hello"], { encoding: "utf8" });
+ * console.log(syncRes.status, syncRes.stdout.trim());
+ *
+ * const { stdout } = await execFile("echo", ["async"], { encoding: "utf8" });
+ * console.log(stdout.trim());
+ * ```
+ *
  * @since 0.0.0-alpha.0
  */
 declare module "node:child_process" {
@@ -17,17 +35,43 @@ declare module "node:child_process" {
    * @since 0.0.0-alpha.0
    */
   export interface ChildProcessOptions {
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Working directory for the child process (inherits parent cwd when omitted).
+     *
+     * @since 0.0.0-alpha.0
+     */
     cwd?: string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Environment key/value map applied to the child process (max 4096 entries).
+     *
+     * When provided, replaces the inherited environment with the specified entries.
+     *
+     * @since 0.0.0-alpha.0
+     */
     env?: Record<string, string | undefined>;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Data written to the child process standard input before closing stdin.
+     *
+     * @since 0.0.0-alpha.0
+     */
     input?: string | Uint8Array | ArrayBufferView;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Output encoding for `stdout` and `stderr` (`"buffer"` or `null` returns `Buffer` / `Uint8Array` bytes).
+     *
+     * @since 0.0.0-alpha.0
+     */
     encoding?: TextEncoding | "buffer" | null;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Maximum execution duration in milliseconds before killing and reaping the child process.
+     *
+     * @since 0.0.0-alpha.0
+     */
     timeout?: number;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Maximum bytes captured per output stream (`stdout` and `stderr`, default 10 MiB).
+     *
+     * @since 0.0.0-alpha.0
+     */
     maxBuffer?: number;
   }
 
@@ -37,35 +81,90 @@ declare module "node:child_process" {
    * @since 0.0.0-alpha.0
    */
   export interface SpawnSyncReturns<T = Uint8Array | string> {
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Process exit code, or `null` if terminated by a signal or spawn failed.
+     *
+     * @since 0.0.0-alpha.0
+     */
     status: number | null;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Signal name (such as `"SIGKILL"`) if terminated by a signal, otherwise `null`.
+     *
+     * @since 0.0.0-alpha.0
+     */
     signal: string | null;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Captured standard output (decoded string or `Buffer` bytes depending on `options.encoding`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     stdout: T;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Captured standard error (decoded string or `Buffer` bytes depending on `options.encoding`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     stderr: T;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Error object populated when spawning failed or the child process timed out.
+     *
+     * @since 0.0.0-alpha.0
+     */
     error?: Error;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * `true` when the child exceeded `options.timeout` and was terminated.
+     *
+     * @since 0.0.0-alpha.0
+     */
     timedOut: boolean;
   }
 
   /**
    * Synchronously spawn `command` returning raw `Uint8Array` stdout/stderr.
    *
+   * Executes `command` directly without a shell (max 4096 `args`). Non-zero exit
+   * codes do not throw; inspect `status` and `error` on the returned object.
+   *
+   * @param command Executable name or path.
+   * @param args Argument list passed to `command` (max 4096 entries).
+   * @param options Execution options with binary output (`encoding: "buffer" | null` or omitted).
+   * @returns Captured exit status, signal, `stdout`, `stderr`, optional `error`, and `timedOut` flag.
+   * @throws {TypeError} when arguments or options have invalid types, or `encoding` is unknown (`ERR_UNKNOWN_ENCODING`).
+   * @throws {RangeError} when `args`/`env` limits are exceeded or `timeout`/`maxBuffer` is invalid.
+   * @throws {Error} with `code = "ERR_UNSUPPORTED"` if `shell` is enabled in `options`.
+   * @example
+   * ```ts
+   * import { Buffer } from "node:buffer";
+   * import { spawnSync } from "node:child_process";
+   *
+   * const res = spawnSync("echo", ["raw-bytes"]);
+   * console.log(Buffer.from(res.stdout).toString("utf8").trim());
+   * ```
    * @since 0.0.0-alpha.0
    */
   export function spawnSync(command: string, args?: readonly string[], options?: ChildProcessOptions & { encoding?: "buffer" | null }): SpawnSyncReturns<Uint8Array>;
   /**
    * Synchronously spawn `command` returning string-decoded stdout/stderr.
    *
+   * @param command Executable name or path.
+   * @param args Argument list passed to `command` (max 4096 entries), or `undefined`.
+   * @param options Execution options specifying a `TextEncoding` for `stdout` and `stderr`.
+   * @returns Captured exit status, signal, string `stdout`, string `stderr`, optional `error`, and `timedOut` flag.
+   * @throws {TypeError} when arguments or options have invalid types, or `encoding` is unknown (`ERR_UNKNOWN_ENCODING`).
+   * @throws {RangeError} when `args`/`env` limits are exceeded or `timeout`/`maxBuffer` is invalid.
+   * @throws {Error} with `code = "ERR_UNSUPPORTED"` if `shell` is enabled in `options`.
    * @since 0.0.0-alpha.0
    */
   export function spawnSync(command: string, args: readonly string[] | undefined, options: ChildProcessOptions & { encoding: TextEncoding }): SpawnSyncReturns<string>;
   /**
    * Synchronously spawn `command` with options.
    *
+   * @param command Executable name or path.
+   * @param options Execution options without an explicit `args` array.
+   * @returns Captured exit status, signal, `stdout`, `stderr`, optional `error`, and `timedOut` flag.
+   * @throws {TypeError} when arguments or options have invalid types, or `encoding` is unknown (`ERR_UNKNOWN_ENCODING`).
+   * @throws {RangeError} when `env` limits are exceeded or `timeout`/`maxBuffer` is invalid.
+   * @throws {Error} with `code = "ERR_UNSUPPORTED"` if `shell` is enabled in `options`.
    * @since 0.0.0-alpha.0
    */
   export function spawnSync(command: string, options?: ChildProcessOptions): SpawnSyncReturns<Uint8Array | string>;
@@ -73,18 +172,49 @@ declare module "node:child_process" {
   /**
    * Synchronously execute `file` returning raw `Uint8Array` stdout.
    *
+   * Unlike `spawnSync`, throws an `Error` (with `status`, `signal`, `stdout`,
+   * `stderr`, `timedOut`, and `code`) if the process fails to spawn, times out,
+   * or exits with a non-zero status.
+   *
+   * @param file Executable name or path.
+   * @param args Argument list passed to `file` (max 4096 entries).
+   * @param options Execution options with binary output.
+   * @returns Captured `stdout` bytes.
+   * @throws {TypeError} when arguments or options have invalid types, or `encoding` is unknown (`ERR_UNKNOWN_ENCODING`).
+   * @throws {RangeError} when `args`/`env` limits are exceeded or `timeout`/`maxBuffer` is invalid.
+   * @throws {Error} on non-zero exit, signal termination, timeout (`ETIMEDOUT`), spawn failure (`ENOENT`, `EACCES`, `EIO`), or `ERR_UNSUPPORTED` if `shell` is enabled.
+   * @example
+   * ```ts
+   * import { execFileSync } from "node:child_process";
+   *
+   * const out = execFileSync("echo", ["hello"], { encoding: "utf8" });
+   * console.log(out.trim());
+   * ```
    * @since 0.0.0-alpha.0
    */
   export function execFileSync(file: string, args?: readonly string[], options?: ChildProcessOptions & { encoding?: "buffer" | null }): Uint8Array;
   /**
    * Synchronously execute `file` returning string-decoded stdout.
    *
+   * @param file Executable name or path.
+   * @param args Argument list passed to `file` (max 4096 entries), or `undefined`.
+   * @param options Execution options specifying a `TextEncoding` for `stdout`.
+   * @returns Decoded `stdout` string.
+   * @throws {TypeError} when arguments or options have invalid types, or `encoding` is unknown (`ERR_UNKNOWN_ENCODING`).
+   * @throws {RangeError} when `args`/`env` limits are exceeded or `timeout`/`maxBuffer` is invalid.
+   * @throws {Error} on non-zero exit, signal termination, timeout (`ETIMEDOUT`), spawn failure (`ENOENT`, `EACCES`, `EIO`), or `ERR_UNSUPPORTED` if `shell` is enabled.
    * @since 0.0.0-alpha.0
    */
   export function execFileSync(file: string, args: readonly string[] | undefined, options: ChildProcessOptions & { encoding: TextEncoding }): string;
   /**
    * Synchronously execute `file` with options.
    *
+   * @param file Executable name or path.
+   * @param options Execution options without an explicit `args` array.
+   * @returns Captured `stdout` as `Uint8Array` or decoded `string`.
+   * @throws {TypeError} when arguments or options have invalid types, or `encoding` is unknown (`ERR_UNKNOWN_ENCODING`).
+   * @throws {RangeError} when `env` limits are exceeded or `timeout`/`maxBuffer` is invalid.
+   * @throws {Error} on non-zero exit, signal termination, timeout (`ETIMEDOUT`), spawn failure (`ENOENT`, `EACCES`, `EIO`), or `ERR_UNSUPPORTED` if `shell` is enabled.
    * @since 0.0.0-alpha.0
    */
   export function execFileSync(file: string, options?: ChildProcessOptions): Uint8Array | string;
@@ -94,19 +224,44 @@ declare module "node:child_process" {
    *
    * Resolves to `{ stdout, stderr }` when called without a callback, or invokes
    * `callback(err, stdout, stderr)` when a trailing callback is provided.
+   * Available in `vjs` only (`vjs-lite` provides synchronous `spawnSync` and
+   * `execFileSync` only).
    *
+   * @param file Executable name or path.
+   * @param options Execution options.
+   * @returns Promise resolving to `{ stdout, stderr }`, or rejecting on spawn failure, timeout, or non-zero exit.
+   * @throws {TypeError} synchronously when `file` or `options` have invalid types, or `encoding` is unknown (`ERR_UNKNOWN_ENCODING`).
+   * @throws {RangeError} synchronously when `env` limits are exceeded or `timeout`/`maxBuffer` is invalid.
+   * @throws {Error} synchronously with `code = "ERR_UNSUPPORTED"` if `shell` is enabled; rejects asynchronously on non-zero exit, timeout (`ETIMEDOUT`), or spawn failure (`ENOENT`, `EACCES`, `EIO`).
+   * @example
+   * ```ts
+   * import { execFile } from "node:child_process";
+   *
+   * const { stdout } = await execFile("echo", ["hello"], { encoding: "utf8" });
+   * console.log(stdout.trim());
+   * ```
    * @since 0.0.0-alpha.0
    */
   export function execFile(file: string, options?: ChildProcessOptions): Promise<{ stdout: Uint8Array | string; stderr: Uint8Array | string }>;
   /**
    * Execute `file` asynchronously with `args` and optional `options`, returning a `Promise`.
    *
+   * @param file Executable name or path.
+   * @param args Argument list passed to `file` (max 4096 entries).
+   * @param options Execution options.
+   * @returns Promise resolving to `{ stdout, stderr }`, or rejecting on spawn failure, timeout, or non-zero exit.
+   * @throws {TypeError} synchronously when arguments or options have invalid types, or `encoding` is unknown (`ERR_UNKNOWN_ENCODING`).
+   * @throws {RangeError} synchronously when `args`/`env` limits are exceeded or `timeout`/`maxBuffer` is invalid.
+   * @throws {Error} synchronously with `code = "ERR_UNSUPPORTED"` if `shell` is enabled; rejects asynchronously on non-zero exit, timeout (`ETIMEDOUT`), or spawn failure (`ENOENT`, `EACCES`, `EIO`).
    * @since 0.0.0-alpha.0
    */
   export function execFile(file: string, args?: readonly string[], options?: ChildProcessOptions): Promise<{ stdout: Uint8Array | string; stderr: Uint8Array | string }>;
   /**
    * Execute `file` asynchronously and invoke `callback(error, stdout, stderr)`.
    *
+   * @param file Executable name or path.
+   * @param callback Node-style callback invoked with `(error, stdout, stderr)` upon completion.
+   * @throws {TypeError} synchronously when `file` is not a string.
    * @since 0.0.0-alpha.0
    */
   export function execFile(
@@ -116,6 +271,11 @@ declare module "node:child_process" {
   /**
    * Execute `file` asynchronously with `args` and invoke `callback(error, stdout, stderr)`.
    *
+   * @param file Executable name or path.
+   * @param args Argument list passed to `file` (max 4096 entries).
+   * @param callback Node-style callback invoked with `(error, stdout, stderr)` upon completion.
+   * @throws {TypeError} synchronously when `file` or `args` have invalid types.
+   * @throws {RangeError} synchronously when `args` exceeds 4096 entries.
    * @since 0.0.0-alpha.0
    */
   export function execFile(
@@ -126,6 +286,13 @@ declare module "node:child_process" {
   /**
    * Execute `file` asynchronously with `args` and `options`, invoking `callback(error, stdout, stderr)`.
    *
+   * @param file Executable name or path.
+   * @param args Argument list passed to `file` (max 4096 entries).
+   * @param options Execution options.
+   * @param callback Node-style callback invoked with `(error, stdout, stderr)` upon completion.
+   * @throws {TypeError} synchronously when arguments or options have invalid types, or `encoding` is unknown (`ERR_UNKNOWN_ENCODING`).
+   * @throws {RangeError} synchronously when `args`/`env` limits are exceeded or `timeout`/`maxBuffer` is invalid.
+   * @throws {Error} synchronously with `code = "ERR_UNSUPPORTED"` if `shell` is enabled.
    * @since 0.0.0-alpha.0
    */
   export function execFile(
@@ -141,10 +308,17 @@ declare module "node:child_process" {
    * @since 0.0.0-alpha.0
    */
   const _default: {
+    /** Synchronously spawn a child process. @since 0.0.0-alpha.0 */
     spawnSync: typeof spawnSync;
+    /** Synchronously execute a file and return stdout. @since 0.0.0-alpha.0 */
     execFileSync: typeof execFileSync;
+    /** Asynchronously execute a file and return stdout/stderr. @since 0.0.0-alpha.0 */
     execFile: typeof execFile;
   };
-  /** @since 0.0.0-alpha.0 */
+  /**
+   * Default export object providing `{ spawnSync, execFileSync, execFile }`.
+   *
+   * @since 0.0.0-alpha.0
+   */
   export default _default;
 }

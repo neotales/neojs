@@ -1,6 +1,18 @@
 /**
  * Node-compatible Windows path manipulation utilities (`node:path/win32`).
  *
+ * Available in both `vjs` and `vjs-lite` runtimes. Enabled by default unless
+ * `--no-node-compat` is passed. Always uses Windows `"\\"` separators and
+ * `";"` delimiters regardless of the host operating system.
+ *
+ * @example
+ * ```ts
+ * import win32 from "node:path/win32";
+ *
+ * console.log(win32.join("C:\\Users", "dev", "app.ts"));
+ * console.log(win32.basename("C:\\temp\\report.txt", ".txt"));
+ * ```
+ *
  * @since 0.0.0-alpha.0
  */
 declare module "node:path/win32" {
@@ -10,15 +22,35 @@ declare module "node:path/win32" {
    * @since 0.0.0-alpha.0
    */
   export interface ParsedPath {
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Root of the Windows path (such as `"C:\\"`, `"\\\\server\\share\\"`, or `""`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     root: string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Directory portion of the path without trailing separator (except root).
+     *
+     * @since 0.0.0-alpha.0
+     */
     dir: string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Final path component including file extension (for example `"file.txt"`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     base: string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * File extension including leading dot (for example `".txt"`), or `""`.
+     *
+     * @since 0.0.0-alpha.0
+     */
     ext: string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Final path component without its extension (for example `"file"`).
+     *
+     * @since 0.0.0-alpha.0
+     */
     name: string;
   }
 
@@ -28,15 +60,35 @@ declare module "node:path/win32" {
    * @since 0.0.0-alpha.0
    */
   export interface FormatInputPathObject {
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Root prefix used when `dir` is omitted.
+     *
+     * @since 0.0.0-alpha.0
+     */
     root?: string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Directory portion (takes precedence over `root` when provided).
+     *
+     * @since 0.0.0-alpha.0
+     */
     dir?: string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Complete filename (takes precedence over `name` and `ext` when provided).
+     *
+     * @since 0.0.0-alpha.0
+     */
     base?: string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * File extension used when `base` is omitted.
+     *
+     * @since 0.0.0-alpha.0
+     */
     ext?: string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Base filename without extension used when `base` is omitted.
+     *
+     * @since 0.0.0-alpha.0
+     */
     name?: string;
   }
 
@@ -46,63 +98,245 @@ declare module "node:path/win32" {
    * @since 0.0.0-alpha.0
    */
   export interface PlatformPath {
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Platform-specific path segment separator (`"\\"` for Windows).
+     *
+     * @since 0.0.0-alpha.0
+     */
     readonly sep: string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Platform-specific `PATH` environment variable delimiter (`";"` for Windows).
+     *
+     * @since 0.0.0-alpha.0
+     */
     readonly delimiter: string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Join all given path segments together and normalize the resulting path.
+     *
+     * @param paths Path segments to join.
+     * @returns Normalized joined path string.
+     * @throws {TypeError} when any segment is not a string.
+     * @since 0.0.0-alpha.0
+     */
     join(...paths: string[]): string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Resolve a sequence of paths or path segments into an absolute path.
+     *
+     * @param paths Sequence of path segments processed from right to left.
+     * @returns Resolved absolute path string.
+     * @throws {TypeError} when any segment is not a string.
+     * @since 0.0.0-alpha.0
+     */
     resolve(...paths: string[]): string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Normalize `path`, resolving `"."` and `".."` segments.
+     *
+     * @param path Path string to normalize.
+     * @returns Normalized path string.
+     * @throws {TypeError} when `path` is not a string.
+     * @since 0.0.0-alpha.0
+     */
     normalize(path: string): string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Return the relative path from `from` to `to`.
+     *
+     * @param from Origin path.
+     * @param to Destination path.
+     * @returns Relative path string from `from` to `to`.
+     * @throws {TypeError} when `from` or `to` is not a string.
+     * @since 0.0.0-alpha.0
+     */
     relative(from: string, to: string): string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Return the directory name of `path`.
+     *
+     * @param path Path string to inspect.
+     * @returns Parent directory portion of `path`.
+     * @throws {TypeError} when `path` is not a string.
+     * @since 0.0.0-alpha.0
+     */
     dirname(path: string): string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Return the last portion of `path`, optionally stripping a trailing `suffix`.
+     *
+     * @param path Path string to inspect.
+     * @param suffix Optional trailing extension or suffix to remove.
+     * @returns Final path component.
+     * @throws {TypeError} when `path` or `suffix` (when provided) is not a string.
+     * @since 0.0.0-alpha.0
+     */
     basename(path: string, suffix?: string): string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Return the extension of `path`, from the last `"."` in the basename to end of string.
+     *
+     * @param path Path string to inspect.
+     * @returns Extension string including leading dot, or `""` if none.
+     * @throws {TypeError} when `path` is not a string.
+     * @since 0.0.0-alpha.0
+     */
     extname(path: string): string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Parse `path` into `{ root, dir, base, ext, name }`.
+     *
+     * @param path Path string to parse.
+     * @returns Object describing the constituent components of `path`.
+     * @throws {TypeError} when `path` is not a string.
+     * @since 0.0.0-alpha.0
+     */
     parse(path: string): ParsedPath;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Format a `FormatInputPathObject` into a path string.
+     *
+     * @param pathObject Object specifying path components.
+     * @returns Formatted path string.
+     * @throws {TypeError} when `pathObject` is not an object or any present component is not a string.
+     * @since 0.0.0-alpha.0
+     */
     format(pathObject: FormatInputPathObject): string;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Return `true` if `path` is an absolute path.
+     *
+     * @param path Path string to test.
+     * @returns `true` if `path` is absolute, otherwise `false`.
+     * @throws {TypeError} when `path` is not a string.
+     * @since 0.0.0-alpha.0
+     */
     isAbsolute(path: string): boolean;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * POSIX-specific implementation of `PlatformPath`.
+     *
+     * @since 0.0.0-alpha.0
+     */
     readonly posix: PlatformPath;
-    /** @since 0.0.0-alpha.0 */
+    /**
+     * Windows-specific implementation of `PlatformPath`.
+     *
+     * @since 0.0.0-alpha.0
+     */
     readonly win32: PlatformPath;
   }
 
-  /** Windows path segment separator (`"\\"`). @since 0.0.0-alpha.0 */
+  /**
+   * Windows path segment separator (`"\\"`).
+   *
+   * @since 0.0.0-alpha.0
+   */
   export const sep: "\\";
-  /** Windows path list delimiter (`";"`). @since 0.0.0-alpha.0 */
+  /**
+   * Windows path list delimiter (`";"`).
+   *
+   * @since 0.0.0-alpha.0
+   */
   export const delimiter: ";";
-  /** Join path segments and normalize the result using Windows rules. @since 0.0.0-alpha.0 */
+  /**
+   * Join path segments and normalize the result using Windows rules.
+   *
+   * @param paths Path segments to join.
+   * @returns Normalized Windows path string.
+   * @throws {TypeError} when any segment is not a string.
+   * @example
+   * ```ts
+   * import { join } from "node:path/win32";
+   *
+   * console.log(join("C:\\Users", "dev", "project")); // "C:\\Users\\dev\\project"
+   * ```
+   * @since 0.0.0-alpha.0
+   */
   export function join(...paths: string[]): string;
-  /** Resolve a sequence of paths into an absolute Windows path. @since 0.0.0-alpha.0 */
+  /**
+   * Resolve a sequence of paths into an absolute Windows path.
+   *
+   * @param paths Sequence of path segments processed from right to left.
+   * @returns Resolved absolute Windows path string.
+   * @throws {TypeError} when any segment is not a string.
+   * @since 0.0.0-alpha.0
+   */
   export function resolve(...paths: string[]): string;
-  /** Normalize a Windows path, resolving `.` and `..` segments. @since 0.0.0-alpha.0 */
+  /**
+   * Normalize a Windows path, resolving `.` and `..` segments.
+   *
+   * @param path Windows path string to normalize.
+   * @returns Normalized Windows path string.
+   * @throws {TypeError} when `path` is not a string.
+   * @since 0.0.0-alpha.0
+   */
   export function normalize(path: string): string;
-  /** Solve the relative Windows path from `from` to `to`. @since 0.0.0-alpha.0 */
+  /**
+   * Solve the relative Windows path from `from` to `to`.
+   *
+   * @param from Origin Windows path.
+   * @param to Destination Windows path.
+   * @returns Relative Windows path string from `from` to `to`.
+   * @throws {TypeError} when `from` or `to` is not a string.
+   * @since 0.0.0-alpha.0
+   */
   export function relative(from: string, to: string): string;
-  /** Return the directory name of `path` using Windows rules. @since 0.0.0-alpha.0 */
+  /**
+   * Return the directory name of `path` using Windows rules.
+   *
+   * @param path Windows path string to inspect.
+   * @returns Parent directory portion of `path`.
+   * @throws {TypeError} when `path` is not a string.
+   * @since 0.0.0-alpha.0
+   */
   export function dirname(path: string): string;
-  /** Return the last portion of `path`, optionally stripping `suffix`. @since 0.0.0-alpha.0 */
+  /**
+   * Return the last portion of `path`, optionally stripping `suffix`.
+   *
+   * @param path Windows path string to inspect.
+   * @param suffix Optional trailing suffix to strip when matched.
+   * @returns Final path component.
+   * @throws {TypeError} when `path` or `suffix` (when provided) is not a string.
+   * @since 0.0.0-alpha.0
+   */
   export function basename(path: string, suffix?: string): string;
-  /** Return the extension of `path`. @since 0.0.0-alpha.0 */
+  /**
+   * Return the extension of `path`.
+   *
+   * @param path Windows path string to inspect.
+   * @returns Extension including leading dot, or `""` if none.
+   * @throws {TypeError} when `path` is not a string.
+   * @since 0.0.0-alpha.0
+   */
   export function extname(path: string): string;
-  /** Parse `path` into `{ root, dir, base, ext, name }` using Windows rules. @since 0.0.0-alpha.0 */
+  /**
+   * Parse `path` into `{ root, dir, base, ext, name }` using Windows rules.
+   *
+   * @param path Windows path string to parse.
+   * @returns Parsed path components.
+   * @throws {TypeError} when `path` is not a string.
+   * @since 0.0.0-alpha.0
+   */
   export function parse(path: string): ParsedPath;
-  /** Format a `FormatInputPathObject` into a Windows path string. @since 0.0.0-alpha.0 */
+  /**
+   * Format a `FormatInputPathObject` into a Windows path string.
+   *
+   * @param pathObject Object specifying path components.
+   * @returns Formatted Windows path string.
+   * @throws {TypeError} when `pathObject` is not an object or any component is not a string.
+   * @since 0.0.0-alpha.0
+   */
   export function format(pathObject: FormatInputPathObject): string;
-  /** Return `true` if `path` is an absolute Windows path. @since 0.0.0-alpha.0 */
+  /**
+   * Return `true` if `path` is an absolute Windows path.
+   *
+   * @param path Windows path string to test.
+   * @returns `true` if `path` is an absolute Windows path (drive root or UNC path), otherwise `false`.
+   * @throws {TypeError} when `path` is not a string.
+   * @since 0.0.0-alpha.0
+   */
   export function isAbsolute(path: string): boolean;
-  /** POSIX path utilities. @since 0.0.0-alpha.0 */
+  /**
+   * POSIX path utilities.
+   *
+   * @since 0.0.0-alpha.0
+   */
   export const posix: PlatformPath;
-  /** Windows path utilities. @since 0.0.0-alpha.0 */
+  /**
+   * Windows path utilities.
+   *
+   * @since 0.0.0-alpha.0
+   */
   export const win32: PlatformPath;
 
   /**
@@ -111,6 +345,10 @@ declare module "node:path/win32" {
    * @since 0.0.0-alpha.0
    */
   const _default: PlatformPath;
-  /** @since 0.0.0-alpha.0 */
+  /**
+   * Default export object providing the Windows `PlatformPath` API.
+   *
+   * @since 0.0.0-alpha.0
+   */
   export default _default;
 }
