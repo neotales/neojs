@@ -76,11 +76,28 @@ for (const name of ["os", "__vaelOs", "__VAEL_OS_PLATFORM__", "__VAEL_OS_ARCH__"
 }
 
 #[test]
-fn exports_equal_the_deno_build_target_constants() {
+fn exports_equal_the_normalized_build_target_constants() {
     let expected_platform = if cfg!(target_os = "macos") {
         "darwin"
     } else {
         std::env::consts::OS
+    };
+    let expected_arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "x86" => "386",
+        "arm" => "arm",
+        "riscv64" => "riscv64",
+        "powerpc64" => {
+            if cfg!(target_endian = "little") {
+                "ppc64le"
+            } else {
+                "ppc64"
+            }
+        }
+        "s390x" => "s390x",
+        "loongarch64" => "loong64",
+        other => other,
     };
     let source = format!(
         r#"
@@ -92,7 +109,7 @@ if (platform !== registry.platform) throw new Error("platform differs from the r
 if (arch !== registry.arch) throw new Error("arch differs from the registry");
 "#,
         platform = expected_platform,
-        arch = std::env::consts::ARCH,
+        arch = expected_arch,
     );
     run_js(&source);
 }

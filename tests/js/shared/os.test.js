@@ -3,7 +3,7 @@ import assert from "vael:assert";
 import * as os from "vael:os";
 import { arch, platform } from "vael:os";
 
-// Documented Deno.build.os and Deno.build.arch target vocabulary.
+// Documented Deno.build.os and normalized OCI/Go-style target arch vocabulary.
 const DENO_OS_VOCABULARY = new Set([
     "darwin",
     "linux",
@@ -16,15 +16,16 @@ const DENO_OS_VOCABULARY = new Set([
     "android",
 ]);
 
-const DENO_ARCH_VOCABULARY = new Set([
-    "x86_64",
-    "aarch64",
-    "x86",
+const NORMALIZED_ARCH_VOCABULARY = new Set([
+    "amd64",
+    "arm64",
+    "386",
     "arm",
     "riscv64",
-    "powerpc64",
+    "ppc64le",
+    "ppc64",
     "s390x",
-    "loongarch64",
+    "loong64",
 ]);
 
 test("vael:os registry, list, and module namespace share frozen identity", async () => {
@@ -56,18 +57,26 @@ test("vael:os registry, list, and module namespace share frozen identity", async
     assert.strictEquals(os.arch, registry.arch);
 });
 
-test("vael:os exposes non-empty strings in Deno target vocabulary", () => {
+test("vael:os exposes non-empty strings in normalized target vocabulary", () => {
     assert.strictEquals(typeof os.platform, "string");
     assert.strictEquals(typeof os.arch, "string");
     assert.ok(os.platform.length > 0, "platform must not be empty");
     assert.ok(os.arch.length > 0, "arch must not be empty");
 
-    // Uses Deno's target vocabulary (`Deno.build.os` / `Deno.build.arch`),
-    // not Rust's `"macos"` or Node's `process.platform`/`arch`.
+    // `platform` uses Deno's target vocabulary (`Deno.build.os`), not Rust's
+    // `"macos"` or Node's `"win32"`. `arch` uses normalized OCI/Go-style short
+    // names (`"amd64"`, `"arm64"`, `"386"`, etc.), not Rust's
+    // `"x86_64"`/`"aarch64"` or Node's `"x64"`/`"ia32"`.
     assert.ok(!["macos", "win32"].includes(os.platform), `unexpected non-Deno OS name: ${os.platform}`);
-    assert.ok(!["x64", "arm64", "ia32"].includes(os.arch), `unexpected Node arch name: ${os.arch}`);
+    assert.ok(
+        !["x86_64", "aarch64", "x64", "ia32"].includes(os.arch),
+        `unexpected non-normalized arch name: ${os.arch}`,
+    );
     assert.ok(DENO_OS_VOCABULARY.has(os.platform), `unexpected Deno OS constant: ${os.platform}`);
-    assert.ok(DENO_ARCH_VOCABULARY.has(os.arch), `unexpected Deno ARCH constant: ${os.arch}`);
+    assert.ok(
+        NORMALIZED_ARCH_VOCABULARY.has(os.arch),
+        `unexpected normalized ARCH constant: ${os.arch}`,
+    );
 });
 
 test("vael:os resists mutation and rejects bare specifiers", async () => {

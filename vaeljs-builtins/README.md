@@ -112,11 +112,12 @@ The canonical specifier and registry key is `vael:os`.
 | Export | Contract |
 | --- | --- |
 | `platform` | Deno-compatible build-target OS name (e.g. `"darwin"`, `"linux"`, `"windows"`). |
-| `arch` | Deno-compatible build-target CPU architecture (e.g. `"x86_64"`, `"aarch64"`). |
+| `arch` | Normalized build-target CPU architecture (e.g. `"amd64"`, `"arm64"`, `"386"`, `"arm"`, `"riscv64"`, `"ppc64le"`, `"ppc64"`, `"s390x"`, `"loong64"`). |
 
-Uses Deno's `Deno.build.os` / `Deno.build.arch` target vocabulary rather than
-Rust's `"macos"` or Node's `"x64"` / `"arm64"`. Performs no host probe, reads
-no environment variable or file, and installs no global.
+`platform` uses Deno's `Deno.build.os` target vocabulary rather than Rust's
+`"macos"` or Node's `"win32"`. `arch` uses clean OCI/Go-style short names rather
+than Rust's `"x86_64"` / `"aarch64"` or Node's `"x64"` / `"ia32"`. Performs no
+host probe, reads no environment variable or file, and installs no global.
 
 ## `vael:uuid`
 

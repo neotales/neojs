@@ -2627,12 +2627,13 @@
 
     // The `vael:os` built-in module object.
     //
-    // `platform` and `arch` use Deno's target vocabulary (`Deno.build.os` /
-    // `Deno.build.arch`) for the target this runtime was compiled for. The two
+    // `platform` uses Deno's `Deno.build.os` target vocabulary (`darwin`,
+    // `linux`, `windows`, etc.), and `arch` uses normalized OCI/Go-style short
+    // names (`amd64`, `arm64`, `386`, etc., not Rust's `x86_64`/`aarch64` or
+    // Node's `x64`/`ia32`) for the target this runtime was compiled for. The two
     // placeholders are replaced by `vaeljs-core/src/builtins.rs` before this
     // script is evaluated; they are compilation-target constants, not a runtime
-    // probe. macOS is `darwin` (not Rust's `macos`) and the architecture is
-    // `x86_64` or `aarch64` (not Node's `x64` or `arm64`).
+    // probe. macOS is `darwin` (not Rust's `macos`).
     //
     // This module calls no host op. It reads no environment variable,
     // OS-release file, registry, sysctl value, file, or process table, and it

@@ -983,13 +983,29 @@ console.log(`${os.platform}/${os.arch}`);
     } else {
         std::env::consts::OS
     };
+    let expected_arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "x86" => "386",
+        "arm" => "arm",
+        "riscv64" => "riscv64",
+        "powerpc64" => {
+            if cfg!(target_endian = "little") {
+                "ppc64le"
+            } else {
+                "ppc64"
+            }
+        }
+        "s390x" => "s390x",
+        "loongarch64" => "loong64",
+        other => other,
+    };
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         stdout(&output),
         format!(
             "true\ntrue\ntrue\n{}/{}\n",
-            expected_platform,
-            std::env::consts::ARCH
+            expected_platform, expected_arch
         )
     );
     assert_eq!(stderr(&output), "");

@@ -214,9 +214,10 @@ const TEMPLATE_REGISTRY_TOKEN: &str = "// __VAEL_TEMPLATE_REGISTRY_ENTRY__";
 /// selected built-in source and registration spliced in.
 ///
 /// [`VAEL_SHIM_SOURCE`] holds two placeholders, one per `vael:os` value. They are
-/// replaced with ECMAScript string literals for this build's Deno-compatible
-/// `vaeljs_builtins::os::platform()` and `arch()`, so the module reports the
-/// target the runtime was compiled for and reads no host state at runtime.
+/// replaced with ECMAScript string literals for this build's
+/// `vaeljs_builtins::os::platform()` (Deno-compatible OS target) and `arch()`
+/// (normalized short architecture name), so the module reports the target the
+/// runtime was compiled for and reads no host state at runtime.
 ///
 /// `vael-chars` spreads the native entry installed by `crate::chars::install`
 /// into the registry and the introspection list, and `vael-strings` splices the
