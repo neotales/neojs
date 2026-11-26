@@ -76,6 +76,7 @@ declare module "vael:os" {
     | "arm"
     | "riscv64"
     | "ppc64le"
+    | "ppc64"
     | "s390x"
     | "loong64"
     | (string & {});
