@@ -6,8 +6,8 @@ Fast, secure-by-default JavaScript and TypeScript runtimes for automation, Go-st
 
 - **Erasable TypeScript out of the box:** Run `.ts`, `.mts`, `.js`, and `.mjs` directly without a build step (`enum`, `namespace`, and transforms are rejected; no type-checking).
 - **Explicit `vael:*` standard library:** Canonical specifiers (`vael:http`, `vael:db`, `vael:template`, `vael:fs`, `vael:ssh`, `vael:crypto`, `vael:age`, `vael:cron`, `vael:test`, and more).
-- **Zero-`node_modules` `npm:` packages:** Content-verified CAS cache, deterministic `vael.lock` v1, `.npmrc` scoped auth (`${ENV_VAR}`), and zero auto-run install scripts.
-- **Opt-outable `node:*` compatibility:** Core `node:*` modules enabled by default (`--no-node-compat` to disable).
+- **Zero-`node_modules` `npm:`, remote & `vael.jsonc`:** Content-verified CAS cache, `vael.lock` v1, `.npmrc` scoped auth (`${ENV_VAR}`), `jsr:` / `gh:` / `https:` imports, `vael.jsonc` workspaces, and zero install scripts across both runtimes.
+- **Opt-outable `node:*` compatibility:** Core `node:*` modules (`11` in `vjs`, `10` sync in `vjs-lite`) enabled by default (`--no-node-compat` to disable).
 - **Go-style frameworkless web apps:** Immutable `(req, ctx) => Response` handlers over `vael:http` `ServeMux`, SQLite via `vael:db`, and XSS-safe `vael:template`.
 
 ## Quick Start
@@ -32,7 +32,7 @@ vjs examples/webapp/main.ts
 vjs test examples/webapp/app.test.ts
 ```
 
-Remote loading (`https:`, `gh:`, `github:`, `jsr:`, and network `npm:` fetches) is disabled by default in `vjs`; pass `--allow-remote` or set `VAELJS_ALLOW_REMOTE=1` to opt in.
+Remote loading (`https:`, `gh:`, `github:`, `jsr:`, and network `npm:` fetches) is disabled by default in both `vjs` and `vjs-lite`; pass `--allow-remote` or set `VAELJS_ALLOW_REMOTE=1` to opt in.
 
 ## `vjs` vs `vjs-lite`
 
@@ -42,9 +42,9 @@ Remote loading (`https:`, `gh:`, `github:`, `jsr:`, and network `npm:` fetches) 
 | **Rust `Vael.engine`** | `"vael"` | `"vael-lite"` |
 | **Erasable `.ts` / `.mts`** | Yes (`deno_ast`) | Yes (`deno_ast`, opt-outable) |
 | **Async I/O, Timers & Server** | Yes (Tokio + Hyper + `vael:http` / `vael:db` / `vael:cron`) | Job queue only (no host timers or TCP server) |
-| **Built-in Modules** | 31 total (`20 vael:*` + `11 node:*`) | 25 sync total (`15 vael:*` + `10 node:*`) |
-| **`npm:` / `jsr:` / `https:` / `gh:`** | Yes (`npm:` offline-first; remote opt-in) | Local & `vael.jsonc` workspaces only |
-| **Embedding Footprint** | Full V8 + Tokio + Hyper (`vaeljs-core`) | Small, zero-V8 / zero-Tokio (`vaeljs-lite-core`) |
+| **Built-in Modules** | 31 total (`20 vael:*` + `11 node:*`) | 25 sync total (`15 vael:*` + `10 node:*`, opt-outable) |
+| **`npm:`, Remote & `vael.jsonc`** | Yes (`npm:`, `jsr:`, `gh:`/`github:`, `https:`, `vael.jsonc`; remote opt-in) | Yes (`npm:`, `jsr:`, `gh:`/`github:`, `https:`, `vael.jsonc`; blocking `ureq` + `rustls`, opt-outable) |
+| **Embedding Footprint** | Full V8 + Tokio + Hyper (`vaeljs-core`) | Small, zero-V8 / zero-Tokio / zero-Hyper (`vaeljs-lite-core`, `--no-default-features`) |
 
 See [vjs vs vjs-lite](https://vaeljs.com/getting-started/vjs-vs-vjs-lite/) for the complete module and flag matrix.
 
@@ -65,7 +65,7 @@ Built-ins are imported strictly by canonical `vael:*` or `node:*` specifiers (ba
 | `vael:chars`, `vael:strings`, `vael:slices` | Unicode char classes, ASCII case-folding, live array/char slices | Both | [text & slices](https://vaeljs.com/modules/vael-text/) |
 | `vael:test`, `vael:assert` | Registration test runner and structural/Promise assertions | Both | [test & assert](https://vaeljs.com/modules/vael-testing/) |
 | `vael:cron`, `vael:console`, `vael:stdio`, `vael:uuid` | UTC cron (`vjs`), formatted console, stdio (`vjs`), UUID v4/v7 | Both / `vjs` | [utilities](https://vaeljs.com/modules/vael-utilities/) |
-| `node:*` | `buffer`, `child_process`, `crypto`, `fs`, `fs/promises` (`vjs`), `os`, `path`, `process`, `url` | Both | [node compat](https://vaeljs.com/modules/node-compat/) |
+| `node:*` | `buffer`, `child_process`, `crypto`, `fs`, `fs/promises` (`vjs`), `os`, `path` (`posix`, `win32`), `process`, `url` | Both | [node compat](https://vaeljs.com/modules/node-compat/) |
 
 ## Embedding in Rust (`vaeljs-lite-core`)
 
@@ -80,7 +80,7 @@ fn main() -> Result<(), vaeljs_lite_core::Error> {
 }
 ```
 
-Granular Cargo features (`--no-default-features` + `vael-fs`, `vael-crypto`, `vael-template`, `manifest`, `typescript`, etc.) let you select the exact surface compiled in. See the [Embedding Guide](https://vaeljs.com/guides/embedding-vaeljs-lite/).
+Default features include `remote` (blocking `ureq` + `rustls`, zero Tokio/hyper), `npm`, `node-compat`, `typescript`, and sync `vael:*` modules; opt out with `--no-default-features` and enable only what you need (`vael-fs`, `vael-crypto`, `vael-template`, `manifest`, `remote`, `npm`, `typescript`, etc.). See the [Embedding Guide](https://vaeljs.com/guides/embedding-vaeljs-lite/).
 
 ## Building & Testing from Source
 
