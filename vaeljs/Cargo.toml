@@ -28,18 +28,18 @@ node-compat = ["vaeljs-core/node-compat"]
 npm = ["vaeljs-core/npm"]
 
 [dependencies]
-vaeljs-core = { version = "0.0.0-alpha.0", path = "../vaeljs-core", default-features = false, features = ["vael-chars", "vael-slices", "vael-strings"] }
+vaeljs-core = { version = "0.0.0-alpha.1", path = "../vaeljs-core", default-features = false, features = ["vael-chars", "vael-slices", "vael-strings"] }
 vaeljs-dts.workspace = true
 vaeljs-manifest.workspace = true
 # Deterministic shell-style expansion for `vjs test`.
-vaeljs-module-policy = { version = "0.0.0-alpha.0", path = "../vaeljs-module-policy", features = ["test-glob"] }
+vaeljs-module-policy = { version = "0.0.0-alpha.1", path = "../vaeljs-module-policy", features = ["test-glob"] }
 
 [dev-dependencies]
 base64.workspace = true
 flate2.workspace = true
 # The duplicate dependency enables the test-only fault injection for this
 # package's tests. A normal `cargo build -p vaeljs` does not include dev-deps.
-vaeljs-core = { version = "0.0.0-alpha.0", path = "../vaeljs-core", default-features = false, features = ["test-support"] }
+vaeljs-core = { version = "0.0.0-alpha.1", path = "../vaeljs-core", default-features = false, features = ["test-support"] }
 vaeljs-npm.workspace = true
 neotales-ssh.workspace = true
 sha2.workspace = true

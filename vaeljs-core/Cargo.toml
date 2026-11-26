@@ -62,7 +62,7 @@ vaeljs-dbapi = { workspace = true, optional = true }
 vaeljs-fs-core.workspace = true
 vaeljs-http-core = { workspace = true, optional = true }
 vaeljs-manifest.workspace = true
-vaeljs-module-policy = { version = "0.0.0-alpha.0", path = "../vaeljs-module-policy", features = ["typescript"] }
+vaeljs-module-policy = { version = "0.0.0-alpha.1", path = "../vaeljs-module-policy", features = ["typescript"] }
 vaeljs-node-core = { workspace = true, optional = true }
 vaeljs-npm = { workspace = true, optional = true }
 vaeljs-remote.workspace = true

@@ -100,7 +100,7 @@ vaeljs-builtins = { workspace = true, optional = true }
 vaeljs-crypto-core = { workspace = true, optional = true }
 vaeljs-fs-core = { workspace = true, optional = true }
 vaeljs-manifest = { workspace = true, optional = true }
-vaeljs-module-policy = { version = "0.0.0-alpha.0", path = "../vaeljs-module-policy" }
+vaeljs-module-policy = { version = "0.0.0-alpha.1", path = "../vaeljs-module-policy" }
 vaeljs-node-core = { workspace = true, optional = true }
 vaeljs-npm = { workspace = true, optional = true }
 vaeljs-remote = { workspace = true, optional = true }

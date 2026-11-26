@@ -21,8 +21,8 @@ network = ["vaeljs-remote/network"]
 base64.workspace = true
 flate2.workspace = true
 indexmap.workspace = true
-vaeljs-manifest = { version = "0.0.0-alpha.0", path = "../vaeljs-manifest" }
-vaeljs-module-policy = { version = "0.0.0-alpha.0", path = "../vaeljs-module-policy" }
+vaeljs-manifest = { version = "0.0.0-alpha.1", path = "../vaeljs-manifest" }
+vaeljs-module-policy = { version = "0.0.0-alpha.1", path = "../vaeljs-module-policy" }
 vaeljs-remote = { workspace = true, default-features = false }
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }

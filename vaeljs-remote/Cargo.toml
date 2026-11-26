@@ -21,7 +21,7 @@ test-support = []
 
 [dependencies]
 httpdate.workspace = true
-vaeljs-manifest = { version = "0.0.0-alpha.0", path = "../vaeljs-manifest" }
+vaeljs-manifest = { version = "0.0.0-alpha.1", path = "../vaeljs-manifest" }
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true

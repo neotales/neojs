@@ -30,7 +30,7 @@ npm = ["vaeljs-lite-core/npm", "remote"]
 # The command's module bundle is explicit rather than inherited from
 # `vaeljs-lite-core` defaults, so a change to the library defaults cannot
 # silently change what the command advertises. This is not a sandbox.
-vaeljs-lite-core = { version = "0.0.0-alpha.0", path = "../vaeljs-lite-core", default-features = false, features = [
+vaeljs-lite-core = { version = "0.0.0-alpha.1", path = "../vaeljs-lite-core", default-features = false, features = [
     "manifest",
     "vael-assert",
     "vael-chars",
@@ -49,12 +49,12 @@ vaeljs-lite-core = { version = "0.0.0-alpha.0", path = "../vaeljs-lite-core", de
 vaeljs-dts.workspace = true
 vaeljs-manifest.workspace = true
 # Deterministic shell-style expansion for `vjs-lite test`.
-vaeljs-module-policy = { version = "0.0.0-alpha.0", path = "../vaeljs-module-policy", features = ["test-glob"] }
+vaeljs-module-policy = { version = "0.0.0-alpha.1", path = "../vaeljs-module-policy", features = ["test-glob"] }
 
 [dev-dependencies]
 base64.workspace = true
 flate2.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-vaeljs-lite-core = { version = "0.0.0-alpha.0", path = "../vaeljs-lite-core", default-features = false, features = ["test-support"] }
+vaeljs-lite-core = { version = "0.0.0-alpha.1", path = "../vaeljs-lite-core", default-features = false, features = ["test-support"] }
 vaeljs-npm.workspace = true
