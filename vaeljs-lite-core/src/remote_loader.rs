@@ -71,6 +71,7 @@ impl RemoteState {
         }
     }
 
+    #[cfg(feature = "npm")]
     pub(crate) fn client(&self) -> &RemoteClient {
         &self.client
     }
@@ -128,6 +129,7 @@ impl RemoteState {
                     reason,
                 });
             }
+            #[cfg(feature = "typescript")]
             Err(PrepareSourceError::TypeScript(reason)) => {
                 self.client
                     .refund_entry(&requested, body_len, module_charged);
@@ -178,6 +180,7 @@ impl RemoteState {
                     reason,
                 });
             }
+            #[cfg(feature = "typescript")]
             Err(PrepareSourceError::TypeScript(reason)) => {
                 return Err(Error::RemoteTypeScript {
                     url: canonical.to_string(),
@@ -306,18 +309,23 @@ impl RemoteState {
     /// Loads, verifies, and strips a pending/loaded JSR module.
     pub(crate) fn load_jsr(&self, name: &str) -> Result<Vec<u8>, String> {
         let url = Url::parse(name).map_err(|error| format!("invalid JSR module URL: {error}"))?;
-        let source = self
-            .load_jsr_prepared(&url)
-            .map_err(|err| err.into_message())?;
-        self.mark_jsr_loaded(&url);
-        Ok(source)
+        match self.load_jsr_prepared(&url) {
+            Ok(source) => {
+                self.mark_jsr_loaded(&url);
+                Ok(source)
+            }
+            Err(err) => {
+                self.unpend(&url);
+                Err(err.into_message())
+            }
+        }
     }
 
     /// Resolves an ordinary `https:` module URL, following redirects and
     /// caching its prepared source so QuickJS registers it under its final URL.
     pub(crate) fn resolve_https(&self, url: &Url) -> Result<String, String> {
         validate_url(url).map_err(|error| error.to_string())?;
-        if self.is_jsr_loaded(url) {
+        if self.is_jsr_candidate(url) {
             return Ok(url.to_string());
         }
         if let Some(aliased) = self.redirect_aliases.borrow().get(url.as_str()).cloned() {
@@ -373,11 +381,12 @@ impl RemoteState {
         let requested_identities = registry_identities_if_registry(requested);
         let final_identities = registry_identities_if_registry(final_url);
         {
+            let pending = self.jsr_pending.borrow();
             let loaded = self.jsr_loaded.borrow();
             if requested_identities
                 .iter()
                 .chain(final_identities.iter())
-                .any(|identity| loaded.contains(identity))
+                .any(|identity| loaded.contains(identity) || pending.contains(identity))
             {
                 return Err(format!(
                     "the final URL `{}` is already a verified JSR module; an ordinary HTTPS load cannot register a module under that identity",
@@ -395,6 +404,14 @@ impl RemoteState {
     fn pend(&self, url: &Url) {
         if !self.is_jsr_loaded(url) {
             self.jsr_pending.borrow_mut().insert(url.to_string());
+        }
+    }
+
+    fn unpend(&self, url: &Url) {
+        let identities = registry_identities(url);
+        let mut pending = self.jsr_pending.borrow_mut();
+        for identity in identities {
+            pending.remove(&identity);
         }
     }
 
@@ -556,13 +573,16 @@ impl RemoteState {
 
 enum PrepareSourceError {
     FormatOrUtf8(String),
+    #[cfg(feature = "typescript")]
     TypeScript(String),
 }
 
 impl PrepareSourceError {
     fn into_message(self) -> String {
         match self {
-            Self::FormatOrUtf8(msg) | Self::TypeScript(msg) => msg,
+            Self::FormatOrUtf8(msg) => msg,
+            #[cfg(feature = "typescript")]
+            Self::TypeScript(msg) => msg,
         }
     }
 }

@@ -43,21 +43,41 @@ mod remote_surface {
     }
 
     #[test]
-    fn run_url_rejects_plaintext_http_and_credentials_without_network() {
+    fn run_url_and_imports_reject_credentials_without_leaking_secrets() {
         let dir = tempfile::tempdir().expect("tempdir");
         for bad in [
             "http://example.test/mod.js",
             "https://user:secret@example.test/mod.js?token=leak",
             "gh:owner/repo/../../etc/passwd@main",
+            "gh:user:secret@host/repo@v1/mod.js",
+            "ftp://user:secret@host/mod.js?tok=leak",
         ] {
             let mut rt = Runtime::with_remote(RemoteOptions::new().with_cache_dir(dir.path()))
                 .expect("runtime");
             let err = rt.run_url(bad).expect_err("bad URL must fail");
             let msg = err.to_string();
-            assert!(!msg.contains("secret"), "{msg}");
-            assert!(!msg.contains("leak"), "{msg}");
+            assert!(!msg.contains("secret"), "{bad} -> {msg}");
+            assert!(!msg.contains("leak"), "{bad} -> {msg}");
+            assert!(!msg.contains("tok="), "{bad} -> {msg}");
             rt.run_source("still_usable.js", "export const ok = true;\n")
                 .expect("failed URL preflight leaves runtime unused");
+        }
+
+        // Importing malformed `gh:` or credentialed non-HTTP specifiers must also
+        // redact credentials in resolution error messages.
+        for bad_spec in [
+            "gh:user:secret@host/repo@v1/mod.js",
+            "ftp://user:secret@host/mod.js?tok=leak",
+        ] {
+            let mut rt = Runtime::with_remote(RemoteOptions::new().with_cache_dir(dir.path()))
+                .expect("runtime");
+            let err = rt
+                .run_source("entry.js", &format!("import '{bad_spec}';\n"))
+                .expect_err("credentialed specifier import must fail");
+            let msg = err.to_string();
+            assert!(!msg.contains("secret"), "{bad_spec} -> {msg}");
+            assert!(!msg.contains("leak"), "{bad_spec} -> {msg}");
+            assert!(!msg.contains("tok="), "{bad_spec} -> {msg}");
         }
     }
 }
@@ -67,7 +87,7 @@ mod remote_transport_tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
@@ -501,6 +521,64 @@ await import("jsr:@scope/pkg@1.0.0");
         }
     }
 
+    #[test]
+    fn failed_jsr_load_cleans_up_pending_state_and_allows_unrelated_https_imports() {
+        let cache = TempDir::new().expect("cache");
+        let routes = Arc::new(BTreeMap::from([
+            (
+                "https://jsr.io/@scope/bad/meta.json".to_owned(),
+                ok_response(r#"{"latest":"1.0.0","versions":{"1.0.0":{}}}"#),
+            ),
+            (
+                "https://jsr.io/@scope/bad/1.0.0_meta.json".to_owned(),
+                // Valid export so `resolve_jsr` marks `1.0.0/index.js` pending,
+                // then `load_jsr` fails due to checksum mismatch on `index.js`.
+                ok_response(
+                    r#"{"manifest":{"/index.js":{"size":24,"checksum":"sha256-0000000000000000000000000000000000000000000000000000000000000000"}},"exports":{".":"./index.js"}}"#,
+                ),
+            ),
+            (
+                "https://jsr.io/@scope/bad/1.0.0/index.js".to_owned(),
+                ok_response("export const bad = 1;\n"),
+            ),
+            (
+                "https://mods.test/ok.js".to_owned(),
+                ok_response("export const value = 42;\n"),
+            ),
+        ]));
+        let dir = TempDir::new().expect("project");
+        let manifest_check = dir.path().join("check.js");
+        fs::write(
+            &manifest_check,
+            r#"
+let sawErr = false;
+try {
+    await import("jsr:@scope/bad@1.0.0");
+} catch (_) {
+    sawErr = true;
+}
+// Direct HTTPS import of the same URL should now go through `load_https`
+// (not stale `jsr_pending` checksum verification) and succeed cleanly.
+const direct = await import("https://jsr.io/@scope/bad/1.0.0/index.js");
+const ok = await import("https://mods.test/ok.js");
+if (!sawErr || direct.bad !== 1 || ok.value !== 42) throw new Error("unexpected state");
+"#,
+        )
+        .expect("write");
+        let mut rt = Runtime::with_options_and_transport(
+            RuntimeOptions::new().with_remote(RemoteOptions::new().with_cache_dir(cache.path())),
+            move |url, _, _, _| {
+                routes
+                    .get(url)
+                    .cloned()
+                    .ok_or_else(|| format!("unexpected fetch: {url}"))
+            },
+        )
+        .expect("runtime");
+        rt.run_file(&manifest_check)
+            .expect("failed JSR load must clean up jsr_pending and not poison runtime");
+    }
+
     #[cfg(all(feature = "npm", feature = "typescript"))]
     mod npm_and_manifest_tests {
         use super::*;
@@ -510,6 +588,7 @@ await import("jsr:@scope/pkg@1.0.0");
         use flate2::write::GzEncoder;
         use sha2::Sha512;
         use std::io::Write as _;
+        use std::sync::Mutex;
         use vaeljs_npm::Lockfile;
 
         fn write_tar_header(name: &str, size: usize) -> [u8; 512] {

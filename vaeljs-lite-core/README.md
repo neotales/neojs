@@ -4,9 +4,10 @@ The primary VaelJS Lite interface: an embeddable QuickJS runtime for ECMAScript
 and erasable TypeScript module files. `vaeljs-lite` is a separate, secondary
 command-line wrapper around this crate.
 
-`vaeljs-lite-core` is built with `rquickjs`/QuickJS-NG. It is a separate crate
-from the V8-based `vaeljs-core`; the workspace's default build does not compile
-it and does not put QuickJS or `rquickjs` in the V8 graph.
+`vaeljs-lite-core` is built with `rquickjs`/QuickJS-NG and remains 100%
+synchronous with zero `tokio`, zero `hyper`, and zero V8/`deno_core`. It is a
+separate crate from the V8-based `vaeljs-core`; the workspace's default build
+does not compile it and does not put QuickJS or `rquickjs` in the V8 graph.
 
 ## Embed a module file
 
@@ -26,31 +27,50 @@ cargo run -p vaeljs-lite-core --example embed -- examples/hello.js
 ```
 
 Relative imports, absolute paths, and `file:` URLs resolve from the importing
-module. Static imports and dynamic `import()` use the same loader. With the
-opt-in `manifest` feature enabled, embedders can depend on `vaeljs-manifest`,
-build an `ImportResolver` with `discover_manifest` (`ImportResolver::from_manifest`
-or `Workspace::load` + `ImportResolver::from_workspace`), and pass it to
-`Runtime::with_import_resolver(resolver)` to resolve `vael.jsonc` `imports` and
-workspace `@scope/pkg` references to local `.js`/`.mjs`/`.ts`/`.mts` modules (remote
-`https:`, `gh:`, `jsr:`, and `npm:` targets are rejected); `Runtime::new()`
-performs zero implicit manifest discovery. `console.log` writes to standard
-output and `console.error` to standard error.
+module. Static imports and dynamic `import()` use the same loader.
+
+With the default `remote` and `npm` features enabled:
+
+* **Offline by default:** `Runtime::new()` / `RuntimeOptions::new()` keeps
+  network fetches disabled (`remote = None`).
+* **Remote & JSR (`remote`):** Opt in with `Runtime::with_remote(RemoteOptions::new())`
+  or `RuntimeOptions::with_remote(...)` to load `https:`, `gh:`/`github:`, and
+  `jsr:` entrypoints (`Runtime::run_url`) and imports via blocking `vaeljs-remote`
+  (`ureq` + `rustls`, zero Tokio/hyper). Plaintext `http://` and credentialed
+  URLs are rejected, and query/userinfo secrets are redacted from diagnostics.
+* **npm & `package.json` (`npm`):** Supports `npm:` specifiers, nearest
+  `package.json` (`dependencies`, `devDependencies`, `optionalDependencies`,
+  `exports`, `#imports`, peer dependencies, self-references), content-verified
+  CAS storage, `vael.lock` v1, and `.npmrc` scoped registries with HTTPS-only
+  Bearer auth (`NpmOptions`, `RuntimeOptions::with_npm`). Never creates or reads
+  `node_modules` and never runs lifecycle scripts.
+* **Manifest import maps (`manifest`, opt-in):** Depend on `vaeljs-manifest`,
+  build an `ImportResolver` with `discover_manifest` (`ImportResolver::from_manifest`
+  or `Workspace::load` + `ImportResolver::from_workspace`), and pass it to
+  `Runtime::with_import_resolver(resolver)` or `RuntimeOptions::with_import_resolver`
+  to resolve `vael.jsonc` `imports` (local paths, `file:`, `https:`, `gh:`/`github:`,
+  `jsr:`, `npm:`, `node:`) and workspace `@scope/pkg` references; `Runtime::new()`
+  performs zero implicit manifest discovery.
+
+`console.log` writes to standard output and `console.error` to standard error.
 
 ```rust
-use vaeljs_lite_core::{ImportResolver, Runtime};
+use vaeljs_lite_core::{ImportResolver, RemoteOptions, Runtime, RuntimeOptions};
 use vaeljs_manifest::{Workspace, discover_manifest};
 
 fn run_with_manifest() -> Result<(), Box<dyn std::error::Error>> {
-    let mut runtime = match discover_manifest(".", None)? {
-        Some(found) if !found.manifest.workspaces.is_empty() => {
+    let mut options = RuntimeOptions::new().with_remote(RemoteOptions::new());
+    if let Some(found) = discover_manifest(".", None)? {
+        let resolver = if !found.manifest.workspaces.is_empty() {
             let ws = Workspace::load(&found.path)?;
             let active = ws.member_for_path("main.js")?.map(|m| m.name());
-            Runtime::with_import_resolver(ImportResolver::from_workspace(&ws, active)?)?
-        }
-        Some(found) => Runtime::with_import_resolver(ImportResolver::from_manifest(&found))?,
-        None => Runtime::new()?,
-    };
-    runtime.run_file("main.js")?;
+            ImportResolver::from_workspace(&ws, active)?
+        } else {
+            ImportResolver::from_manifest(&found)
+        };
+        options = options.with_import_resolver(resolver);
+    }
+    Runtime::with_options(options)?.run_file("main.js")?;
     Ok(())
 }
 ```
@@ -87,20 +107,18 @@ fn main() -> Result<(), vaeljs_lite_core::Error> {
 ```
 
 `Runtime::run_tests` evaluates `Vael.getBuiltInModule("vael:test").run({ throwOnFailure: false, settle: true })`
-and returns a [`TestReport`] (`total`, `passed`, `failed`, `pending`, `unhandled`,
+and returns a `TestReport` (`total`, `passed`, `failed`, `pending`, `unhandled`,
 `unsettled`, `failures`, and `all_passed()`). Runner faults, unresolved test
 Promises, or disabled `vael-test` builds return `Error::TestRunner`.
 
 ## Runtime introspection
 
 The runtime installs a minimal `Vael` global. Its `engine` property is
-`"vael-lite"`. With the default `vael-assert`, `vael-chars`, `vael-console`,
-`vael-crypto`, `vael-fs`, `vael-os`, `vael-path`, `vael-slices`, `vael-ssh`,
-`vael-strings`, `vael-test`, and `vael-uuid` features the registry contains the
+`"vael-lite"`. With default features enabled, the registry contains the
 canonical shared modules `vael:assert`, `vael:chars`, `vael:console`, `vael:crypto`
 (13 synchronous exports only), `vael:fs`, `vael:os`, `vael:path`, `vael:slices`,
-`vael:ssh`, `vael:strings`, `vael:test`, `vael:uuid`, `vael:uuid/v4`, and
-`vael:uuid/v7`.
+`vael:ssh`, `vael:strings`, `vael:template`, `vael:test`, `vael:uuid`,
+`vael:uuid/v4`, and `vael:uuid/v7`.
 `Vael.getBuiltInModulesList()` returns one frozen array of canonical specifiers,
 and `Vael.getBuiltInModule(specifier)` returns the cached registry object (frozen
 for every module except `vael:console`, which is the live mutable
@@ -111,43 +129,29 @@ or fragment, or any unimplemented specifier returns `undefined`; a non-string
 name throws `TypeError`. The `Vael` object and the global property are frozen and
 non-writable, and the list is the same array for every lookup.
 
-```js
-console.log(Vael.engine); // "vael-lite"
-console.log(Vael.getBuiltInModulesList());
-// [ "vael:assert", "vael:chars", "vael:console", "vael:crypto", "vael:fs", "vael:os", "vael:path", "vael:slices", "vael:ssh", "vael:strings", "vael:test", "vael:uuid", "vael:uuid/v4", "vael:uuid/v7" ]
-console.log(Vael.getBuiltInModule("vael:chars").isLetter(0x41)); // true
-console.log(Vael.getBuiltInModule("vael:crypto").randomBytes(16).length); // 16
-console.log(Vael.getBuiltInModule("vael:fs").exists(".")); // true
-console.log(Vael.getBuiltInModule("vael:os").platform); // e.g. "linux"
-console.log(Vael.getBuiltInModule("vael:ssh").MAX_COMMAND_BYTES); // 65536
-console.log(Vael.getBuiltInModule("vael:strings").equalFold("K", "\u212A")); // true
-console.log(Vael.getBuiltInModule("vael:uuid").v4()); // e.g. "919108f7-52d1-4320-9bac-f847db4148a8"
-console.log(Vael.getBuiltInModule("chars")); // undefined
-```
+Canonical `vael:` (including ASCII case-insensitive `VAEL:` scheme) and `node:`
+built-in specifiers are never shadowed by `vael.jsonc` or `package.json`.
 
-This is not the V8 runtime's full built-in surface. Only `vael:assert`,
-`vael:chars`, `vael:console`, `vael:crypto` (13 synchronous exports; no `*Async`
-functions), `vael:fs`, `vael:os`, `vael:path`, `vael:slices`, `vael:ssh`,
-`vael:strings`, `vael:test`, `vael:uuid`, `vael:uuid/v4`, and `vael:uuid/v7` are
-implemented, and the list does not claim another module exists or will exist.
-The shared logic comes from `vaeljs-builtins` (`chars`, `os`, `strings`, and
-`uuid` bound as native QuickJS modules; `assert`, `console`, `path`, `slices`,
-and `test` evaluated from shared ECMAScript factories with native QuickJS host
-hooks), `vaeljs-crypto-core` (`crypto` synchronous exports bound as a
-native QuickJS module), `vaeljs-fs-core` (`fs` bound as a native QuickJS module),
-and `vaeljs-ssh-core` (`ssh` bound as a native QuickJS module). See
+This is not the V8 runtime's full built-in surface. Other V8 modules (`vael:age`,
+`vael:cron`, `vael:db`, `vael:http`, `vael:stdio`, `node:fs/promises`, and
+`*Async` crypto helpers) are not importable, and the `Vael` list does not claim
+them. See
 [`vaeljs-builtins/README.md`](../vaeljs-builtins/README.md),
 [`vaeljs-crypto-core/README.md`](../vaeljs-crypto-core/README.md),
-[`vaeljs-fs-core/README.md`](../vaeljs-fs-core/README.md), and
-[`vaeljs-ssh-core/README.md`](../vaeljs-ssh-core/README.md) for the precise limits.
+[`vaeljs-fs-core/README.md`](../vaeljs-fs-core/README.md),
+[`vaeljs-node-core/README.md`](../vaeljs-node-core/README.md),
+[`vaeljs-npm/README.md`](../vaeljs-npm/README.md),
+[`vaeljs-remote/README.md`](../vaeljs-remote/README.md),
+[`vaeljs-ssh-core/README.md`](../vaeljs-ssh-core/README.md), and
+[`vaeljs-template-core/README.md`](../vaeljs-template-core/README.md).
 
 ## Lifecycle
 
-A runtime evaluates one entry. A preflight failure (unsupported format,
-unreadable file, or TypeScript strip failure) leaves it unused, so another entry
-can be tried. Once evaluation starts, the runtime is consumed even if evaluation,
-the job drain, or an unhandled rejection fails. Create a new runtime for
-subsequent work.
+A runtime evaluates one entry (`run_file`, `run_url`, or `run_source`). A
+preflight failure (unsupported format, unreadable file, remote entry error, or
+TypeScript strip failure) leaves it unused, so another entry can be tried. Once
+evaluation starts, the runtime is consumed even if evaluation, the job drain, or
+an unhandled rejection fails. Create a new runtime for subsequent work.
 
 After the entry promise settles, the runtime drains the remaining QuickJS job
 queue, so a trailing `.then` or an unawaited dynamic import still runs. The
@@ -174,14 +178,8 @@ This crate does **not** claim parity with the V8-based `vaeljs`:
   loop beyond QuickJS's own job queue. A top-level `await` works only when
   QuickJS's own job queue can settle it, and `test(..., { timeout })` is
   rejected explicitly with `VAEL_TEST_NO_TIMER`.
-* **Most V8-only async/platform `vael:` modules are absent.** With the default
-  features, only the shared `vael:assert`, `vael:chars`, `vael:console`,
-  `vael:crypto` (13 synchronous exports), `vael:fs`, `vael:os`, `vael:path`,
-  `vael:slices`, `vael:ssh`, `vael:strings`, `vael:test`, `vael:uuid`,
-  `vael:uuid/v4`, and `vael:uuid/v7` modules are implemented. Other V8 modules
-  (`vael:age`, `vael:cron`, `vael:stdio`, and `*Async` crypto helpers) are not
-  importable, and the `Vael` list does not claim them. With default features off,
-  no built-in module is implemented.
+* **Most V8-only async/platform `vael:` modules are absent.** Only the shared
+  synchronous `vael:` and `node:` modules listed above are implemented.
 * **No permissions or sandbox.** None are implemented.
 
 Both runtimes share `vaeljs-module-policy` for executable-extension decisions and
@@ -193,49 +191,32 @@ WebAssembly, and native addons are the same.
 
 A default build enables `vael-assert`, `vael-chars`, `vael-console`, `vael-crypto`,
 `vael-fs`, `vael-os`, `vael-path`, `vael-slices`, `vael-ssh`, `vael-strings`,
-`vael-test`, `vael-uuid`, and `typescript`,
-along with the canonical registry, loader, introspection-list entries, and
-`Runtime::run_tests`. The opt-in `manifest` feature enables `vaeljs-manifest` and
-`Runtime::with_import_resolver`. Each feature controls its optional dependency
-(`vaeljs-builtins`, `vaeljs-crypto-core`, `vaeljs-fs-core`, `vaeljs-ssh-core`,
-`vaeljs-manifest`, or `vaeljs-module-policy/typescript`); with
-`default-features = false` those dependencies (along with `aes`, `aes-gcm`,
-`bcrypt`, `cbc`, `hmac`, `pbkdf2`, `sha2`, `neotales-ssh`, `deno_ast`,
-`getrandom`, `uuid`, `glob`, `semver`, and `serde_json`), the implementation
-source, the registry objects, the loader entries, and the list entries are all
-absent. The list is then the frozen empty array.
+`vael-template`, `vael-test`, `vael-uuid`, `node-compat`, `typescript`,
+`remote`, and `npm`. The opt-in `manifest` feature enables `vaeljs-manifest` and
+`Runtime::with_import_resolver`.
+
+With `default-features = false`, all optional runtime dependencies
+(`vaeljs-builtins`, `vaeljs-crypto-core`, `vaeljs-fs-core`, `vaeljs-manifest`,
+`vaeljs-node-core`, `vaeljs-npm`, `vaeljs-remote`, `vaeljs-ssh-core`,
+`vaeljs-template-core`, and `deno_ast`), built-in modules, remote/JSR/npm
+loaders, and TypeScript stripping are omitted.
 
 ```sh
-# Default: all shared modules present
-cargo test -p vaeljs-lite-core
+# Default: shared modules, node-compat, typescript, remote, and npm present
+cargo test --offline --locked -p vaeljs-lite-core
 
-# No built-in module: dependency and source absent
-cargo test -p vaeljs-lite-core --no-default-features --test feature_flags
+# Minimal build: optional runtime crates omitted
+cargo test --offline --locked -p vaeljs-lite-core --no-default-features
 
-# One feature at a time
-cargo test -p vaeljs-lite-core --no-default-features --features vael-assert --test feature_flags
-cargo test -p vaeljs-lite-core --no-default-features --features vael-chars --test feature_flags
-cargo test -p vaeljs-lite-core --no-default-features --features vael-console --test feature_flags
-cargo test -p vaeljs-lite-core --no-default-features --features vael-crypto --test feature_flags
-cargo test -p vaeljs-lite-core --no-default-features --features vael-fs --test feature_flags
-cargo test -p vaeljs-lite-core --no-default-features --features vael-os --test feature_flags
-cargo test -p vaeljs-lite-core --no-default-features --features vael-path --test feature_flags
-cargo test -p vaeljs-lite-core --no-default-features --features vael-slices --test feature_flags
-cargo test -p vaeljs-lite-core --no-default-features --features vael-ssh --test feature_flags
-cargo test -p vaeljs-lite-core --no-default-features --features vael-strings --test feature_flags
-cargo test -p vaeljs-lite-core --no-default-features --features vael-test --test feature_flags
-cargo test -p vaeljs-lite-core --no-default-features --features vael-uuid --test feature_flags
+# Manifest + deterministic offline transport tests
+cargo test --offline --locked -p vaeljs-lite-core --features "manifest,test-support"
 ```
 
-Cargo features are additive and unify across the dependency graph. A build that
-another dependent enables a module or TypeScript feature for contains it even if
-this crate was requested without it. Feature selection is compile-time surface
-selection, not a security boundary or sandbox; code that runs keeps the
-process's authority. `vaeljs-lite` explicitly selects `vael-assert`, `vael-chars`,
-`vael-console`, `vael-crypto`, `vael-fs`, `vael-os`, `vael-path`, `vael-slices`,
-`vael-ssh`, `vael-strings`, `vael-test`, `vael-uuid`, and `typescript` with
-`default-features = false`, so a change to this crate's defaults cannot silently
-change what the command advertises.
+Cargo features are additive and unify across the dependency graph. Selection is
+compile-time surface selection, not a security boundary or sandbox. `vaeljs-lite`
+selects its base features from `vaeljs-lite-core` with `default-features = false`
+and exposes opt-outable `vael-template`, `node-compat`, `remote`, and `npm`
+features.
 
 ## Build isolation
 
@@ -243,8 +224,8 @@ The workspace's default members are the V8 crates. `cargo build` does not compil
 QuickJS or add `rquickjs` to the default graph. Build this runtime explicitly:
 
 ```sh
-cargo build -p vaeljs-lite-core
-cargo test -p vaeljs-lite-core -p vaeljs-lite
+cargo build --offline --locked -p vaeljs-lite-core
+cargo test --offline --locked -p vaeljs-lite-core -p vaeljs-lite
 ```
 
 ## Licence

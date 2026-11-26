@@ -347,6 +347,8 @@ impl FileResolver {
                 {
                     return Ok(canonical.to_owned());
                 }
+                #[cfg(not(feature = "node-compat"))]
+                let _ = node_spec;
                 Err(Error::new_resolving_message(
                     display_referrer(base),
                     display_specifier(name),
@@ -538,7 +540,7 @@ impl Resolver for FileResolver {
                 Ok(url) => self.resolve_https_url(base, name, &url),
                 Err(reason) => Err(Error::new_resolving_message(
                     display_referrer(base),
-                    display_specifier(name),
+                    "<invalid GitHub specifier>",
                     reason,
                 )),
             };
@@ -547,7 +549,7 @@ impl Resolver for FileResolver {
         if is_scheme_ci(name, "gh") || is_scheme_ci(name, "github") {
             return Err(Error::new_resolving_message(
                 display_referrer(base),
-                display_specifier(name),
+                "<GitHub specifier>",
                 "remote module loading is not enabled in this build",
             ));
         }
@@ -727,22 +729,14 @@ pub(crate) fn display_specifier(specifier: &str) -> String {
         return specifier.to_owned();
     }
     match Url::parse(specifier) {
-        Ok(url) if matches!(url.scheme(), "https" | "http") => {
-            #[cfg(feature = "remote")]
-            {
-                display_url(&url)
-            }
-            #[cfg(not(feature = "remote"))]
-            {
-                redact_url_fallback(&url)
-            }
+        Ok(url)
+            if matches!(url.scheme(), "https" | "http")
+                || !url.username().is_empty()
+                || url.password().is_some() =>
+        {
+            redact_parsed_url(&url)
         }
-        Ok(_) => specifier
-            .split(['?', '#'])
-            .next()
-            .unwrap_or_default()
-            .to_owned(),
-        Err(_) => specifier
+        Ok(_) | Err(_) => specifier
             .split(['?', '#'])
             .next()
             .unwrap_or_default()
@@ -755,22 +749,22 @@ fn display_referrer(referrer: &str) -> String {
         return referrer.to_owned();
     }
     match Url::parse(referrer) {
-        Ok(url) if matches!(url.scheme(), "https" | "http") => {
-            #[cfg(feature = "remote")]
-            {
-                display_url(&url)
-            }
-            #[cfg(not(feature = "remote"))]
-            {
-                redact_url_fallback(&url)
-            }
+        Ok(url)
+            if matches!(url.scheme(), "https" | "http")
+                || !url.username().is_empty()
+                || url.password().is_some() =>
+        {
+            redact_parsed_url(&url)
         }
         _ => referrer.to_owned(),
     }
 }
 
-#[cfg(not(feature = "remote"))]
-fn redact_url_fallback(url: &Url) -> String {
+fn redact_parsed_url(url: &Url) -> String {
+    #[cfg(feature = "remote")]
+    if matches!(url.scheme(), "https" | "http") {
+        return display_url(url);
+    }
     let mut sanitized = url.clone();
     let _ = sanitized.set_username("");
     let _ = sanitized.set_password(None);

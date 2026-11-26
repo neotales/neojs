@@ -1122,6 +1122,27 @@ Local modules discover `vael.jsonc` upward for `imports` and `workspaces`
 unless `--config` or `--no-config` is passed. Remote (`https:`, `gh:`, `jsr:`)
 and `npm:` features were disabled at compile time.";
 
+    #[cfg(feature = "remote")]
+    let usage_remote = format!(
+        "  {prog_name} --allow-remote <file-or-url>\n  {prog_name} --no-allow-remote <file>\n"
+    );
+    #[cfg(not(feature = "remote"))]
+    let usage_remote = String::new();
+
+    #[cfg(feature = "remote")]
+    let usage_test_remote = format!("  {prog_name} test --allow-remote <file-or-glob>...\n");
+    #[cfg(not(feature = "remote"))]
+    let usage_test_remote = String::new();
+
+    #[cfg(feature = "remote")]
+    let env_section = "\
+\nEnvironment:
+  VAELJS_ALLOW_REMOTE  1 or true enables remote loading, 0 or false keeps it off
+                       (case-insensitive); an explicit flag overrides a valid
+                       setting, and an invalid value is rejected at startup\n";
+    #[cfg(not(feature = "remote"))]
+    let env_section = "";
+
     format!(
         "\
 vaeljs-lite {}
@@ -1129,14 +1150,11 @@ Run an ECMAScript module or erasable TypeScript file on QuickJS, or run test fil
 
 Usage:
   {prog_name} <file>                    run one module
-  {prog_name} --allow-remote <file-or-url>
-  {prog_name} --no-allow-remote <file>
-  {prog_name} --config <path> <file>
+{usage_remote}  {prog_name} --config <path> <file>
   {prog_name} --no-config <file>
   {prog_name} -- <file>
   {prog_name} test <file-or-glob>...    run test files
-  {prog_name} test --allow-remote <file-or-glob>...
-  {prog_name} types [--profile <lite|v8>] [--out-dir <dir>]
+{usage_test_remote}  {prog_name} types [--profile <lite|v8>] [--out-dir <dir>]
                                        emit TypeScript declarations (.d.ts)
 
 Options:
@@ -1147,12 +1165,7 @@ Options:
   -h, --help        Print this help (alone or after `test`)
   -V, --version     Print the version
   --                End option parsing, for a file or pattern beginning with `-`
-
-Environment:
-  VAELJS_ALLOW_REMOTE  1 or true enables remote loading, 0 or false keeps it off
-                       (case-insensitive); an explicit flag overrides a valid
-                       setting, and an invalid value is rejected at startup
-
+{env_section}
 Built-in modules:
 {}{}
 
