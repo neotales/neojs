@@ -186,16 +186,16 @@ fn resolves_manifest_targets_rejects_remote_and_preserves_builtins() {
     write(dir.path(), "typed.ts", "export const x: number = 1;\n");
     let resolver = load_standalone_resolver(&manifest_path);
 
-    // Built-in `vael:os` is never intercepted.
+    // Built-in `vael:os` and uppercase `VAEL:os` are never intercepted.
     let os_entry = write(
         dir.path(),
         "os.js",
-        "import { platform } from 'vael:os';\nif (platform === 'fake') throw new Error('shadowed');\n",
+        "import { platform } from 'vael:os';\nimport { platform as upper } from 'VAEL:os';\nif (platform === 'fake' || upper === 'fake' || platform !== upper) throw new Error('shadowed');\n",
     );
     Runtime::with_import_resolver(resolver.clone())
         .expect("runtime")
         .run_file(&os_entry)
-        .expect("vael:os succeeds");
+        .expect("vael:os and VAEL:os succeed");
 
     // `node:fs` must use the built-in (never `./fake-fs.js`), while unsupported
     // `node:fs/promises` and disabled `node-compat` stay rejected.
@@ -246,24 +246,46 @@ fn resolves_manifest_targets_rejects_remote_and_preserves_builtins() {
         .expect_err("node:fs/promises must fail on lite");
     assert!(node_err.to_string().contains("node:"), "{node_err}");
 
-    // Remote `https:`, `gh:`, `jsr:`, `npm:` targets fail with clear error stating remote loading is not supported.
+    // Remote `https:`, `gh:`, `jsr:` targets fail closed without `Runtime::with_remote`,
+    // and `npm:` fails closed offline when not in CAS.
     for (file, spec) in [
         ("https.js", "https-dep"),
         ("gh.js", "gh-dep"),
         ("jsr.js", "jsr-dep"),
-        ("npm.js", "npm-dep"),
     ] {
         let entry = write(dir.path(), file, &format!("import '{spec}';\n"));
         let err = Runtime::with_import_resolver(resolver.clone())
             .expect("runtime")
             .run_file(&entry)
-            .expect_err("remote target must be rejected in vaeljs-lite");
+            .expect_err("remote target must fail closed without remote opt-in");
         let msg = err.to_string();
         assert!(
-            msg.contains("remote module loading is not supported in vaeljs-lite"),
+            msg.contains("remote module loading is disabled")
+                || msg.contains("require remote module loading")
+                || msg.contains("remote module loading is not enabled"),
             "unexpected error for {spec}: {msg}"
         );
     }
+
+    let npm_entry = write(dir.path(), "npm.js", "import 'npm-dep';\n");
+    let npm_err = Runtime::with_import_resolver(resolver.clone())
+        .expect("runtime")
+        .run_file(&npm_entry)
+        .expect_err("uncached npm target without remote must fail");
+    let npm_msg = npm_err.to_string();
+    #[cfg(feature = "npm")]
+    assert!(
+        npm_msg.contains("offline")
+            || npm_msg.contains("CAS")
+            || npm_msg.contains("not found")
+            || npm_msg.contains("registry"),
+        "unexpected error for npm-dep: {npm_msg}"
+    );
+    #[cfg(not(feature = "npm"))]
+    assert!(
+        npm_msg.contains("npm: modules are not implemented"),
+        "unexpected error for npm-dep: {npm_msg}"
+    );
 
     // TypeScript target runs when `typescript` feature is enabled, and fails clearly when disabled.
     let ts_entry = write(

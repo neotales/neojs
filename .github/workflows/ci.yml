@@ -333,7 +333,7 @@ jobs:
         run: |
           set -euo pipefail
           lite_core_minimal_tree=$(cargo tree --locked -e normal -p vaeljs-lite-core --no-default-features --prefix none)
-          forbidden='^(deno_ast|deno_core|deno_v8|v8|vaeljs-builtins|vaeljs-crypto-core|vaeljs-dts|vaeljs-fs-core|vaeljs-manifest|vaeljs-node-core|vaeljs-ssh-core|vaeljs-template-core) v'
+          forbidden='^(deno_ast|deno_core|deno_v8|v8|vaeljs-builtins|vaeljs-crypto-core|vaeljs-dts|vaeljs-fs-core|vaeljs-manifest|vaeljs-node-core|vaeljs-npm|vaeljs-remote|vaeljs-ssh-core|vaeljs-template-core) v'
           if grep -Eq "${forbidden}" <<<"${lite_core_minimal_tree}"; then
             echo "ERROR: vaeljs-lite-core --no-default-features normal graph unexpectedly contains excluded crates" >&2
             grep -E "${forbidden}" <<<"${lite_core_minimal_tree}" >&2

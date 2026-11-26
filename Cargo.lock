@@ -4112,19 +4112,26 @@ dependencies = [
 name = "vaeljs-lite"
 version = "0.0.0-alpha.0"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "sha2 0.11.1",
  "tempfile",
  "vaeljs-dts",
  "vaeljs-lite-core",
  "vaeljs-manifest",
  "vaeljs-module-policy",
+ "vaeljs-npm",
 ]
 [[package]]
 name = "vaeljs-lite-core"
 version = "0.0.0-alpha.0"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
  "neotales-ssh",
  "rquickjs",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "thiserror",
  "url",
@@ -4135,6 +4142,8 @@ dependencies = [
  "vaeljs-manifest",
  "vaeljs-module-policy",
  "vaeljs-node-core",
+ "vaeljs-npm",
+ "vaeljs-remote",
  "vaeljs-ssh-core",
  "vaeljs-template-core",
 ]

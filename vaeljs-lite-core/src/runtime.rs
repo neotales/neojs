@@ -15,8 +15,16 @@ use rquickjs::{
 #[cfg(feature = "typescript")]
 use url::Url;
 use vaeljs_module_policy::{ModuleFormat, module_format};
+#[cfg(feature = "remote")]
+use vaeljs_remote::{Redactions, RemoteClient, RemoteOptions};
 
-use crate::loader::{FileLoader, FileResolver};
+use crate::loader::{FileLoader, FileResolver, local_meta_url, set_import_meta_url};
+#[cfg(feature = "npm")]
+use crate::npm_loader::{NpmLoader, NpmOptions};
+#[cfg(feature = "remote")]
+use crate::remote_loader::{
+    RemoteState, display_module_identity, is_generated_diagnostic, redact_known_urls,
+};
 
 /// The most QuickJS jobs one entry may execute.
 ///
@@ -240,7 +248,11 @@ fn primitive_reason(ctx: &Ctx<'_>, reason: &Value<'_>) -> Option<String> {
 /// are ordinary objects in QuickJS, so the descriptor lookup cannot run a proxy
 /// trap or getter. The result is `Error: <message>` plus stack when both are
 /// plain string data.
-fn error_reason(ctx: &Ctx<'_>, reason: &Value<'_>) -> Option<String> {
+fn error_reason(
+    ctx: &Ctx<'_>,
+    reason: &Value<'_>,
+    #[cfg(feature = "remote")] redactions: Option<&Redactions>,
+) -> Option<String> {
     if !reason.is_error() || reason.is_proxy() {
         return None;
     }
@@ -250,9 +262,26 @@ fn error_reason(ctx: &Ctx<'_>, reason: &Value<'_>) -> Option<String> {
     } else {
         format!("Error: {message}")
     };
+    #[cfg(feature = "remote")]
+    let head = match redactions {
+        Some(redactions) if is_generated_diagnostic(&message) => {
+            redact_known_urls(&head, redactions)
+        }
+        _ => head,
+    };
     match own_string_property(ctx, reason.as_raw(), c"stack") {
-        Some(stack) if message.is_empty() || stack.contains(&message) => Some(stack),
-        Some(stack) => Some(format!("{head}\n{stack}")),
+        Some(stack) => {
+            #[cfg(feature = "remote")]
+            let stack = match redactions {
+                Some(redactions) => redact_known_urls(&stack, redactions),
+                None => stack,
+            };
+            if message.is_empty() || stack.contains(&message) {
+                Some(stack)
+            } else {
+                Some(format!("{head}\n{stack}"))
+            }
+        }
         None => Some(head),
     }
 }
@@ -264,11 +293,20 @@ fn error_reason(ctx: &Ctx<'_>, reason: &Value<'_>) -> Option<String> {
 /// ordinary Error's own data `message`/`stack` strings are used when present,
 /// and everything else becomes a type-only description. Any exception raised
 /// by QuickJS while inspecting a descriptor is cleared.
-fn rejection_message(ctx: &Ctx<'_>, reason: &Value<'_>) -> String {
+fn rejection_message(
+    ctx: &Ctx<'_>,
+    reason: &Value<'_>,
+    #[cfg(feature = "remote")] redactions: Option<&Redactions>,
+) -> String {
     if let Some(text) = primitive_reason(ctx, reason) {
         return text;
     }
-    if let Some(text) = error_reason(ctx, reason) {
+    if let Some(text) = error_reason(
+        ctx,
+        reason,
+        #[cfg(feature = "remote")]
+        redactions,
+    ) {
         return text;
     }
     if reason.is_error() {
@@ -371,10 +409,35 @@ pub enum Error {
         jobs: usize,
     },
 
-    /// [`Runtime::run_file`] or [`Runtime::run_source`] was called after an
-    /// entry module had already started.
+    /// [`Runtime::run_file`], [`Runtime::run_url`], or [`Runtime::run_source`]
+    /// was called after an entry module had already started.
     #[error("the runtime has already run an entry module; create a new runtime")]
     RuntimeConsumed,
+
+    /// A remote entry module was requested from a runtime without remote
+    /// loading enabled.
+    #[error(
+        "remote module loading is disabled; create the Runtime with Runtime::with_remote to enable it"
+    )]
+    RemoteDisabled,
+
+    /// A remote entry URL could not be parsed, fetched, or validated.
+    #[error("cannot load `{url}`: {reason}")]
+    RemoteEntry {
+        /// The requested URL without credentials, query, or fragment.
+        url: String,
+        /// Why the remote entry module was not executed.
+        reason: String,
+    },
+
+    /// A remote TypeScript entry could not be reduced to ECMAScript.
+    #[error("cannot compile `{url}`: {reason}")]
+    RemoteTypeScript {
+        /// The requested URL without credentials, query, or fragment.
+        url: String,
+        /// Why the module could not be reduced to ECMAScript.
+        reason: String,
+    },
 
     /// The `test` runner returned an unusable report or failed unexpectedly.
     ///
@@ -457,8 +520,12 @@ pub(crate) struct ProcessExitState {
 /// Configuration options for constructing a [`Runtime`].
 #[derive(Debug, Clone)]
 pub struct RuntimeOptions {
+    #[cfg(feature = "remote")]
+    remote: Option<RemoteOptions>,
     #[cfg(feature = "manifest")]
     import_resolver: Option<vaeljs_manifest::ImportResolver>,
+    #[cfg(feature = "npm")]
+    npm: NpmOptions,
     node_compat: bool,
 }
 
@@ -473,10 +540,22 @@ impl RuntimeOptions {
     /// (when compiled with the `node-compat` feature).
     pub fn new() -> Self {
         Self {
+            #[cfg(feature = "remote")]
+            remote: None,
             #[cfg(feature = "manifest")]
             import_resolver: None,
+            #[cfg(feature = "npm")]
+            npm: NpmOptions::default(),
             node_compat: true,
         }
+    }
+
+    /// Enables remote `https:`, `gh:`/`github:`, and `jsr:` module loading
+    /// (and online `npm:` registry fetches) with the given limits and cache settings.
+    #[cfg(feature = "remote")]
+    pub fn with_remote(mut self, remote: RemoteOptions) -> Self {
+        self.remote = Some(remote);
+        self
     }
 
     /// Enables or disables runtime `node:*` built-in compatibility modules.
@@ -494,6 +573,41 @@ impl RuntimeOptions {
         self.import_resolver = Some(resolver);
         self
     }
+
+    /// Configures `npm:` and `package.json` module resolution.
+    #[cfg(feature = "npm")]
+    pub fn with_npm(mut self, options: NpmOptions) -> Self {
+        self.npm = options;
+        self
+    }
+
+    /// Disables `npm:` and `package.json` module resolution at runtime.
+    #[cfg(feature = "npm")]
+    pub fn without_npm(mut self) -> Self {
+        self.npm = self.npm.with_enabled(false);
+        self
+    }
+
+    /// Refuses npm resolution not already pinned in `vael.lock`.
+    #[cfg(feature = "npm")]
+    pub fn with_frozen_lockfile(mut self, frozen: bool) -> Self {
+        self.npm = self.npm.with_frozen_lockfile(frozen);
+        self
+    }
+
+    /// Refuses network fetches for npm packages, serving strictly from `CasStore`.
+    #[cfg(feature = "npm")]
+    pub fn with_offline(mut self, offline: bool) -> Self {
+        self.npm = self.npm.with_offline(offline);
+        self
+    }
+
+    /// Overrides the `CasStore` root directory used for npm packages.
+    #[cfg(feature = "npm")]
+    pub fn with_npm_cache_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.npm = self.npm.with_cache_dir(dir);
+        self
+    }
 }
 
 pub struct Runtime {
@@ -501,6 +615,10 @@ pub struct Runtime {
     _runtime: rquickjs::Runtime,
     rejections: Rc<RefCell<RejectionState>>,
     exit_state: Rc<RefCell<ProcessExitState>>,
+    #[cfg(feature = "remote")]
+    remote: Option<Rc<RemoteState>>,
+    #[cfg(feature = "remote")]
+    redactions: Option<Redactions>,
     consumed: bool,
 }
 
@@ -531,6 +649,13 @@ impl Runtime {
         Self::with_options(RuntimeOptions::new())
     }
 
+    /// Creates a QuickJS runtime with remote (`https:`, `gh:`/`github:`, `jsr:`)
+    /// module loading enabled.
+    #[cfg(feature = "remote")]
+    pub fn with_remote(options: RemoteOptions) -> Result<Self, Error> {
+        Self::with_options(RuntimeOptions::new().with_remote(options))
+    }
+
     /// Creates a QuickJS runtime with an explicit `vael.jsonc`
     /// [`vaeljs_manifest::ImportResolver`].
     ///
@@ -542,8 +667,7 @@ impl Runtime {
     /// here. Local `imports` and workspace `@scope/pkg` references resolve to
     /// local `.js`/`.mjs`/`.ts`/`.mts` modules (with `.ts`/`.mts` stripped when
     /// the `typescript` feature is enabled); remote targets (`https:`, `gh:`,
-    /// `jsr:`, `npm:`) are rejected because remote loading is not supported in
-    /// `vaeljs-lite-core`.
+    /// `jsr:`) require [`Runtime::with_remote`] or [`RuntimeOptions::with_remote`].
     ///
     /// # Example
     ///
@@ -571,15 +695,144 @@ impl Runtime {
 
     /// Creates a QuickJS runtime configured with explicit [`RuntimeOptions`].
     pub fn with_options(options: RuntimeOptions) -> Result<Self, Error> {
-        #[cfg(feature = "manifest")]
-        let resolver = match options.import_resolver {
-            Some(resolver) => FileResolver::with_import_resolver(resolver),
-            None => FileResolver::new(),
+        #[cfg(feature = "remote")]
+        let (remote_state, remote_cache_dir) = {
+            let cache_dir = options
+                .remote
+                .as_ref()
+                .and_then(|r| r.cache_dir().map(Path::to_path_buf));
+            let state = options
+                .remote
+                .map(|opts| Rc::new(RemoteState::new(RemoteClient::new(opts))));
+            (state, cache_dir)
         };
-        #[cfg(not(feature = "manifest"))]
-        let resolver = FileResolver::new();
-        let resolver = resolver.with_node_compat(options.node_compat);
-        Self::build(resolver, options.node_compat)
+        Self::build_with_remote(
+            #[cfg(feature = "manifest")]
+            options.import_resolver,
+            #[cfg(feature = "remote")]
+            remote_state,
+            #[cfg(feature = "remote")]
+            remote_cache_dir,
+            #[cfg(feature = "npm")]
+            options.npm,
+            options.node_compat,
+        )
+    }
+
+    /// Creates a QuickJS runtime over an injected remote transport (for `test-support` only).
+    #[cfg(all(feature = "test-support", feature = "remote"))]
+    #[doc(hidden)]
+    pub fn with_remote_transport<F>(options: RemoteOptions, fetch: F) -> Result<Self, Error>
+    where
+        F: Fn(
+                &str,
+                std::time::Duration,
+                Option<&str>,
+                Option<&str>,
+            ) -> Result<vaeljs_remote::TestRemoteResponse, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::with_options_and_transport(RuntimeOptions::new().with_remote(options), fetch)
+    }
+
+    /// Creates a QuickJS runtime over an injected remote transport and an
+    /// [`vaeljs_manifest::ImportResolver`] (for `test-support` only).
+    #[cfg(all(feature = "test-support", feature = "remote", feature = "manifest"))]
+    #[doc(hidden)]
+    pub fn with_remote_transport_and_resolver<F>(
+        options: RemoteOptions,
+        resolver: vaeljs_manifest::ImportResolver,
+        fetch: F,
+    ) -> Result<Self, Error>
+    where
+        F: Fn(
+                &str,
+                std::time::Duration,
+                Option<&str>,
+                Option<&str>,
+            ) -> Result<vaeljs_remote::TestRemoteResponse, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::with_options_and_transport(
+            RuntimeOptions::new()
+                .with_remote(options)
+                .with_import_resolver(resolver),
+            fetch,
+        )
+    }
+
+    /// Creates a QuickJS runtime configured by [`RuntimeOptions`] over an
+    /// injected remote transport (for `test-support` only).
+    #[cfg(all(feature = "test-support", feature = "remote"))]
+    #[doc(hidden)]
+    pub fn with_options_and_transport<F>(options: RuntimeOptions, fetch: F) -> Result<Self, Error>
+    where
+        F: Fn(
+                &str,
+                std::time::Duration,
+                Option<&str>,
+                Option<&str>,
+            ) -> Result<vaeljs_remote::TestRemoteResponse, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let transport = vaeljs_remote::test_transport(fetch);
+        Self::with_options_and_transport_impl(options, transport)
+    }
+
+    /// Creates a QuickJS runtime configured by [`RuntimeOptions`] over an
+    /// injected remote transport that also inspects `Authorization` headers
+    /// (for `test-support` only).
+    #[cfg(all(feature = "test-support", feature = "remote"))]
+    #[doc(hidden)]
+    pub fn with_options_and_auth_transport<F>(
+        options: RuntimeOptions,
+        fetch: F,
+    ) -> Result<Self, Error>
+    where
+        F: Fn(
+                &str,
+                std::time::Duration,
+                Option<&str>,
+                Option<&str>,
+                Option<&str>,
+            ) -> Result<vaeljs_remote::TestRemoteResponse, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let transport = vaeljs_remote::test_transport_with_auth(fetch);
+        Self::with_options_and_transport_impl(options, transport)
+    }
+
+    #[cfg(all(feature = "test-support", feature = "remote"))]
+    fn with_options_and_transport_impl(
+        options: RuntimeOptions,
+        transport: std::sync::Arc<dyn vaeljs_remote::RemoteTransport>,
+    ) -> Result<Self, Error> {
+        let remote_cache_dir = options
+            .remote
+            .as_ref()
+            .and_then(|r| r.cache_dir().map(Path::to_path_buf));
+        let remote_state = options.remote.map(|opts| {
+            Rc::new(RemoteState::new(RemoteClient::with_transport(
+                opts, transport,
+            )))
+        });
+        Self::build_with_remote(
+            #[cfg(feature = "manifest")]
+            options.import_resolver,
+            remote_state,
+            remote_cache_dir,
+            #[cfg(feature = "npm")]
+            options.npm,
+            options.node_compat,
+        )
     }
 
     /// Returns the requested process exit code set via `node:process`
@@ -588,7 +841,49 @@ impl Runtime {
         self.exit_state.borrow().exit_code
     }
 
-    fn build(resolver: FileResolver, node_compat: bool) -> Result<Self, Error> {
+    fn build_with_remote(
+        #[cfg(feature = "manifest")] import_resolver: Option<vaeljs_manifest::ImportResolver>,
+        #[cfg(feature = "remote")] remote: Option<Rc<RemoteState>>,
+        #[cfg(feature = "remote")] remote_cache_dir: Option<PathBuf>,
+        #[cfg(feature = "npm")] npm_options: NpmOptions,
+        node_compat: bool,
+    ) -> Result<Self, Error> {
+        #[cfg(feature = "npm")]
+        let npm = {
+            let remote_client = remote.as_ref().map(|state| state.client().clone());
+            #[cfg(feature = "manifest")]
+            let manifest_root = import_resolver
+                .as_ref()
+                .map(|resolver| resolver.root_dir().to_path_buf());
+            #[cfg(not(feature = "manifest"))]
+            let manifest_root = None;
+            Rc::new(NpmLoader::new(
+                npm_options,
+                remote_client,
+                remote_cache_dir,
+                manifest_root,
+            ))
+        };
+        #[cfg(all(feature = "remote", not(feature = "npm")))]
+        let _ = remote_cache_dir;
+
+        let resolver = FileResolver::new(
+            #[cfg(feature = "manifest")]
+            import_resolver,
+            #[cfg(feature = "remote")]
+            remote.as_ref().map(Rc::clone),
+            #[cfg(feature = "npm")]
+            Rc::clone(&npm),
+            node_compat,
+        );
+        let loader = FileLoader::new(
+            #[cfg(feature = "remote")]
+            remote.as_ref().map(Rc::clone),
+            #[cfg(feature = "npm")]
+            npm,
+            node_compat,
+        );
+
         let runtime = rquickjs::Runtime::new().map_err(|error| Error::Init {
             message: error.to_string(),
         })?;
@@ -604,7 +899,7 @@ impl Runtime {
         let exit_state = Rc::new(RefCell::new(ProcessExitState::default()));
         let interrupt_exit = Rc::clone(&exit_state);
         runtime.set_interrupt_handler(Some(Box::new(move || interrupt_exit.borrow().exited)));
-        runtime.set_loader(resolver, FileLoader { node_compat });
+        runtime.set_loader(resolver, loader);
         let context = Context::full(&runtime).map_err(|error| Error::Init {
             message: error.to_string(),
         })?;
@@ -645,11 +940,17 @@ impl Runtime {
             .map_err(|error| Error::Init {
                 message: error.to_string(),
             })?;
+        #[cfg(feature = "remote")]
+        let redactions = remote.as_ref().map(|state| state.redactions());
         Ok(Self {
             context,
             _runtime: runtime,
             rejections,
             exit_state,
+            #[cfg(feature = "remote")]
+            remote,
+            #[cfg(feature = "remote")]
+            redactions,
             consumed: false,
         })
     }
@@ -750,6 +1051,28 @@ impl Runtime {
         self.evaluate(module, source)
     }
 
+    /// Runs one remote entry module (`https://...`, `gh:...`, `github:...`,
+    /// or `jsr:...`) to completion.
+    ///
+    /// Remote loading must be enabled with [`Runtime::with_remote`] or
+    /// [`RuntimeOptions::with_remote`]; otherwise this returns
+    /// [`Error::RemoteDisabled`] without performing network I/O. Plaintext
+    /// `http://` and credentialed URLs are rejected. Preflight failures
+    /// (invalid URL, fetch failure, unsupported extension, invalid UTF-8, or
+    /// TypeScript stripping failure) leave the runtime unused.
+    #[cfg(feature = "remote")]
+    pub fn run_url(&mut self, url: &str) -> Result<(), Error> {
+        if self.consumed {
+            return Err(Error::RuntimeConsumed);
+        }
+        let Some(remote) = self.remote.as_ref() else {
+            return Err(Error::RemoteDisabled);
+        };
+        let entry = remote.prepare_url_entry(url)?;
+        self.consumed = true;
+        self.evaluate(entry.module_name, entry.source)
+    }
+
     /// Runs one ECMAScript module from memory.
     ///
     /// `name` is the module identity and the base for relative imports. The
@@ -779,25 +1102,63 @@ impl Runtime {
     /// Declares and evaluates one module, drives its top-level `await`, drains
     /// the remaining job queue, and reports unhandled rejections.
     fn evaluate(&self, name: String, source: Vec<u8>) -> Result<(), Error> {
+        #[cfg(feature = "remote")]
+        let display_name = display_module_identity(&name);
+        #[cfg(not(feature = "remote"))]
+        let display_name = name.clone();
+        #[cfg(feature = "remote")]
+        let redactions = self.redactions.as_ref();
+
         let result = self.context.with(|ctx| {
-            let promise =
-                Module::evaluate(ctx.clone(), name.as_str(), source).map_err(|error| {
+            let module =
+                Module::declare(ctx.clone(), name.as_str(), source).map_err(|error| {
                     Error::Module {
-                        module: name.clone(),
-                        message: caught_message(&ctx, error),
+                        module: display_name.clone(),
+                        message: caught_message(
+                            &ctx,
+                            error,
+                            #[cfg(feature = "remote")]
+                            redactions,
+                        ),
                     }
                 })?;
+            let meta_url = entry_meta_url(&name);
+            set_import_meta_url(&module, &meta_url).map_err(|error| Error::Module {
+                module: display_name.clone(),
+                message: caught_message(
+                    &ctx,
+                    error,
+                    #[cfg(feature = "remote")]
+                    redactions,
+                ),
+            })?;
+            let (_evaluated, promise) = module.eval().map_err(|error| Error::Module {
+                module: display_name.clone(),
+                message: caught_message(
+                    &ctx,
+                    error,
+                    #[cfg(feature = "remote")]
+                    redactions,
+                ),
+            })?;
             drive_promise::<()>(
                 &ctx,
-                &name,
+                &display_name,
                 &promise,
                 "top-level await could not settle; host asynchronous work is not implemented in vaeljs-lite yet",
                 true,
+                #[cfg(feature = "remote")]
+                redactions,
             )?;
             #[cfg(feature = "vael-test")]
             flush_unhandled_rejections(&ctx, &self.rejections).map_err(|error| Error::Module {
-                module: name.clone(),
-                message: caught_message(&ctx, error),
+                module: display_name.clone(),
+                message: caught_message(
+                    &ctx,
+                    error,
+                    #[cfg(feature = "remote")]
+                    redactions,
+                ),
             })?;
             Ok(())
         });
@@ -806,7 +1167,7 @@ impl Runtime {
             return Ok(());
         }
         match result {
-            Ok(()) => self.report_unhandled_rejections(name),
+            Ok(()) => self.report_unhandled_rejections(display_name),
             Err(error) => {
                 self.clear_rejection_roots();
                 Err(error)
@@ -832,10 +1193,17 @@ impl Runtime {
         {
             const TEST_RUN_SCRIPT: &str = r#"Vael.getBuiltInModule("vael:test").run({ throwOnFailure: false, settle: true })"#;
 
+            #[cfg(feature = "remote")]
+            let redactions = self.redactions.as_ref();
             let result = self.context.with(|ctx| {
-                let value: Value<'_> = ctx
-                    .eval(TEST_RUN_SCRIPT)
-                    .map_err(|error| Error::TestRunner(caught_message(&ctx, error)))?;
+                let value: Value<'_> = ctx.eval(TEST_RUN_SCRIPT).map_err(|error| {
+                    Error::TestRunner(caught_message(
+                        &ctx,
+                        error,
+                        #[cfg(feature = "remote")]
+                        redactions,
+                    ))
+                })?;
                 let promise = value.into_promise().ok_or_else(|| {
                     Error::TestRunner("the test runner did not return a Promise".to_string())
                 })?;
@@ -848,13 +1216,20 @@ impl Runtime {
                     &promise,
                     "test runner did not settle; a test returned a Promise that never resolved",
                     false,
+                    #[cfg(feature = "remote")]
+                    redactions,
                 )
                 .map_err(|error| match error {
                     Error::Module { message, .. } => Error::TestRunner(message),
                     other => other,
                 })?;
                 if let Err(error) = flush_unhandled_rejections(&ctx, &self.rejections) {
-                    return Err(Error::TestRunner(caught_message(&ctx, error)));
+                    return Err(Error::TestRunner(caught_message(
+                        &ctx,
+                        error,
+                        #[cfg(feature = "remote")]
+                        redactions,
+                    )));
                 }
                 read_test_report(&ctx, report_value)
             });
@@ -876,6 +1251,8 @@ impl Runtime {
             return Ok(());
         }
         let count = unhandled.len();
+        #[cfg(feature = "remote")]
+        let redactions = self.redactions.as_ref();
         let details = self.context.with(move |ctx| {
             clear_pending_exception(&ctx);
             let details = unhandled
@@ -883,7 +1260,12 @@ impl Runtime {
                 .enumerate()
                 .map(|(index, rejection)| {
                     let reason = match rejection.reason.clone().restore(&ctx) {
-                        Ok(reason) => rejection_message(&ctx, &reason),
+                        Ok(reason) => rejection_message(
+                            &ctx,
+                            &reason,
+                            #[cfg(feature = "remote")]
+                            redactions,
+                        ),
                         Err(_) => "<reason unavailable>".to_string(),
                     };
                     clear_pending_exception(&ctx);
@@ -1080,7 +1462,21 @@ pub(super) fn is_job_pending(ctx: &Ctx<'_>) -> bool {
 /// The raw call is safe here because the caller holds the runtime lock through
 /// `Context::with` and this runtime has exactly one context, so the context
 /// QuickJS reports for the job is the context that owns `ctx`.
-fn execute_job(ctx: &Ctx<'_>) -> JobStep {
+fn entry_meta_url(name: &str) -> String {
+    if name.starts_with("https://")
+        || name.starts_with("http://")
+        || name.starts_with("npm://")
+        || name.starts_with("file://")
+    {
+        return name.to_owned();
+    }
+    local_meta_url(name)
+}
+
+fn execute_job(
+    ctx: &Ctx<'_>,
+    #[cfg(feature = "remote")] redactions: Option<&Redactions>,
+) -> JobStep {
     let runtime = runtime_ptr(ctx);
     let mut job_context = MaybeUninit::uninit();
     // SAFETY: the runtime is locked and valid for the duration of the call.
@@ -1101,17 +1497,31 @@ fn execute_job(ctx: &Ctx<'_>) -> JobStep {
         "the runtime must have exactly one context"
     );
     let reason = ctx.catch();
-    JobStep::Threw(rejection_message(ctx, &reason))
+    JobStep::Threw(rejection_message(
+        ctx,
+        &reason,
+        #[cfg(feature = "remote")]
+        redactions,
+    ))
 }
 
-fn step_job(ctx: &Ctx<'_>, module: &str, jobs: &mut usize) -> Result<(), Error> {
+fn step_job(
+    ctx: &Ctx<'_>,
+    module: &str,
+    jobs: &mut usize,
+    #[cfg(feature = "remote")] redactions: Option<&Redactions>,
+) -> Result<(), Error> {
     if *jobs >= JOB_BUDGET {
         return Err(Error::NonConvergingJobs {
             module: module.to_owned(),
             jobs: *jobs,
         });
     }
-    match execute_job(ctx) {
+    match execute_job(
+        ctx,
+        #[cfg(feature = "remote")]
+        redactions,
+    ) {
         JobStep::Ran => {
             *jobs += 1;
             Ok(())
@@ -1144,6 +1554,7 @@ fn drive_promise<'js, T: rquickjs::FromJs<'js>>(
     promise: &rquickjs::Promise<'js>,
     unsettled_message: &str,
     drain_trailing: bool,
+    #[cfg(feature = "remote")] redactions: Option<&Redactions>,
 ) -> Result<T, Error> {
     let mut jobs = 0usize;
     let output;
@@ -1151,7 +1562,12 @@ fn drive_promise<'js, T: rquickjs::FromJs<'js>>(
         if let Some(result) = promise.result::<T>() {
             output = result.map_err(|error| Error::Module {
                 module: module.to_owned(),
-                message: caught_message(ctx, error),
+                message: caught_message(
+                    ctx,
+                    error,
+                    #[cfg(feature = "remote")]
+                    redactions,
+                ),
             })?;
             break;
         }
@@ -1161,12 +1577,24 @@ fn drive_promise<'js, T: rquickjs::FromJs<'js>>(
                 message: unsettled_message.to_owned(),
             });
         }
-        step_job(ctx, module, &mut jobs)?;
+        step_job(
+            ctx,
+            module,
+            &mut jobs,
+            #[cfg(feature = "remote")]
+            redactions,
+        )?;
     }
 
     if drain_trailing {
         while is_job_pending(ctx) {
-            step_job(ctx, module, &mut jobs)?;
+            step_job(
+                ctx,
+                module,
+                &mut jobs,
+                #[cfg(feature = "remote")]
+                redactions,
+            )?;
         }
     }
     Ok(output)
@@ -1178,12 +1606,34 @@ fn drive_promise<'js, T: rquickjs::FromJs<'js>>(
 /// JavaScript exception goes through the same non-executing formatter as an
 /// unhandled rejection: no getters, proxy traps, `toString`, or `String`
 /// conversion run while an entry error is being reported.
-fn caught_message(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
+fn caught_message(
+    ctx: &Ctx<'_>,
+    error: rquickjs::Error,
+    #[cfg(feature = "remote")] redactions: Option<&Redactions>,
+) -> String {
     let message = match Err::<(), _>(error).catch(ctx) {
         Ok(()) => "unknown QuickJS error".to_string(),
-        Err(CaughtError::Error(error)) => error.to_string(),
-        Err(CaughtError::Exception(exception)) => rejection_message(ctx, &exception.into_value()),
-        Err(CaughtError::Value(value)) => rejection_message(ctx, &value),
+        Err(CaughtError::Error(error)) => {
+            let text = error.to_string();
+            #[cfg(feature = "remote")]
+            let text = match redactions {
+                Some(redactions) => redact_known_urls(&text, redactions),
+                None => text,
+            };
+            text
+        }
+        Err(CaughtError::Exception(exception)) => rejection_message(
+            ctx,
+            &exception.into_value(),
+            #[cfg(feature = "remote")]
+            redactions,
+        ),
+        Err(CaughtError::Value(value)) => rejection_message(
+            ctx,
+            &value,
+            #[cfg(feature = "remote")]
+            redactions,
+        ),
     };
     clear_pending_exception(ctx);
     message

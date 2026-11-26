@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use vaeljs_dts::Profile;
+#[cfg(feature = "npm")]
+use vaeljs_lite_core::NpmOptions;
+#[cfg(feature = "remote")]
+use vaeljs_lite_core::RemoteOptions;
 use vaeljs_lite_core::{Error, ImportResolver, Runtime, RuntimeOptions, TestReport};
 use vaeljs_manifest::{
     DiscoveredManifest, MAX_DISCOVERY_DEPTH, Manifest, Workspace, discover_manifest,
@@ -16,6 +20,9 @@ const DEFAULT_PROG_NAME: &str = "vjs-lite";
 const EXIT_RUNTIME_FAILURE: u8 = 1;
 /// Exit code for a command vjs-lite could not start.
 const EXIT_STARTUP_FAILURE: u8 = 2;
+
+/// Persistent remote-loading setting for both run and test commands.
+const ALLOW_REMOTE_ENV: &str = "VAELJS_ALLOW_REMOTE";
 
 /// Derives the CLI program name from `argv[0]`, falling back to `default`.
 fn program_name_from_arg0(arg0: Option<&OsStr>, default: &str) -> String {
@@ -59,15 +66,32 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Run {
-            path,
+            input,
+            allow_remote,
             config,
+            npm,
             node_compat,
-        } => run(&prog_name, &path, &config, node_compat),
+        } => match resolve_allow_remote(allow_remote) {
+            Ok(allow_remote) => run(&prog_name, input, allow_remote, &config, npm, node_compat),
+            Err(message) => startup_failure(&prog_name, &message),
+        },
         Command::Test {
             patterns,
+            allow_remote,
             config,
+            npm,
             node_compat,
-        } => run_tests(&prog_name, &patterns, &config, node_compat),
+        } => match resolve_allow_remote(allow_remote) {
+            Ok(allow_remote) => run_tests(
+                &prog_name,
+                &patterns,
+                allow_remote,
+                &config,
+                npm,
+                node_compat,
+            ),
+            Err(message) => startup_failure(&prog_name, &message),
+        },
         Command::Types { profile, out_dir } => run_types(&prog_name, profile, out_dir.as_deref()),
         Command::TypesHelp => {
             print!("{}", types_help(&prog_name));
@@ -82,16 +106,37 @@ fn startup_failure(prog_name: &str, message: &str) -> ExitCode {
     ExitCode::from(EXIT_STARTUP_FAILURE)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NpmFlags {
+    enabled: bool,
+    frozen_lockfile: bool,
+    offline: bool,
+}
+
+impl Default for NpmFlags {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            frozen_lockfile: false,
+            offline: false,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Run {
-        path: PathBuf,
+        input: Input,
+        allow_remote: AllowRemote,
         config: ConfigChoice,
+        npm: NpmFlags,
         node_compat: bool,
     },
     Test {
         patterns: Vec<String>,
+        allow_remote: AllowRemote,
         config: ConfigChoice,
+        npm: NpmFlags,
         node_compat: bool,
     },
     Types {
@@ -138,12 +183,129 @@ impl ConfigChoice {
     }
 }
 
+/// The remote-loading choice made on the command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllowRemote {
+    Unspecified,
+    #[cfg_attr(not(feature = "remote"), allow(dead_code))]
+    Enabled,
+    Disabled,
+}
+
+impl AllowRemote {
+    fn choose(&mut self, requested: Self) -> Result<(), String> {
+        if *self != Self::Unspecified && *self != requested {
+            return Err(
+                "`--allow-remote` and `--no-allow-remote` cannot be used together".to_string(),
+            );
+        }
+        *self = requested;
+        Ok(())
+    }
+}
+
+fn resolve_allow_remote(choice: AllowRemote) -> Result<bool, String> {
+    let configured = match std::env::var_os(ALLOW_REMOTE_ENV) {
+        Some(value) => parse_boolean_env(ALLOW_REMOTE_ENV, &value)?,
+        None => false,
+    };
+    let enabled = match choice {
+        AllowRemote::Unspecified => configured,
+        AllowRemote::Enabled => true,
+        AllowRemote::Disabled => false,
+    };
+    #[cfg(not(feature = "remote"))]
+    if enabled {
+        return Err(
+            "`VAELJS_ALLOW_REMOTE` requires `vaeljs-lite` built with the `remote` feature"
+                .to_string(),
+        );
+    }
+    Ok(enabled)
+}
+
+fn parse_boolean_env(name: &str, value: &OsStr) -> Result<bool, String> {
+    let Some(text) = value.to_str() else {
+        return Err(boolean_env_error(name));
+    };
+    if text == "1" || text.eq_ignore_ascii_case("true") {
+        return Ok(true);
+    }
+    if text == "0" || text.eq_ignore_ascii_case("false") {
+        return Ok(false);
+    }
+    Err(boolean_env_error(name))
+}
+
+fn boolean_env_error(name: &str) -> String {
+    format!("invalid {name}: expected `1`, `0`, `true`, or `false`")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Input {
+    Path(PathBuf),
+    Url(String),
+}
+
 fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
+    let mut allow_remote = AllowRemote::Unspecified;
     let mut config = ConfigChoice::Auto;
+    #[cfg_attr(not(feature = "npm"), allow(unused_mut))]
+    let mut npm = NpmFlags::default();
     let mut node_compat = true;
     let mut index = 0;
     while let Some(argument) = args.get(index) {
         match argument.to_str() {
+            Some("--allow-remote") => {
+                #[cfg(not(feature = "remote"))]
+                return Err(
+                    "`--allow-remote` requires `vaeljs-lite` built with the `remote` feature"
+                        .to_string(),
+                );
+                #[cfg(feature = "remote")]
+                {
+                    allow_remote.choose(AllowRemote::Enabled)?;
+                    index += 1;
+                }
+            }
+            Some("--no-allow-remote") => {
+                allow_remote.choose(AllowRemote::Disabled)?;
+                index += 1;
+            }
+            Some("--no-npm") => {
+                #[cfg(not(feature = "npm"))]
+                return Err(
+                    "`--no-npm` requires `vaeljs-lite` built with the `npm` feature".to_string(),
+                );
+                #[cfg(feature = "npm")]
+                {
+                    npm.enabled = false;
+                    index += 1;
+                }
+            }
+            Some("--frozen-lockfile") => {
+                #[cfg(not(feature = "npm"))]
+                return Err(
+                    "`--frozen-lockfile` requires `vaeljs-lite` built with the `npm` feature"
+                        .to_string(),
+                );
+                #[cfg(feature = "npm")]
+                {
+                    npm.frozen_lockfile = true;
+                    index += 1;
+                }
+            }
+            Some("--offline") => {
+                #[cfg(not(feature = "npm"))]
+                return Err(
+                    "`--offline` requires `vaeljs-lite` built with the `npm` feature".to_string(),
+                );
+                #[cfg(feature = "npm")]
+                {
+                    npm.offline = true;
+                    index += 1;
+                }
+            }
             Some("--no-config") => {
                 config.set_disabled()?;
                 index += 1;
@@ -188,16 +350,27 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
                     return Err("expected exactly one input file after `--`".to_string());
                 }
                 return Ok(Command::Run {
-                    path: PathBuf::from(&rest[1]),
+                    input: classify_input(&rest[1]),
+                    allow_remote,
                     config,
+                    npm,
                     node_compat,
                 });
             }
-            "test" => return parse_test_args(&rest[1..], config, node_compat),
+            "test" => return parse_test_args(&rest[1..], allow_remote, config, npm, node_compat),
             "types" => {
-                if config != ConfigChoice::Auto || !node_compat {
+                if allow_remote != AllowRemote::Unspecified
+                    || config != ConfigChoice::Auto
+                    || !node_compat
+                {
                     return Err(
-                        "`types` does not accept `--config`, `--no-config`, or `--no-node-compat`"
+                        "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--no-node-compat`, `--config`, or `--no-config`"
+                            .to_string(),
+                    );
+                }
+                if npm != NpmFlags::default() {
+                    return Err(
+                        "`types` does not accept `--no-npm`, `--frozen-lockfile`, or `--offline`"
                             .to_string(),
                     );
                 }
@@ -214,21 +387,20 @@ fn parse_args(args: Vec<OsString>) -> Result<Command, String> {
         return Err(format!("unknown option `{}`", first.to_string_lossy()));
     }
     Ok(Command::Run {
-        path: PathBuf::from(first),
+        input: classify_input(first),
+        allow_remote,
         config,
+        npm,
         node_compat,
     })
 }
 
 /// Parses `vjs-lite test <file-or-glob>...`.
-///
-/// `--config <path>`, `--no-config`, and `--no-node-compat` may appear before
-/// or after `test`.
-/// `--` ends option parsing so a pattern beginning with `-` can still be named.
-/// Requires at least one pattern; discovery defaults are deliberately absent.
 fn parse_test_args(
     args: &[OsString],
+    mut allow_remote: AllowRemote,
     mut config: ConfigChoice,
+    #[cfg_attr(not(feature = "npm"), allow(unused_mut))] mut npm: NpmFlags,
     mut node_compat: bool,
 ) -> Result<Command, String> {
     if args.len() == 1 && matches!(args[0].to_str(), Some("-h" | "--help")) {
@@ -245,6 +417,61 @@ fn parse_test_args(
             after_double_dash = true;
             index += 1;
             continue;
+        }
+        if !after_double_dash && value == "--allow-remote" {
+            #[cfg(not(feature = "remote"))]
+            return Err(
+                "`--allow-remote` requires `vaeljs-lite` built with the `remote` feature"
+                    .to_string(),
+            );
+            #[cfg(feature = "remote")]
+            {
+                allow_remote.choose(AllowRemote::Enabled)?;
+                index += 1;
+                continue;
+            }
+        }
+        if !after_double_dash && value == "--no-allow-remote" {
+            allow_remote.choose(AllowRemote::Disabled)?;
+            index += 1;
+            continue;
+        }
+        if !after_double_dash && value == "--no-npm" {
+            #[cfg(not(feature = "npm"))]
+            return Err(
+                "`--no-npm` requires `vaeljs-lite` built with the `npm` feature".to_string(),
+            );
+            #[cfg(feature = "npm")]
+            {
+                npm.enabled = false;
+                index += 1;
+                continue;
+            }
+        }
+        if !after_double_dash && value == "--frozen-lockfile" {
+            #[cfg(not(feature = "npm"))]
+            return Err(
+                "`--frozen-lockfile` requires `vaeljs-lite` built with the `npm` feature"
+                    .to_string(),
+            );
+            #[cfg(feature = "npm")]
+            {
+                npm.frozen_lockfile = true;
+                index += 1;
+                continue;
+            }
+        }
+        if !after_double_dash && value == "--offline" {
+            #[cfg(not(feature = "npm"))]
+            return Err(
+                "`--offline` requires `vaeljs-lite` built with the `npm` feature".to_string(),
+            );
+            #[cfg(feature = "npm")]
+            {
+                npm.offline = true;
+                index += 1;
+                continue;
+            }
         }
         if !after_double_dash && value == "--no-config" {
             config.set_disabled()?;
@@ -286,7 +513,9 @@ fn parse_test_args(
     }
     Ok(Command::Test {
         patterns,
+        allow_remote,
         config,
+        npm,
         node_compat,
     })
 }
@@ -374,6 +603,32 @@ fn parse_profile(value: &str) -> Result<Profile, String> {
     }
 }
 
+/// Decides whether an input names a local path or a remote URL (`https:`,
+/// `http:`, `gh:`, `github:`, `jsr:`).
+fn classify_input(input: &OsString) -> Input {
+    if let Some(text) = input.to_str() {
+        let https = text
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
+        let http = text
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"));
+        let github = text
+            .get(..3)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("gh:"))
+            || text
+                .get(..7)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("github:"));
+        let jsr = text
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("jsr:"));
+        if https || http || github || jsr {
+            return Input::Url(text.to_string());
+        }
+    }
+    Input::Path(PathBuf::from(input))
+}
+
 enum LoadedConfig {
     None,
     Standalone(ImportResolver),
@@ -389,20 +644,21 @@ impl LoadedConfig {
         }
     }
 
-    fn resolver_for_entry(&self, entry_path: &Path) -> Result<Option<ImportResolver>, String> {
+    fn resolver_for_entry(
+        &self,
+        entry_path: Option<&Path>,
+    ) -> Result<Option<ImportResolver>, String> {
         match self {
             Self::None => Ok(None),
             Self::Standalone(resolver) => Ok(Some(resolver.clone())),
             Self::Workspace(workspace) => {
-                let active = if std::fs::symlink_metadata(entry_path).is_ok() {
-                    workspace.member_for_path(entry_path).map_err(|err| {
-                        format!(
-                            "cannot resolve `{}` in workspace: {err}",
-                            entry_path.display()
-                        )
-                    })?
-                } else {
-                    None
+                let active = match entry_path {
+                    Some(path) if std::fs::symlink_metadata(path).is_ok() => {
+                        workspace.member_for_path(path).map_err(|err| {
+                            format!("cannot resolve `{}` in workspace: {err}", path.display())
+                        })?
+                    }
+                    _ => None,
                 };
                 let resolver = ImportResolver::from_workspace(workspace, active.map(|m| m.name()))
                     .map_err(|err| format!("cannot build workspace import resolver: {err}"))?;
@@ -515,15 +771,43 @@ fn discover_resolver_for_entry(entry_path: &Path) -> Result<Option<ImportResolve
     Ok(Some(ImportResolver::from_manifest(&discovered)))
 }
 
-fn create_runtime(resolver: Option<ImportResolver>, node_compat: bool) -> Result<Runtime, Error> {
+fn create_runtime(
+    allow_remote: bool,
+    resolver: Option<ImportResolver>,
+    npm: NpmFlags,
+    node_compat: bool,
+) -> Result<Runtime, Error> {
     let mut options = RuntimeOptions::new().with_node_compat(node_compat);
+    #[cfg(feature = "remote")]
+    if allow_remote {
+        options = options.with_remote(RemoteOptions::new());
+    }
+    #[cfg(not(feature = "remote"))]
+    let _ = allow_remote;
     if let Some(resolver) = resolver {
         options = options.with_import_resolver(resolver);
     }
+    #[cfg(feature = "npm")]
+    {
+        let npm_options = NpmOptions::new()
+            .with_enabled(npm.enabled)
+            .with_frozen_lockfile(npm.frozen_lockfile)
+            .with_offline(npm.offline);
+        options = options.with_npm(npm_options);
+    }
+    #[cfg(not(feature = "npm"))]
+    let _ = npm;
     Runtime::with_options(options)
 }
 
-fn run(prog_name: &str, path: &Path, config: &ConfigChoice, node_compat: bool) -> ExitCode {
+fn run(
+    prog_name: &str,
+    input: Input,
+    allow_remote: bool,
+    config: &ConfigChoice,
+    npm: NpmFlags,
+    node_compat: bool,
+) -> ExitCode {
     let loaded = match LoadedConfig::from_choice(config) {
         Ok(loaded) => loaded,
         Err(message) => {
@@ -531,9 +815,11 @@ fn run(prog_name: &str, path: &Path, config: &ConfigChoice, node_compat: bool) -
             return ExitCode::from(EXIT_STARTUP_FAILURE);
         }
     };
-    let resolver = match &loaded {
-        Some(loaded) => loaded.resolver_for_entry(path),
-        None => discover_resolver_for_entry(path),
+    let resolver = match (&loaded, &input) {
+        (Some(loaded), Input::Path(path)) => loaded.resolver_for_entry(Some(path)),
+        (Some(loaded), Input::Url(_)) => loaded.resolver_for_entry(None),
+        (None, Input::Path(path)) => discover_resolver_for_entry(path),
+        (None, Input::Url(_)) => Ok(None),
     };
     let resolver = match resolver {
         Ok(resolver) => resolver,
@@ -543,7 +829,7 @@ fn run(prog_name: &str, path: &Path, config: &ConfigChoice, node_compat: bool) -
         }
     };
 
-    let mut runtime = match create_runtime(resolver, node_compat) {
+    let mut runtime = match create_runtime(allow_remote, resolver, npm, node_compat) {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("{prog_name}: {error}");
@@ -551,7 +837,24 @@ fn run(prog_name: &str, path: &Path, config: &ConfigChoice, node_compat: bool) -
         }
     };
 
-    match runtime.run_file(path) {
+    let result = match &input {
+        Input::Path(path) => runtime.run_file(path),
+        Input::Url(url) => {
+            #[cfg(feature = "remote")]
+            {
+                runtime.run_url(url)
+            }
+            #[cfg(not(feature = "remote"))]
+            {
+                let _ = url;
+                eprintln!(
+                    "{prog_name}: remote module loading requires `vaeljs-lite` built with the `remote` feature"
+                );
+                return ExitCode::from(EXIT_STARTUP_FAILURE);
+            }
+        }
+    };
+    match result {
         Ok(()) => {
             if let Some(code) = runtime.exit_code() {
                 ExitCode::from((code & 0xff) as u8)
@@ -595,14 +898,12 @@ impl TestTotals {
 }
 
 /// Expands the arguments, then runs each file in a fresh QuickJS runtime.
-///
-/// A file that fails to load, fails a test, registers no tests, leaves a test
-/// pending, leaves an unhandled rejection, or leaves unsettled job work makes
-/// the command exit 1. Later files still run in fresh isolated runtimes.
 fn run_tests(
     prog_name: &str,
     patterns: &[String],
+    allow_remote: bool,
     config: &ConfigChoice,
+    npm: NpmFlags,
     node_compat: bool,
 ) -> ExitCode {
     let loaded = match LoadedConfig::from_choice(config) {
@@ -621,7 +922,7 @@ fn run_tests(
     let mut resolvers = Vec::with_capacity(files.len());
     for file in &files {
         let resolver = match &loaded {
-            Some(loaded) => loaded.resolver_for_entry(file),
+            Some(loaded) => loaded.resolver_for_entry(Some(file)),
             None => discover_resolver_for_entry(file),
         };
         match resolver {
@@ -637,7 +938,7 @@ fn run_tests(
     let mut failed_files = 0usize;
     for (file, resolver) in files.iter().zip(resolvers) {
         println!("test {}:", file.display());
-        let mut runtime = match create_runtime(resolver, node_compat) {
+        let mut runtime = match create_runtime(allow_remote, resolver, npm, node_compat) {
             Ok(runtime) => runtime,
             Err(error) => {
                 eprintln!("{prog_name}: {error}");
@@ -693,22 +994,20 @@ fn run_tests(
 }
 
 /// Maps an error to the exit code the V8 `vaeljs` command uses.
-///
-/// A module that started and failed is a runtime failure. A preflight problem
-/// (unreadable or unsupported entry, or failure to create the runtime) is a
-/// startup failure. Keeping this mapping aligned makes shared fixtures behave
-/// the same across the two commands even though the prefixes differ.
 fn exit_code(error: &Error) -> u8 {
     match error {
         Error::Module { .. }
         | Error::TypeScript { .. }
+        | Error::RemoteTypeScript { .. }
         | Error::UnhandledRejection { .. }
         | Error::NonConvergingJobs { .. }
         | Error::TestRunner(_) => EXIT_RUNTIME_FAILURE,
-        Error::Init { .. } | Error::Entry { .. } | Error::UnsupportedEntry { .. } => {
-            EXIT_STARTUP_FAILURE
-        }
-        Error::RuntimeConsumed => EXIT_STARTUP_FAILURE,
+        Error::Init { .. }
+        | Error::Entry { .. }
+        | Error::UnsupportedEntry { .. }
+        | Error::RemoteDisabled
+        | Error::RemoteEntry { .. }
+        | Error::RuntimeConsumed => EXIT_STARTUP_FAILURE,
         _ => EXIT_STARTUP_FAILURE,
     }
 }
@@ -778,6 +1077,51 @@ const NODE_MODULES_HELP: &str = "\n  node:buffer, node:child_process, node:crypt
 const NODE_MODULES_HELP: &str = "";
 
 fn help(prog_name: &str) -> String {
+    #[cfg(all(feature = "remote", feature = "npm"))]
+    let remote_npm_options = "\
+  --allow-remote   allow https:, gh:, github:, and jsr: entry and imports, plus
+                   npm: network fetches; off by default
+  --no-allow-remote
+                   force remote loading off, overriding VAELJS_ALLOW_REMOTE
+  --no-npm         disable npm: and package.json module resolution
+  --frozen-lockfile
+                   refuse npm resolutions not pinned in vael.lock
+  --offline        refuse network fetches; serve npm packages strictly from CAS";
+    #[cfg(all(feature = "remote", not(feature = "npm")))]
+    let remote_npm_options = "\
+  --allow-remote   allow https:, gh:, github:, and jsr: entry and imports;
+                   off by default
+  --no-allow-remote
+                   force remote loading off, overriding VAELJS_ALLOW_REMOTE";
+    #[cfg(not(feature = "remote"))]
+    let remote_npm_options = "\
+  (remote and npm features disabled at compile time)";
+
+    #[cfg(all(feature = "remote", feature = "npm"))]
+    let remote_npm_summary = "\
+Remote loading is disabled by default. `--allow-remote` enables https:, gh:,
+github:, and jsr:@scope/name[@version][/subpath] entries and imports;
+`--no-allow-remote` forces it off. Downloads are cached under `vaeljs/packages`
+in the user cache. `npm:` specifiers, `package.json` dependencies/`#imports`,
+and `vael.lock` resolve without `node_modules` or install scripts via the
+verified CAS cache (offline by default; use `--allow-remote` to fetch missing
+packages, `--frozen-lockfile` to require `vael.lock`, `--offline` to forbid
+network, or `--no-npm` to disable). Local modules discover `vael.jsonc` upward
+for `imports` and `workspaces` unless `--config` or `--no-config` is passed.";
+    #[cfg(all(feature = "remote", not(feature = "npm")))]
+    let remote_npm_summary = "\
+Remote loading is disabled by default. `--allow-remote` enables https:, gh:,
+github:, and jsr:@scope/name[@version][/subpath] entries and imports;
+`--no-allow-remote` forces it off. Downloads are cached under `vaeljs/packages`
+in the user cache. `npm:` is disabled at compile time. Local modules discover
+`vael.jsonc` upward for `imports` and `workspaces` unless `--config` or
+`--no-config` is passed.";
+    #[cfg(not(feature = "remote"))]
+    let remote_npm_summary = "\
+Local modules discover `vael.jsonc` upward for `imports` and `workspaces`
+unless `--config` or `--no-config` is passed. Remote (`https:`, `gh:`, `jsr:`)
+and `npm:` features were disabled at compile time.";
+
     format!(
         "\
 vaeljs-lite {}
@@ -785,20 +1129,29 @@ Run an ECMAScript module or erasable TypeScript file on QuickJS, or run test fil
 
 Usage:
   {prog_name} <file>                    run one module
+  {prog_name} --allow-remote <file-or-url>
+  {prog_name} --no-allow-remote <file>
   {prog_name} --config <path> <file>
   {prog_name} --no-config <file>
   {prog_name} -- <file>
   {prog_name} test <file-or-glob>...    run test files
+  {prog_name} test --allow-remote <file-or-glob>...
   {prog_name} types [--profile <lite|v8>] [--out-dir <dir>]
                                        emit TypeScript declarations (.d.ts)
 
 Options:
+{remote_npm_options}
   --config <path>   Use an explicit vael.jsonc manifest instead of discovery
   --no-config       Disable automatic vael.jsonc manifest discovery
   --no-node-compat  Disable node:* built-in compatibility modules
   -h, --help        Print this help (alone or after `test`)
   -V, --version     Print the version
   --                End option parsing, for a file or pattern beginning with `-`
+
+Environment:
+  VAELJS_ALLOW_REMOTE  1 or true enables remote loading, 0 or false keeps it off
+                       (case-insensitive); an explicit flag overrides a valid
+                       setting, and an invalid value is rejected at startup
 
 Built-in modules:
 {}{}
@@ -808,10 +1161,8 @@ file. .js, .mjs, .ts, and .mts run. TypeScript is stripped, not type checked:
 only erasable syntax is accepted (no enum, namespace, or other transforms), and
 .tsx, .jsx, .cts, and declaration files are rejected.
 
-Local modules discover `vael.jsonc` upward for `imports` and `workspaces`
-unless `--config` or `--no-config` is passed. Remote (`https:`, `gh:`, `jsr:`,
-`npm:`) and unsupported `node:*` imports (such as `node:fs/promises`) are not
-supported in `vjs-lite`.
+{remote_npm_summary}
+Unsupported `node:*` imports (such as `node:fs/promises`) are rejected.
 
 `{prog_name} test` expands each argument as an existing file or a case-sensitive
 shell-style glob. Files are sorted, deduplicated, and each runs in a fresh
@@ -833,7 +1184,12 @@ Exit codes:
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, ConfigChoice, DEFAULT_PROG_NAME, parse_args, program_name_from_arg0};
+    use super::{
+        AllowRemote, Command, ConfigChoice, DEFAULT_PROG_NAME, Input, NpmFlags, parse_args,
+        program_name_from_arg0,
+    };
+    #[cfg(feature = "remote")]
+    use super::{classify_input, parse_boolean_env};
     use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
     use vaeljs_dts::Profile;
@@ -848,7 +1204,9 @@ mod tests {
             parse_args(args(&["test", "a.test.js", "b/*.test.js"])),
             Ok(Command::Test {
                 patterns: vec!["a.test.js".to_string(), "b/*.test.js".to_string()],
+                allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Auto,
+                npm: NpmFlags::default(),
                 node_compat: true,
             })
         );
@@ -861,7 +1219,9 @@ mod tests {
             parse_args(args(&["test", "--", "-weird.test.js"])),
             Ok(Command::Test {
                 patterns: vec!["-weird.test.js".to_string()],
+                allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Auto,
+                npm: NpmFlags::default(),
                 node_compat: true,
             })
         );
@@ -884,8 +1244,10 @@ mod tests {
         assert_eq!(
             parse_args(args(&["--config", "custom.jsonc", "main.js"])),
             Ok(Command::Run {
-                path: PathBuf::from("main.js"),
+                input: Input::Path(PathBuf::from("main.js")),
+                allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Explicit(PathBuf::from("custom.jsonc")),
+                npm: NpmFlags::default(),
                 node_compat: true,
             })
         );
@@ -893,15 +1255,19 @@ mod tests {
             parse_args(args(&["test", "--no-config", "a.test.js"])),
             Ok(Command::Test {
                 patterns: vec!["a.test.js".to_string()],
+                allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Disabled,
+                npm: NpmFlags::default(),
                 node_compat: true,
             })
         );
         assert_eq!(
             parse_args(args(&["--no-node-compat", "main.js"])),
             Ok(Command::Run {
-                path: PathBuf::from("main.js"),
+                input: Input::Path(PathBuf::from("main.js")),
+                allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Auto,
+                npm: NpmFlags::default(),
                 node_compat: false,
             })
         );
@@ -909,7 +1275,9 @@ mod tests {
             parse_args(args(&["test", "--no-node-compat", "a.test.js"])),
             Ok(Command::Test {
                 patterns: vec!["a.test.js".to_string()],
+                allow_remote: AllowRemote::Unspecified,
                 config: ConfigChoice::Auto,
+                npm: NpmFlags::default(),
                 node_compat: false,
             })
         );
@@ -920,6 +1288,97 @@ mod tests {
         assert_eq!(
             parse_args(args(&["--config"])),
             Err("`--config` requires a path".to_string())
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "remote")]
+    fn allow_remote_and_url_inputs_parse_cleanly() {
+        assert_eq!(
+            parse_args(args(&["--allow-remote", "https://example.test/mod.ts"])),
+            Ok(Command::Run {
+                input: Input::Url("https://example.test/mod.ts".to_string()),
+                allow_remote: AllowRemote::Enabled,
+                config: ConfigChoice::Auto,
+                npm: NpmFlags::default(),
+                node_compat: true,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["--allow-remote", "test", "a.test.js"])),
+            Ok(Command::Test {
+                patterns: vec!["a.test.js".to_string()],
+                allow_remote: AllowRemote::Enabled,
+                config: ConfigChoice::Auto,
+                npm: NpmFlags::default(),
+                node_compat: true,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["--allow-remote", "--no-allow-remote", "main.js"])),
+            Err("`--allow-remote` and `--no-allow-remote` cannot be used together".to_string())
+        );
+        assert_eq!(
+            classify_input(&OsString::from("jsr:@scope/pkg@1.0.0")),
+            Input::Url("jsr:@scope/pkg@1.0.0".to_string())
+        );
+        assert_eq!(
+            classify_input(&OsString::from("gh:owner/repo@v1/mod.ts")),
+            Input::Url("gh:owner/repo@v1/mod.ts".to_string())
+        );
+        assert_eq!(
+            classify_input(&OsString::from("github:owner/repo@v1/mod.ts")),
+            Input::Url("github:owner/repo@v1/mod.ts".to_string())
+        );
+        assert_eq!(
+            classify_input(&OsString::from("C:\\work\\main.js")),
+            Input::Path(PathBuf::from("C:\\work\\main.js"))
+        );
+        assert!(parse_boolean_env("VAELJS_ALLOW_REMOTE", OsStr::new("1")).unwrap());
+        assert!(!parse_boolean_env("VAELJS_ALLOW_REMOTE", OsStr::new("false")).unwrap());
+        assert!(parse_boolean_env("VAELJS_ALLOW_REMOTE", OsStr::new("maybe")).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "npm")]
+    fn npm_flags_parse_for_run_and_test() {
+        assert_eq!(
+            parse_args(args(&[
+                "--no-npm",
+                "--frozen-lockfile",
+                "--offline",
+                "main.js"
+            ])),
+            Ok(Command::Run {
+                input: Input::Path(PathBuf::from("main.js")),
+                allow_remote: AllowRemote::Unspecified,
+                config: ConfigChoice::Auto,
+                npm: NpmFlags {
+                    enabled: false,
+                    frozen_lockfile: true,
+                    offline: true,
+                },
+                node_compat: true,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&[
+                "test",
+                "--frozen-lockfile",
+                "--offline",
+                "a.test.js"
+            ])),
+            Ok(Command::Test {
+                patterns: vec!["a.test.js".to_string()],
+                allow_remote: AllowRemote::Unspecified,
+                config: ConfigChoice::Auto,
+                npm: NpmFlags {
+                    enabled: true,
+                    frozen_lockfile: true,
+                    offline: true,
+                },
+                node_compat: true,
+            })
         );
     }
 
@@ -969,14 +1428,22 @@ mod tests {
         assert_eq!(
             parse_args(args(&["--no-config", "types"])),
             Err(
-                "`types` does not accept `--config`, `--no-config`, or `--no-node-compat`"
+                "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--no-node-compat`, `--config`, or `--no-config`"
                     .to_string()
             )
         );
         assert_eq!(
             parse_args(args(&["--no-node-compat", "types"])),
             Err(
-                "`types` does not accept `--config`, `--no-config`, or `--no-node-compat`"
+                "`types` does not accept `--allow-remote`, `--no-allow-remote`, `--no-node-compat`, `--config`, or `--no-config`"
+                    .to_string()
+            )
+        );
+        #[cfg(feature = "npm")]
+        assert_eq!(
+            parse_args(args(&["--offline", "types"])),
+            Err(
+                "`types` does not accept `--no-npm`, `--frozen-lockfile`, or `--offline`"
                     .to_string()
             )
         );

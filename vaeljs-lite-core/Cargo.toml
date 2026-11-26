@@ -21,7 +21,7 @@ readme = "README.md"
 # advertises. Cargo features are additive and unify across the dependency graph:
 # a feature is present whenever any dependent enables it. Selection is
 # compile-time surface selection, not a sandbox.
-default = ["vael-assert", "vael-chars", "vael-console", "vael-crypto", "vael-fs", "vael-os", "vael-path", "vael-slices", "vael-ssh", "vael-strings", "vael-template", "vael-test", "vael-uuid", "node-compat", "typescript"]
+default = ["vael-assert", "vael-chars", "vael-console", "vael-crypto", "vael-fs", "vael-os", "vael-path", "vael-slices", "vael-ssh", "vael-strings", "vael-template", "vael-test", "vael-uuid", "node-compat", "typescript", "remote", "npm"]
 # The shared `assert` module and its Promise observation host hooks. This
 # enables the optional `vaeljs-builtins` dependency and its `assert` module.
 vael-assert = ["dep:vaeljs-builtins", "vaeljs-builtins/assert"]
@@ -79,13 +79,20 @@ node-compat = ["dep:vaeljs-node-core"]
 # `vael.jsonc` `ImportResolver` integration for local `imports` and workspace
 # packages. Opt-in so `--no-default-features` stays free of manifest/glob deps.
 manifest = ["dep:vaeljs-manifest"]
+# Opt-in `https:`, `gh:`/`github:`, and `jsr:` module resolution and loading
+# backed by blocking `vaeljs-remote` (`ureq` + `rustls`, zero Tokio/hyper).
+remote = ["dep:vaeljs-remote"]
+# Opt-outable `npm:`, `package.json`, and `vael.lock` CAS-backed module
+# resolution. Enables `remote` and `vaeljs-npm/network` for online registry
+# fetches when `--allow-remote` / `RemoteOptions` is provided.
+npm = ["dep:vaeljs-npm", "remote", "vaeljs-npm/network"]
 # Erasable TypeScript (`.ts` and `.mts`) stripping shared with `vaeljs-core`
 # through `vaeljs-module-policy/typescript` (`deno_ast`). `--no-default-features`
 # keeps `deno_ast` and its parser dependencies out of minimal builds.
 typescript = ["vaeljs-module-policy/typescript"]
-# Test-only streaming-read counters for the bounded text access tests. Never
-# enabled by a normal build.
-test-support = []
+# Test-only streaming-read counters and remote transport hooks. Never enabled by
+# a normal build.
+test-support = ["vaeljs-remote?/test-support"]
 
 [dependencies]
 # The shared `vael:chars` Rust logic is enabled by the `vael-chars` feature.
@@ -95,6 +102,8 @@ vaeljs-fs-core = { workspace = true, optional = true }
 vaeljs-manifest = { workspace = true, optional = true }
 vaeljs-module-policy = { version = "0.0.0-alpha.0", path = "../vaeljs-module-policy" }
 vaeljs-node-core = { workspace = true, optional = true }
+vaeljs-npm = { workspace = true, optional = true }
+vaeljs-remote = { workspace = true, optional = true }
 vaeljs-ssh-core = { workspace = true, optional = true }
 vaeljs-template-core = { workspace = true, optional = true }
 # Pinned: the C API and Rust API change between minor releases. 0.14.0 is the
@@ -106,6 +115,10 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-vaeljs-dts.workspace = true
+base64.workspace = true
+flate2.workspace = true
 neotales-ssh.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
+vaeljs-dts.workspace = true

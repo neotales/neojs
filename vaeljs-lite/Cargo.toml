@@ -16,11 +16,15 @@ name = "vjs-lite"
 path = "src/main.rs"
 
 [features]
-default = ["vael-template", "node-compat"]
+default = ["vael-template", "node-compat", "remote", "npm"]
 # Enables `vael:template` in `vaeljs-lite-core`. Opt-outable with `--no-default-features`.
 vael-template = ["vaeljs-lite-core/vael-template"]
 # Enables `node:*` compatibility modules in `vaeljs-lite-core`. Opt-outable with `--no-default-features`.
 node-compat = ["vaeljs-lite-core/node-compat"]
+# Enables `https:`, `gh:`/`github:`, and `jsr:` remote module loading in `vaeljs-lite-core`.
+remote = ["vaeljs-lite-core/remote"]
+# Enables `npm:`, `package.json`, and `vael.lock` resolution in `vaeljs-lite-core`.
+npm = ["vaeljs-lite-core/npm", "remote"]
 
 [dependencies]
 # The command's module bundle is explicit rather than inherited from
@@ -48,4 +52,9 @@ vaeljs-manifest.workspace = true
 vaeljs-module-policy = { version = "0.0.0-alpha.0", path = "../vaeljs-module-policy", features = ["test-glob"] }
 
 [dev-dependencies]
+base64.workspace = true
+flate2.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
+vaeljs-lite-core = { version = "0.0.0-alpha.0", path = "../vaeljs-lite-core", default-features = false, features = ["test-support"] }
+vaeljs-npm.workspace = true

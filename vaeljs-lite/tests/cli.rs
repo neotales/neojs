@@ -501,20 +501,22 @@ fn rejects_remote_import_map_targets_clearly() {
     write(&dir, "r1.js", "import 'remote';\n");
     let out1 = run(&[file1.as_os_str()]);
     assert_eq!(out1.status.code(), Some(1));
+    let err1 = stderr(&out1);
     assert!(
-        stderr(&out1).contains("remote module loading is not supported in vaeljs-lite"),
-        "{}",
-        stderr(&out1)
+        err1.contains("remote module loading is disabled")
+            || err1.contains("remote module loading is not enabled"),
+        "{err1}"
     );
 
     let file2 = dir.path().join("r2.js");
     write(&dir, "r2.js", "import 'jsr-lib';\n");
     let out2 = run(&[file2.as_os_str()]);
     assert_eq!(out2.status.code(), Some(1));
+    let err2 = stderr(&out2);
     assert!(
-        stderr(&out2).contains("remote module loading is not supported in vaeljs-lite"),
-        "{}",
-        stderr(&out2)
+        err2.contains("jsr: modules require remote module loading")
+            || err2.contains("remote module loading is not enabled"),
+        "{err2}"
     );
 }
 
@@ -995,5 +997,527 @@ fn help_and_usage_use_symlink_program_name() {
     assert_eq!(
         stdout(&version),
         format!("vjs-lite {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[cfg(feature = "remote")]
+#[test]
+fn remote_url_entrypoints_require_allow_remote_and_reject_http() {
+    for entry in [
+        "https://example.test/mod.js",
+        "gh:owner/repo@v1/mod.ts",
+        "jsr:@scope/pkg@1.0.0",
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_vjs-lite"))
+            .env_remove("VAELJS_ALLOW_REMOTE")
+            .arg(entry)
+            .output()
+            .expect("run vjs-lite");
+        assert_eq!(out.status.code(), Some(2), "{entry}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("remote module loading is disabled"),
+            "{entry}: {}",
+            stderr(&out)
+        );
+    }
+
+    let http_out = Command::new(env!("CARGO_BIN_EXE_vjs-lite"))
+        .args(["--allow-remote", "http://example.test/mod.js"])
+        .output()
+        .expect("run vjs-lite with http");
+    assert_eq!(http_out.status.code(), Some(2));
+    assert!(
+        stderr(&http_out).contains("https:"),
+        "{}",
+        stderr(&http_out)
+    );
+
+    let bad_env = Command::new(env!("CARGO_BIN_EXE_vjs-lite"))
+        .env("VAELJS_ALLOW_REMOTE", "maybe")
+        .arg("https://example.test/mod.js")
+        .output()
+        .expect("run vjs-lite with bad env");
+    assert_eq!(bad_env.status.code(), Some(2));
+    assert!(
+        stderr(&bad_env).contains("invalid VAELJS_ALLOW_REMOTE"),
+        "{}",
+        stderr(&bad_env)
+    );
+}
+
+#[cfg(all(feature = "remote", feature = "npm"))]
+#[test]
+fn ancestor_vael_jsonc_import_maps_for_npm_jsr_gh_and_https_in_run_and_test() {
+    use std::collections::{BTreeMap, HashMap};
+    use std::io::Write as _;
+    use std::sync::Arc;
+
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use sha2::{Digest, Sha256, Sha512};
+    use vaeljs_lite_core::test_support::TestRemoteResponse;
+    use vaeljs_lite_core::{RemoteOptions, Runtime, RuntimeOptions};
+    use vaeljs_manifest::discover_manifest;
+    use vaeljs_npm::{
+        CasStore, DEFAULT_REGISTRY_ORIGIN, LockedPackage, Lockfile, NpmLimits, TarballIngestor,
+    };
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let digest = Sha256::digest(bytes);
+        let mut out = String::with_capacity(digest.len() * 2);
+        for b in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut out, "{b:02x}");
+        }
+        out
+    }
+
+    fn write_tar_header(name: &str, size: usize) -> [u8; 512] {
+        let mut header = [0u8; 512];
+        let name_bytes = name.as_bytes();
+        let copy_len = name_bytes.len().min(100);
+        header[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        let size_str = format!("{size:011o}\0");
+        header[124..136].copy_from_slice(size_str.as_bytes());
+        header[136..148].copy_from_slice(b"00000000000\0");
+        header[148..156].copy_from_slice(b"        ");
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let sum: u32 = header.iter().map(|&b| u32::from(b)).sum();
+        let csum = format!("{sum:06o}\0 ");
+        header[148..156].copy_from_slice(csum.as_bytes());
+        header
+    }
+
+    fn build_tgz(files: &[(&str, &str)]) -> (Vec<u8>, String) {
+        let mut tar_buf = Vec::new();
+        for (rel_path, content) in files {
+            let full = format!("package/{rel_path}");
+            let bytes = content.as_bytes();
+            tar_buf.extend_from_slice(&write_tar_header(&full, bytes.len()));
+            if !bytes.is_empty() {
+                tar_buf.extend_from_slice(bytes);
+                let pad = (512 - (bytes.len() % 512)) % 512;
+                tar_buf.resize(tar_buf.len() + pad, 0);
+            }
+        }
+        tar_buf.resize(tar_buf.len() + 1024, 0);
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(&tar_buf).expect("write tar");
+        let tgz = gz.finish().expect("finish gzip");
+        let sri = format!("sha512-{}", BASE64_STANDARD.encode(Sha512::digest(&tgz)));
+        (tgz, sri)
+    }
+
+    let xdg_cache = tempfile::tempdir().expect("xdg cache");
+    let packages_cache = xdg_cache.path().join("vaeljs/packages");
+    let cas = CasStore::new(&packages_cache);
+    let (npm_tgz, npm_sri) = build_tgz(&[
+        (
+            "package.json",
+            r#"{
+                "name": "demo-pkg",
+                "version": "1.0.0",
+                "type": "module",
+                "exports": { ".": "./index.ts", "./sub": "./sub.ts" }
+            }"#,
+        ),
+        (
+            "index.ts",
+            "export const npmRoot: string = 'cli-npm-root';\n",
+        ),
+        ("sub.ts", "export const npmSub: string = 'cli-npm-sub';\n"),
+    ]);
+    let npm_tree = TarballIngestor::new(cas.clone(), NpmLimits::default())
+        .ingest(DEFAULT_REGISTRY_ORIGIN, &npm_sri, &npm_tgz)
+        .expect("ingest npm tarball")
+        .tree_sha256;
+
+    let project = tempfile::tempdir().expect("project");
+    let mut lock = Lockfile::new();
+    lock.specifiers
+        .insert("demo-pkg@^1.0.0".to_owned(), "demo-pkg@1.0.0".to_owned());
+    lock.packages.insert(
+        "demo-pkg@1.0.0".to_owned(),
+        LockedPackage {
+            version: "1.0.0".to_owned(),
+            integrity: npm_sri,
+            tree_sha256: Some(npm_tree),
+            tarball_url: "https://registry.npmjs.org/demo-pkg/-/1.0.0.tgz".to_owned(),
+            dependencies: BTreeMap::new(),
+        },
+    );
+    lock.write_atomic(&project.path().join("vael.lock"))
+        .unwrap();
+
+    let jsr_mod_bytes = b"export const jsrVal: string = 'cli-jsr-root';\n";
+    let jsr_sub_bytes = b"export const jsrSubVal: string = 'cli-jsr-sub';\n";
+    let mut remote_replies: HashMap<String, Vec<u8>> = HashMap::new();
+    remote_replies.insert(
+        "https://cdn.example.test/mod.ts".to_owned(),
+        b"export const httpsVal: string = 'cli-https-root';\n".to_vec(),
+    );
+    remote_replies.insert(
+        "https://raw.githubusercontent.com/acme/repo/v1.0.0/mod.ts".to_owned(),
+        b"export const ghVal: string = 'cli-gh-root';\n".to_vec(),
+    );
+    remote_replies.insert(
+        "https://raw.githubusercontent.com/acme/repo/v1.0.0/alt.ts".to_owned(),
+        b"export const githubVal: string = 'cli-github-alt';\n".to_vec(),
+    );
+    remote_replies.insert(
+        "https://jsr.io/@demo/pkg/meta.json".to_owned(),
+        br#"{"scope":"demo","name":"pkg","latest":"1.0.0","versions":{"1.0.0":{}}}"#.to_vec(),
+    );
+    remote_replies.insert(
+        "https://jsr.io/@demo/pkg/1.0.0_meta.json".to_owned(),
+        format!(
+            r#"{{
+                "exports": {{ ".": "./mod.ts", "./sub": "./sub.ts" }},
+                "manifest": {{
+                    "/mod.ts": {{ "size": {}, "checksum": "sha256-{}" }},
+                    "/sub.ts": {{ "size": {}, "checksum": "sha256-{}" }}
+                }}
+            }}"#,
+            jsr_mod_bytes.len(),
+            sha256_hex(jsr_mod_bytes),
+            jsr_sub_bytes.len(),
+            sha256_hex(jsr_sub_bytes),
+        )
+        .into_bytes(),
+    );
+    remote_replies.insert(
+        "https://jsr.io/@demo/pkg/1.0.0/mod.ts".to_owned(),
+        jsr_mod_bytes.to_vec(),
+    );
+    remote_replies.insert(
+        "https://jsr.io/@demo/pkg/1.0.0/sub.ts".to_owned(),
+        jsr_sub_bytes.to_vec(),
+    );
+    let remote_replies = Arc::new(remote_replies);
+
+    write(
+        &project,
+        "vael.jsonc",
+        r#"{
+            "name": "@demo/cli-lite-ancestor",
+            "imports": {
+                "my-npm": "npm:demo-pkg@^1.0.0",
+                "my-npm/": "npm:demo-pkg@^1.0.0/",
+                "my-jsr": "jsr:@demo/pkg@^1.0.0",
+                "my-jsr/": "jsr:@demo/pkg@^1.0.0/",
+                "my-gh": "gh:acme/repo@v1.0.0/mod.ts",
+                "my-github": "github:acme/repo@v1.0.0/alt.ts",
+                "my-https": "https://cdn.example.test/mod.ts"
+            }
+        }"#,
+    );
+
+    let main_src = r#"
+import { npmRoot } from "my-npm";
+import { npmSub } from "my-npm/sub";
+const dynNpm = await import("my-npm");
+console.log(`${npmRoot}|${npmSub}|${dynNpm.npmRoot}`);
+"#;
+    let test_src = r#"
+import test from "vael:test";
+import assert from "vael:assert";
+import { npmRoot } from "my-npm";
+import { npmSub } from "my-npm/sub";
+
+test("ancestor vael.jsonc npm exact and prefix subpath", async () => {
+    const dynNpm = await import("my-npm");
+    assert.strictEquals(npmRoot, "cli-npm-root");
+    assert.strictEquals(npmSub, "cli-npm-sub");
+    assert.strictEquals(dynNpm.npmRoot, "cli-npm-root");
+});
+"#;
+    write(&project, "apps/nested/sub/main.ts", main_src);
+    write(&project, "apps/nested/sub/app.test.ts", test_src);
+
+    let run_in_project = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_vjs-lite"))
+            .current_dir(project.path())
+            .env_remove("VAELJS_ALLOW_REMOTE")
+            .env("XDG_CACHE_HOME", xdg_cache.path())
+            .args(args)
+            .output()
+            .expect("run vjs-lite")
+    };
+
+    // 1. Offline CAS + ancestor `vael.lock` succeeds in `vjs-lite` and `vjs-lite test`.
+    let npm_run = run_in_project(&["--frozen-lockfile", "--offline", "apps/nested/sub/main.ts"]);
+    assert_eq!(
+        npm_run.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&npm_run)
+    );
+    assert_eq!(stdout(&npm_run), "cli-npm-root|cli-npm-sub|cli-npm-root\n");
+
+    let npm_test = run_in_project(&[
+        "test",
+        "--frozen-lockfile",
+        "--offline",
+        "apps/nested/sub/app.test.ts",
+    ]);
+    assert_eq!(
+        npm_test.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&npm_test),
+        stderr(&npm_test)
+    );
+    assert!(
+        stdout(&npm_test).contains("ok 1 - ancestor vael.jsonc npm exact and prefix subpath"),
+        "{}",
+        stdout(&npm_test)
+    );
+    assert!(!project.path().join("node_modules").exists());
+
+    // 2. `--no-npm` and `--no-config` fail cleanly in both `vjs-lite` and `vjs-lite test`.
+    for args in [
+        ["--no-npm", "apps/nested/sub/main.ts"].as_slice(),
+        ["test", "--no-npm", "apps/nested/sub/app.test.ts"].as_slice(),
+    ] {
+        let out = run_in_project(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("--no-npm"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+    for args in [
+        ["--no-config", "apps/nested/sub/main.ts"].as_slice(),
+        ["test", "--no-config", "apps/nested/sub/app.test.ts"].as_slice(),
+    ] {
+        let out = run_in_project(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("bare module specifiers"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+
+    // 3. Seed remote cache in `XDG_CACHE_HOME` and verify `--allow-remote` executes
+    // all 4 schemes (`npm:`, `jsr:`, `gh:`/`github:`, `https:`) in `vjs-lite` and `vjs-lite test`.
+    let seed_script = project.path().join("apps/nested/sub/seed_all.ts");
+    write(
+        &project,
+        "apps/nested/sub/seed_all.ts",
+        r#"
+import { npmRoot } from "my-npm";
+import { npmSub } from "my-npm/sub";
+import { jsrVal } from "my-jsr";
+import { jsrSubVal } from "my-jsr/sub";
+import { ghVal } from "my-gh";
+import { githubVal } from "my-github";
+import { httpsVal } from "my-https";
+if (
+    npmRoot !== "cli-npm-root" ||
+    npmSub !== "cli-npm-sub" ||
+    jsrVal !== "cli-jsr-root" ||
+    jsrSubVal !== "cli-jsr-sub" ||
+    ghVal !== "cli-gh-root" ||
+    githubVal !== "cli-github-alt" ||
+    httpsVal !== "cli-https-root"
+) {
+    throw new Error("seed mismatch");
+}
+"#,
+    );
+    let all_schemes_src = r#"
+import { npmRoot } from "my-npm";
+import { npmSub } from "my-npm/sub";
+import { jsrVal } from "my-jsr";
+import { jsrSubVal } from "my-jsr/sub";
+import { ghVal } from "my-gh";
+import { githubVal } from "my-github";
+import { httpsVal } from "my-https";
+console.log([npmRoot, npmSub, jsrVal, jsrSubVal, ghVal, githubVal, httpsVal].join("|"));
+"#;
+    let all_schemes_test_src = r#"
+import test from "vael:test";
+import assert from "vael:assert";
+import { npmRoot } from "my-npm";
+import { npmSub } from "my-npm/sub";
+import { jsrVal } from "my-jsr";
+import { jsrSubVal } from "my-jsr/sub";
+import { ghVal } from "my-gh";
+import { githubVal } from "my-github";
+import { httpsVal } from "my-https";
+
+test("ancestor vael.jsonc all four external schemes on lite", () => {
+    assert.strictEquals(npmRoot, "cli-npm-root");
+    assert.strictEquals(npmSub, "cli-npm-sub");
+    assert.strictEquals(jsrVal, "cli-jsr-root");
+    assert.strictEquals(jsrSubVal, "cli-jsr-sub");
+    assert.strictEquals(ghVal, "cli-gh-root");
+    assert.strictEquals(githubVal, "cli-github-alt");
+    assert.strictEquals(httpsVal, "cli-https-root");
+});
+"#;
+    write(&project, "apps/nested/sub/all_schemes.ts", all_schemes_src);
+    write(
+        &project,
+        "apps/nested/sub/all_schemes.test.ts",
+        all_schemes_test_src,
+    );
+
+    let discovered = discover_manifest(seed_script.parent().expect("nested"), None)
+        .expect("discover")
+        .expect("ancestor vael.jsonc");
+    let resolver = vaeljs_lite_core::ImportResolver::from_manifest(&discovered);
+    let replies_ref = Arc::clone(&remote_replies);
+    let seed_opts = RuntimeOptions::new()
+        .with_remote(RemoteOptions::new().with_cache_dir(&packages_cache))
+        .with_npm_cache_dir(&packages_cache)
+        .with_offline(true)
+        .with_import_resolver(resolver);
+    Runtime::with_options_and_transport(seed_opts, move |url, _, _, _| {
+        let body = replies_ref
+            .get(url)
+            .cloned()
+            .ok_or_else(|| format!("unexpected seed URL {url}"))?;
+        Ok(TestRemoteResponse {
+            status: 200,
+            declared_length: Some(body.len() as u64),
+            cache_control: Some("max-age=3600".to_owned()),
+            body,
+            ..TestRemoteResponse::default()
+        })
+    })
+    .expect("seed runtime")
+    .run_file(&seed_script)
+    .expect("seed all schemes into XDG_CACHE_HOME");
+
+    let cli_all_run = run_in_project(&[
+        "--allow-remote",
+        "--offline",
+        "apps/nested/sub/all_schemes.ts",
+    ]);
+    assert_eq!(
+        cli_all_run.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&cli_all_run)
+    );
+    assert_eq!(
+        stdout(&cli_all_run),
+        "cli-npm-root|cli-npm-sub|cli-jsr-root|cli-jsr-sub|cli-gh-root|cli-github-alt|cli-https-root\n"
+    );
+
+    let cli_all_test = run_in_project(&[
+        "test",
+        "--allow-remote",
+        "--offline",
+        "apps/nested/sub/all_schemes.test.ts",
+    ]);
+    assert_eq!(
+        cli_all_test.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&cli_all_test),
+        stderr(&cli_all_test)
+    );
+    assert!(
+        stdout(&cli_all_test)
+            .contains("ok 1 - ancestor vael.jsonc all four external schemes on lite"),
+        "{}",
+        stdout(&cli_all_test)
+    );
+
+    // 4. Direct URL entrypoints (`https:`, `gh:`, `jsr:`) from seeded cache, plus env var + override.
+    for entry in [
+        "https://cdn.example.test/mod.ts",
+        "gh:acme/repo@v1.0.0/mod.ts",
+        "jsr:@demo/pkg@^1.0.0",
+    ] {
+        let direct = run_in_project(&["--allow-remote", entry]);
+        assert_eq!(
+            direct.status.code(),
+            Some(0),
+            "{entry}: {}",
+            stderr(&direct)
+        );
+    }
+
+    let env_enabled = Command::new(env!("CARGO_BIN_EXE_vjs-lite"))
+        .current_dir(project.path())
+        .env("VAELJS_ALLOW_REMOTE", "1")
+        .env("XDG_CACHE_HOME", xdg_cache.path())
+        .args(["--offline", "apps/nested/sub/all_schemes.ts"])
+        .output()
+        .expect("run with VAELJS_ALLOW_REMOTE");
+    assert_eq!(
+        env_enabled.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&env_enabled)
+    );
+
+    let env_overridden = Command::new(env!("CARGO_BIN_EXE_vjs-lite"))
+        .current_dir(project.path())
+        .env("VAELJS_ALLOW_REMOTE", "1")
+        .env("XDG_CACHE_HOME", xdg_cache.path())
+        .args([
+            "--no-allow-remote",
+            "--offline",
+            "apps/nested/sub/all_schemes.ts",
+        ])
+        .output()
+        .expect("run with --no-allow-remote override");
+    assert_eq!(env_overridden.status.code(), Some(1));
+    assert!(
+        stderr(&env_overridden).contains("remote module loading"),
+        "{}",
+        stderr(&env_overridden)
+    );
+}
+
+#[cfg(not(feature = "remote"))]
+#[test]
+fn no_default_features_cli_rejects_remote_and_npm_flags() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write(&dir, "main.js", "console.log('hi');\n");
+    let main_path = dir.path().join("main.js");
+
+    for (flag, expected) in [
+        (
+            "--allow-remote",
+            "requires `vaeljs-lite` built with the `remote` feature",
+        ),
+        (
+            "--no-npm",
+            "requires `vaeljs-lite` built with the `npm` feature",
+        ),
+        (
+            "--frozen-lockfile",
+            "requires `vaeljs-lite` built with the `npm` feature",
+        ),
+        (
+            "--offline",
+            "requires `vaeljs-lite` built with the `npm` feature",
+        ),
+    ] {
+        let out = run(&[std::ffi::OsStr::new(flag), main_path.as_os_str()]);
+        assert_eq!(out.status.code(), Some(2), "{flag}: {}", stderr(&out));
+        assert!(stderr(&out).contains(expected), "{flag}: {}", stderr(&out));
+    }
+
+    let url_out = run(&[std::ffi::OsStr::new("https://example.test/mod.js")]);
+    assert_eq!(url_out.status.code(), Some(2));
+    assert!(
+        stderr(&url_out).contains("requires `vaeljs-lite` built with the `remote` feature"),
+        "{}",
+        stderr(&url_out)
     );
 }

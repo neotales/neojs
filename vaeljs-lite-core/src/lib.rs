@@ -121,10 +121,14 @@ mod fs;
 mod native;
 #[cfg(feature = "node-compat")]
 mod node_compat;
+#[cfg(feature = "npm")]
+mod npm_loader;
 #[cfg(feature = "vael-os")]
 mod os;
 #[cfg(any(feature = "vael-assert", feature = "vael-test"))]
 mod promise;
+#[cfg(feature = "remote")]
+mod remote_loader;
 #[cfg(feature = "vael-ssh")]
 mod ssh;
 #[cfg(feature = "vael-strings")]
@@ -135,18 +139,25 @@ mod template;
 mod uuid;
 mod vael;
 
+#[cfg(feature = "npm")]
+pub use npm_loader::NpmOptions;
 pub use runtime::{Error, Runtime, RuntimeOptions, TestReport};
 #[cfg(feature = "manifest")]
 pub use vaeljs_manifest::ImportResolver;
+#[cfg(feature = "remote")]
+pub use vaeljs_remote::RemoteOptions;
 
 /// Test-only hooks. Compiled only with the off-by-default `test-support`
 /// feature, which a normal build never enables.
 #[cfg(all(
     feature = "test-support",
-    any(feature = "vael-strings", feature = "vael-uuid")
+    any(feature = "vael-strings", feature = "vael-uuid", feature = "remote")
 ))]
 #[doc(hidden)]
 pub mod test_support {
+    /// Scripted HTTP response for `Runtime::with_options_and_transport` tests.
+    #[cfg(feature = "remote")]
+    pub use vaeljs_remote::TestRemoteResponse;
     /// Return `(units, windows)` copied from QuickJS strings by the last
     /// `indexOfFold`/`lastIndexOfFold` calls.
     ///
