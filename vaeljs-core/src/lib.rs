@@ -216,10 +216,10 @@
 //! ownership, partial-read, end-of-file, close, error, and size contracts.
 //!
 //! `os` is two frozen strings describing the target the runtime was compiled
-//! for: `platform` is `std::env::consts::OS` and `arch` is
-//! `std::env::consts::ARCH`. They use the compiler's vocabulary, not Node's
-//! (`macos`, not `darwin`; `x86_64` or `aarch64`, not `x64` or `arm64`), and
-//! describe the build target rather than probing the running host. The module
+//! for using Deno's target vocabulary (`Deno.build.os` / `Deno.build.arch`):
+//! `platform` (`"darwin"` on macOS, `"linux"`, `"windows"`, etc.) and `arch`
+//! (`"x86_64"` or `"aarch64"`, not Node's `"x64"` or `"arm64"`). They describe
+//! the build target rather than probing the running host. The module
 //! calls no host op and reads no environment variable, OS-release file,
 //! registry, sysctl value, file, or process table. vaeljs installs no `os`
 //! global. `version`, `codename`, `variant`, user, keyring, and scheduler

@@ -30,7 +30,7 @@ function extractCookiePair(setCookieHeader: string): string {
 test("SSR GET / renders layout, Sprig helpers, and escapes XSS payloads", async () => {
   const { db, app } = await setupApp();
   try {
-    const emptyRes = await app.mux.fetch("/");
+    const emptyRes = await app.router.fetch("/");
     assert.strictEquals(emptyRes.status, 200);
     assert.strictEquals(
       emptyRes.header("content-type"),
@@ -42,14 +42,14 @@ test("SSR GET / renders layout, Sprig helpers, and escapes XSS payloads", async 
     assert.ok(emptyHtml.includes('href="/assets/style.css"'));
 
     const xssPayload = `<script>alert("xss")</script>`;
-    const createRes = await app.mux.fetch("/api/tasks", {
+    const createRes = await app.router.fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: `  ${xssPayload}  ` }),
     });
     assert.strictEquals(createRes.status, 201);
 
-    const listRes = await app.mux.fetch("/?status=open");
+    const listRes = await app.router.fetch("/?status=open");
     assert.strictEquals(listRes.status, 200);
     const htmlBody = listRes.text();
     assert.ok(htmlBody.includes("FILTER: OPEN (1)"));
@@ -59,11 +59,11 @@ test("SSR GET / renders layout, Sprig helpers, and escapes XSS payloads", async 
       "XSS payload must be HTML-escaped",
     );
 
-    const doneRes = await app.mux.fetch("/?status=done");
+    const doneRes = await app.router.fetch("/?status=done");
     assert.strictEquals(doneRes.status, 200);
     assert.ok(doneRes.text().includes("FILTER: DONE (0)"));
 
-    const badFilterRes = await app.mux.fetch("/?status=invalid");
+    const badFilterRes = await app.router.fetch("/?status=invalid");
     assert.strictEquals(badFilterRes.status, 400);
   } finally {
     await db.close();
@@ -74,7 +74,7 @@ test("SSR form POST /tasks, signed flash cookie, toggle, and delete", async () =
   const { db, app } = await setupApp();
   try {
     // Blank title is rejected with 400.
-    const blankRes = await app.mux.fetch("/tasks", {
+    const blankRes = await app.router.fetch("/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: "title=+++",
@@ -82,7 +82,7 @@ test("SSR form POST /tasks, signed flash cookie, toggle, and delete", async () =
     assert.strictEquals(blankRes.status, 400);
 
     // Over-long title (> 200 chars) is rejected with 400 before DB write.
-    const tooLongRes = await app.mux.fetch("/tasks", {
+    const tooLongRes = await app.router.fetch("/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: `title=${"a".repeat(201)}`,
@@ -91,24 +91,24 @@ test("SSR form POST /tasks, signed flash cookie, toggle, and delete", async () =
 
     // 200-char multi-byte title succeeds and truncates flash cookie safely.
     const maxTitle = "🚀".repeat(200);
-    const maxRes = await app.mux.fetch("/tasks", {
+    const maxRes = await app.router.fetch("/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: `title=${encodeURIComponent(maxTitle)}`,
     });
     assert.strictEquals(maxRes.status, 303);
     const maxFlashCookie = extractCookiePair(maxRes.headerValues("set-cookie")[0]);
-    const maxHome = await app.mux.fetch("/", {
+    const maxHome = await app.router.fetch("/", {
       headers: { Cookie: maxFlashCookie },
     });
     assert.strictEquals(maxHome.status, 200);
     assert.ok(maxHome.text().includes("…"));
-    const maxList = await app.mux.fetch("/api/tasks");
+    const maxList = await app.router.fetch("/api/tasks");
     const maxTaskId = maxList.json<{ tasks: Task[] }>().tasks[0].id;
-    await app.mux.fetch(`/tasks/${maxTaskId}/delete`, { method: "POST" });
+    await app.router.fetch(`/tasks/${maxTaskId}/delete`, { method: "POST" });
 
     // Valid form submission creates task, returns 303, and sets signed flash cookie.
-    const createRes = await app.mux.fetch("/tasks", {
+    const createRes = await app.router.fetch("/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: "title=Ship+%3Cb%3Ewebapp%3C%2Fb%3E",
@@ -124,7 +124,7 @@ test("SSR form POST /tasks, signed flash cookie, toggle, and delete", async () =
     const cookiePair = extractCookiePair(setCookies[0]);
 
     // Following redirect with valid signed cookie shows escaped flash & clears cookie.
-    const homeWithFlash = await app.mux.fetch("/", {
+    const homeWithFlash = await app.router.fetch("/", {
       headers: { Cookie: cookiePair },
     });
     assert.strictEquals(homeWithFlash.status, 200);
@@ -139,42 +139,42 @@ test("SSR form POST /tasks, signed flash cookie, toggle, and delete", async () =
     assert.ok(clearCookies[0].includes("Max-Age=0"));
 
     // Tampered flash cookie is ignored (HMAC fails) and cleared.
-    const tamperedHome = await app.mux.fetch("/", {
+    const tamperedHome = await app.router.fetch("/", {
       headers: { Cookie: "flash=Forged%20message.0000deadbeef" },
     });
     assert.strictEquals(tamperedHome.status, 200);
     assert.ok(!tamperedHome.text().includes("Forged message"));
 
     // Look up created task ID via JSON API to exercise SSR toggle and delete.
-    const listApi = await app.mux.fetch("/api/tasks");
+    const listApi = await app.router.fetch("/api/tasks");
     const listBody = listApi.json<{ tasks: Task[]; count: number }>();
     assert.strictEquals(listBody.count, 1);
     const taskId = listBody.tasks[0].id;
     assert.ok(UUID_V7_RE.test(taskId));
 
-    const toggleRes = await app.mux.fetch(`/tasks/${taskId}/toggle`, {
+    const toggleRes = await app.router.fetch(`/tasks/${taskId}/toggle`, {
       method: "POST",
     });
     assert.strictEquals(toggleRes.status, 303);
     assert.strictEquals(toggleRes.header("location"), "/");
 
-    const afterToggle = await app.mux.fetch(`/api/tasks/${taskId}`);
+    const afterToggle = await app.router.fetch(`/api/tasks/${taskId}`);
     assert.strictEquals(afterToggle.json<Task>().done, true);
 
-    const deleteRes = await app.mux.fetch(`/tasks/${taskId}/delete`, {
+    const deleteRes = await app.router.fetch(`/tasks/${taskId}/delete`, {
       method: "POST",
     });
     assert.strictEquals(deleteRes.status, 303);
 
-    const afterDelete = await app.mux.fetch(`/api/tasks/${taskId}`);
+    const afterDelete = await app.router.fetch(`/api/tasks/${taskId}`);
     assert.strictEquals(afterDelete.status, 404);
 
     // Toggle/delete on unknown ID return 404.
-    const missingToggle = await app.mux.fetch("/tasks/does-not-exist/toggle", {
+    const missingToggle = await app.router.fetch("/tasks/does-not-exist/toggle", {
       method: "POST",
     });
     assert.strictEquals(missingToggle.status, 404);
-    const missingDelete = await app.mux.fetch("/tasks/does-not-exist/delete", {
+    const missingDelete = await app.router.fetch("/tasks/does-not-exist/delete", {
       method: "POST",
     });
     assert.strictEquals(missingDelete.status, 404);
@@ -186,12 +186,12 @@ test("SSR form POST /tasks, signed flash cookie, toggle, and delete", async () =
 test("JSON REST API full CRUD lifecycle and error handling", async () => {
   const { db, app } = await setupApp();
   try {
-    const health = await app.mux.fetch("/api/health");
+    const health = await app.router.fetch("/api/health");
     assert.strictEquals(health.status, 200);
     assert.equals(health.json(), { ok: true, runtime: "vaeljs" });
 
     // POST /api/tasks -> 201
-    const createdRes = await app.mux.fetch("/api/tasks", {
+    const createdRes = await app.router.fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "  Write VaelJS docs  " }),
@@ -203,19 +203,19 @@ test("JSON REST API full CRUD lifecycle and error handling", async () => {
     assert.strictEquals(created.done, false);
 
     // GET /api/tasks
-    const listRes = await app.mux.fetch("/api/tasks");
+    const listRes = await app.router.fetch("/api/tasks");
     assert.strictEquals(listRes.status, 200);
     const listed = listRes.json<{ tasks: Task[]; count: number }>();
     assert.strictEquals(listed.count, 1);
     assert.equals(listed.tasks[0], created);
 
     // GET /api/tasks/{id}
-    const getRes = await app.mux.fetch(`/api/tasks/${created.id}`);
+    const getRes = await app.router.fetch(`/api/tasks/${created.id}`);
     assert.strictEquals(getRes.status, 200);
     assert.equals(getRes.json<Task>(), created);
 
     // PATCH /api/tasks/{id}
-    const patchRes = await app.mux.fetch(`/api/tasks/${created.id}`, {
+    const patchRes = await app.router.fetch(`/api/tasks/${created.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "Published VaelJS docs", done: true }),
@@ -226,52 +226,52 @@ test("JSON REST API full CRUD lifecycle and error handling", async () => {
     assert.strictEquals(updated.done, true);
 
     // DELETE /api/tasks/{id} -> 204
-    const delRes = await app.mux.fetch(`/api/tasks/${created.id}`, {
+    const delRes = await app.router.fetch(`/api/tasks/${created.id}`, {
       method: "DELETE",
     });
     assert.strictEquals(delRes.status, 204);
     assert.strictEquals(delRes.text(), "");
 
     // 404 on missing ID
-    const notFoundGet = await app.mux.fetch(`/api/tasks/${created.id}`);
+    const notFoundGet = await app.router.fetch(`/api/tasks/${created.id}`);
     assert.strictEquals(notFoundGet.status, 404);
     assert.strictEquals(notFoundGet.json<{ code: string }>().code, "TASK_NOT_FOUND");
 
-    const notFoundPatch = await app.mux.fetch(`/api/tasks/${created.id}`, {
+    const notFoundPatch = await app.router.fetch(`/api/tasks/${created.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ done: false }),
     });
     assert.strictEquals(notFoundPatch.status, 404);
 
-    const notFoundDelete = await app.mux.fetch(`/api/tasks/${created.id}`, {
+    const notFoundDelete = await app.router.fetch(`/api/tasks/${created.id}`, {
       method: "DELETE",
     });
     assert.strictEquals(notFoundDelete.status, 404);
 
     // 400 on invalid payloads
-    const badJson = await app.mux.fetch("/api/tasks", {
+    const badJson = await app.router.fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{bad-json",
     });
     assert.strictEquals(badJson.status, 400);
 
-    const emptyTitle = await app.mux.fetch("/api/tasks", {
+    const emptyTitle = await app.router.fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "   " }),
     });
     assert.strictEquals(emptyTitle.status, 400);
 
-    const invalidPatch = await app.mux.fetch(`/api/tasks/${created.id}`, {
+    const invalidPatch = await app.router.fetch(`/api/tasks/${created.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ done: "yes" }),
     });
     assert.strictEquals(invalidPatch.status, 400);
 
-    const emptyPatch = await app.mux.fetch(`/api/tasks/${created.id}`, {
+    const emptyPatch = await app.router.fetch(`/api/tasks/${created.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -279,7 +279,7 @@ test("JSON REST API full CRUD lifecycle and error handling", async () => {
     assert.strictEquals(emptyPatch.status, 400);
 
     // 405 + Allow on wrong method
-    const wrongMethod = await app.mux.fetch("/api/tasks", {
+    const wrongMethod = await app.router.fetch("/api/tasks", {
       method: "PUT",
       headers: { Accept: "application/json" },
     });
@@ -294,7 +294,7 @@ test("JSON REST API full CRUD lifecycle and error handling", async () => {
 test("Static CSS serving and path-traversal protection", async () => {
   const { db, app } = await setupApp();
   try {
-    const cssRes = await app.mux.fetch("/assets/style.css");
+    const cssRes = await app.router.fetch("/assets/style.css");
     assert.strictEquals(cssRes.status, 200);
     assert.strictEquals(cssRes.header("content-type"), "text/css; charset=utf-8");
     assert.ok(cssRes.text().includes(".task-list"));
@@ -304,7 +304,7 @@ test("Static CSS serving and path-traversal protection", async () => {
       "/assets/%2e%2e/app.ts",
       "/assets/..%2fapp.ts",
     ]) {
-      const badRes = await app.mux.fetch(traversalPath);
+      const badRes = await app.router.fetch(traversalPath);
       assert.ok(
         badRes.status === 400 || badRes.status === 404,
         `expected 400 or 404 for ${traversalPath}, got ${badRes.status}`,
@@ -319,7 +319,7 @@ test("Static CSS serving and path-traversal protection", async () => {
 test("Middleware attaches security headers, request ID, and structured logs", async () => {
   const { db, app, logs } = await setupApp();
   try {
-    const generatedRes = await app.mux.fetch("/api/health");
+    const generatedRes = await app.router.fetch("/api/health");
     assert.strictEquals(generatedRes.status, 200);
     const rid = generatedRes.header("x-request-id");
     assert.ok(typeof rid === "string" && rid.length > 0);
@@ -327,7 +327,7 @@ test("Middleware attaches security headers, request ID, and structured logs", as
     assert.strictEquals(generatedRes.header("x-frame-options"), "DENY");
     assert.strictEquals(generatedRes.header("referrer-policy"), "no-referrer");
 
-    const propagatedRes = await app.mux.fetch("/api/health", {
+    const propagatedRes = await app.router.fetch("/api/health", {
       headers: { "X-Request-Id": "trace-42_ok" },
     });
     assert.strictEquals(propagatedRes.status, 200);
@@ -348,7 +348,7 @@ test("Live loopback server binds ephemeral port and shuts down cleanly", async (
   const { db, app } = await setupApp();
   let server: Server | undefined;
   try {
-    server = serve({ host: "127.0.0.1", port: 0 }, app.mux);
+    server = serve({ host: "127.0.0.1", port: 0 }, app.router);
     assert.strictEquals(server.host, "127.0.0.1");
     assert.ok(server.port > 0, `expected ephemeral port > 0, got ${server.port}`);
     assert.strictEquals(server.addr, `127.0.0.1:${server.port}`);

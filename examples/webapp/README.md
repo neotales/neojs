@@ -7,7 +7,7 @@ A complete, zero-framework web application built purely with VaelJS built-in mod
 - `vael:template` — Go `text/template` layouts (`define`, `block`, `template`) with Sprig helpers (`title`, `upper`, `trim`, `default`) and automatic HTML XSS escaping.
 - `vael:uuid` — Time-ordered RFC 9562 UUIDv7 primary keys (`v7()`).
 - `vael:crypto` — CSPRNG key generation (`randomBytes`) and HMAC-SHA256 (`createHmac`) for tamper-proof flash cookies.
-- `vael:test` & `vael:assert` — Zero-socket `mux.fetch(...)` and live loopback server integration tests.
+- `vael:test` & `vael:assert` — Zero-socket `router.fetch(...)` and live loopback server integration tests.
 
 ## Running
 
@@ -35,7 +35,7 @@ vjs test examples/webapp/app.test.ts
 
 ## Architecture (Go-Style, Without Go Boilerplate)
 
-- **Plain dependency injection**: `createApp({ db, staticDir, logSink })` wires handlers and returns `{ mux }`, with no decorator magic, DI containers, or global singletons.
+- **Plain dependency injection**: `createApp({ db, staticDir, logSink })` wires handlers and returns `{ router }`, with no decorator magic, DI containers, or global singletons.
 - **No `ResponseWriter` mutability**: Handlers receive an immutable `HttpRequest` and return an immutable `HttpResponse` (`html(...)`, `json(...)`, `redirect(...)`, `noContent()`), avoiding Go's partial-write / header-after-body hazards.
 - **No `if err != nil` clutter**: Handlers simply `throw badRequest(...)` or `throw notFound(...)` (`HttpError`), and `ServeMux` + `recover()` translate errors cleanly while masking unexpected internal exceptions as `500`.
-- **Fast zero-socket tests**: `mux.fetch(...)` runs the full router, middleware stack, templates, and SQLite queries in memory without opening TCP sockets.
+- **Fast zero-socket tests**: `router.fetch(...)` runs the full router, middleware stack, templates, and SQLite queries in memory without opening TCP sockets.

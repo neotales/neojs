@@ -111,12 +111,12 @@ The canonical specifier and registry key is `vael:os`.
 
 | Export | Contract |
 | --- | --- |
-| `platform` | `std::env::consts::OS` for the compilation target (e.g. `"linux"`, `"macos"`, `"windows"`). |
-| `arch` | `std::env::consts::ARCH` for the compilation target (e.g. `"x86_64"`, `"aarch64"`). |
+| `platform` | Deno-compatible build-target OS name (e.g. `"darwin"`, `"linux"`, `"windows"`). |
+| `arch` | Deno-compatible build-target CPU architecture (e.g. `"x86_64"`, `"aarch64"`). |
 
-Uses Rust's target vocabulary rather than Node's (`macos`, not `darwin`;
-`aarch64`, not `arm64`). Performs no host probe, reads no environment variable
-or file, and installs no global.
+Uses Deno's `Deno.build.os` / `Deno.build.arch` target vocabulary rather than
+Rust's `"macos"` or Node's `"x64"` / `"arm64"`. Performs no host probe, reads
+no environment variable or file, and installs no global.
 
 ## `vael:uuid`
 

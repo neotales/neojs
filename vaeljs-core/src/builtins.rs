@@ -142,10 +142,10 @@ use deno_core::url::Url;
 /// `undefined`.
 const VAEL_SHIM_SOURCE: &str = include_str!("builtins/vael.js");
 
-/// The placeholder replaced with the build target's `std::env::consts::OS`.
+/// The placeholder replaced with the build target's Deno-compatible OS name.
 const OS_PLATFORM_TOKEN: &str = "__VAEL_OS_PLATFORM__";
 
-/// The placeholder replaced with the build target's `std::env::consts::ARCH`.
+/// The placeholder replaced with the build target's Deno-compatible arch name.
 const OS_ARCH_TOKEN: &str = "__VAEL_OS_ARCH__";
 
 /// The marker replaced with the native `vael:chars` registry entry.
@@ -214,8 +214,8 @@ const TEMPLATE_REGISTRY_TOKEN: &str = "// __VAEL_TEMPLATE_REGISTRY_ENTRY__";
 /// selected built-in source and registration spliced in.
 ///
 /// [`VAEL_SHIM_SOURCE`] holds two placeholders, one per `vael:os` value. They are
-/// replaced with ECMAScript string literals for this build's
-/// `std::env::consts::OS` and `std::env::consts::ARCH`, so the module reports the
+/// replaced with ECMAScript string literals for this build's Deno-compatible
+/// `vaeljs_builtins::os::platform()` and `arch()`, so the module reports the
 /// target the runtime was compiled for and reads no host state at runtime.
 ///
 /// `vael-chars` spreads the native entry installed by `crate::chars::install`
@@ -826,11 +826,14 @@ mod tests {
         assert!(!shim.contains(TEMPLATE_IMPL_TOKEN));
         assert!(!shim.contains(TEMPLATE_REGISTRY_TOKEN));
         assert!(
-            shim.contains(&format!("platform: \"{}\"", std::env::consts::OS)),
+            shim.contains(&format!(
+                "platform: \"{}\"",
+                vaeljs_builtins::os::platform()
+            )),
             "platform literal is missing from the shim"
         );
         assert!(
-            shim.contains(&format!("arch: \"{}\"", std::env::consts::ARCH)),
+            shim.contains(&format!("arch: \"{}\"", vaeljs_builtins::os::arch())),
             "arch literal is missing from the shim"
         );
 

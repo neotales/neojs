@@ -39,7 +39,7 @@ export interface AppOptions {
 
 /** Application container returned by `createApp`. */
 export interface WebApp {
-  mux: ServeMux;
+  router: ServeMux;
 }
 
 const FLASH_COOKIE_NAME = "flash";
@@ -141,18 +141,18 @@ export function createApp({
   cookieSecret = randomBytes(32),
 }: AppOptions): WebApp {
   const templates = createAppTemplates();
-  const mux = createRouter();
+  const router = createRouter();
 
-  mux.use(
+  router.use(
     recover(),
     requestId(),
     securityHeaders(),
     logger({ sink: logSink }),
   );
 
-  mux.static("/assets", staticDir);
+  router.static("/assets", staticDir);
 
-  mux.get("/", async (req) => {
+  router.get("/", async (req) => {
     const filter = parseTaskFilter(req.query.get("status"));
     const tasks = await listTasks(db, filter);
     const rawFlash = req.cookies[FLASH_COOKIE_NAME];
@@ -181,7 +181,7 @@ export function createApp({
     return res;
   });
 
-  mux.post("/tasks", async (req) => {
+  router.post("/tasks", async (req) => {
     const form = await req.form();
     const title = assertNonEmptyTitle(form.get("title") ?? "");
     const task = await createTask(db, title);
@@ -198,7 +198,7 @@ export function createApp({
     });
   });
 
-  mux.post("/tasks/{id}/toggle", async (req) => {
+  router.post("/tasks/{id}/toggle", async (req) => {
     const id = req.param("id") ?? "";
     const updated = await toggleTask(db, id);
     if (!updated) {
@@ -217,7 +217,7 @@ export function createApp({
     });
   });
 
-  mux.post("/tasks/{id}/delete", async (req) => {
+  router.post("/tasks/{id}/delete", async (req) => {
     const id = req.param("id") ?? "";
     const deleted = await deleteTask(db, id);
     if (!deleted) {
@@ -232,7 +232,7 @@ export function createApp({
     });
   });
 
-  mux.group("/api", (api) => {
+  router.group("/api", (api) => {
     // Ensure REST API errors always serialize as JSON regardless of Accept header.
     api.use((next) => async (req, ctx) => {
       try {
@@ -315,5 +315,5 @@ export function createApp({
     });
   });
 
-  return { mux };
+  return { router };
 }

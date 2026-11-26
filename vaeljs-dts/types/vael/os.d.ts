@@ -1,25 +1,67 @@
 /**
- * Host compilation-target operating system and CPU architecture constants.
+ * Build-target operating system and CPU architecture constants.
+ *
+ * Available in both `vjs` (`vaeljs`) and `vjs-lite` (`vaeljs-lite`) runtimes.
+ * Exposes compilation-target identifiers using standard cross-platform target
+ * names (`"darwin"` on macOS, `"linux"`, `"windows"`, `"x86_64"`, `"aarch64"`).
+ * Performs no host probe, reads no environment variables or files, and installs
+ * no globals.
+ *
+ * @example
+ * ```ts
+ * import { arch, platform } from "vael:os";
+ *
+ * console.log(`Running on ${platform}/${arch}`);
+ * if (platform === "darwin" && arch === "aarch64") {
+ *   console.log("Apple Silicon target");
+ * }
+ * ```
  *
  * @since 0.0.0-alpha.0
  */
 declare module "vael:os" {
   /**
-   * Compilation-target operating system (`std::env::consts::OS`).
+   * Compilation-target operating system identifier.
    *
-   * Uses Rust target vocabulary (for example `"linux"`, `"macos"`, `"windows"`)
-   * rather than legacy platform names. Constant from build time; performs no
-   * runtime host probe.
+   * Uses standard cross-platform target names (`"darwin"` on macOS, `"linux"`,
+   * `"windows"`, `"freebsd"`, `"netbsd"`, `"aix"`, `"solaris"`, `"illumos"`,
+   * `"android"`) rather than legacy names. Constant from build time; performs
+   * no runtime host probe.
+   *
+   * @example
+   * ```ts
+   * import { platform } from "vael:os";
+   *
+   * const sep = platform === "windows" ? "\\" : "/";
+   * console.log(sep);
+   * ```
    *
    * @since 0.0.0-alpha.0
    */
-  export const platform: "linux" | "macos" | "windows" | (string & {});
+  export const platform:
+    | "darwin"
+    | "linux"
+    | "windows"
+    | "freebsd"
+    | "netbsd"
+    | "aix"
+    | "solaris"
+    | "illumos"
+    | "android"
+    | (string & {});
 
   /**
-   * Compilation-target CPU architecture (`std::env::consts::ARCH`).
+   * Compilation-target CPU architecture identifier.
    *
-   * Uses Rust target vocabulary (for example `"x86_64"`, `"aarch64"`).
-   * Constant from build time; performs no runtime host probe.
+   * Uses standard cross-platform target names (for example `"x86_64"`,
+   * `"aarch64"`). Constant from build time; performs no runtime host probe.
+   *
+   * @example
+   * ```ts
+   * import { arch } from "vael:os";
+   *
+   * console.log(arch);
+   * ```
    *
    * @since 0.0.0-alpha.0
    */

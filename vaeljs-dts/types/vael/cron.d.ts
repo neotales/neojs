@@ -1,6 +1,23 @@
 /**
  * UTC five-field cron scheduler and next-occurrence calculator.
  *
+ * Available in the `vjs` (`vaeljs`) runtime only; absent in `vjs-lite`.
+ * Evaluates standard five-field UTC expressions (`minute hour dom month dow`)
+ * with overlap and missed-tick protection.
+ *
+ * @example
+ * ```ts
+ * import { cron, next } from "vael:cron";
+ *
+ * const upcoming = next("0 9 * * 1-5", new Date("2026-01-01T00:00:00Z"));
+ * console.log(upcoming?.toISOString());
+ *
+ * const job = cron("* * * * *", () => {
+ *   console.log("tick");
+ * });
+ * job.dispose();
+ * ```
+ *
  * @since 0.0.0-alpha.0
  */
 declare module "vael:cron" {
@@ -28,15 +45,19 @@ declare module "vael:cron" {
      * @since 0.0.0-alpha.0
      */
     override name: "CronError";
+
     /**
      * Machine-readable cron error code.
      *
      * @since 0.0.0-alpha.0
      */
     code: CronErrorCode;
+
     /**
      * Construct a `CronError`.
      *
+     * @param code Machine-readable `CronErrorCode`.
+     * @param message Human-readable error message.
      * @since 0.0.0-alpha.0
      */
     constructor(code: CronErrorCode, message: string);
@@ -49,27 +70,27 @@ declare module "vael:cron" {
    */
   export type CronEvent =
     | {
-        /** Tick arrived while the previous callback was still running and was skipped. */
+        /** Tick arrived while the previous callback was still running and was skipped. @since 0.0.0-alpha.0 */
         readonly type: "overlap";
-        /** Scheduled UTC occurrence time. */
+        /** Scheduled UTC occurrence time. @since 0.0.0-alpha.0 */
         readonly scheduledTime: Date;
-        /** Actual UTC wake-up time. */
+        /** Actual UTC wake-up time. @since 0.0.0-alpha.0 */
         readonly wokeAt: Date;
       }
     | {
-        /** Wake-up was late enough that the following occurrence was already due; stale tick was skipped. */
+        /** Wake-up was late enough that the following occurrence was already due; stale tick was skipped. @since 0.0.0-alpha.0 */
         readonly type: "missed";
-        /** Scheduled UTC occurrence time that was missed. */
+        /** Scheduled UTC occurrence time that was missed. @since 0.0.0-alpha.0 */
         readonly scheduledTime: Date;
-        /** Actual UTC wake-up time. */
+        /** Actual UTC wake-up time. @since 0.0.0-alpha.0 */
         readonly wokeAt: Date;
       }
     | {
-        /** Callback threw synchronously, returned a rejected Promise, or the scheduler encountered a wait error. */
+        /** Callback threw synchronously, returned a rejected Promise, or the scheduler encountered a wait error. @since 0.0.0-alpha.0 */
         readonly type: "error";
-        /** Thrown or rejected value. */
+        /** Thrown or rejected value. @since 0.0.0-alpha.0 */
         readonly error: unknown;
-        /** `true` if a fatal scheduler error terminated the job; `false` for a callback error. */
+        /** `true` if a fatal scheduler error terminated the job; `false` for a callback error. @since 0.0.0-alpha.0 */
         readonly fatal: boolean;
       };
 
@@ -116,9 +137,21 @@ declare module "vael:cron" {
    * @param expression Five-field UTC cron expression (no extended `L`/`W`/`#`/`?`).
    * @param callback Invoked with no arguments on each eligible tick.
    * @param options Optional `{ onEvent }` observer.
+   * @returns Frozen `CronJob` handle whose `dispose()` stops future ticks.
    * @throws {TypeError} on invalid arguments or unknown options.
    * @throws {CronError} with `code` `"VAEL_CRON_EXPRESSION"`, `"VAEL_CRON_LIMIT"`,
    * `"VAEL_CRON_NO_OCCURRENCE"`, or `"VAEL_CRON_ARGUMENT"`.
+   * @example
+   * ```ts
+   * import { cron } from "vael:cron";
+   *
+   * const job = cron("0 * * * *", async () => {
+   *   console.log("hourly job");
+   * }, {
+   *   onEvent: (ev) => console.warn(ev.type),
+   * });
+   * job.dispose();
+   * ```
    * @since 0.0.0-alpha.0
    */
   export function cron(
@@ -133,9 +166,17 @@ declare module "vael:cron" {
    *
    * @param expression Five-field UTC cron expression (max 512 bytes).
    * @param after Reference `Date` or epoch milliseconds (defaults to current host UTC time).
+   * @returns Next matching UTC `Date`, or `null` when no occurrence exists in range.
    * @throws {TypeError} when `expression` or `after` has an invalid type.
    * @throws {RangeError} when `after` is an invalid `Date` or non-finite number.
    * @throws {CronError} with `code` `"VAEL_CRON_EXPRESSION"` or `"VAEL_CRON_ARGUMENT"`.
+   * @example
+   * ```ts
+   * import { next } from "vael:cron";
+   *
+   * const after = new Date("2026-01-01T00:00:00Z");
+   * console.log(next("30 12 * * *", after)?.toISOString());
+   * ```
    * @since 0.0.0-alpha.0
    */
   export function next(expression: string, after?: Date | number): Date | null;

@@ -76,7 +76,12 @@ for (const name of ["os", "__vaelOs", "__VAEL_OS_PLATFORM__", "__VAEL_OS_ARCH__"
 }
 
 #[test]
-fn exports_equal_the_rust_build_target_constants() {
+fn exports_equal_the_deno_build_target_constants() {
+    let expected_platform = if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        std::env::consts::OS
+    };
     let source = format!(
         r#"
 import {{ platform, arch }} from "vael:os";
@@ -86,7 +91,7 @@ if (arch !== {arch:?}) throw new Error(`arch: expected {arch:?}, got ${{arch}}`)
 if (platform !== registry.platform) throw new Error("platform differs from the registry");
 if (arch !== registry.arch) throw new Error("arch differs from the registry");
 "#,
-        platform = std::env::consts::OS,
+        platform = expected_platform,
         arch = std::env::consts::ARCH,
     );
     run_js(&source);

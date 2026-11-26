@@ -978,12 +978,17 @@ console.log(`${os.platform}/${os.arch}`);
 
     let output = run_file(&file);
 
+    let expected_platform = if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        std::env::consts::OS
+    };
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         stdout(&output),
         format!(
             "true\ntrue\ntrue\n{}/{}\n",
-            std::env::consts::OS,
+            expected_platform,
             std::env::consts::ARCH
         )
     );

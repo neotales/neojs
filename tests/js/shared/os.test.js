@@ -3,49 +3,28 @@ import assert from "vael:assert";
 import * as os from "vael:os";
 import { arch, platform } from "vael:os";
 
-// Documented Rust std::env::consts::OS and std::env::consts::ARCH values.
-const RUST_OS_VOCABULARY = new Set([
+// Documented Deno.build.os and Deno.build.arch target vocabulary.
+const DENO_OS_VOCABULARY = new Set([
+    "darwin",
     "linux",
-    "macos",
     "windows",
     "freebsd",
     "netbsd",
-    "openbsd",
-    "dragonfly",
-    "android",
-    "ios",
-    "illumos",
-    "solaris",
-    "fuchsia",
-    "haiku",
-    "redox",
-    "emscripten",
-    "wasi",
     "aix",
-    "hurd",
-    "nto",
-    "tvos",
-    "visionos",
-    "watchos",
+    "solaris",
+    "illumos",
+    "android",
 ]);
 
-const RUST_ARCH_VOCABULARY = new Set([
+const DENO_ARCH_VOCABULARY = new Set([
     "x86_64",
-    "x86",
     "aarch64",
+    "x86",
     "arm",
     "riscv64",
-    "riscv32",
     "powerpc64",
-    "powerpc",
     "s390x",
     "loongarch64",
-    "wasm32",
-    "wasm64",
-    "mips",
-    "mips64",
-    "sparc",
-    "sparc64",
 ]);
 
 test("vael:os registry, list, and module namespace share frozen identity", async () => {
@@ -77,17 +56,18 @@ test("vael:os registry, list, and module namespace share frozen identity", async
     assert.strictEquals(os.arch, registry.arch);
 });
 
-test("vael:os exposes non-empty strings in Rust target vocabulary", () => {
+test("vael:os exposes non-empty strings in Deno target vocabulary", () => {
     assert.strictEquals(typeof os.platform, "string");
     assert.strictEquals(typeof os.arch, "string");
     assert.ok(os.platform.length > 0, "platform must not be empty");
     assert.ok(os.arch.length > 0, "arch must not be empty");
 
-    // Uses Rust's std::env::consts vocabulary, not Node's process.platform/arch.
-    assert.ok(!["darwin", "win32"].includes(os.platform), `unexpected Node OS name: ${os.platform}`);
+    // Uses Deno's target vocabulary (`Deno.build.os` / `Deno.build.arch`),
+    // not Rust's `"macos"` or Node's `process.platform`/`arch`.
+    assert.ok(!["macos", "win32"].includes(os.platform), `unexpected non-Deno OS name: ${os.platform}`);
     assert.ok(!["x64", "arm64", "ia32"].includes(os.arch), `unexpected Node arch name: ${os.arch}`);
-    assert.ok(RUST_OS_VOCABULARY.has(os.platform), `unexpected Rust OS constant: ${os.platform}`);
-    assert.ok(RUST_ARCH_VOCABULARY.has(os.arch), `unexpected Rust ARCH constant: ${os.arch}`);
+    assert.ok(DENO_OS_VOCABULARY.has(os.platform), `unexpected Deno OS constant: ${os.platform}`);
+    assert.ok(DENO_ARCH_VOCABULARY.has(os.arch), `unexpected Deno ARCH constant: ${os.arch}`);
 });
 
 test("vael:os resists mutation and rejects bare specifiers", async () => {

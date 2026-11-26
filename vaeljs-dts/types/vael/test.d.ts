@@ -1,6 +1,23 @@
 /**
  * Sequential registration-based test runner and reporting API.
  *
+ * Available in both `vjs` (`vaeljs`) and `vjs-lite` (`vaeljs-lite`) runtimes.
+ * Note that `TestOptions.timeout` is only supported in `vjs` (`vaeljs`);
+ * specifying `timeout` in `vjs-lite` throws `VAEL_TEST_NO_TIMER`.
+ *
+ * @example
+ * ```ts
+ * import assert from "vael:assert";
+ * import test, { run } from "vael:test";
+ *
+ * test("addition works", () => {
+ *   assert.strictEquals(2 + 2, 4);
+ * });
+ *
+ * const report = await run({ throwOnFailure: false });
+ * console.log(report.passed, report.total);
+ * ```
+ *
  * @since 0.0.0-alpha.0
  */
 declare module "vael:test" {
@@ -36,9 +53,9 @@ declare module "vael:test" {
   export interface TestOptions {
     /**
      * Per-test timeout in milliseconds (`1..=2_147_483_647`, default `30_000`
-     * in `vaeljs` V8).
+     * in `vjs` V8).
      *
-     * Not supported in `vaeljs-lite` (throws `VAEL_TEST_NO_TIMER` because QuickJS
+     * Not supported in `vjs-lite` (throws `VAEL_TEST_NO_TIMER` because QuickJS
      * has no host timers).
      *
      * @since 0.0.0-alpha.0
@@ -60,6 +77,7 @@ declare module "vael:test" {
      * @since 0.0.0-alpha.0
      */
     throwOnFailure?: boolean;
+
     /**
      * Run a bounded event-loop settle drain after tests finish (default: `false`).
      * Intended for the runtime's final pass after entry module evaluation.
@@ -75,19 +93,19 @@ declare module "vael:test" {
    * @since 0.0.0-alpha.0
    */
   export interface TestReport {
-    /** @since 0.0.0-alpha.0 */
+    /** Total number of registered tests executed. @since 0.0.0-alpha.0 */
     total: number;
-    /** @since 0.0.0-alpha.0 */
+    /** Count of passing tests. @since 0.0.0-alpha.0 */
     passed: number;
-    /** @since 0.0.0-alpha.0 */
+    /** Count of failing tests. @since 0.0.0-alpha.0 */
     failed: number;
-    /** @since 0.0.0-alpha.0 */
+    /** Count of pending tests (registered without a callback). @since 0.0.0-alpha.0 */
     pending: number;
-    /** @since 0.0.0-alpha.0 */
+    /** Count of unhandled Promise rejections observed during the run. @since 0.0.0-alpha.0 */
     unhandled: number;
-    /** @since 0.0.0-alpha.0 */
+    /** Count of unsettled async test promises. @since 0.0.0-alpha.0 */
     unsettled: number;
-    /** @since 0.0.0-alpha.0 */
+    /** Formatted failure messages for all failing/pending/unhandled items. @since 0.0.0-alpha.0 */
     failures: string[];
   }
 
@@ -104,7 +122,14 @@ declare module "vael:test" {
     code: "VAEL_TEST_FAILURES";
     /** Formatted failure messages. @since 0.0.0-alpha.0 */
     failures: string[];
-    /** Construct a `TestFailureError`. @since 0.0.0-alpha.0 */
+
+    /**
+     * Construct a `TestFailureError`.
+     *
+     * @param message Summary failure message.
+     * @param failures Individual formatted failure strings.
+     * @since 0.0.0-alpha.0
+     */
     constructor(message: string, failures: string[]);
   }
 
@@ -117,6 +142,7 @@ declare module "vael:test" {
    * @since 0.0.0-alpha.0
    */
   export function test(name: string): void;
+
   /**
    * Register a test case to execute on the next `run()`.
    *
@@ -128,6 +154,16 @@ declare module "vael:test" {
    * @throws {TypeError} on invalid arguments or unknown options.
    * @throws {Error} with `code` `"VAEL_TEST_DURING_RUN"`, `"VAEL_TEST_LIMIT"`,
    * `"VAEL_TEST_UNSUPPORTED"`, or `"VAEL_TEST_NO_TIMER"`.
+   * @example
+   * ```ts
+   * import assert from "vael:assert";
+   * import { test } from "vael:test";
+   *
+   * test("async work resolves", async () => {
+   *   const value = await Promise.resolve(123);
+   *   assert.strictEquals(value, 123);
+   * });
+   * ```
    * @since 0.0.0-alpha.0
    */
   export function test(name: string, fn: () => unknown, options?: TestOptions): void;
@@ -136,11 +172,20 @@ declare module "vael:test" {
    * Execute queued tests in registration order and return the cumulative
    * `TestReport`.
    *
+   * @param options Optional `{ throwOnFailure, settle }` flags.
+   * @returns Promise resolving to the cumulative `TestReport`.
    * @throws {TypeError} on invalid options.
    * @throws {Error} with `code = "VAEL_TEST_ALREADY_RUNNING"` if re-entered.
    * @throws {TestFailureError} (`code = "VAEL_TEST_FAILURES"`) when `throwOnFailure`
    * is `true` and any failure, pending test, unhandled rejection, or unsettled
    * work was recorded.
+   * @example
+   * ```ts
+   * import { run } from "vael:test";
+   *
+   * const report = await run({ throwOnFailure: false });
+   * console.log(report.passed, report.failed);
+   * ```
    * @since 0.0.0-alpha.0
    */
   export function run(options?: RunOptions): Promise<TestReport>;

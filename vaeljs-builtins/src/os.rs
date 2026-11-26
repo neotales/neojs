@@ -1,9 +1,10 @@
 //! The engine-neutral `vael:os` implementation.
 //!
-//! Exposes the compilation-target operating system (`std::env::consts::OS`)
-//! and architecture (`std::env::consts::ARCH`). The module performs no host
-//! probe, reads no environment variable, file, registry, sysctl, or process
-//! table, and installs no global.
+//! Exposes the compilation-target operating system and architecture using
+//! Deno's `Deno.build.os` / `Deno.build.arch` target vocabulary (`"darwin"`,
+//! `"linux"`, `"windows"`, `"x86_64"`, `"aarch64"`, etc.). The module performs
+//! no host probe, reads no environment variable, file, registry, sysctl, or
+//! process table, and installs no global.
 
 /// The canonical import specifier and registry key.
 pub const SPECIFIER: &str = "vael:os";
@@ -11,13 +12,20 @@ pub const SPECIFIER: &str = "vael:os";
 /// The named exports, in the module object's property order.
 pub const EXPORTS: &[&str] = &["platform", "arch"];
 
-/// Returns the Rust build-target operating system (`std::env::consts::OS`).
+/// Returns the build-target operating system in Deno's `Deno.build.os`
+/// vocabulary (`"darwin"`, `"linux"`, `"windows"`, `"freebsd"`, `"netbsd"`,
+/// `"aix"`, `"solaris"`, `"illumos"`, `"android"`, etc.).
 #[must_use]
 pub const fn platform() -> &'static str {
-    std::env::consts::OS
+    if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        std::env::consts::OS
+    }
 }
 
-/// Returns the Rust build-target architecture (`std::env::consts::ARCH`).
+/// Returns the build-target CPU architecture in Deno's `Deno.build.arch`
+/// vocabulary (`"x86_64"`, `"aarch64"`, etc.).
 #[must_use]
 pub const fn arch() -> &'static str {
     std::env::consts::ARCH
@@ -35,11 +43,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn constants_match_rust_target_vocabulary() {
-        assert_eq!(platform(), std::env::consts::OS);
+    fn constants_match_deno_target_vocabulary() {
+        let expected_platform = if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            std::env::consts::OS
+        };
+        assert_eq!(platform(), expected_platform);
         assert_eq!(arch(), std::env::consts::ARCH);
         assert!(!platform().is_empty());
         assert!(!arch().is_empty());
+        if cfg!(target_os = "macos") {
+            assert_eq!(platform(), "darwin");
+        }
     }
 
     #[test]

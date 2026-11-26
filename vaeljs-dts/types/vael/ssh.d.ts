@@ -1,6 +1,29 @@
 /**
  * Synchronous SSH command execution with mandatory host-key verification.
  *
+ * Available in both `vjs` (`vaeljs`) and `vjs-lite` (`vaeljs-lite`) runtimes.
+ * Enforces explicit host-key pinning via `hostKey` or in-memory `knownHosts`
+ * and never reads user `~/.ssh/` configuration or identity files.
+ *
+ * @example
+ * ```ts
+ * import { connect } from "vael:ssh";
+ *
+ * const conn = connect({
+ *   host: "127.0.0.1",
+ *   port: 2222,
+ *   username: "deploy",
+ *   knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
+ *   agent: true,
+ * });
+ * try {
+ *   const res = conn.exec("uname -a");
+ *   console.log(res.status, res.stdout.byteLength);
+ * } finally {
+ *   conn.close();
+ * }
+ * ```
+ *
  * @since 0.0.0-alpha.0
  */
 declare module "vael:ssh" {
@@ -62,13 +85,15 @@ declare module "vael:ssh" {
    */
   export type SshHostTrustOptions =
     | {
-        /** Explicit SSH-format Ed25519 host public-key blob. */
+        /** Explicit SSH-format Ed25519 host public-key blob. @since 0.0.0-alpha.0 */
         hostKey: Uint8Array;
+        /** Must be omitted when `hostKey` is provided. @since 0.0.0-alpha.0 */
         knownHosts?: undefined;
       }
     | {
+        /** Must be omitted when `knownHosts` is provided. @since 0.0.0-alpha.0 */
         hostKey?: undefined;
-        /** In-memory `known_hosts` host-key records. */
+        /** In-memory `known_hosts` host-key records. @since 0.0.0-alpha.0 */
         knownHosts: string;
       };
 
@@ -80,31 +105,43 @@ declare module "vael:ssh" {
    */
   export type SshAuthOptions =
     | {
-        /** Password credential. */
+        /** Password credential. @since 0.0.0-alpha.0 */
         password: string;
+        /** Must be omitted for password authentication. @since 0.0.0-alpha.0 */
         privateKey?: undefined;
+        /** Must be omitted for password authentication. @since 0.0.0-alpha.0 */
         passphrase?: undefined;
+        /** Must be omitted or `false` for password authentication. @since 0.0.0-alpha.0 */
         agent?: false;
       }
     | {
         /**
          * In-memory unencrypted PKCS#8 DER/PEM or OpenSSH (`openssh-key-v1`/PEM)
          * private key bytes.
+         *
+         * @since 0.0.0-alpha.0
          */
         privateKey: Uint8Array;
-        /** Optional passphrase for encrypted `openssh-key-v1` containers only. */
+        /** Optional passphrase for encrypted `openssh-key-v1` containers only. @since 0.0.0-alpha.0 */
         passphrase?: string;
+        /** Must be omitted for key authentication. @since 0.0.0-alpha.0 */
         password?: undefined;
+        /** Must be omitted or `false` for key authentication. @since 0.0.0-alpha.0 */
         agent?: false;
       }
     | {
         /**
          * Explicit Unix-only opt-in to authenticate via `SSH_AUTH_SOCK` after
          * host-key verification (tries up to 16 identities).
+         *
+         * @since 0.0.0-alpha.0
          */
         agent: true;
+        /** Must be omitted for agent authentication. @since 0.0.0-alpha.0 */
         password?: undefined;
+        /** Must be omitted for agent authentication. @since 0.0.0-alpha.0 */
         privateKey?: undefined;
+        /** Must be omitted for agent authentication. @since 0.0.0-alpha.0 */
         passphrase?: undefined;
       };
 
@@ -114,15 +151,15 @@ declare module "vael:ssh" {
    * @since 0.0.0-alpha.0
    */
   export type SshConnectOptions = {
-    /** Remote hostname or IP address. */
+    /** Remote hostname or IP address. @since 0.0.0-alpha.0 */
     host: string;
-    /** Remote TCP port (`1..=65535`, default `22`). */
+    /** Remote TCP port (`1..=65535`, default `22`). @since 0.0.0-alpha.0 */
     port?: number;
-    /** SSH username (max 256 bytes). */
+    /** SSH username (max 256 bytes). @since 0.0.0-alpha.0 */
     username: string;
-    /** Connect/handshake inactivity timeout in ms (`1..=120_000`, default `15_000`). */
+    /** Connect/handshake inactivity timeout in ms (`1..=120_000`, default `15_000`). @since 0.0.0-alpha.0 */
     connectTimeoutMs?: number;
-    /** Per-command execution timeout in ms (`1..=600_000`, default `30_000`). */
+    /** Per-command execution timeout in ms (`1..=600_000`, default `30_000`). @since 0.0.0-alpha.0 */
     execTimeoutMs?: number;
   } & SshHostTrustOptions &
     SshAuthOptions;
@@ -157,10 +194,25 @@ declare module "vael:ssh" {
      * errors close the connection; pre-flight validation errors leave it open.
      *
      * @param command UTF-8 string or raw bytes (max `MAX_COMMAND_BYTES`).
+     * @returns `{ stdout, status }` result from the remote command.
      * @throws {TypeError} on wrong argument type or arity.
      * @throws {Error} (`name = "SshError"`) with `code` `"VAEL_SSH_CLOSED"`,
      * `"VAEL_SSH_LIMIT"`, `"VAEL_SSH_TIMEOUT"`, `"VAEL_SSH_IO"`,
      * `"VAEL_SSH_SESSION"`, or `"VAEL_SSH_INTERNAL"`.
+     * @example
+     * ```ts
+     * import { connect } from "vael:ssh";
+     *
+     * const conn = connect({
+     *   host: "127.0.0.1",
+     *   username: "deploy",
+     *   knownHosts: "127.0.0.1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
+     *   password: "demo",
+     * });
+     * const res = conn.exec("id -u");
+     * console.log(res.status);
+     * conn.close();
+     * ```
      * @since 0.0.0-alpha.0
      */
     exec(command: string | Uint8Array): SshExecResult;
@@ -180,9 +232,23 @@ declare module "vael:ssh" {
    *
    * Never reads `ssh_config`, identity files, or `~/.ssh/known_hosts`.
    *
+   * @param options Connection, mandatory host-trust, and authentication options.
+   * @returns Authenticated `SshConnection` handle.
    * @throws {TypeError} on invalid options or unknown option keys.
    * @throws {RangeError} on out-of-range port or timeout values.
    * @throws {Error} (`name = "SshError"`) with `code: SshErrorCode`.
+   * @example
+   * ```ts
+   * import { connect } from "vael:ssh";
+   *
+   * const conn = connect({
+   *   host: "10.0.0.5",
+   *   username: "ops",
+   *   hostKey: new Uint8Array(32),
+   *   privateKey: new Uint8Array(64),
+   * });
+   * conn.close();
+   * ```
    * @since 0.0.0-alpha.0
    */
   export function connect(options: SshConnectOptions): SshConnection;

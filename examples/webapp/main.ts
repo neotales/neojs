@@ -29,7 +29,7 @@ const db = await openTaskDb(dbPath);
 let server: Server | undefined;
 try {
   const app = createApp({ db, staticDir });
-  server = serve({ host, port }, app.mux);
+  server = serve({ host, port }, app.router);
   console.log(`Listening on ${server.url}`);
   await server.finished;
 } finally {
