@@ -136,7 +136,7 @@ declare module "node:os" {
    * Return the host name of the operating system.
    *
    * @returns Hostname string of the machine.
-   * @throws {Error} with `code = "EIO"` or `"EINVAL"` if querying the hostname fails or returns invalid UTF-8.
+   * @throws {Error} with `code = "ERR_UNAVAILABLE"` or `"EINVAL"` if querying the hostname fails or returns invalid UTF-8.
    * @example
    * ```ts
    * import { hostname } from "node:os";

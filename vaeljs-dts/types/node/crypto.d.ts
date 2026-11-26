@@ -50,7 +50,7 @@ declare module "node:crypto" {
      * @param data Input bytes or string to feed into the hash state.
      * @param inputEncoding Encoding used when `data` is a string (default `"utf8"`).
      * @returns `this` for method chaining.
-     * @throws {Error} with `code = "ERR_CRYPTO_INVALID_STATE"` if `digest()` was already called, or `"VAEL_CRYPTO_LIMIT"` if cumulative input exceeds 16 MiB.
+     * @throws {Error} if `digest()` was already called, or with `code = "VAEL_CRYPTO_LIMIT"` if cumulative input exceeds 16 MiB.
      * @throws {TypeError} when `data` has an invalid type or `inputEncoding` is unknown (`ERR_UNKNOWN_ENCODING`).
      * @since 0.0.0-alpha.0
      */
@@ -61,7 +61,7 @@ declare module "node:crypto" {
      * Finalizes the hash state; subsequent `update()` or `digest()` calls throw.
      *
      * @returns Raw digest bytes as a `Buffer` (`Uint8Array` subclass).
-     * @throws {Error} with `code = "ERR_CRYPTO_INVALID_STATE"` if `digest()` was already called.
+     * @throws {Error} if `digest()` was already called.
      * @since 0.0.0-alpha.0
      */
     digest(): Uint8Array;
@@ -72,7 +72,7 @@ declare module "node:crypto" {
      *
      * @param encoding Output string encoding (`"hex"`, `"base64"`, `"base64url"`, `"latin1"`, or `"binary"`).
      * @returns Encoded digest string.
-     * @throws {Error} with `code = "ERR_CRYPTO_INVALID_STATE"` if `digest()` was already called.
+     * @throws {Error} if `digest()` was already called.
      * @throws {TypeError} with `code = "ERR_UNKNOWN_ENCODING"` when `encoding` is unsupported.
      * @since 0.0.0-alpha.0
      */
@@ -94,7 +94,7 @@ declare module "node:crypto" {
      * @param data Input bytes or string to authenticate.
      * @param inputEncoding Encoding used when `data` is a string (default `"utf8"`).
      * @returns `this` for method chaining.
-     * @throws {Error} with `code = "ERR_CRYPTO_INVALID_STATE"` if `digest()` was already called, or `"VAEL_CRYPTO_LIMIT"` if cumulative input exceeds 16 MiB.
+     * @throws {Error} if `digest()` was already called, or with `code = "VAEL_CRYPTO_LIMIT"` if cumulative input exceeds 16 MiB.
      * @throws {TypeError} when `data` has an invalid type or `inputEncoding` is unknown (`ERR_UNKNOWN_ENCODING`).
      * @since 0.0.0-alpha.0
      */
@@ -105,7 +105,7 @@ declare module "node:crypto" {
      * Finalizes the HMAC state; subsequent `update()` or `digest()` calls throw.
      *
      * @returns Raw HMAC tag bytes as a `Buffer` (`Uint8Array` subclass).
-     * @throws {Error} with `code = "ERR_CRYPTO_INVALID_STATE"` if `digest()` was already called.
+     * @throws {Error} if `digest()` was already called.
      * @since 0.0.0-alpha.0
      */
     digest(): Uint8Array;
@@ -116,7 +116,7 @@ declare module "node:crypto" {
      *
      * @param encoding Output string encoding (`"hex"`, `"base64"`, `"base64url"`, `"latin1"`, or `"binary"`).
      * @returns Encoded HMAC tag string.
-     * @throws {Error} with `code = "ERR_CRYPTO_INVALID_STATE"` if `digest()` was already called.
+     * @throws {Error} if `digest()` was already called.
      * @throws {TypeError} with `code = "ERR_UNKNOWN_ENCODING"` when `encoding` is unsupported.
      * @since 0.0.0-alpha.0
      */

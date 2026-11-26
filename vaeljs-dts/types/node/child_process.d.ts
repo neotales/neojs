@@ -235,10 +235,15 @@ declare module "node:child_process" {
    * @throws {Error} synchronously with `code = "ERR_UNSUPPORTED"` if `shell` is enabled; rejects asynchronously on non-zero exit, timeout (`ETIMEDOUT`), or spawn failure (`ENOENT`, `EACCES`, `EIO`).
    * @example
    * ```ts
+   * import { Buffer } from "node:buffer";
    * import { execFile } from "node:child_process";
    *
    * const { stdout } = await execFile("echo", ["hello"], { encoding: "utf8" });
-   * console.log(stdout.trim());
+   * console.log(
+   *   typeof stdout === "string"
+   *     ? stdout.trim()
+   *     : Buffer.from(stdout).toString("utf8").trim(),
+   * );
    * ```
    * @since 0.0.0-alpha.0
    */
