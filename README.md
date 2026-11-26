@@ -61,11 +61,11 @@ Built-ins are imported strictly by canonical `vael:*` or `node:*` specifiers (ba
 | `vael:ssh` | Sync SSH exec with mandatory host trust (`hostKey` / `knownHosts`) | Both | [vael:ssh](https://vaeljs.com/modules/vael-ssh/) |
 | `vael:crypto` | AES-GCM/CBC, SHA-2, HMAC, PBKDF2, bcrypt, Shamir (13 sync; +7 async on `vjs`) | Both | [vael:crypto](https://vaeljs.com/modules/vael-crypto/) |
 | `vael:age` | X25519 binary age v1 encryption & decryption | `vjs` | [vael:age](https://vaeljs.com/modules/vael-age/) |
-| `vael:os`, `vael:path` | Host target constants and lexical POSIX/Win32 path utilities | Both | [os & path](https://vaeljs.com/modules/vael-os-path/) |
-| `vael:chars`, `vael:strings`, `vael:slices` | Unicode char classes, ASCII case-folding, live array/char slices | Both | [text & slices](https://vaeljs.com/modules/vael-text/) |
-| `vael:test`, `vael:assert` | Registration test runner and structural/Promise assertions | Both | [test & assert](https://vaeljs.com/modules/vael-testing/) |
-| `vael:cron`, `vael:console`, `vael:stdio`, `vael:uuid` | UTC cron (`vjs`), formatted console, stdio (`vjs`), UUID v4/v7 | Both / `vjs` | [utilities](https://vaeljs.com/modules/vael-utilities/) |
-| `node:*` | `buffer`, `child_process`, `crypto`, `fs`, `fs/promises` (`vjs`), `os`, `path` (`posix`, `win32`), `process`, `url` | Both | [node compat](https://vaeljs.com/modules/node-compat/) |
+| `vael:os`, `vael:path` | Host target constants and lexical POSIX/Win32 path utilities | Both | [vael:os](https://vaeljs.com/modules/vael-os/), [vael:path](https://vaeljs.com/modules/vael-path/) |
+| `vael:chars`, `vael:strings`, `vael:slices` | Unicode char classes, Unicode 16.0 case-folding, live array/char slices | Both | [vael:chars](https://vaeljs.com/modules/vael-chars/), [vael:strings](https://vaeljs.com/modules/vael-strings/), [vael:slices](https://vaeljs.com/modules/vael-slices/) |
+| `vael:test`, `vael:assert` | Registration test runner and structural/Promise assertions | Both | [vael:test](https://vaeljs.com/modules/vael-test/), [vael:assert](https://vaeljs.com/modules/vael-assert/) |
+| `vael:cron`, `vael:console`, `vael:stdio`, `vael:uuid` | UTC cron (`vjs`), formatted console, stdio (`vjs`), UUID v4/v7 | Both / `vjs` | [vael:cron](https://vaeljs.com/modules/vael-cron/), [vael:console](https://vaeljs.com/modules/vael-console/), [vael:stdio](https://vaeljs.com/modules/vael-stdio/), [vael:uuid](https://vaeljs.com/modules/vael-uuid/) |
+| `node:*` | `buffer`, `child_process`, `crypto`, `fs`, `fs/promises` (`vjs`), `os`, `path` (`posix`, `win32`), `process`, `url` | Both | [all modules](https://vaeljs.com/modules/overview/) |
 
 ## Embedding in Rust (`vaeljs-lite-core`)
 
