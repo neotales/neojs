@@ -1685,3 +1685,53 @@ fn the_default_runtime_rejects_jsr() {
         "{message}"
     );
 }
+
+// Integration test: uppercase `JSR:` scheme is handled by the JSR loader
+// consistently with QuickJS (never falling through to claim remote is disabled).
+#[test]
+fn uppercase_jsr_scheme_does_not_bypass_jsr_loader() {
+    let server = Arc::new(Server::new());
+    let message = error_message(run(&server, "import \"JSR:@scope/pkg@1\";\n"));
+    assert!(
+        !message.contains("jsr: modules require remote module loading"),
+        "must not fall through to FileModuleLoader: {message}"
+    );
+    assert!(message.contains("jsr:"), "{message}");
+}
+
+// Integration test: a pending `jsr:` import in the same module graph blocks
+// an ordinary HTTPS redirect onto the pending `jsr.io` URL before registration.
+#[test]
+fn pending_jsr_import_blocks_ordinary_redirect_to_same_identity() {
+    let requested = "https://elsewhere.test/entry.js";
+    let target = file_url("scope", "pkg", "1.0.0", "/mod.js");
+    let body = b"export const value = 1;\n";
+    let server = Arc::new(
+        Server::new()
+            .with(
+                meta_url("scope", "pkg"),
+                Reply::ok(package_metadata("scope", "pkg", &[("1.0.0", false)])),
+            )
+            .with(
+                version_url("scope", "pkg", "1.0.0"),
+                Reply::ok(version_metadata(&[("/mod.js", body)], &[(".", "./mod.js")])),
+            )
+            .with(
+                requested.to_string(),
+                Reply::redirect("https://jsr.io/@scope/pkg/1.0.0/mod.js"),
+            )
+            .with(target, Reply::ok(body.as_slice())),
+    );
+
+    let message = error_message(run(
+        &server,
+        r#"
+import "https://elsewhere.test/entry.js";
+import "jsr:@scope/pkg@1";
+"#,
+    ));
+    assert!(
+        message.contains("already a verified JSR module"),
+        "expected pending JSR collision refusal, got: {message}"
+    );
+}

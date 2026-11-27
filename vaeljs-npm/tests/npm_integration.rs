@@ -1689,29 +1689,27 @@ fn npmrc_scoped_routing_auth_env_redirect_stripping_and_offline_replay() {
     let cache_dir = tempfile::tempdir().unwrap();
     let cas = CasStore::new(cache_dir.path());
 
-    // User ~/.npmrc defines a default mirror and fallback auth; project .npmrc
-    // overrides default registry back to npmjs, adds @private + @basic scopes,
-    // configures path-specific auth, and leaves ${MISSING_TOKEN} unset for @unset.
+    // User ~/.npmrc defines a default mirror and auth rules (including ${ENV_VAR}
+    // credentials); project .npmrc overrides registry routing ONLY.
     fs::write(
         home.path().join(".npmrc"),
         r#"
             registry=https://user-mirror.example.test/
-            //priv.example.test/:_authToken=user_stale_token
+            //priv.example.test/:_authToken=root_should_not_win
+            //priv.example.test/team/:_authToken=${TEAM_TOKEN}
+            //basic.example.test/:_auth=${BASIC_CREDS}
+            //unset.example.test/:_authToken=${MISSING_TOKEN}
         "#,
     )
     .unwrap();
     fs::write(
         project.path().join(".npmrc"),
         r#"
-            # Project overrides user settings
+            # Project overrides routing only (auth must come from ~/.npmrc)
             registry=https://registry.npmjs.org/
             @Private:registry=https://priv.example.test/team/
             @Basic:registry=https://basic.example.test/
             @Unset:registry=https://unset.example.test/
-            //priv.example.test/:_authToken=root_should_not_win
-            //priv.example.test/team/:_authToken=${TEAM_TOKEN}
-            //basic.example.test/:_auth=${BASIC_CREDS}
-            //unset.example.test/:_authToken=${MISSING_TOKEN}
         "#,
     )
     .unwrap();
@@ -1728,7 +1726,7 @@ fn npmrc_scoped_routing_auth_env_redirect_stripping_and_offline_replay() {
     let dbg = format!("{npmrc:?}");
     assert!(!dbg.contains("team_secret_token"));
     assert!(!dbg.contains("dXNlcjpwYXNz"));
-    assert!(!dbg.contains("user_stale_token"));
+    assert!(!dbg.contains("root_should_not_win"));
 
     let (pub_tgz, pub_sri) = build_tgz(&[
         TarEntrySpec::file(
@@ -2080,5 +2078,342 @@ fn npmrc_scoped_routing_auth_env_redirect_stripping_and_offline_replay() {
             ],
             "same-origin out-of-scope redirect to {redirect_dst} must strip Authorization"
         );
+    }
+}
+
+#[test]
+fn lockfile_rejects_aliasing_missing_tree_sha256_missing_deps_omitted_version_and_tilde_zero_collision()
+ {
+    use vaeljs_npm::{
+        DEFAULT_REGISTRY_ORIGIN, LockedPackage, Lockfile, NpmRootRequest, VersionConstraint,
+        resolve_requests_with_lockfile,
+    };
+
+    let mut reg = MockRegistry::new();
+    reg.publish_simple(
+        "legit",
+        "1.0.0",
+        true,
+        r#"{"name":"legit","version":"1.0.0","type":"module","exports":"./index.mjs","dependencies":{"leaf":"^1.0.0"}}"#,
+        &[("index.mjs", "import { v } from 'leaf'; export const legit = v;\n")],
+    );
+    reg.publish_simple(
+        "leaf",
+        "1.0.0",
+        true,
+        r#"{"name":"leaf","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+        &[("index.mjs", "export const v = 1;\n")],
+    );
+
+    let cache = tempfile::tempdir().unwrap();
+    let cas = CasStore::new(cache.path());
+    let base_graph = NpmGraphResolver::new(&reg, cas.clone())
+        .resolve_specifiers(&[NpmSpecifier::parse("npm:legit@^1.0.0").unwrap()])
+        .unwrap();
+    let mut base_lock = Lockfile::new();
+    base_lock.record_graph(&base_graph);
+
+    let req_legit = NpmRootRequest {
+        name: PackageName::parse("legit").unwrap(),
+        constraint: VersionConstraint::parse("^1.0.0").unwrap(),
+        optional: false,
+    };
+    let req_evil = NpmRootRequest {
+        name: PackageName::parse("evil-alias").unwrap(),
+        constraint: VersionConstraint::parse("^1.0.0").unwrap(),
+        optional: false,
+    };
+
+    // 1. Aliasing bypass: `evil-alias@^1.0.0` points to `legit@1.0.0` after `legit` was visited.
+    for frozen in [false, true] {
+        let mut aliased = base_lock.clone();
+        aliased
+            .specifiers
+            .insert("evil-alias@^1.0.0".to_owned(), "legit@1.0.0".to_owned());
+        let err = resolve_requests_with_lockfile(
+            &[req_legit.clone(), req_evil.clone()],
+            &mut aliased,
+            &cas,
+            Some(&reg),
+            DEFAULT_REGISTRY_ORIGIN,
+            frozen,
+            false,
+            NpmLimits::default(),
+            &TargetPlatform::current(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ResolverError::Lockfile(_) | ResolverError::PackageIdentityMismatch { .. }
+            ),
+            "frozen={frozen}: {err}"
+        );
+
+        // Also when aliased under `evil-alias@1.0.0` key pointing at `legit`'s tarball:
+        let mut aliased_tar = base_lock.clone();
+        let legit_entry = aliased_tar.packages["legit@1.0.0"].clone();
+        aliased_tar.specifiers.insert(
+            "evil-alias@^1.0.0".to_owned(),
+            "evil-alias@1.0.0".to_owned(),
+        );
+        aliased_tar
+            .packages
+            .insert("evil-alias@1.0.0".to_owned(), legit_entry);
+        let err = resolve_requests_with_lockfile(
+            &[req_legit.clone(), req_evil.clone()],
+            &mut aliased_tar,
+            &cas,
+            Some(&reg),
+            DEFAULT_REGISTRY_ORIGIN,
+            frozen,
+            false,
+            NpmLimits::default(),
+            &TargetPlatform::current(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ResolverError::PackageIdentityMismatch { .. }),
+            "frozen={frozen}: {err}"
+        );
+    }
+
+    // 2. Non-frozen lockfile MUST also reject missing `treeSha256`.
+    let mut missing_tree = base_lock.clone();
+    missing_tree
+        .packages
+        .get_mut("legit@1.0.0")
+        .unwrap()
+        .tree_sha256 = None;
+    let err = resolve_requests_with_lockfile(
+        std::slice::from_ref(&req_legit),
+        &mut missing_tree,
+        &cas,
+        Some(&reg),
+        DEFAULT_REGISTRY_ORIGIN,
+        false,
+        false,
+        NpmLimits::default(),
+        &TargetPlatform::current(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ResolverError::FrozenLockfile { .. }), "{err}");
+
+    // 3. Non-frozen lockfile MUST reject missing required dependency edge.
+    let mut missing_dep = base_lock.clone();
+    missing_dep
+        .packages
+        .get_mut("legit@1.0.0")
+        .unwrap()
+        .dependencies
+        .clear();
+    let err = resolve_requests_with_lockfile(
+        std::slice::from_ref(&req_legit),
+        &mut missing_dep,
+        &cas,
+        Some(&reg),
+        DEFAULT_REGISTRY_ORIGIN,
+        false,
+        false,
+        NpmLimits::default(),
+        &TargetPlatform::current(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ResolverError::FrozenLockfile { .. }), "{err}");
+
+    // 4. `~0` suffix collision (`legit@1.0.0` and `legit@1.0.0~0`) is rejected.
+    let mut tilde_zero = base_lock.clone();
+    let cloned_entry = tilde_zero.packages["legit@1.0.0"].clone();
+    tilde_zero
+        .packages
+        .insert("legit@1.0.0~0".to_owned(), cloned_entry);
+    tilde_zero
+        .specifiers
+        .insert("legit@1.0.0".to_owned(), "legit@1.0.0~0".to_owned());
+    let req_tilde = NpmRootRequest {
+        name: PackageName::parse("legit").unwrap(),
+        constraint: VersionConstraint::parse("1.0.0").unwrap(),
+        optional: false,
+    };
+    let err = resolve_requests_with_lockfile(
+        &[req_legit.clone(), req_tilde],
+        &mut tilde_zero,
+        &cas,
+        Some(&reg),
+        DEFAULT_REGISTRY_ORIGIN,
+        true,
+        false,
+        NpmLimits::default(),
+        &TargetPlatform::current(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ResolverError::Lockfile(_)), "{err}");
+
+    // 5. Tarball package.json omitting `"version"` must fail lockfile version verification.
+    let (no_ver_tgz, no_ver_sri) = build_tgz(&[
+        TarEntrySpec::file(
+            "package/package.json",
+            r#"{"name":"no-ver","type":"module","exports":"./index.mjs"}"#,
+        ),
+        TarEntrySpec::file("package/index.mjs", "export const x = 1;\n"),
+    ]);
+    let ingestor = TarballIngestor::new(cas.clone(), NpmLimits::default());
+    let no_ver_tree = ingestor
+        .ingest(DEFAULT_REGISTRY_ORIGIN, &no_ver_sri, &no_ver_tgz)
+        .unwrap();
+    let mut no_ver_lock = Lockfile::new();
+    no_ver_lock
+        .specifiers
+        .insert("no-ver@^1.0.0".to_owned(), "no-ver@1.0.0".to_owned());
+    no_ver_lock.packages.insert(
+        "no-ver@1.0.0".to_owned(),
+        LockedPackage {
+            version: "1.0.0".to_owned(),
+            integrity: no_ver_sri,
+            tree_sha256: Some(no_ver_tree.tree_sha256),
+            tarball_url: "https://registry.npmjs.org/no-ver/-/no-ver-1.0.0.tgz".to_owned(),
+            dependencies: BTreeMap::new(),
+        },
+    );
+    let err = resolve_requests_with_lockfile(
+        &[NpmRootRequest {
+            name: PackageName::parse("no-ver").unwrap(),
+            constraint: VersionConstraint::parse("^1.0.0").unwrap(),
+            optional: false,
+        }],
+        &mut no_ver_lock,
+        &cas,
+        None::<&MockRegistry>,
+        DEFAULT_REGISTRY_ORIGIN,
+        false,
+        true,
+        NpmLimits::default(),
+        &TargetPlatform::current(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ResolverError::PackageVersionMismatch { .. }),
+        "{err}"
+    );
+}
+
+#[test]
+fn native_binary_exclusions_and_project_imports_nearest_package_type_and_symlink_containment() {
+    use vaeljs_npm::{DEFAULT_REGISTRY_ORIGIN, ProjectResolution};
+
+    let cache = tempfile::tempdir().unwrap();
+    let cas = CasStore::new(cache.path());
+    let ingestor = TarballIngestor::new(cas.clone(), NpmLimits::default());
+
+    let (tgz, sri) = build_tgz(&[
+        TarEntrySpec::file(
+            "package/package.json",
+            r#"{"name":"native-mix","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+        ),
+        TarEntrySpec::file("package/index.mjs", "export const ok = true;\n"),
+        TarEntrySpec::file("package/bin/tool.exe", b"MZ"),
+        TarEntrySpec::file("package/bin/libfoo.so.1.2.3", b"\x7fELF"),
+        TarEntrySpec::file("package/bin/mod.wasm", b"\0asm"),
+        TarEntrySpec::file("package/bin/addon.dll", b"MZ"),
+        TarEntrySpec::file("package/bin/libbar.dylib", b"\xfe\xed\xfa\xce"),
+    ]);
+    let tree = ingestor
+        .ingest(DEFAULT_REGISTRY_ORIGIN, &sri, &tgz)
+        .unwrap();
+    for skipped in [
+        "bin/addon.dll",
+        "bin/libbar.dylib",
+        "bin/libfoo.so.1.2.3",
+        "bin/mod.wasm",
+        "bin/tool.exe",
+    ] {
+        assert!(tree.is_skipped_native(skipped), "missing {skipped}");
+        assert!(tree.get_file(skipped).is_none(), "stored {skipped}");
+    }
+
+    // `#imports` targeting a subdirectory with `"type": "commonjs"` must fail closed
+    // even when root `package.json` has `"type": "module"`.
+    let proj = tempfile::tempdir().unwrap();
+    fs::create_dir_all(proj.path().join("cjs-sub")).unwrap();
+    fs::write(
+        proj.path().join("package.json"),
+        r##"{
+            "name": "root-esm",
+            "type": "module",
+            "imports": {
+                "#cjs": "./cjs-sub/legacy.js",
+                "#esm": "./esm.mjs"
+            }
+        }"##,
+    )
+    .unwrap();
+    fs::write(
+        proj.path().join("cjs-sub/package.json"),
+        r#"{"name":"cjs-sub","type":"commonjs"}"#,
+    )
+    .unwrap();
+    fs::write(
+        proj.path().join("cjs-sub/legacy.js"),
+        "module.exports = 1;\n",
+    )
+    .unwrap();
+    fs::write(proj.path().join("esm.mjs"), "export const ok = 1;\n").unwrap();
+
+    let project = ProjectPackageResolver::discover(proj.path())
+        .unwrap()
+        .expect("discover project");
+    let err = project.resolve_local_specifier("#cjs").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ResolverError::Exports(ExportsError::UnsupportedModuleFormat { .. })
+        ),
+        "{err}"
+    );
+    assert!(matches!(
+        project.resolve_local_specifier("#esm").unwrap(),
+        Some(ProjectResolution::LocalFile { .. })
+    ));
+
+    // Symlinked `package.json` and escaping `#imports` symlinks must fail closed.
+    #[cfg(unix)]
+    {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.mjs"), "export const s = 1;\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.mjs"),
+            proj.path().join("escape.mjs"),
+        )
+        .unwrap();
+        fs::write(
+            proj.path().join("package.json"),
+            r##"{
+                "name": "root-esm",
+                "type": "module",
+                "imports": { "#escape": "./escape.mjs" }
+            }"##,
+        )
+        .unwrap();
+        let escaped_proj = ProjectPackageResolver::discover(proj.path())
+            .unwrap()
+            .unwrap();
+        let esc_err = escaped_proj.resolve_local_specifier("#escape").unwrap_err();
+        assert!(
+            matches!(esc_err, ResolverError::DisallowedImport { .. }),
+            "{esc_err}"
+        );
+
+        let sym_pkg_dir = tempfile::tempdir().unwrap();
+        fs::write(
+            outside.path().join("real-pkg.json"),
+            r#"{"name":"real","type":"module"}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("real-pkg.json"),
+            sym_pkg_dir.path().join("package.json"),
+        )
+        .unwrap();
+        assert!(ProjectPackageResolver::discover(sym_pkg_dir.path()).is_err());
     }
 }

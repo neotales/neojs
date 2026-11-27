@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::Path;
 
@@ -198,16 +198,19 @@ impl Manifest {
     /// Reads and validates a manifest from a caller-supplied path.
     ///
     /// This does not search parent directories and does not default to
-    /// [`MANIFEST_FILE_NAME`]. The read is bounded: at most
-    /// `MAX_MANIFEST_BYTES + 1` bytes are read, so an oversized file is rejected
-    /// without loading it whole. The path is not included in an error message.
+    /// [`MANIFEST_FILE_NAME`]. Uses `O_NOFOLLOW` on Unix (and reparse-point
+    /// checks on Windows) to reject symlinks and non-regular files. The read
+    /// is bounded: at most `MAX_MANIFEST_BYTES + 1` bytes are read, so an
+    /// oversized file is rejected without loading it whole. The path is not
+    /// included in an error message.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] when the file cannot be read, or any error from
-    /// [`Self::parse`], including [`Error::ManifestTooLarge`].
+    /// Returns [`Error::Io`] when the file cannot be read or is a symlink /
+    /// non-regular file, or any error from [`Self::parse`], including
+    /// [`Error::ManifestTooLarge`].
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
-        let file = File::open(path.as_ref()).map_err(|source| Error::Io { source })?;
+        let file = open_regular_nofollow(path.as_ref()).map_err(|source| Error::Io { source })?;
         let mut bytes = Vec::new();
         let mut limited = file.take(MAX_MANIFEST_BYTES as u64 + 1);
         limited
@@ -226,6 +229,116 @@ impl Manifest {
         })?;
         Self::parse(&text)
     }
+}
+
+#[cfg(unix)]
+const fn o_nofollow_flag() -> i32 {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        0x0100
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "aarch64",
+            target_arch = "arm",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "m68k"
+        )
+    ))]
+    {
+        0x8000
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "riscv64",
+            target_arch = "s390x"
+        )
+    ))]
+    {
+        0x20000
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        all(
+            any(target_os = "linux", target_os = "android"),
+            any(
+                target_arch = "aarch64",
+                target_arch = "arm",
+                target_arch = "powerpc",
+                target_arch = "powerpc64",
+                target_arch = "m68k",
+                target_arch = "x86",
+                target_arch = "x86_64",
+                target_arch = "riscv64",
+                target_arch = "s390x"
+            )
+        )
+    )))]
+    {
+        0
+    }
+}
+
+fn open_regular_nofollow(path: &Path) -> std::io::Result<File> {
+    let pre_meta = std::fs::symlink_metadata(path)?;
+    if pre_meta.file_type().is_symlink() || !pre_meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "manifest path is not a regular file",
+        ));
+    }
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let flags = o_nofollow_flag();
+        if flags != 0 {
+            opts.custom_flags(flags);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = opts.open(path)?;
+    let post_meta = file.metadata()?;
+    if post_meta.file_type().is_symlink() || !post_meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "manifest path is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if (pre_meta.dev(), pre_meta.ino()) != (post_meta.dev(), post_meta.ino()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "manifest path changed concurrently",
+            ));
+        }
+    }
+    Ok(file)
 }
 
 /// A scoped package name.
@@ -902,5 +1015,22 @@ fn unknown_field(field: &str, position: jsonc::SourcePosition) -> Error {
     Error::UnknownField {
         line: position.line,
         column: position.column,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_path_rejects_symlink_manifest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("real.jsonc");
+        let link = temp.path().join("vael.jsonc");
+        std::fs::write(&real, r#"{"name":"@acme/app"}"#).expect("write real");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let err = Manifest::from_path(&link).expect_err("symlinked manifest must fail closed");
+        assert!(matches!(err, Error::Io { .. }), "{err}");
     }
 }

@@ -201,9 +201,15 @@ impl CasStore {
         ) {
             Err(CasError::Io {
                 operation: "open", ..
-            }) if !path.exists() => Err(CasError::NotFound {
-                digest: expected_sha256_hex.to_owned(),
-            }),
+            }) if matches!(
+                fs::symlink_metadata(&path),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound
+            ) =>
+            {
+                Err(CasError::NotFound {
+                    digest: expected_sha256_hex.to_owned(),
+                })
+            }
             other => other,
         }
     }
@@ -252,7 +258,7 @@ pub fn read_bounded_regular_file(
         operation: "stat",
         reason: err.to_string(),
     })?;
-    if !meta.is_file() {
+    if meta.file_type().is_symlink() || !meta.is_file() {
         return Err(CasError::NotRegularFile);
     }
     let actual_len = meta.len();
@@ -384,7 +390,15 @@ pub(crate) fn atomic_write_file(
     write_res
 }
 
-fn open_nofollow(path: &Path) -> Result<File, CasError> {
+pub(crate) fn open_nofollow(path: &Path) -> Result<File, CasError> {
+    let pre_meta = fs::symlink_metadata(path).map_err(|err| CasError::Io {
+        operation: "open",
+        reason: err.to_string(),
+    })?;
+    if pre_meta.file_type().is_symlink() || !pre_meta.is_file() {
+        return Err(CasError::NotRegularFile);
+    }
+
     let mut opts = OpenOptions::new();
     opts.read(true);
     #[cfg(unix)]
@@ -392,10 +406,31 @@ fn open_nofollow(path: &Path) -> Result<File, CasError> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.custom_flags(libc::O_NOFOLLOW);
     }
-    opts.open(path).map_err(|err| CasError::Io {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = opts.open(path).map_err(|err| CasError::Io {
         operation: "open",
         reason: err.to_string(),
-    })
+    })?;
+    let post_meta = file.metadata().map_err(|err| CasError::Io {
+        operation: "stat",
+        reason: err.to_string(),
+    })?;
+    if post_meta.file_type().is_symlink() || !post_meta.is_file() {
+        return Err(CasError::NotRegularFile);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if (pre_meta.dev(), pre_meta.ino()) != (post_meta.dev(), post_meta.ino()) {
+            return Err(CasError::NotRegularFile);
+        }
+    }
+    Ok(file)
 }
 
 fn create_dir_mode(dir: &Path, mode: u32) -> Result<(), CasError> {
@@ -406,7 +441,10 @@ fn create_dir_mode(dir: &Path, mode: u32) -> Result<(), CasError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(mode));
+        fs::set_permissions(dir, fs::Permissions::from_mode(mode)).map_err(|err| CasError::Io {
+            operation: "set directory permissions",
+            reason: err.to_string(),
+        })?;
     }
     #[cfg(not(unix))]
     let _ = mode;

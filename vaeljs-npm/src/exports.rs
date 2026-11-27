@@ -9,8 +9,8 @@ use std::path::Path;
 use indexmap::IndexMap;
 use vaeljs_module_policy::{ModuleFormat, PackageType, package_module_format};
 
-use crate::cas::{CasError, CasStore};
-use crate::package_json::{ExportsField, PackageJson, PackageJsonError};
+use crate::cas::{CasError, CasStore, read_bounded_regular_file};
+use crate::package_json::{ExportsField, MAX_PACKAGE_JSON_BYTES, PackageJson, PackageJsonError};
 use crate::specifier::{
     PackageName, SpecifierError, split_bare_package_specifier, validate_subpath,
 };
@@ -244,6 +244,12 @@ fn resolve_import_impl(
             specifier: specifier.to_owned(),
         });
     };
+    if let Some(bad_key) = imports_map.keys().find(|k| !k.starts_with('#')) {
+        return Err(ExportsError::InvalidConfig {
+            package: pkg_name.to_owned(),
+            reason: format!("invalid imports key `{bad_key}`: keys must start with `#`"),
+        });
+    }
 
     let target = resolve_map_lookup(imports_map, pkg_name, specifier, false)?.ok_or_else(|| {
         ExportsError::PackageImportNotDefined {
@@ -258,22 +264,25 @@ fn resolve_import_impl(
             let resolved = classify_tree_file(tree, cas, pkg_name, &clean)?;
             return Ok(PackageImportTarget::InternalFile(resolved));
         }
-        let classify_path = match project_root {
-            Some(root) => root.join(&clean),
-            None => Path::new(&clean).to_path_buf(),
+        let (classify_path, package_type) = match project_root {
+            Some(root) => {
+                let pkg_type =
+                    nearest_project_package_type(root, &clean, pkg_name, pkg_json.package_type)?;
+                (root.join(&clean), pkg_type)
+            }
+            None => (Path::new(&clean).to_path_buf(), pkg_json.package_type),
         };
-        let format =
-            package_module_format(&classify_path, pkg_json.package_type).map_err(|reason| {
-                ExportsError::UnsupportedModuleFormat {
-                    package: pkg_name.to_owned(),
-                    path: clean.clone(),
-                    reason,
-                }
-            })?;
+        let format = package_module_format(&classify_path, package_type).map_err(|reason| {
+            ExportsError::UnsupportedModuleFormat {
+                package: pkg_name.to_owned(),
+                path: clean.clone(),
+                reason,
+            }
+        })?;
         return Ok(PackageImportTarget::InternalFile(ResolvedPackageFile {
             rel_path: clean,
             format,
-            package_type: pkg_json.package_type,
+            package_type,
         }));
     }
 
@@ -312,6 +321,48 @@ fn resolve_import_impl(
         name: ext_name,
         subpath: ext_subpath,
     })
+}
+
+pub(crate) fn nearest_project_package_type(
+    project_root: &Path,
+    clean_rel: &str,
+    pkg_name: &str,
+    root_package_type: PackageType,
+) -> Result<PackageType, ExportsError> {
+    let mut dir = match clean_rel.rsplit_once('/') {
+        Some((parent, _)) => parent,
+        None => "",
+    };
+
+    while !dir.is_empty() {
+        let candidate = project_root.join(dir).join("package.json");
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(_) => {
+                let bytes = read_bounded_regular_file(&candidate, None, MAX_PACKAGE_JSON_BYTES)?;
+                let parsed = PackageJson::parse_bytes(&bytes).map_err(|err| {
+                    ExportsError::InvalidConfig {
+                        package: pkg_name.to_owned(),
+                        reason: format!("invalid `{dir}/package.json`: {err}"),
+                    }
+                })?;
+                return Ok(parsed.package_type);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(CasError::Io {
+                    operation: "stat",
+                    reason: err.to_string(),
+                }
+                .into());
+            }
+        }
+        dir = match dir.rsplit_once('/') {
+            Some((parent, _)) => parent,
+            None => "",
+        };
+    }
+
+    Ok(root_package_type)
 }
 
 fn classify_tree_file(

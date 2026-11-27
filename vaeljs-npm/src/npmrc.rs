@@ -161,6 +161,12 @@ pub enum NpmrcError {
     /// Auth credential value contained disallowed characters (such as CR/LF/NUL).
     #[error("invalid auth credential in .npmrc at line {line}: {reason}")]
     InvalidAuthValue { line: usize, reason: String },
+
+    /// Project-level `.npmrc` attempted to configure auth directives or `${ENV_VAR}` interpolation.
+    #[error(
+        "project .npmrc at line {line} cannot configure auth directives or env interpolation; move credentials to ~/.npmrc"
+    )]
+    ProjectAuthNotAllowed { line: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,6 +272,24 @@ impl NpmrcConfig {
         content: &str,
         env_lookup: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, NpmrcError> {
+        Self::parse_with_policy(content, env_lookup, true)
+    }
+
+    /// Parses a project-level `.npmrc` permitting registry routing (`registry=`,
+    /// `@scope:registry=`) only.
+    ///
+    /// Rejects auth directives (`_authToken`, `_auth`, `always-auth`, `//...:`
+    /// auth keys) and any `${ENV_VAR}` interpolation to prevent untrusted
+    /// repositories from exfiltrating ambient environment variables.
+    pub fn parse_project(content: &str) -> Result<Self, NpmrcError> {
+        Self::parse_with_policy(content, &|_| None, false)
+    }
+
+    fn parse_with_policy(
+        content: &str,
+        env_lookup: &dyn Fn(&str) -> Option<String>,
+        allow_auth: bool,
+    ) -> Result<Self, NpmrcError> {
         if content.len() > MAX_NPMRC_BYTES {
             return Err(NpmrcError::TooLarge {
                 size: content.len(),
@@ -293,6 +317,9 @@ impl NpmrcConfig {
                         reason: "expected `key=value` assignment".to_owned(),
                     });
                 }
+                if !allow_auth && is_auth_directive_key(trimmed) {
+                    return Err(NpmrcError::ProjectAuthNotAllowed { line: line_no });
+                }
                 continue;
             };
 
@@ -305,6 +332,10 @@ impl NpmrcConfig {
             }
 
             let value = parse_value(raw_val, line_no)?;
+
+            if !allow_auth && (is_auth_directive_key(key) || value.contains("${")) {
+                return Err(NpmrcError::ProjectAuthNotAllowed { line: line_no });
+            }
 
             if key == "registry" {
                 let target = parse_registry_target(value.as_str())?;
@@ -323,7 +354,8 @@ impl NpmrcConfig {
                 continue;
             }
 
-            if key.starts_with("//")
+            if allow_auth
+                && key.starts_with("//")
                 && let Some((prefix, setting)) = key.rsplit_once(':')
                 && matches!(setting, "_authToken" | "_auth")
             {
@@ -337,7 +369,11 @@ impl NpmrcConfig {
     }
 
     /// Loads `~/.npmrc` (if `home_dir` is `Some`) and `<project_dir>/.npmrc`,
-    /// with project settings overriding user settings.
+    /// with project settings overriding registry routing ONLY.
+    ///
+    /// Auth directives (`_authToken`, `_auth`, `always-auth`) and `${ENV_VAR}`
+    /// interpolation are permitted only in `~/.npmrc` and rejected in project
+    /// `.npmrc` files.
     ///
     /// Uses `O_NOFOLLOW` on Unix and regular-file bounded reads ([`MAX_NPMRC_BYTES`]).
     /// Missing `.npmrc` files are silently skipped; symlinks, non-regular files,
@@ -346,6 +382,23 @@ impl NpmrcConfig {
         project_dir: &Path,
         home_dir: Option<&Path>,
         env_lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, NpmrcError> {
+        Self::load_for_project_with_options(Some(project_dir), home_dir, env_lookup, false)
+    }
+
+    /// Loads `~/.npmrc` (if `home_dir` is `Some`) and optionally
+    /// `<project_dir>/.npmrc` (if `project_dir` is `Some`).
+    ///
+    /// When `allow_project_auth` is `false` (the safe default), project `.npmrc`
+    /// files may configure registry routing (`registry=`, `@scope:registry=`)
+    /// only, and reject auth directives and `${ENV_VAR}` interpolation.
+    /// Trusted embedders/tests may pass `allow_project_auth = true` to opt in
+    /// to project-level auth directives.
+    pub fn load_for_project_with_options(
+        project_dir: Option<&Path>,
+        home_dir: Option<&Path>,
+        env_lookup: &dyn Fn(&str) -> Option<String>,
+        allow_project_auth: bool,
     ) -> Result<Self, NpmrcError> {
         let mut merged = Self::default();
 
@@ -356,8 +409,14 @@ impl NpmrcConfig {
             merged.merge_from(user_cfg);
         }
 
-        if let Some(content) = read_optional_npmrc_file(&project_dir.join(".npmrc"))? {
-            let project_cfg = Self::parse(&content, env_lookup)?;
+        if let Some(proj) = project_dir
+            && let Some(content) = read_optional_npmrc_file(&proj.join(".npmrc"))?
+        {
+            let project_cfg = if allow_project_auth {
+                Self::parse_with_policy(&content, env_lookup, true)?
+            } else {
+                Self::parse_project(&content)?
+            };
             merged.merge_from(project_cfg);
         }
 
@@ -816,6 +875,20 @@ fn build_auth_entry(
     Ok(AuthEntry::Ready(auth))
 }
 
+fn is_auth_directive_key(key: &str) -> bool {
+    if key.starts_with("//") {
+        return true;
+    }
+    let setting = key.rsplit_once(':').map_or(key, |(_, s)| s);
+    setting.eq_ignore_ascii_case("_authToken")
+        || setting.eq_ignore_ascii_case("_auth")
+        || setting.eq_ignore_ascii_case("always-auth")
+        || setting.eq_ignore_ascii_case("_password")
+        || setting.eq_ignore_ascii_case("username")
+        || setting.eq_ignore_ascii_case("certfile")
+        || setting.eq_ignore_ascii_case("keyfile")
+}
+
 fn is_valid_env_var_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     let Some(first) = bytes.next() else {
@@ -1059,23 +1132,26 @@ mod tests {
 
         std::fs::write(
             home.path().join(".npmrc"),
-            "registry=https://user-mirror.example.com/\n@user:registry=https://user.example.com/\n//user.example.com/:_authToken=user_tok\n",
+            "registry=https://user-mirror.example.com/\n@user:registry=https://user.example.com/\n//user.example.com/:_authToken=${USER_TOK}\n",
         )
         .unwrap();
+        // Project .npmrc may override routing only; auth must come from ~/.npmrc.
         std::fs::write(
             project.path().join(".npmrc"),
-            "@user:registry=https://proj.example.com/\n//user.example.com/:_authToken=proj_tok\n",
+            "@user:registry=https://proj.example.com/\n",
         )
         .unwrap();
 
-        let cfg =
-            NpmrcConfig::load_for_project(project.path(), Some(home.path()), &no_env).unwrap();
+        let cfg = NpmrcConfig::load_for_project(project.path(), Some(home.path()), &|name| {
+            (name == "USER_TOK").then(|| "user_tok".to_owned())
+        })
+        .unwrap();
         // Project without `registry=` preserves user's `registry=`.
         assert_eq!(
             cfg.registry_for_package("lodash").as_str(),
             "https://user-mirror.example.com/"
         );
-        // Project overrides user's `@user:registry` and auth token.
+        // Project overrides user's `@user:registry`, while user ~/.npmrc still provides auth.
         assert_eq!(
             cfg.registry_for_package("@user/pkg").as_str(),
             "https://proj.example.com/"
@@ -1086,7 +1162,7 @@ mod tests {
                 .unwrap()
                 .authorization_header_value()
                 .as_str(),
-            "Bearer proj_tok"
+            "Bearer user_tok"
         );
 
         // Missing files silently skipped.
@@ -1113,5 +1189,88 @@ mod tests {
             let err = NpmrcConfig::load_for_project(sym_proj.path(), None, &no_env).unwrap_err();
             assert_eq!(err, NpmrcError::NotRegularFile);
         }
+    }
+
+    #[test]
+    fn project_npmrc_rejects_auth_directives_and_env_interpolation_by_default() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".npmrc"),
+            "//user.example.com/:_authToken=${USER_SECRET}\n",
+        )
+        .unwrap();
+
+        for malicious in [
+            "registry=https://evil.test/\n//evil.test/:_authToken=${SECRET}\n",
+            "//evil.test/:_auth=${SECRET}\n",
+            "_authToken=${SECRET}\n",
+            "always-auth=true\n",
+            "always-auth\n",
+            "registry=https://${SECRET}.evil.test/\n",
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            std::fs::write(project.path().join(".npmrc"), malicious).unwrap();
+            let secret_read = AtomicBool::new(false);
+            let err = NpmrcConfig::load_for_project(project.path(), Some(home.path()), &|name| {
+                if name == "SECRET" {
+                    secret_read.store(true, Ordering::SeqCst);
+                    return Some("super_secret_value".to_owned());
+                }
+                (name == "USER_SECRET").then(|| "user_ok".to_owned())
+            })
+            .unwrap_err();
+            assert!(
+                matches!(err, NpmrcError::ProjectAuthNotAllowed { .. }),
+                "expected ProjectAuthNotAllowed for `{malicious}`, got {err}"
+            );
+            assert!(
+                !secret_read.load(Ordering::SeqCst),
+                "env_lookup must NEVER be called for project .npmrc: {malicious}"
+            );
+        }
+
+        // Skipping project .npmrc (`None`) loads ~/.npmrc only.
+        let skipped = NpmrcConfig::load_for_project_with_options(
+            None,
+            Some(home.path()),
+            &|name| (name == "USER_SECRET").then(|| "user_ok".to_owned()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            skipped
+                .auth_for_url(&Url::parse("https://user.example.com/pkg").unwrap())
+                .unwrap()
+                .unwrap()
+                .authorization_header_value()
+                .as_str(),
+            "Bearer user_ok"
+        );
+
+        // Explicit trusted opt-in allows project auth when requested.
+        let opted_in_proj = tempfile::tempdir().unwrap();
+        std::fs::write(
+            opted_in_proj.path().join(".npmrc"),
+            "//trusted.test/:_authToken=trusted_tok\n",
+        )
+        .unwrap();
+        let opted_in = NpmrcConfig::load_for_project_with_options(
+            Some(opted_in_proj.path()),
+            None,
+            &no_env,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            opted_in
+                .auth_for_url(&Url::parse("https://trusted.test/pkg").unwrap())
+                .unwrap()
+                .unwrap()
+                .authorization_header_value()
+                .as_str(),
+            "Bearer trusted_tok"
+        );
     }
 }

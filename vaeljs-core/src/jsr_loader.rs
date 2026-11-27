@@ -188,6 +188,7 @@ impl JsrModuleLoader {
         let jsr_pending = Rc::new(RefCell::new(BTreeSet::new()));
         let jsr_loaded = Rc::new(RefCell::new(BTreeSet::new()));
         let ordinary_loaded = Rc::new(RefCell::new(BTreeSet::new()));
+        let final_jsr_pending = Rc::clone(&jsr_pending);
         let final_jsr_loaded = Rc::clone(&jsr_loaded);
         let final_ordinary = Rc::clone(&ordinary_loaded);
         files.set_final_url_observer(Rc::new(
@@ -195,11 +196,12 @@ impl JsrModuleLoader {
                 let requested_identities = registry_identities_if_registry(requested);
                 let final_identities = registry_identities_if_registry(final_url);
                 {
+                    let pending = final_jsr_pending.borrow();
                     let loaded = final_jsr_loaded.borrow();
                     if requested_identities
                         .iter()
                         .chain(final_identities.iter())
-                        .any(|identity| loaded.contains(identity))
+                        .any(|identity| loaded.contains(identity) || pending.contains(identity))
                     {
                         return Err(format!(
                             "the final URL `{}` is already a verified JSR module; an ordinary HTTPS load cannot register a module under that identity",
@@ -241,34 +243,33 @@ impl JsrModuleLoader {
     /// The first import of a package or version performs its metadata requests
     /// here. [`deno_core::ModuleLoader::resolve`] is synchronous, so that work
     /// blocks the isolate thread with the same transport as remote loading.
-    fn resolve_jsr(&self, input: &str, referrer: &str) -> ModuleResolveResponse {
-        let result = (|| -> Result<Url, String> {
-            let specifier = Specifier::parse(input).map_err(|error| error.to_string())?;
-            let package = self
-                .package_metadata(&specifier.package)
-                .map_err(|reason| reason.to_string())?;
-            let selected = package
-                .select(&specifier.constraint)
-                .map_err(|error| error.to_string())?;
-            let package_version = PackageVersion {
-                package: specifier.package.clone(),
-                version: selected.version,
-            };
-            let version = self
-                .version_metadata(&package_version)
-                .map_err(|reason| reason.to_string())?;
-            let resolved = resolve_module(&specifier, &package, &version)
-                .map_err(|error| error.to_string())?;
-            let url = canonical_module_url(&resolved)?;
-            if self.is_ordinary_loaded(&url) {
-                return Err(format!(
-                    "`{url}` was already loaded as an ordinary HTTPS module; a `jsr:` import cannot add registry verification to that module. Use the `jsr:` import first, or a new Runtime."
-                ));
-            }
+    fn resolve_jsr_url(&self, input: &str, pend: bool) -> Result<Url, String> {
+        let specifier = Specifier::parse(input).map_err(|error| error.to_string())?;
+        let package = self
+            .package_metadata(&specifier.package)
+            .map_err(|reason| reason.to_string())?;
+        let selected = package
+            .select(&specifier.constraint)
+            .map_err(|error| error.to_string())?;
+        let package_version = PackageVersion {
+            package: specifier.package.clone(),
+            version: selected.version,
+        };
+        let version = self
+            .version_metadata(&package_version)
+            .map_err(|reason| reason.to_string())?;
+        let resolved =
+            resolve_module(&specifier, &package, &version).map_err(|error| error.to_string())?;
+        let url = canonical_module_url(&resolved)?;
+        if self.is_ordinary_loaded(&url) {
+            return Err(format!(
+                "`{url}` was already loaded as an ordinary HTTPS module; a `jsr:` import cannot add registry verification to that module. Use the `jsr:` import first, or a new Runtime."
+            ));
+        }
+        if pend {
             self.pend(&url);
-            Ok(url)
-        })();
-        result.map_err(|reason| resolve_error(input, referrer, reason))
+        }
+        Ok(url)
     }
 
     /// Resolves a relative import from a previously resolved JSR module.
@@ -276,47 +277,47 @@ impl JsrModuleLoader {
     /// The joined URL must stay on the registry origin and inside the exact
     /// package version directory. A module cannot use `..`, an absolute path,
     /// or a protocol-relative URL to reach another package or version.
-    fn resolve_relative(&self, input: &str, referrer: &str) -> ModuleResolveResponse {
-        let result = (|| -> Result<Url, String> {
-            if let Some(character) = input.chars().find(|character| {
-                matches!(character, '%' | '\\' | '?' | '#') || character.is_control()
-            }) {
-                return Err(format!(
-                    "the import contains `{character}`, which is not accepted in a JSR relative import"
-                ));
-            }
-            let base = Url::parse(referrer).map_err(|_| "the referrer is not a URL".to_owned())?;
-            let Some(base_module) = parse_module_url(&base)? else {
-                return Err("the referrer is not a JSR module URL".to_owned());
-            };
-            let joined = base
-                .join(input)
-                .map_err(|error| format!("the import is not a valid relative URL: {error}"))?;
-            if joined.scheme() != "https" || joined.host_str() != Some(REGISTRY_HOST) {
-                return Err("the relative import leaves the registry origin".to_owned());
-            }
-            let prefix = format!("/{}/{}/", base_module.id.package, base_module.id.version);
-            if !joined.path().starts_with(&prefix) {
-                return Err("the relative import leaves the package version directory".to_owned());
-            }
-            let Some(joined_module) = parse_module_url(&joined)? else {
-                return Err("the relative import is not a canonical JSR module path".to_owned());
-            };
-            if joined_module.id != base_module.id {
-                return Err("the relative import leaves the package version directory".to_owned());
-            }
-            // Normalize the encoding chosen by the URL parser so one file has
-            // one module identity however the importer spelled it.
-            let url = canonical_url_for(&joined_module)?;
-            if self.is_ordinary_loaded(&url) {
-                return Err(format!(
-                    "`{url}` was already loaded as an ordinary HTTPS module; a JSR graph import cannot add registry verification to that module"
-                ));
-            }
+    fn resolve_relative_url(&self, input: &str, referrer: &str, pend: bool) -> Result<Url, String> {
+        if let Some(character) = input
+            .chars()
+            .find(|character| matches!(character, '%' | '\\' | '?' | '#') || character.is_control())
+        {
+            return Err(format!(
+                "the import contains `{character}`, which is not accepted in a JSR relative import"
+            ));
+        }
+        let base = Url::parse(referrer).map_err(|_| "the referrer is not a URL".to_owned())?;
+        let Some(base_module) = parse_module_url(&base)? else {
+            return Err("the referrer is not a JSR module URL".to_owned());
+        };
+        let joined = base
+            .join(input)
+            .map_err(|error| format!("the import is not a valid relative URL: {error}"))?;
+        if joined.scheme() != "https" || joined.host_str() != Some(REGISTRY_HOST) {
+            return Err("the relative import leaves the registry origin".to_owned());
+        }
+        let prefix = format!("/{}/{}/", base_module.id.package, base_module.id.version);
+        if !joined.path().starts_with(&prefix) {
+            return Err("the relative import leaves the package version directory".to_owned());
+        }
+        let Some(joined_module) = parse_module_url(&joined)? else {
+            return Err("the relative import is not a canonical JSR module path".to_owned());
+        };
+        if joined_module.id != base_module.id {
+            return Err("the relative import leaves the package version directory".to_owned());
+        }
+        // Normalize the encoding chosen by the URL parser so one file has
+        // one module identity however the importer spelled it.
+        let url = canonical_url_for(&joined_module)?;
+        if self.is_ordinary_loaded(&url) {
+            return Err(format!(
+                "`{url}` was already loaded as an ordinary HTTPS module; a JSR graph import cannot add registry verification to that module"
+            ));
+        }
+        if pend {
             self.pend(&url);
-            Ok(url)
-        })();
-        result.map_err(|reason| resolve_error(input, referrer, reason))
+        }
+        Ok(url)
     }
 
     /// Records a canonical URL as resolved through the JSR path.
@@ -325,6 +326,14 @@ impl JsrModuleLoader {
     fn pend(&self, url: &Url) {
         if !self.is_jsr_loaded(url) {
             self.jsr_pending.borrow_mut().insert(url.to_string());
+        }
+    }
+
+    fn unpend(&self, url: &Url) {
+        let identities = registry_identities(url);
+        let mut pending = self.jsr_pending.borrow_mut();
+        for identity in identities {
+            pending.remove(&identity);
         }
     }
 
@@ -377,7 +386,7 @@ impl JsrModuleLoader {
     /// `jsr.io` URL that is not canonical is refused instead of falling through
     /// to the ordinary remote loader, which would execute it without the
     /// version-manifest check.
-    fn resolve_registry_https(&self, input: &str, referrer: &str) -> Option<ModuleResolveResponse> {
+    fn resolve_registry_https_url(&self, input: &str, pend: bool) -> Option<Result<Url, String>> {
         let url = Url::parse(input).ok()?;
         if url.scheme() != "https" || url.host_str() != Some(REGISTRY_HOST) {
             return None;
@@ -395,10 +404,12 @@ impl JsrModuleLoader {
                     "`{canonical}` was already loaded as an ordinary HTTPS module; a JSR graph import cannot add registry verification to that module"
                 ));
             }
-            self.pend(&canonical);
+            if pend {
+                self.pend(&canonical);
+            }
             Ok(canonical)
         })();
-        Some(result.map_err(|reason| resolve_error(input, referrer, reason)))
+        Some(result)
     }
 
     fn package_metadata(&self, package: &PackageId) -> Result<PackageMetadata, LoadFailure> {
@@ -563,20 +574,29 @@ impl JsrModuleLoader {
     }
 }
 
-impl ModuleLoader for JsrModuleLoader {
-    fn resolve(
+fn has_scheme_prefix_ci(specifier: &str, prefix_lower: &str) -> bool {
+    specifier
+        .get(..prefix_lower.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix_lower))
+}
+
+impl JsrModuleLoader {
+    fn resolve_impl(
         &self,
         specifier: &str,
         referrer: &str,
         kind: ResolutionKind,
+        pend: bool,
     ) -> ModuleResolveResponse {
         // Virtual `npm://` referrers enforce their own strict CAS package boundary
         // (including forbidding `jsr:`, `https:`, and `file:` imports).
         if Url::parse(referrer).is_ok_and(|url| url.scheme() == "npm") {
             return self.files.resolve(specifier, referrer, kind);
         }
-        if specifier.starts_with("jsr:") {
-            return self.resolve_jsr(specifier, referrer);
+        if has_scheme_prefix_ci(specifier, "jsr:") {
+            return self
+                .resolve_jsr_url(specifier, pend)
+                .map_err(|reason| resolve_error(specifier, referrer, reason));
         }
         // Only a successfully verified JSR module classifies its relative
         // imports as JSR. A pending resolution, or a failed one, does not: an
@@ -585,24 +605,49 @@ impl ModuleLoader for JsrModuleLoader {
         let referrer_is_jsr = Url::parse(referrer).is_ok_and(|url| self.is_jsr_loaded(&url));
         if referrer_is_jsr {
             if is_relative_reference(specifier) {
-                return self.resolve_relative(specifier, referrer);
+                return self
+                    .resolve_relative_url(specifier, referrer, pend)
+                    .map_err(|reason| resolve_error(specifier, referrer, reason));
             }
             if let Some(reason) = local_file_reason(specifier) {
                 return Err(JsErrorBox::generic(format!(
                     "cannot resolve `{specifier}` (imported from {referrer}): {reason}"
                 )));
             }
-            if let Some(response) = self.resolve_registry_https(specifier, referrer) {
-                return response;
+            if let Some(result) = self.resolve_registry_https_url(specifier, pend) {
+                return result.map_err(|reason| resolve_error(specifier, referrer, reason));
             }
         } else {
             match self.files.resolve_jsr_from_manifest(specifier, referrer) {
-                Ok(Some(jsr_specifier)) => return self.resolve_jsr(&jsr_specifier, referrer),
+                Ok(Some(jsr_specifier)) => {
+                    return self
+                        .resolve_jsr_url(&jsr_specifier, pend)
+                        .map_err(|reason| resolve_error(&jsr_specifier, referrer, reason));
+                }
                 Ok(None) => {}
                 Err(error) => return Err(error),
             }
         }
-        self.files.resolve(specifier, referrer, kind)
+        if pend {
+            self.files.resolve(specifier, referrer, kind)
+        } else {
+            self.files.import_meta_resolve(specifier, referrer)
+        }
+    }
+}
+
+impl ModuleLoader for JsrModuleLoader {
+    fn resolve(
+        &self,
+        specifier: &str,
+        referrer: &str,
+        kind: ResolutionKind,
+    ) -> ModuleResolveResponse {
+        self.resolve_impl(specifier, referrer, kind, true)
+    }
+
+    fn import_meta_resolve(&self, specifier: &str, referrer: &str) -> ModuleResolveResponse {
+        self.resolve_impl(specifier, referrer, ResolutionKind::DynamicImport, false)
     }
 
     fn load(
@@ -626,6 +671,7 @@ impl ModuleLoader for JsrModuleLoader {
                     ModuleLoadResponse::Sync(Ok(source))
                 }
                 Err(failure) => {
+                    self.unpend(module_specifier);
                     ModuleLoadResponse::Sync(Err(JsErrorBox::generic(failure.to_string())))
                 }
             };

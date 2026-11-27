@@ -80,12 +80,15 @@
 //! fetched and the program continues. Openness of the cache directory is the
 //! user's responsibility.
 //!
-//! This is not SSRF protection. There is no host allowlist, no private-address
-//! rejection, and no DNS pinning: the client fetches whatever HTTPS URL the
-//! caller names, using the process's network authority. Remote code has the
-//! same authority as local code once it runs; it is not a sandbox. The cache is
-//! an internal part of module loading; vaeljs exposes no `fetch`-style API and
-//! no way for JavaScript to read the cache.
+//! By default, resolved network addresses are checked against private,
+//! loopback, link-local, metadata, and unspecified IP ranges (`127.0.0.0/8`,
+//! `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`,
+//! `0.0.0.0/8`, `::1`, `fc00::/7`, `fe80::/10`, and IPv4-mapped IPv6) and
+//! pinned per connection to prevent SSRF and DNS rebinding (opt-in escape hatch
+//! via [`RemoteOptions::with_allow_private_ips`]). Remote code has the same
+//! authority as local code once it runs; it is not a sandbox. The cache is an
+//! internal part of module loading; vaeljs exposes no `fetch`-style API and no
+//! way for JavaScript to read the cache.
 //!
 //! Offline callers can use [`Cache::load_offline`] to read and SHA-256-verify
 //! cached entries without taking write locks, without consulting `max-age`
@@ -99,6 +102,8 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Read;
 use std::io::Write;
+#[cfg(any(feature = "network", test))]
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -270,6 +275,7 @@ pub struct RemoteOptions {
     max_requests: usize,
     max_redirects: u32,
     cache_dir: Option<PathBuf>,
+    allow_private_ips: bool,
 }
 
 impl Default for RemoteOptions {
@@ -282,6 +288,7 @@ impl Default for RemoteOptions {
             max_requests: DEFAULT_MAX_REQUESTS,
             max_redirects: DEFAULT_MAX_REDIRECTS,
             cache_dir: default_cache_dir(),
+            allow_private_ips: false,
         }
     }
 }
@@ -406,6 +413,24 @@ impl RemoteOptions {
     /// Returns the cache directory, or `None` when caching is disabled.
     pub fn cache_dir(&self) -> Option<&Path> {
         self.cache_dir.as_deref()
+    }
+
+    /// Configures whether connections to private, loopback, link-local, or
+    /// metadata IP addresses are permitted (defaults to `false`).
+    ///
+    /// Leaving this `false` blocks SSRF against internal network services and
+    /// cloud metadata endpoints (`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`,
+    /// `192.168.0.0/16`, `169.254.0.0/16`, `0.0.0.0/8`, `::1`, `fc00::/7`,
+    /// `fe80::/10`, and IPv4-mapped IPv6). Enable only for trusted local
+    /// development servers or integration tests.
+    pub fn with_allow_private_ips(mut self, allow: bool) -> Self {
+        self.allow_private_ips = allow;
+        self
+    }
+
+    /// Returns whether connections to private/loopback IP addresses are allowed.
+    pub fn allow_private_ips(&self) -> bool {
+        self.allow_private_ips
     }
 }
 
@@ -628,9 +653,10 @@ impl RemoteClient {
             .cache_dir
             .as_ref()
             .map(|dir| Arc::new(Cache::new(dir.clone())));
+        let allow_private_ips = options.allow_private_ips;
         Self {
             options,
-            transport: Arc::new(UreqTransport::new()),
+            transport: Arc::new(UreqTransport::new(allow_private_ips)),
             cache,
             budget: Arc::new(RemoteBudget::default()),
             attempted: Arc::new(Mutex::new(BTreeSet::new())),
@@ -1655,7 +1681,7 @@ impl Cache {
     /// entries. The caller must check `expected_length` before allocating.
     fn open_entry(&self, url: &Url) -> Option<(BufReader<File>, CachedModule, usize, String)> {
         let path = self.path(url);
-        let file = File::open(path).ok()?;
+        let file = open_regular_nofollow(&path).ok()?;
         let mut reader = BufReader::new(file);
         let magic = read_line_bounded(&mut reader, 64)?;
         if magic.trim_end() != CACHE_MAGIC {
@@ -1715,7 +1741,7 @@ impl Cache {
 
     fn load_entry_state(&self, url: &Url, max_body: usize) -> EntryState {
         let path = self.path(url);
-        let file = match File::open(path) {
+        let file = match open_regular_nofollow(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return EntryState::Absent;
@@ -1905,7 +1931,7 @@ impl Cache {
 
     /// Acquires the per-key publication lock.
     fn lock(&self, url: &Url, deadline: Instant) -> std::io::Result<CacheLock> {
-        std::fs::create_dir_all(&self.dir)?;
+        ensure_cache_dir_ready(&self.dir)?;
         let deadline = deadline.min(Instant::now() + CACHE_LOCK_BUDGET);
         let mut lock_path = self.path(url).into_os_string();
         lock_path.push(".lock");
@@ -1917,11 +1943,7 @@ impl Cache {
                     "cache publication lock timed out",
                 ));
             }
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-            {
+            match open_create_new_nofollow(&lock_path) {
                 Ok(_file) => return Ok(CacheLock { path: lock_path }),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1941,7 +1963,7 @@ impl Cache {
     fn next_revision(&self, url: &Url, deadline: Instant) -> std::io::Result<String> {
         let _lock = self.lock(url, deadline)?;
         let path = self.revision_path(url);
-        let current = File::open(&path)
+        let current = open_regular_nofollow(&path)
             .ok()
             .and_then(|file| {
                 let mut reader = BufReader::new(file);
@@ -1957,10 +1979,7 @@ impl Cache {
             TEMPORARY_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
+            let mut file = open_create_new_nofollow(&temporary)?;
             writeln!(file, "{next}")?;
             std::fs::rename(&temporary, &path)
         })();
@@ -1972,7 +1991,7 @@ impl Cache {
     }
 
     fn read_tombstone_state(&self, url: &Url) -> TombstoneState {
-        let file = match File::open(self.tombstone_path(url)) {
+        let file = match open_regular_nofollow(&self.tombstone_path(url)) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return TombstoneState::Absent;
@@ -1998,7 +2017,7 @@ impl Cache {
     }
 
     fn read_redirect_state(&self, url: &Url) -> RedirectState {
-        let file = match File::open(self.redirect_path(url)) {
+        let file = match open_regular_nofollow(&self.redirect_path(url)) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return RedirectState::Absent;
@@ -2242,6 +2261,7 @@ impl Cache {
     }
 
     fn write_tombstone(&self, url: &Url, generation: &str) -> std::io::Result<()> {
+        ensure_cache_dir_ready(&self.dir)?;
         let temporary = self.dir.join(format!(
             ".tomb-{}-{}-{}",
             std::process::id(),
@@ -2249,10 +2269,7 @@ impl Cache {
             TEMPORARY_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
+            let mut file = open_create_new_nofollow(&temporary)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -2268,6 +2285,7 @@ impl Cache {
     }
 
     fn write_redirect(&self, url: &Url, target: &Url, generation: &str) -> std::io::Result<()> {
+        ensure_cache_dir_ready(&self.dir)?;
         let metadata = format!(
             "generation={generation}\ntarget={}\n",
             hex_encode(request_url(target).as_str().as_bytes())
@@ -2285,10 +2303,7 @@ impl Cache {
             TEMPORARY_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
+            let mut file = open_create_new_nofollow(&temporary)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -2304,6 +2319,7 @@ impl Cache {
     }
 
     fn write_entry(&self, url: &Url, entry: &CachedModule) -> std::io::Result<()> {
+        ensure_cache_dir_ready(&self.dir)?;
         let metadata = entry.metadata();
         let path = self.path(url);
         let temporary = self.dir.join(format!(
@@ -2313,10 +2329,7 @@ impl Cache {
             TEMPORARY_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
+            let mut file = open_create_new_nofollow(&temporary)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -2333,6 +2346,148 @@ impl Cache {
     }
 }
 
+#[cfg(unix)]
+const fn o_nofollow_flag() -> i32 {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        0x0100
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "aarch64",
+            target_arch = "arm",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "m68k"
+        )
+    ))]
+    {
+        0x8000
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "riscv64",
+            target_arch = "s390x"
+        )
+    ))]
+    {
+        0x20000
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        all(
+            any(target_os = "linux", target_os = "android"),
+            any(
+                target_arch = "aarch64",
+                target_arch = "arm",
+                target_arch = "powerpc",
+                target_arch = "powerpc64",
+                target_arch = "m68k",
+                target_arch = "x86",
+                target_arch = "x86_64",
+                target_arch = "riscv64",
+                target_arch = "s390x"
+            )
+        )
+    )))]
+    {
+        0
+    }
+}
+
+fn ensure_cache_dir_ready(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let meta = std::fs::symlink_metadata(dir)?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cache directory is not a regular directory",
+        ));
+    }
+    Ok(())
+}
+
+fn open_regular_nofollow(path: &Path) -> std::io::Result<File> {
+    let pre_meta = std::fs::symlink_metadata(path)?;
+    if pre_meta.file_type().is_symlink() || !pre_meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cache entry is not a regular file",
+        ));
+    }
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let flags = o_nofollow_flag();
+        if flags != 0 {
+            opts.custom_flags(flags);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = opts.open(path)?;
+    let post_meta = file.metadata()?;
+    if post_meta.file_type().is_symlink() || !post_meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cache entry is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if (pre_meta.dev(), pre_meta.ino()) != (post_meta.dev(), post_meta.ino()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cache entry changed concurrently",
+            ));
+        }
+    }
+    Ok(file)
+}
+
+fn open_create_new_nofollow(path: &Path) -> std::io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let flags = o_nofollow_flag();
+        if flags != 0 {
+            opts.custom_flags(flags);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    opts.open(path)
+}
+
 /// Holds a per-key cache publication lock until dropped.
 struct CacheLock {
     path: PathBuf,
@@ -2347,24 +2502,119 @@ impl Drop for CacheLock {
 /// Makes temporary cache file names unique within one process.
 static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Returns `true` when `ip` belongs to a private, loopback, link-local,
+/// metadata, unspecified, multicast, or reserved address range.
+#[cfg(any(feature = "network", test))]
+fn is_disallowed_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_disallowed_ipv4(v4),
+        IpAddr::V6(v6) => is_disallowed_ipv6(v6),
+    }
+}
+
+#[cfg(any(feature = "network", test))]
+fn is_disallowed_ipv4(v4: Ipv4Addr) -> bool {
+    let [a, b, c, _d] = v4.octets();
+    a == 0 // 0.0.0.0/8 (unspecified / "this network")
+        || a == 10 // 10.0.0.0/8 (RFC 1918)
+        || (a == 100 && (64..=127).contains(&b)) // 100.64.0.0/10 (CGNAT)
+        || a == 127 // 127.0.0.0/8 (loopback)
+        || (a == 169 && b == 254) // 169.254.0.0/16 (link-local & cloud metadata)
+        || (a == 172 && (16..=31).contains(&b)) // 172.16.0.0/12 (RFC 1918)
+        || (a == 192 && b == 0 && c == 0) // 192.0.0.0/24 (IETF protocol assignments)
+        || (a == 192 && b == 168) // 192.168.0.0/16 (RFC 1918)
+        || a >= 224 // 224.0.0.0/4 (multicast, reserved, 255.255.255.255)
+}
+
+#[cfg(any(feature = "network", test))]
+fn is_disallowed_ipv6(v6: Ipv6Addr) -> bool {
+    if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+        return is_disallowed_ipv4(mapped_v4);
+    }
+    if let Some(compat_v4) = v6.to_ipv4() {
+        return is_disallowed_ipv4(compat_v4);
+    }
+    let segs = v6.segments();
+    // NAT64 well-known prefix 64:ff9b::/96.
+    if segs[0] == 0x0064
+        && segs[1] == 0xff9b
+        && segs[2] == 0
+        && segs[3] == 0
+        && segs[4] == 0
+        && segs[5] == 0
+    {
+        let embedded = Ipv4Addr::new(
+            (segs[6] >> 8) as u8,
+            (segs[6] & 0xff) as u8,
+            (segs[7] >> 8) as u8,
+            (segs[7] & 0xff) as u8,
+        );
+        return is_disallowed_ipv4(embedded);
+    }
+    v6.is_unspecified() // ::
+        || v6.is_loopback() // ::1
+        || v6.is_multicast() // ff00::/8
+        || (segs[0] & 0xfe00) == 0xfc00 // fc00::/7 (ULA)
+        || (segs[0] & 0xffc0) == 0xfe80 // fe80::/10 (link-local)
+}
+
+#[cfg(any(feature = "network", test))]
+fn filter_resolved_addrs(
+    addrs: Vec<SocketAddr>,
+    allow_private_ips: bool,
+) -> std::io::Result<Vec<SocketAddr>> {
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no socket addresses resolved",
+        ));
+    }
+    if !allow_private_ips && addrs.iter().any(|addr| is_disallowed_ip(addr.ip())) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "connection to private or non-public IP address refused",
+        ));
+    }
+    Ok(addrs)
+}
+
+#[cfg(feature = "network")]
+struct SsrfGuardResolver {
+    allow_private_ips: bool,
+}
+
+#[cfg(feature = "network")]
+impl ureq::Resolver for SsrfGuardResolver {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+        use std::net::ToSocketAddrs as _;
+        let addrs: Vec<SocketAddr> = netloc.to_socket_addrs()?.collect();
+        filter_resolved_addrs(addrs, self.allow_private_ips)
+    }
+}
+
 /// The production transport: blocking HTTPS through `ureq` and `rustls`.
 #[cfg(feature = "network")]
 struct UreqTransport {
     agent: ureq::Agent,
+    allow_private_ips: bool,
 }
 
 #[cfg(feature = "network")]
 impl UreqTransport {
-    /// Returns the one production agent configuration.
+    /// Returns the production agent configuration with SSRF DNS resolution
+    /// policy (`allow_private_ips`).
     ///
     /// Tests with a local CA variant must start from this builder, so the
     /// transport policy (HTTPS-only, no redirects, no environment proxy, no idle
-    /// pooling, timeout, user agent) is shared rather than duplicated.
-    fn agent_builder() -> ureq::AgentBuilder {
+    /// pooling, timeout, user agent, SSRF DNS resolver) is shared rather than
+    /// duplicated.
+    fn agent_builder_with_policy(allow_private_ips: bool) -> ureq::AgentBuilder {
         // `https_only` and `redirects(0)` mirror the policy in `RemoteClient`;
         // they are defence in depth, because every hop is already checked there.
         // Environment proxy detection is not enabled, and no cookie store or
         // authorization header exists on this agent.
+        // The custom `SsrfGuardResolver` blocks private/loopback/link-local/metadata
+        // IPs and pins the checked `SocketAddr`s to prevent DNS rebinding.
         ureq::AgentBuilder::new()
             .https_only(true)
             .redirects(0)
@@ -2377,19 +2627,24 @@ impl UreqTransport {
             .max_idle_connections(0)
             .max_idle_connections_per_host(0)
             .timeout(DEFAULT_TIMEOUT)
+            .resolver(SsrfGuardResolver { allow_private_ips })
             .user_agent(concat!("vaeljs/", env!("CARGO_PKG_VERSION")))
     }
 
-    fn new() -> Self {
+    fn new(allow_private_ips: bool) -> Self {
         Self {
-            agent: Self::agent_builder().build(),
+            agent: Self::agent_builder_with_policy(allow_private_ips).build(),
+            allow_private_ips,
         }
     }
 
-    /// Wraps an agent built from [`Self::agent_builder`] with a test trust store.
+    /// Wraps an agent built from [`Self::agent_builder_with_policy`] with a test trust store.
     #[cfg(test)]
-    fn with_agent(agent: ureq::Agent) -> Self {
-        Self { agent }
+    fn with_agent_allowing_private_ips(agent: ureq::Agent, allow_private_ips: bool) -> Self {
+        Self {
+            agent,
+            allow_private_ips,
+        }
     }
 }
 
@@ -2402,6 +2657,12 @@ fn ureq_error_reason(error: ureq::Error) -> String {
     let Some(error) = error.into_transport() else {
         return "HTTP transport error".to_string();
     };
+    if std::error::Error::source(&error)
+        .and_then(|src| src.downcast_ref::<std::io::Error>())
+        .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        return "connection to private or non-public IP address refused".to_string();
+    }
     let reason = match error.kind() {
         ureq::ErrorKind::InvalidUrl => "invalid URL",
         ureq::ErrorKind::UnknownScheme => "unsupported URL scheme",
@@ -2423,6 +2684,16 @@ fn ureq_error_reason(error: ureq::Error) -> String {
 #[cfg(feature = "network")]
 impl RemoteTransport for UreqTransport {
     fn get(&self, request: &RemoteRequest<'_>) -> Result<RemoteResponse, String> {
+        if !self.allow_private_ips {
+            let blocked_literal = match request.url.host() {
+                Some(url::Host::Ipv4(v4)) => is_disallowed_ip(IpAddr::V4(v4)),
+                Some(url::Host::Ipv6(v6)) => is_disallowed_ip(IpAddr::V6(v6)),
+                _ => false,
+            };
+            if blocked_literal {
+                return Err("connection to private or non-public IP address refused".to_owned());
+            }
+        }
         let mut call = self
             .agent
             .get(request.url.as_str())
@@ -3989,6 +4260,8 @@ mod tests {
 
         use url::Url;
 
+        use super::super::RemoteClient;
+        use super::super::RemoteOptions;
         use super::super::RemoteRequest;
         use super::super::RemoteTransport;
         use super::super::UreqTransport;
@@ -4120,16 +4393,56 @@ mod tests {
         }
 
         fn trusted_agent(cert_der: &[u8]) -> ureq::Agent {
-            UreqTransport::agent_builder()
+            UreqTransport::agent_builder_with_policy(true)
                 .timeout(Duration::from_secs(5))
                 .tls_config(trusted_tls_config(cert_der))
                 .build()
         }
 
         #[test]
+        fn default_transport_blocks_private_and_loopback_ips_without_connecting() {
+            // Default `UreqTransport::new(false)` must refuse private/loopback/metadata
+            // literals and `localhost` DNS before touching any socket.
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            listener.set_nonblocking(true).expect("nonblocking");
+
+            let client = RemoteClient::new(RemoteOptions::new().without_cache());
+            for bad_url in [
+                format!("https://127.0.0.1:{port}/mod.js?token=sentinel"),
+                format!("https://localhost:{port}/mod.js?token=sentinel"),
+                "https://[::1]/mod.js?token=sentinel".to_owned(),
+                "https://169.254.169.254/latest/meta-data?token=sentinel".to_owned(),
+                "https://10.0.0.1/mod.js?token=sentinel".to_owned(),
+                "https://172.16.0.1/mod.js?token=sentinel".to_owned(),
+                "https://192.168.1.1/mod.js?token=sentinel".to_owned(),
+                "https://0.0.0.0/mod.js?token=sentinel".to_owned(),
+                "https://[fc00::1]/mod.js?token=sentinel".to_owned(),
+                "https://[fe80::1]/mod.js?token=sentinel".to_owned(),
+                "https://[::ffff:127.0.0.1]/mod.js?token=sentinel".to_owned(),
+                "https://[::ffff:169.254.169.254]/mod.js?token=sentinel".to_owned(),
+            ] {
+                let url = Url::parse(&bad_url).expect("url");
+                let err = client
+                    .fetch(&url)
+                    .expect_err("private IP must be blocked by default");
+                let msg = err.to_string();
+                assert!(!msg.contains("sentinel"), "{msg}");
+                assert!(
+                    msg.contains("private or non-public IP address refused"),
+                    "expected SSRF refusal for {bad_url}, got: {msg}"
+                );
+            }
+            assert!(
+                listener.accept().is_err(),
+                "SSRF guard must block before opening TCP connection"
+            );
+        }
+
+        #[test]
         fn a_real_transport_error_never_echoes_the_query() {
             let url = Url::parse("https://127.0.0.1:1/mod.js?token=sentinel").expect("url");
-            let error = UreqTransport::new()
+            let error = UreqTransport::new(true)
                 .get(&RemoteRequest {
                     url: &url,
                     timeout: Duration::from_secs(1),
@@ -4150,7 +4463,7 @@ mod tests {
             let (port, handle) = spawn_tls_server(cert_der.clone(), key_der.clone());
             let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js?token=sentinel"))
                 .expect("url");
-            let untrusted = UreqTransport::new();
+            let untrusted = UreqTransport::new(true);
             let error = untrusted
                 .get(&RemoteRequest {
                     url: &url,
@@ -4167,7 +4480,8 @@ mod tests {
 
             let (port, handle) = spawn_tls_server(cert_der.clone(), key_der);
             let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js")).expect("url");
-            let transport = UreqTransport::with_agent(trusted_agent(&cert_der));
+            let transport =
+                UreqTransport::with_agent_allowing_private_ips(trusted_agent(&cert_der), true);
             let response = transport
                 .get(&RemoteRequest {
                     url: &url,
@@ -4193,7 +4507,8 @@ mod tests {
             let (cert_der, key_der) = certificate();
             let (port, accepted, handle) = spawn_counting_tls_server(cert_der.clone(), key_der, 2);
             let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js")).expect("url");
-            let transport = UreqTransport::with_agent(trusted_agent(&cert_der));
+            let transport =
+                UreqTransport::with_agent_allowing_private_ips(trusted_agent(&cert_der), true);
             for _ in 0..2 {
                 let response = transport
                     .get(&RemoteRequest {
@@ -4226,13 +4541,13 @@ mod tests {
             let (port, accepted, _handle) = spawn_counting_tls_server(cert_der.clone(), key_der, 2);
             let url = Url::parse(&format!("https://127.0.0.1:{port}/mod.js")).expect("url");
             // Deliberately mutate the shared production builder to allow pooling.
-            let agent = UreqTransport::agent_builder()
+            let agent = UreqTransport::agent_builder_with_policy(true)
                 .timeout(Duration::from_millis(500))
                 .max_idle_connections(1)
                 .max_idle_connections_per_host(1)
                 .tls_config(trusted_tls_config(&cert_der))
                 .build();
-            let transport = UreqTransport::with_agent(agent);
+            let transport = UreqTransport::with_agent_allowing_private_ips(agent, true);
             let first = transport
                 .get(&RemoteRequest {
                     url: &url,
@@ -4280,7 +4595,7 @@ mod tests {
                 destination.to_string_lossy()
             ))
             .expect("url");
-            let transport = UreqTransport::new();
+            let transport = UreqTransport::new(true);
             let _ = transport.get(&RemoteRequest {
                 url: &url,
                 timeout: Duration::from_secs(2),
@@ -6114,5 +6429,96 @@ mod tests {
             );
         }
         assert_eq!(called.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn ssrf_ip_filter_rejects_private_loopback_link_local_metadata_and_mapped_ips() {
+        use std::net::{IpAddr, SocketAddr};
+
+        assert!(!RemoteOptions::new().allow_private_ips());
+        assert!(
+            RemoteOptions::new()
+                .with_allow_private_ips(true)
+                .allow_private_ips()
+        );
+
+        let disallowed = [
+            "127.0.0.1",
+            "127.255.255.254",
+            "10.0.0.1",
+            "10.255.255.254",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.0.1",
+            "192.168.255.254",
+            "169.254.169.254",
+            "0.0.0.0",
+            "0.1.2.3",
+            "100.64.0.1",
+            "::1",
+            "::",
+            "fc00::1",
+            "fd12:3456:789a::1",
+            "fe80::1",
+            "febf::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:172.16.0.1",
+            "::ffff:192.168.1.1",
+            "64:ff9b::169.254.169.254",
+        ];
+        for raw in disallowed {
+            let ip: IpAddr = raw.parse().expect("valid IP");
+            assert!(
+                super::is_disallowed_ip(ip),
+                "expected {raw} to be disallowed"
+            );
+        }
+
+        let allowed = [
+            "93.184.216.34",
+            "1.1.1.1",
+            "172.15.255.254",
+            "172.32.0.1",
+            "2606:4700:4700::1111",
+        ];
+        for raw in allowed {
+            let ip: IpAddr = raw.parse().expect("valid IP");
+            assert!(!super::is_disallowed_ip(ip), "expected {raw} to be allowed");
+        }
+
+        // Mixed DNS resolution containing both public and private IP must fail closed.
+        let mixed = vec![
+            "93.184.216.34:443".parse::<SocketAddr>().unwrap(),
+            "127.0.0.1:443".parse::<SocketAddr>().unwrap(),
+        ];
+        let err = super::filter_resolved_addrs(mixed.clone(), false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        // Opt-in allows private IPs when explicitly requested.
+        assert_eq!(super::filter_resolved_addrs(mixed, true).unwrap().len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_rejects_symlinks_with_nofollow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        let target = outside.path().join("secret");
+        std::fs::write(&target, b"secret-content").expect("write target");
+
+        let cache = super::Cache::new(dir.path().to_path_buf());
+        let url = Url::parse("https://example.test/mod.js").expect("url");
+        let entry_path = cache.path(&url);
+        std::os::unix::fs::symlink(&target, &entry_path).expect("symlink entry");
+
+        assert!(
+            cache.load_offline(&url).unwrap().is_none(),
+            "symlinked cache entry must be rejected"
+        );
+        assert!(
+            cache.load(&url, 1024).is_none(),
+            "symlinked cache entry must not load"
+        );
     }
 }

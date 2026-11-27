@@ -38,6 +38,9 @@ pub struct NpmOptions {
     cache_dir: Option<PathBuf>,
     registry_origin: String,
     registry_origin_overridden: bool,
+    discover_project_npmrc: bool,
+    allow_project_npmrc_auth: bool,
+    npmrc_home_dir: Option<PathBuf>,
 }
 
 impl Default for NpmOptions {
@@ -49,6 +52,9 @@ impl Default for NpmOptions {
             cache_dir: None,
             registry_origin: DEFAULT_REGISTRY_ORIGIN.to_owned(),
             registry_origin_overridden: false,
+            discover_project_npmrc: true,
+            allow_project_npmrc_auth: false,
+            npmrc_home_dir: None,
         }
     }
 }
@@ -117,6 +123,29 @@ impl NpmOptions {
     /// Returns the configured npm registry origin URL.
     pub fn registry_origin(&self) -> &str {
         &self.registry_origin
+    }
+
+    /// Controls whether project-level `.npmrc` discovery is enabled (defaults
+    /// to `true`; CLI `--no-config` sets this to `false`).
+    pub fn with_discover_project_npmrc(mut self, discover: bool) -> Self {
+        self.discover_project_npmrc = discover;
+        self
+    }
+
+    /// Explicitly opts in to reading auth directives and `${ENV_VAR}`
+    /// interpolation from project-level `.npmrc` files (defaults to `false`).
+    ///
+    /// Leave `false` for untrusted repositories so credentials and `${ENV_VAR}`
+    /// expansion are only read from user-level `~/.npmrc`.
+    pub fn with_allow_project_npmrc_auth(mut self, allow: bool) -> Self {
+        self.allow_project_npmrc_auth = allow;
+        self
+    }
+
+    /// Overrides the home directory used to locate `~/.npmrc`.
+    pub fn with_npmrc_home_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.npmrc_home_dir = Some(dir.into());
+        self
     }
 }
 
@@ -418,18 +447,25 @@ impl NpmLoader {
         referrer_dir.to_path_buf()
     }
 
-    fn load_npmrc_for_dir(&self, project_dir: &Path) -> Result<NpmrcConfig, String> {
-        let key = std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    fn load_npmrc_for_dir(&self, project_dir: Option<&Path>) -> Result<NpmrcConfig, String> {
+        let key = project_dir
+            .map(|dir| std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()))
+            .unwrap_or_default();
         if let Some(cached) = self.npmrcs.borrow().get(&key) {
             return Ok(cached.clone());
         }
-        let home_dir = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .filter(|val| !val.is_empty())
-            .map(PathBuf::from);
-        let config = NpmrcConfig::load_for_project(&key, home_dir.as_deref(), &|name| {
-            std::env::var(name).ok()
-        })
+        let home_dir = self.options.npmrc_home_dir.clone().or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .filter(|val| !val.is_empty())
+                .map(PathBuf::from)
+        });
+        let config = NpmrcConfig::load_for_project_with_options(
+            project_dir.map(|_| key.as_path()),
+            home_dir.as_deref(),
+            &|name| std::env::var(name).ok(),
+            self.options.allow_project_npmrc_auth,
+        )
         .map_err(|err| err.to_string())?;
         self.npmrcs.borrow_mut().insert(key, config.clone());
         Ok(config)
@@ -452,8 +488,12 @@ impl NpmLoader {
             return Ok(());
         }
 
-        let npmrc_dir = self.discover_npmrc_dir(referrer_dir, project.map(|p| p.root_dir()));
-        let npmrc = self.load_npmrc_for_dir(&npmrc_dir)?;
+        let npmrc_dir = if self.options.discover_project_npmrc {
+            Some(self.discover_npmrc_dir(referrer_dir, project.map(|p| p.root_dir())))
+        } else {
+            None
+        };
+        let npmrc = self.load_npmrc_for_dir(npmrc_dir.as_deref())?;
         let effective_origin =
             if !self.options.registry_origin_overridden && npmrc.has_explicit_default_registry() {
                 npmrc.default_registry_origin().to_owned()

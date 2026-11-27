@@ -199,7 +199,10 @@ impl PackageTree {
         let expected_sha512 = parse_sha512_sri(integrity)?;
         let sha512_hex = hex_lower(&expected_sha512);
         let path = tree_path(cache_root, registry_origin, &sha512_hex);
-        if !path.exists() {
+        if matches!(
+            std::fs::symlink_metadata(&path),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound
+        ) {
             return Ok(None);
         }
         let bytes = match expected_tree_sha256 {
@@ -418,10 +421,22 @@ pub fn parse_sha512_sri(integrity: &str) -> Result<[u8; 64], TarballError> {
 
 fn is_native_binary_path(rel_path: &str) -> bool {
     let lower = rel_path.to_ascii_lowercase();
-    lower.ends_with(".node")
-        || lower.ends_with(".dll")
-        || lower.ends_with(".so")
-        || lower.ends_with(".dylib")
+    let file_name = lower.rsplit('/').next().unwrap_or(&lower);
+    if file_name.ends_with(".node")
+        || file_name.ends_with(".dll")
+        || file_name.ends_with(".so")
+        || file_name.ends_with(".dylib")
+        || file_name.ends_with(".exe")
+        || file_name.ends_with(".wasm")
+    {
+        return true;
+    }
+    if let Some((_, suffix)) = file_name.split_once(".so.")
+        && !suffix.is_empty()
+    {
+        return true;
+    }
+    false
 }
 
 struct BoundedReader<R> {

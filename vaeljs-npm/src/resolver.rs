@@ -10,8 +10,8 @@ use serde::Deserialize;
 use url::Url;
 use vaeljs_module_policy::{ModuleFormat, PackageType, package_module_format};
 
-use crate::cas::{CasError, CasStore, sha256_hex};
-use crate::exports::{ExportsError, ExportsResolver};
+use crate::cas::{CasError, CasStore, read_bounded_regular_file, sha256_hex};
+use crate::exports::{ExportsError, ExportsResolver, nearest_project_package_type};
 use crate::lockfile::{LockedPackage, Lockfile, LockfileError};
 use crate::npmrc::{NpmrcConfig, NpmrcError};
 use crate::package_json::{
@@ -1680,9 +1680,9 @@ pub struct ProjectPackageResolver {
 impl ProjectPackageResolver {
     /// Discovers the nearest `package.json` walking upward from `start_dir`
     /// (bounded by [`MAX_DISCOVERY_DEPTH`] and canonical symlink-loop detection).
+    ///
+    /// Fails closed on symlinked or non-regular `package.json` files.
     pub fn discover(start_dir: &Path) -> Result<Option<Self>, ResolverError> {
-        use std::io::Read as _;
-
         let mut current =
             fs::canonicalize(start_dir).map_err(|err| ResolverError::ProjectManifest {
                 reason: err.to_string(),
@@ -1695,25 +1695,31 @@ impl ProjectPackageResolver {
                 break;
             }
             let candidate = current.join("package.json");
-            if candidate.is_file() {
-                let file =
-                    fs::File::open(&candidate).map_err(|err| ResolverError::ProjectManifest {
-                        reason: err.to_string(),
-                    })?;
-                let mut bytes = Vec::new();
-                file.take((MAX_PACKAGE_JSON_BYTES as u64) + 1)
-                    .read_to_end(&mut bytes)
-                    .map_err(|err| ResolverError::ProjectManifest {
-                        reason: err.to_string(),
-                    })?;
-                if bytes.len() > MAX_PACKAGE_JSON_BYTES {
-                    return Err(PackageJsonError::TooLarge { size: bytes.len() }.into());
+            match fs::symlink_metadata(&candidate) {
+                Ok(_) => {
+                    let bytes = read_bounded_regular_file(&candidate, None, MAX_PACKAGE_JSON_BYTES)
+                        .map_err(|err| match err {
+                            CasError::TooLarge { size, .. } => {
+                                ResolverError::PackageJson(PackageJsonError::TooLarge {
+                                    size: size as usize,
+                                })
+                            }
+                            other => ResolverError::ProjectManifest {
+                                reason: other.to_string(),
+                            },
+                        })?;
+                    let package_json = PackageJson::parse_bytes(&bytes)?;
+                    return Ok(Some(Self {
+                        root_dir: current,
+                        package_json,
+                    }));
                 }
-                let package_json = PackageJson::parse_bytes(&bytes)?;
-                return Ok(Some(Self {
-                    root_dir: current,
-                    package_json,
-                }));
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(ResolverError::ProjectManifest {
+                        reason: err.to_string(),
+                    });
+                }
             }
             if !current.pop() {
                 break;
@@ -1918,19 +1924,44 @@ impl ProjectPackageResolver {
             }
             .into());
         }
-        let full = self.root_dir.join(&clean);
-        let format = self.classify_local_file(&full).map_err(|reason| {
-            ExportsError::UnsupportedModuleFormat {
-                package: self
+        let canon_root =
+            fs::canonicalize(&self.root_dir).map_err(|err| ResolverError::ProjectManifest {
+                reason: err.to_string(),
+            })?;
+        let full = canon_root.join(&clean);
+        let canon_target =
+            fs::canonicalize(&full).map_err(|err| ResolverError::ProjectManifest {
+                reason: err.to_string(),
+            })?;
+        if !canon_target.starts_with(&canon_root) || canon_target == canon_root {
+            return Err(ResolverError::DisallowedImport {
+                referrer: self
                     .package_json
                     .name
                     .clone()
                     .unwrap_or_else(|| "<project>".to_owned()),
+                specifier: clean,
+                reason: "local project subpath escapes package root".to_owned(),
+            });
+        }
+        let pkg_name = self.package_json.name.as_deref().unwrap_or("<project>");
+        let nearest_type = nearest_project_package_type(
+            &canon_root,
+            &clean,
+            pkg_name,
+            self.package_json.package_type,
+        )?;
+        let format = package_module_format(&canon_target, nearest_type).map_err(|reason| {
+            ExportsError::UnsupportedModuleFormat {
+                package: pkg_name.to_owned(),
                 path: clean,
                 reason,
             }
         })?;
-        Ok(ProjectResolution::LocalFile { path: full, format })
+        Ok(ProjectResolution::LocalFile {
+            path: canon_target,
+            format,
+        })
     }
 
     fn resolve_declared_npm(
@@ -2027,7 +2058,7 @@ pub fn resolve_requests_with_lockfile_and_npmrc<R: NpmRegistry + ?Sized>(
     let registry_host = graph.registry_host.clone();
     let ingestor = TarballIngestor::new(cas.clone(), limits);
     let mut lockfile_modified = false;
-    let mut visited_keys: BTreeMap<String, String> = BTreeMap::new();
+    let mut visited_keys: BTreeMap<(PackageName, String), String> = BTreeMap::new();
 
     let mut locked_siblings: Vec<(PackageName, NpmVersion)> = Vec::new();
     let mut unlocked_reqs: Vec<NpmRootRequest> = Vec::new();
@@ -2060,7 +2091,6 @@ pub fn resolve_requests_with_lockfile_and_npmrc<R: NpmRegistry + ?Sized>(
                 registry_host: &registry_host,
                 npmrc,
                 registry_origin_overridden,
-                frozen_lockfile,
                 offline,
                 limits,
                 platform,
@@ -2165,11 +2195,10 @@ struct LockedContext<'a, R: NpmRegistry + ?Sized> {
     registry_host: &'a str,
     npmrc: Option<&'a NpmrcConfig>,
     registry_origin_overridden: bool,
-    frozen_lockfile: bool,
     offline: bool,
     limits: NpmLimits,
     platform: &'a TargetPlatform,
-    visited_keys: &'a mut BTreeMap<String, String>,
+    visited_keys: &'a mut BTreeMap<(PackageName, String), String>,
     graph: &'a mut ResolvedNpmGraph,
 }
 
@@ -2217,7 +2246,8 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
     optional: bool,
     ctx: &mut LockedContext<'_, R>,
 ) -> Result<Option<String>, ResolverError> {
-    if let Some(existing_id) = ctx.visited_keys.get(pkg_key) {
+    let visit_key = (expected_name.clone(), pkg_key.to_owned());
+    if let Some(existing_id) = ctx.visited_keys.get(&visit_key) {
         return Ok(Some(existing_id.clone()));
     }
     if ctx.graph.instances.len() >= ctx.limits.max_graph_packages {
@@ -2235,25 +2265,38 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
             })?;
     let _ = NpmVersion::parse(&locked.version)?;
 
-    let pkg_ctx = extract_lock_ctx(expected_name, &locked.version, pkg_key);
+    let pkg_ctx = extract_lock_ctx(expected_name, &locked.version, pkg_key)?;
     let instance_id = format!("{expected_name}@{}~{pkg_ctx}", locked.version);
 
     let (pkg_origin, pkg_host) = locked_package_origin_and_host(expected_name, ctx)?;
+    if ctx.graph.instances.contains_key(&instance_id)
+        || ctx.graph.by_url_identity.contains_key(&(
+            pkg_host.clone(),
+            expected_name.clone(),
+            locked.version.clone(),
+            pkg_ctx.clone(),
+        ))
+    {
+        return Err(LockfileError::InvalidJson {
+            reason: format!(
+                "duplicate virtual package identity `{instance_id}` for lockfile key `{pkg_key}`"
+            ),
+        }
+        .into());
+    }
 
     // Load and verify `.tree` from CAS (or fetch tarball when permitted).
     let _ = parse_sha512_sri(&locked.integrity)?;
-    if ctx.frozen_lockfile && locked.tree_sha256.is_none() {
+    let Some(expected_tree_sha256) = locked.tree_sha256.as_deref() else {
         return Err(ResolverError::FrozenLockfile {
-            reason: format!(
-                "locked package `{pkg_key}` is missing required `treeSha256` under --frozen-lockfile"
-            ),
+            reason: format!("locked package `{pkg_key}` is missing required `treeSha256`"),
         });
-    }
+    };
     let tree = match PackageTree::load_verified(
         ctx.cas.cache_root(),
         &pkg_origin,
         &locked.integrity,
-        locked.tree_sha256.as_deref(),
+        Some(expected_tree_sha256),
     )? {
         Some(cached) => cached,
         None => {
@@ -2288,11 +2331,9 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
             };
             let tgz = reg.fetch_tarball(&tarball_url, &locked.integrity)?;
             let tree = ctx.ingestor.ingest(&pkg_origin, &locked.integrity, &tgz)?;
-            if let Some(expected_tree_sha256) = &locked.tree_sha256
-                && expected_tree_sha256 != &tree.tree_sha256
-            {
+            if expected_tree_sha256 != tree.tree_sha256 {
                 return Err(CasError::IntegrityMismatch {
-                    expected: expected_tree_sha256.clone(),
+                    expected: expected_tree_sha256.to_owned(),
                     actual: tree.tree_sha256,
                 }
                 .into());
@@ -2313,13 +2354,14 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
             actual: package_json.name.clone(),
         });
     }
-    if let Some(pkg_ver) = &package_json.version
-        && pkg_ver != &locked.version
-    {
+    if package_json.version.as_deref() != Some(locked.version.as_str()) {
         return Err(ResolverError::PackageVersionMismatch {
             package: expected_name.to_string(),
             expected: locked.version.clone(),
-            actual: pkg_ver.clone(),
+            actual: package_json
+                .version
+                .clone()
+                .unwrap_or_else(|| "<missing>".to_owned()),
         });
     }
     if !ctx.platform.matches(
@@ -2338,34 +2380,31 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
         });
     }
 
-    if ctx.frozen_lockfile {
-        for dep_name in package_json.dependencies.keys() {
-            if !locked.dependencies.contains_key(dep_name) {
-                return Err(ResolverError::FrozenLockfile {
-                    reason: format!(
-                        "locked package `{pkg_key}` is missing required dependency `{dep_name}`"
-                    ),
-                });
-            }
+    for dep_name in package_json.dependencies.keys() {
+        if !locked.dependencies.contains_key(dep_name) {
+            return Err(ResolverError::FrozenLockfile {
+                reason: format!(
+                    "locked package `{pkg_key}` is missing required dependency `{dep_name}`"
+                ),
+            });
         }
-        for peer_name in package_json.peer_dependencies.keys() {
-            let is_optional_peer = package_json
-                .peer_dependencies_meta
-                .get(peer_name)
-                .is_some_and(|m| m.optional);
-            if !is_optional_peer && !locked.dependencies.contains_key(peer_name) {
-                return Err(ResolverError::FrozenLockfile {
-                    reason: format!(
-                        "locked package `{pkg_key}` is missing required peer dependency `{peer_name}`"
-                    ),
-                });
-            }
+    }
+    for peer_name in package_json.peer_dependencies.keys() {
+        let is_optional_peer = package_json
+            .peer_dependencies_meta
+            .get(peer_name)
+            .is_some_and(|m| m.optional);
+        if !is_optional_peer && !locked.dependencies.contains_key(peer_name) {
+            return Err(ResolverError::FrozenLockfile {
+                reason: format!(
+                    "locked package `{pkg_key}` is missing required peer dependency `{peer_name}`"
+                ),
+            });
         }
     }
 
     // Record visited before recursing so dependency cycles terminate cleanly.
-    ctx.visited_keys
-        .insert(pkg_key.to_owned(), instance_id.clone());
+    ctx.visited_keys.insert(visit_key, instance_id.clone());
 
     let mut deps = BTreeMap::new();
     let mut opt_deps = BTreeMap::new();
@@ -2463,15 +2502,29 @@ fn load_locked_package<R: NpmRegistry + ?Sized>(
     Ok(Some(instance_id))
 }
 
-fn extract_lock_ctx(name: &PackageName, version: &str, pkg_key: &str) -> String {
+fn extract_lock_ctx(
+    name: &PackageName,
+    version: &str,
+    pkg_key: &str,
+) -> Result<String, ResolverError> {
     let base = format!("{name}@{version}");
+    if pkg_key == base {
+        return Ok("0".to_owned());
+    }
     if let Some(rest) = pkg_key.strip_prefix(&base)
         && let Some(ctx) = rest.strip_prefix('~')
-        && !ctx.is_empty()
+        && let Some(hex) = ctx.strip_prefix('p')
+        && hex.len() == 32
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
     {
-        return ctx.to_owned();
+        return Ok(ctx.to_owned());
     }
-    "0".to_owned()
+    Err(LockfileError::InvalidJson {
+        reason: format!("invalid lockfile package key `{pkg_key}` for `{base}`"),
+    }
+    .into())
 }
 
 fn has_scheme_prefix_ci(specifier: &str, prefix_lower: &str) -> bool {

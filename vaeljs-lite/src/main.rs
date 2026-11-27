@@ -776,6 +776,7 @@ fn create_runtime(
     resolver: Option<ImportResolver>,
     npm: NpmFlags,
     node_compat: bool,
+    discover_project_npmrc: bool,
 ) -> Result<Runtime, Error> {
     let mut options = RuntimeOptions::new().with_node_compat(node_compat);
     #[cfg(feature = "remote")]
@@ -792,11 +793,12 @@ fn create_runtime(
         let npm_options = NpmOptions::new()
             .with_enabled(npm.enabled)
             .with_frozen_lockfile(npm.frozen_lockfile)
-            .with_offline(npm.offline);
+            .with_offline(npm.offline)
+            .with_discover_project_npmrc(discover_project_npmrc);
         options = options.with_npm(npm_options);
     }
     #[cfg(not(feature = "npm"))]
-    let _ = npm;
+    let _ = (npm, discover_project_npmrc);
     Runtime::with_options(options)
 }
 
@@ -829,7 +831,13 @@ fn run(
         }
     };
 
-    let mut runtime = match create_runtime(allow_remote, resolver, npm, node_compat) {
+    let mut runtime = match create_runtime(
+        allow_remote,
+        resolver,
+        npm,
+        node_compat,
+        !matches!(config, ConfigChoice::Disabled),
+    ) {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("{prog_name}: {error}");
@@ -938,7 +946,13 @@ fn run_tests(
     let mut failed_files = 0usize;
     for (file, resolver) in files.iter().zip(resolvers) {
         println!("test {}:", file.display());
-        let mut runtime = match create_runtime(allow_remote, resolver, npm, node_compat) {
+        let mut runtime = match create_runtime(
+            allow_remote,
+            resolver,
+            npm,
+            node_compat,
+            !matches!(config, ConfigChoice::Disabled),
+        ) {
             Ok(runtime) => runtime,
             Err(error) => {
                 eprintln!("{prog_name}: {error}");

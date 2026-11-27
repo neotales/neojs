@@ -1483,6 +1483,133 @@ test("ancestor vael.jsonc all four external schemes on lite", () => {
     );
 }
 
+#[cfg(feature = "npm")]
+#[test]
+fn no_config_skips_project_npmrc_and_default_rejects_project_npmrc_auth() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use sha2::{Digest, Sha512};
+    use std::collections::BTreeMap;
+    use std::io::Write as _;
+    use vaeljs_npm::{
+        CasStore, DEFAULT_REGISTRY_ORIGIN, LockedPackage, Lockfile, NpmLimits, TarballIngestor,
+    };
+
+    fn tar_header(name: &str, size: usize) -> [u8; 512] {
+        let mut h = [0u8; 512];
+        let nb = name.as_bytes();
+        h[..nb.len()].copy_from_slice(nb);
+        h[100..108].copy_from_slice(b"0000644\0");
+        h[108..116].copy_from_slice(b"0000000\0");
+        h[116..124].copy_from_slice(b"0000000\0");
+        h[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+        h[136..148].copy_from_slice(b"00000000000\0");
+        h[148..156].fill(b' ');
+        h[156] = b'0';
+        h[257..263].copy_from_slice(b"ustar\0");
+        h[263..265].copy_from_slice(b"00");
+        let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        h
+    }
+
+    let mut tar_buf = Vec::new();
+    for (name, body) in [
+        (
+            "package/package.json",
+            r#"{"name":"cached-pkg","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+        ),
+        ("package/index.mjs", "export const ok = 'from-cas';\n"),
+    ] {
+        let bytes = body.as_bytes();
+        tar_buf.extend_from_slice(&tar_header(name, bytes.len()));
+        tar_buf.extend_from_slice(bytes);
+        let pad = (512 - (bytes.len() % 512)) % 512;
+        tar_buf.resize(tar_buf.len() + pad, 0);
+    }
+    tar_buf.resize(tar_buf.len() + 1024, 0);
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(&tar_buf).expect("write tar");
+    let tgz = gz.finish().expect("finish gzip");
+    let sri = format!("sha512-{}", BASE64_STANDARD.encode(Sha512::digest(&tgz)));
+
+    let xdg_cache = tempfile::tempdir().expect("xdg cache");
+    let home = tempfile::tempdir().expect("home");
+    let cas = CasStore::new(xdg_cache.path().join("vaeljs").join("packages"));
+    let tree = TarballIngestor::new(cas, NpmLimits::default())
+        .ingest(DEFAULT_REGISTRY_ORIGIN, &sri, &tgz)
+        .expect("ingest")
+        .tree_sha256;
+
+    let project = tempfile::tempdir().expect("project");
+    let mut lock = Lockfile::new();
+    lock.specifiers.insert(
+        "cached-pkg@^1.0.0".to_owned(),
+        "cached-pkg@1.0.0".to_owned(),
+    );
+    lock.packages.insert(
+        "cached-pkg@1.0.0".to_owned(),
+        LockedPackage {
+            version: "1.0.0".to_owned(),
+            integrity: sri,
+            tree_sha256: Some(tree),
+            tarball_url: "https://registry.npmjs.org/cached-pkg/-/1.0.0.tgz".to_owned(),
+            dependencies: BTreeMap::new(),
+        },
+    );
+    lock.write_atomic(&project.path().join("vael.lock"))
+        .expect("write lock");
+    write(
+        &project,
+        ".npmrc",
+        "registry=https://evil.test/\n//evil.test/:_authToken=${VAEL_SECRET_SENTINEL}\n",
+    );
+    write(
+        &project,
+        "main.mjs",
+        "import { ok } from 'npm:cached-pkg@^1.0.0'; console.log(ok);\n",
+    );
+
+    let blocked = Command::new(env!("CARGO_BIN_EXE_vjs-lite"))
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("XDG_CACHE_HOME", xdg_cache.path())
+        .env("VAEL_SECRET_SENTINEL", "top_secret_token")
+        .args(["--offline", "--frozen-lockfile", "main.mjs"])
+        .output()
+        .expect("spawn vjs-lite");
+    assert_eq!(
+        blocked.status.code(),
+        Some(1),
+        "stderr: {}",
+        stderr(&blocked)
+    );
+    assert!(
+        stderr(&blocked).contains("project .npmrc"),
+        "stderr: {}",
+        stderr(&blocked)
+    );
+    assert!(!stderr(&blocked).contains("top_secret_token"));
+
+    let skipped = Command::new(env!("CARGO_BIN_EXE_vjs-lite"))
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("XDG_CACHE_HOME", xdg_cache.path())
+        .env("VAEL_SECRET_SENTINEL", "top_secret_token")
+        .args(["--no-config", "--offline", "--frozen-lockfile", "main.mjs"])
+        .output()
+        .expect("spawn vjs-lite --no-config");
+    assert_eq!(
+        skipped.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&skipped)
+    );
+    assert_eq!(stdout(&skipped), "from-cas\n");
+}
+
 #[cfg(not(feature = "remote"))]
 #[test]
 fn no_default_features_cli_rejects_remote_and_npm_flags() {
