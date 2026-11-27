@@ -18,6 +18,8 @@
 //! ECMAScript and erasable TypeScript modules without host asynchrony or remote
 //! loading.
 
+#![forbid(unsafe_code)]
+
 use std::path::Path;
 
 #[cfg(feature = "test-glob")]
