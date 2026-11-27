@@ -1,0 +1,160 @@
+# Supply-chain and static security scanning for vaeljs.
+#
+# All GitHub Actions are pinned to immutable 40-char commit SHAs (Node 24 / composite).
+# Workflow-level permissions default to `contents: read`; only the CodeQL job
+# grants `security-events: write` to upload SARIF results.
+
+name: Security
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+    branches:
+      - dev
+      - main
+  schedule:
+    # Daily RustSec + full-history secret + SAST scan at 06:00 UTC.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must stay aligned with `workspace.package.rust-version` in Cargo.toml and
+  # `eng/size/toolchain`.
+  RUST_TOOLCHAIN: "1.100.0"
+
+jobs:
+  cargo-audit:
+    name: RustSec Advisory Audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned cargo-audit
+        uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
+        with:
+          tool: cargo-audit@0.23.0
+
+      - name: Run RustSec advisory audit against Cargo.lock
+        run: cargo audit --deny warnings --deny yanked
+
+  cargo-deny:
+    name: Cargo Deny (Advisories, Bans, Licenses, Sources)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Install pinned cargo-deny
+        uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
+        with:
+          tool: cargo-deny@0.22.1
+
+      - name: Check full workspace (V8 + QuickJS + shared crates)
+        run: cargo deny --locked --workspace --all-features check advisories bans licenses sources
+
+      - name: Check vaeljs-lite standalone graph
+        run: cargo deny --locked --all-features --manifest-path vaeljs-lite/Cargo.toml check advisories bans licenses sources
+
+  gitleaks:
+    name: Secret Scan (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+    steps:
+      - name: Checkout full git history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Download and verify pinned gitleaks binary
+        run: |
+          set -euo pipefail
+          tmp_dir=$(mktemp -d)
+          trap 'rm -rf "${tmp_dir}"' EXIT
+          archive="${tmp_dir}/gitleaks.tar.gz"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 "${url}" -o "${archive}"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "${archive}" -C "${tmp_dir}" gitleaks
+          install -m 0755 "${tmp_dir}/gitleaks" /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Scan pull request diff or full repository history
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" = "pull_request" ] && [ -n "${PR_BASE_SHA}" ] && [ -n "${PR_HEAD_SHA}" ]; then
+            gitleaks git --no-banner --redact --log-opts="${PR_BASE_SHA}..${PR_HEAD_SHA}" .
+          else
+            gitleaks git --no-banner --redact .
+          fi
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - rust
+          - javascript-typescript
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned Rust toolchain
+        if: matrix.language == 'rust'
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+          cargo fetch --locked
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended,security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        with:
+          category: "/language:${{ matrix.language }}"

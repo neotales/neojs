@@ -49,6 +49,8 @@
 //!   JavaScript module behavior; this crate's exact Rust signatures are
 //!   internal to the two engines.
 
+#![forbid(unsafe_code)]
+
 /// The backend that implements a shared module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
