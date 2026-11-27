@@ -809,6 +809,7 @@ import {
     httpError,
     HttpError,
     cors,
+    logger,
     serve,
     parseCookies,
 } from "vael:http";
@@ -926,6 +927,25 @@ try {
     // Empty cors({}) must not pick up Object.prototype.credentials = true.
     const cleanCors = cors({});
     assert.strictEquals(typeof cleanCors, "function");
+
+    // logger() must sanitize control characters and ANSI escapes before emitting log lines.
+    const emitted = [];
+    const origInfo = console.info;
+    console.info = (msg) => {
+        emitted.push(String(msg));
+    };
+    try {
+        const logMux = createRouter().use(logger()).get("/hello", () => text("ok"));
+        await logMux.fetch("/hello\r\nFAKE 200\x1b[31m\x7f");
+        assert.strictEquals(emitted.length, 1);
+        const line = emitted[0];
+        assert.ok(!/[\x00-\x1f\x7f-\x9f]/.test(line), `control chars leaked: ${JSON.stringify(line)}`);
+        assert.ok(line.includes("\\x0d\\x0a"), line);
+        assert.ok(line.includes("\\x1b"), line);
+        assert.ok(line.includes("\\x7f"), line);
+    } finally {
+        console.info = origInfo;
+    }
 } finally {
     delete Object.prototype.code;
     delete Object.prototype.host;

@@ -543,3 +543,58 @@ test("node:child_process rejects truthy shell options and bounds arg/env tamperi
         rmSync(dir, { recursive: true, force: true });
     }
 });
+
+test("node:child_process and node:fs ignore Object.prototype option pollution and enforce maxBuffer cap", () => {
+    const MAX_BUFFER_CAP = 64 * 1024 * 1024;
+    assert.throws(() => spawnSync(argv[0], ["--version"], { maxBuffer: MAX_BUFFER_CAP + 1 }), RangeError);
+    assert.throws(() => spawnSync(argv[0], ["--version"], { maxBuffer: Infinity }), RangeError);
+
+    const pollutedKeys = ["shell", "cwd", "env", "encoding", "maxBuffer", "timeout", "flag", "recursive", "force", "withFileTypes"];
+    const saved = new Map();
+    for (const k of pollutedKeys) {
+        saved.set(k, Object.getOwnPropertyDescriptor(Object.prototype, k));
+    }
+
+    const dir = mkdtempSync(join(tmpdir(), "vaeljs-proto-opts-"));
+    try {
+        const probeFile = join(dir, "sample.txt");
+        writeFileSync(probeFile, "alpha", "utf8");
+        const okScript = join(dir, "ok.js");
+        writeFileSync(okScript, 'console.log("proto-safe");\n', "utf8");
+
+        Object.defineProperty(Object.prototype, "shell", { configurable: true, value: true });
+        Object.defineProperty(Object.prototype, "cwd", { configurable: true, value: "/nonexistent-proto-cwd" });
+        Object.defineProperty(Object.prototype, "env", { configurable: true, value: { POLLUTED: "1" } });
+        Object.defineProperty(Object.prototype, "encoding", { configurable: true, value: "hex" });
+        Object.defineProperty(Object.prototype, "maxBuffer", { configurable: true, value: 1 });
+        Object.defineProperty(Object.prototype, "timeout", { configurable: true, value: 1 });
+        Object.defineProperty(Object.prototype, "flag", { configurable: true, value: "a" });
+        Object.defineProperty(Object.prototype, "recursive", { configurable: true, value: true });
+        Object.defineProperty(Object.prototype, "force", { configurable: true, value: true });
+        Object.defineProperty(Object.prototype, "withFileTypes", { configurable: true, value: true });
+
+        // node:fs ignores Object.prototype.encoding / flag / withFileTypes / recursive / force
+        assert.strictEquals(Buffer.isBuffer(readFileSync(probeFile, {})), true);
+        writeFileSync(probeFile, "beta", {});
+        assert.strictEquals(readFileSync(probeFile, { encoding: "utf8" }), "beta");
+        const names = readdirSync(dir, {});
+        assert.strictEquals(typeof names[0], "string");
+        assert.throws(() => rmSync(join(dir, "missing-file"), {}));
+
+        // node:child_process ignores Object.prototype.shell / cwd / env / encoding / maxBuffer / timeout
+        const res = spawnSync(argv[0], [okScript], {});
+        assert.strictEquals(res.status, 0);
+        assert.strictEquals(Buffer.isBuffer(res.stdout), true);
+        assert.strictEquals(res.stdout.toString("utf8").trim(), "proto-safe");
+    } finally {
+        for (const k of pollutedKeys) {
+            const desc = saved.get(k);
+            if (desc) {
+                Object.defineProperty(Object.prototype, k, desc);
+            } else {
+                delete Object.prototype[k];
+            }
+        }
+        rmSync(dir, { recursive: true, force: true });
+    }
+});

@@ -318,12 +318,12 @@ fn validate_options(options: ConnectOptions) -> Result<ValidatedConnect, SshErro
 }
 
 fn connect_validated(options: ValidatedConnect) -> Result<Connection, SshError> {
-    let stream = dial(&options.host, options.port, options.connect_timeout)?;
+    // DNS resolution, TCP connect, handshake, agent I/O, and authentication
+    // all share one connect deadline.
+    let deadline = Instant::now() + options.connect_timeout;
+    let stream = dial(&options.host, options.port, deadline)?;
     let io = stream.try_clone().map_err(SshError::connect)?;
 
-    // The handshake and authentication share one deadline. DNS resolution was
-    // part of `dial` and is documented as outside this budget.
-    let deadline = Instant::now() + options.connect_timeout;
     set_socket_deadline(&io, deadline)?;
 
     let config = ClientConfig::new();
@@ -351,12 +351,8 @@ fn connect_validated(options: ValidatedConnect) -> Result<Connection, SshError> 
 
     let methods = match options.method {
         Some(method) => vec![method],
-        None => agent_methods()?,
+        None => agent_methods(deadline)?,
     };
-    // Agent connect, enumeration, and signing are outside the connect budget:
-    // UnixStream::connect may block, and the backend's 30-second socket
-    // timeout is inactivity-based. Re-check and refresh the SSH socket
-    // deadline before user authentication.
     if Instant::now() >= deadline {
         return Err(SshError::Timeout);
     }
@@ -627,9 +623,61 @@ fn map_auth_error(error: AuthError, deadline: Instant, agent_auth: bool) -> SshE
             }
         }
         AuthError::AgentUnavailable | AuthError::InvalidProof if agent_auth => {
-            SshError::agent("the SSH agent did not produce a usable signature")
+            if Instant::now() >= deadline {
+                SshError::Timeout
+            } else {
+                SshError::agent("the SSH agent did not produce a usable signature")
+            }
         }
         _ => SshError::Auth,
+    }
+}
+
+#[cfg(unix)]
+fn set_unix_socket_deadline(
+    stream: &std::os::unix::net::UnixStream,
+    deadline: Instant,
+) -> io::Result<()> {
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "SSH connect timeout expired",
+        ));
+    }
+    let remaining = (deadline - now).max(Duration::from_millis(1));
+    stream.set_read_timeout(Some(remaining))?;
+    stream.set_write_timeout(Some(remaining))?;
+    Ok(())
+}
+
+/// Wraps a Unix agent socket and refreshes its `SO_RCVTIMEO` / `SO_SNDTIMEO`
+/// from `deadline` before every read and write so a stalled agent never hangs
+/// past `connect_timeout`.
+#[cfg(unix)]
+struct DeadlineUnixStream {
+    stream: std::os::unix::net::UnixStream,
+    deadline: Instant,
+}
+
+#[cfg(unix)]
+impl io::Read for DeadlineUnixStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        set_unix_socket_deadline(&self.stream, self.deadline)?;
+        self.stream.read(buf)
+    }
+}
+
+#[cfg(unix)]
+impl io::Write for DeadlineUnixStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        set_unix_socket_deadline(&self.stream, self.deadline)?;
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        set_unix_socket_deadline(&self.stream, self.deadline)?;
+        self.stream.flush()
     }
 }
 
@@ -638,20 +686,49 @@ fn map_auth_error(error: AuthError, deadline: Instant, agent_auth: bool) -> SshE
 /// Called only after server host-key verification succeeds. Reads
 /// `SSH_AUTH_SOCK` only here, never in password or private-key mode.
 #[cfg(unix)]
-fn agent_methods() -> Result<Vec<ClientAuthMethod>, SshError> {
-    use neotales_ssh::AgentKeySigner;
-    use neotales_ssh::agent::AgentClient;
-
-    use crate::types::MAX_AGENT_IDENTITIES;
-
+fn agent_methods(deadline: Instant) -> Result<Vec<ClientAuthMethod>, SshError> {
     let path = std::env::var_os("SSH_AUTH_SOCK")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| SshError::agent("SSH_AUTH_SOCK is not set"))?;
-    let mut client = neotales_ssh::agent::connect_unix(path)
+    agent_methods_from_path(std::path::Path::new(&path), deadline)
+}
+
+#[cfg(unix)]
+fn agent_methods_from_path(
+    path: &std::path::Path,
+    deadline: Instant,
+) -> Result<Vec<ClientAuthMethod>, SshError> {
+    use std::os::unix::net::UnixStream;
+
+    use neotales_ssh::AgentKeySigner;
+    use neotales_ssh::agent::{AgentClient, AgentError};
+
+    use crate::types::MAX_AGENT_IDENTITIES;
+
+    if Instant::now() >= deadline {
+        return Err(SshError::Timeout);
+    }
+    let stream = UnixStream::connect(path)
         .map_err(|_| SshError::agent("the SSH agent socket is unavailable"))?;
-    let identities = client
-        .identities()
-        .map_err(|_| SshError::agent("the SSH agent did not list identities"))?;
+    set_unix_socket_deadline(&stream, deadline).map_err(|err| {
+        if is_timeout(&err) {
+            SshError::Timeout
+        } else {
+            SshError::agent("the SSH agent socket is unavailable")
+        }
+    })?;
+    let enum_stream = stream
+        .try_clone()
+        .map_err(|_| SshError::agent("the SSH agent socket could not be duplicated"))?;
+    let mut client = AgentClient::new(DeadlineUnixStream {
+        stream: enum_stream,
+        deadline,
+    });
+    let identities = client.identities().map_err(|err| match err {
+        AgentError::Io(ref io_err) if is_timeout(io_err) => SshError::Timeout,
+        _ if Instant::now() >= deadline => SshError::Timeout,
+        _ => SshError::agent("the SSH agent did not list identities"),
+    })?;
     if identities.is_empty() {
         return Err(SshError::agent("the SSH agent has no identities"));
     }
@@ -660,13 +737,15 @@ fn agent_methods() -> Result<Vec<ClientAuthMethod>, SshError> {
             "the SSH agent has more identities than this slice tries",
         ));
     }
-    let stream = client.into_inner();
     let mut methods = Vec::new();
     for identity in identities {
         let clone = stream
             .try_clone()
             .map_err(|_| SshError::agent("the SSH agent socket could not be duplicated"))?;
-        let client = AgentClient::new(clone);
+        let client = AgentClient::new(DeadlineUnixStream {
+            stream: clone,
+            deadline,
+        });
         if let Ok(signer) = AgentKeySigner::new(client, identity.key_blob()) {
             methods.push(ClientAuthMethod::agent(signer));
         }
@@ -678,22 +757,50 @@ fn agent_methods() -> Result<Vec<ClientAuthMethod>, SshError> {
 }
 
 #[cfg(not(unix))]
-fn agent_methods() -> Result<Vec<ClientAuthMethod>, SshError> {
+fn agent_methods(_deadline: Instant) -> Result<Vec<ClientAuthMethod>, SshError> {
     Err(SshError::agent(
         "the SSH agent is unsupported on this platform",
     ))
 }
 
-/// Resolves and dials the host, applying the connect deadline to each address.
-///
-/// `ToSocketAddrs` performs the platform's name resolution and has no portable
-/// timeout; DNS resolution is outside the connect timeout budget.
-fn dial(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, SshError> {
-    let addresses = (host, port)
-        .to_socket_addrs()
-        .map_err(SshError::connect)?
-        .collect::<Vec<_>>();
-    let deadline = Instant::now() + timeout;
+fn resolve_with_timeout<F>(
+    deadline: Instant,
+    resolver: F,
+) -> Result<Vec<std::net::SocketAddr>, SshError>
+where
+    F: FnOnce() -> io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
+{
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(SshError::Timeout);
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(resolver());
+    });
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match rx.recv_timeout(remaining) {
+        Ok(result) => result.map_err(SshError::connect),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(SshError::Timeout),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(SshError::Connect { source: None })
+        }
+    }
+}
+
+/// Resolves and dials the host, enforcing `deadline` across both name
+/// resolution and TCP connect attempts.
+fn dial(host: &str, port: u16, deadline: Instant) -> Result<TcpStream, SshError> {
+    let addresses = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        vec![std::net::SocketAddr::new(ip, port)]
+    } else {
+        let host_owned = host.to_owned();
+        resolve_with_timeout(deadline, move || {
+            (host_owned.as_str(), port)
+                .to_socket_addrs()
+                .map(|iter| iter.collect())
+        })?
+    };
     let mut last_error = None;
     for address in addresses {
         let now = Instant::now();
@@ -910,5 +1017,51 @@ mod tests {
         assert_eq!(next, 0);
         next = next.wrapping_add(1);
         assert_eq!(next, 1);
+    }
+
+    #[test]
+    fn resolve_with_timeout_bounds_stalled_dns_resolver() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(80);
+        let err = resolve_with_timeout(deadline, || {
+            std::thread::sleep(Duration::from_secs(3));
+            Ok(Vec::new())
+        })
+        .expect_err("stalled DNS resolver must time out");
+        assert_eq!(err.code(), SshErrorCode::Timeout);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_methods_bounds_stalled_agent_socket() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!(
+            "vaeljs-ssh-agent-timeout-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let sock_path = dir.join("agent.sock");
+        let listener = UnixListener::bind(&sock_path).expect("bind unix sock");
+        let server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                std::thread::sleep(Duration::from_secs(3));
+                drop(stream);
+            }
+        });
+
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(100);
+        let err = match agent_methods_from_path(&sock_path, deadline) {
+            Ok(_) => panic!("stalled agent socket must time out"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code(), SshErrorCode::Timeout);
+        assert!(start.elapsed() < Duration::from_secs(1));
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -110,6 +110,70 @@ fn map_open_file_error(path: &Path, err: io::Error) -> FsError {
     map_io_error(err)
 }
 
+#[cfg(unix)]
+const fn unix_o_nofollow() -> i32 {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        0x0100
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "m68k"
+        )
+    ))]
+    {
+        0x8000
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        not(any(
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "m68k"
+        ))
+    ))]
+    {
+        0x20000
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "linux",
+        target_os = "android"
+    )))]
+    {
+        0x20000
+    }
+}
+
+fn map_copy_dest_open_error(to: &Path, err: io::Error) -> FsError {
+    if fs::symlink_metadata(to).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return FsError::InvalidPath {
+            reason: "copy_file destination must not be a symbolic link",
+            source: Some(err),
+        };
+    }
+    map_open_file_error(to, err)
+}
+
 fn is_same_file(from: &Path, src_meta: &Metadata, to: &Path) -> Result<bool, FsError> {
     #[cfg(unix)]
     {
@@ -843,10 +907,78 @@ pub fn copy_file(
         if is_same_file(from, &src_meta, to)? {
             return Ok(());
         }
-        drop(src);
-        fs::copy(from, to)
-            .map(|_| ())
-            .map_err(|err| map_open_file_error(to, err))?;
+        let existed = match fs::symlink_metadata(to) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(FsError::InvalidPath {
+                        reason: "copy_file destination must not be a symbolic link",
+                        source: None,
+                    });
+                }
+                if meta.is_dir() {
+                    return Err(FsError::IsADirectory {
+                        source: io::Error::from(io::ErrorKind::IsADirectory),
+                    });
+                }
+                true
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => false,
+            Err(err) => return Err(map_io_error(err)),
+        };
+
+        let mut dst_opts = OpenOptions::new();
+        dst_opts.write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            dst_opts.mode((src_meta.mode() & 0o777) | 0o200);
+            dst_opts.custom_flags(unix_o_nofollow());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            dst_opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+
+        let mut dst = dst_opts
+            .open(to)
+            .map_err(|err| map_copy_dest_open_error(to, err))?;
+        let dst_meta = dst.metadata().map_err(map_io_error)?;
+        if dst_meta.file_type().is_symlink() {
+            return Err(FsError::InvalidPath {
+                reason: "copy_file destination must not be a symbolic link",
+                source: None,
+            });
+        }
+        if dst_meta.is_dir() {
+            return Err(FsError::IsADirectory {
+                source: io::Error::from(io::ErrorKind::IsADirectory),
+            });
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if src_meta.dev() == dst_meta.dev() && src_meta.ino() == dst_meta.ino() {
+                return Ok(());
+            }
+        }
+
+        let mut guard = if existed {
+            None
+        } else {
+            Some(FileCleanupGuard::new(to.to_path_buf()))
+        };
+        dst.set_len(0).map_err(map_io_error)?;
+        io::copy(&mut src, &mut dst).map_err(map_io_error)?;
+        if let Err(err) = dst.set_permissions(src_meta.permissions())
+            && err.kind() != io::ErrorKind::Unsupported
+        {
+            return Err(map_io_error(err));
+        }
+        if let Some(ref mut g) = guard {
+            g.disarm();
+        }
         return Ok(());
     }
 

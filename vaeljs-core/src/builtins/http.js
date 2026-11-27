@@ -916,6 +916,30 @@
         };
     }
 
+    function sanitizeLogText(value) {
+        const text = String(value);
+        let out = "";
+        let lastClean = 0;
+        for (let i = 0; i < text.length; i++) {
+            const code = text.charCodeAt(i);
+            if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
+                if (i > lastClean) {
+                    out += stringSlice(text, lastClean, i);
+                }
+                const hex = code.toString(16);
+                out += code < 0x10 ? `\\x0${hex}` : `\\x${hex}`;
+                lastClean = i + 1;
+            }
+        }
+        if (lastClean === 0) {
+            return text;
+        }
+        if (lastClean < text.length) {
+            out += stringSlice(text, lastClean);
+        }
+        return out;
+    }
+
     function logger(options) {
         if (options !== undefined && (options === null || typeof options !== "object" || arrayIsArray(options))) {
             throw new makeTypeError("logger options must be an object");
@@ -954,8 +978,10 @@
                     if (sink) {
                         sink(entry);
                     } else {
-                        const ridPart = entry.requestId ? ` requestId=${entry.requestId}` : "";
-                        console.info(`${entry.method} ${entry.path} ${entry.status} ${entry.durationMs}ms${ridPart}`);
+                        const ridPart = entry.requestId ? ` requestId=${sanitizeLogText(entry.requestId)}` : "";
+                        console.info(
+                            `${sanitizeLogText(entry.method)} ${sanitizeLogText(entry.path)} ${entry.status} ${entry.durationMs}ms${ridPart}`,
+                        );
                     }
                 }
             };

@@ -7,11 +7,16 @@
 //! * Enforces [`SpawnOptions::timeout_ms`] via `try_wait` polling, terminating and
 //!   reaping timed-out children so no zombie processes are left behind.
 
-use std::io::{self, Write as _};
+#[cfg(any(windows, test))]
+use std::ffi::OsStr;
+use std::io::{self, Read as _, Write as _};
+#[cfg(any(windows, test))]
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::error::{NodeCoreError, map_io_error};
@@ -19,7 +24,12 @@ use crate::error::{NodeCoreError, map_io_error};
 /// Default capture cap per output stream (`10 MiB`).
 pub const DEFAULT_MAX_BUFFER: usize = 10 * 1024 * 1024;
 
+/// Hard upper bound accepted for [`SpawnOptions::max_buffer`] (`64 MiB`).
+pub const MAX_MAX_BUFFER: usize = 64 * 1024 * 1024;
+
 const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(75);
+#[cfg(unix)]
+const STREAM_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Configuration for [`spawn_sync`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,7 +100,8 @@ pub fn spawn_sync(
 ) -> Result<SpawnOutput, NodeCoreError> {
     validate_spawn_inputs(program, args, opts)?;
 
-    let mut cmd = Command::new(program);
+    let resolved_program = resolve_program_for_spawn(program, opts)?;
+    let mut cmd = Command::new(&resolved_program);
     cmd.args(args);
 
     if let Some(cwd) = &opts.cwd {
@@ -105,44 +116,93 @@ pub fn spawn_sync(
         }
     }
 
-    if opts.stdin.is_some() {
-        cmd.stdin(Stdio::piped());
-    } else {
-        cmd.stdin(Stdio::null());
-    }
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|err| map_io_error("spawn child process", err))?;
-
-    let stdin_pipe = child.stdin.take();
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-
     let max_buf = opts.max_buffer;
     let truncated = Arc::new(AtomicBool::new(false));
+    let cancel = Arc::new(AtomicBool::new(false));
 
-    let stdin_signal = stdin_pipe
-        .zip(opts.stdin.as_deref())
-        .map(|(mut pipe, data)| {
-            let payload = data.to_vec();
-            let signal = Arc::new((Mutex::new(false), Condvar::new()));
-            let worker_signal = Arc::clone(&signal);
-            std::thread::spawn(move || {
-                let _ = pipe.write_all(&payload);
-                drop(pipe);
-                let (lock, cvar) = &*worker_signal;
-                let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
-                *done = true;
-                cvar.notify_all();
-            });
-            signal
-        });
+    #[cfg(unix)]
+    let (mut child, stdin_handle, stdout_handle, stderr_handle) = {
+        use std::net::Shutdown;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
 
-    let stdout_state = stdout_pipe.map(|pipe| spawn_reader(pipe, max_buf, Arc::clone(&truncated)));
-    let stderr_state = stderr_pipe.map(|pipe| spawn_reader(pipe, max_buf, Arc::clone(&truncated)));
+        let stdin_pair = if opts.stdin.is_some() {
+            let (parent_in, child_in) =
+                UnixStream::pair().map_err(|err| map_io_error("create stdin pipe", err))?;
+            cmd.stdin(Stdio::from(OwnedFd::from(child_in)));
+            Some(parent_in)
+        } else {
+            cmd.stdin(Stdio::null());
+            None
+        };
+
+        let (parent_out, child_out) =
+            UnixStream::pair().map_err(|err| map_io_error("create stdout pipe", err))?;
+        cmd.stdout(Stdio::from(OwnedFd::from(child_out)));
+
+        let (parent_err, child_err) =
+            UnixStream::pair().map_err(|err| map_io_error("create stderr pipe", err))?;
+        cmd.stderr(Stdio::from(OwnedFd::from(child_err)));
+
+        let child = cmd
+            .spawn()
+            .map_err(|err| map_io_error("spawn child process", err))?;
+        // Drop `cmd` immediately so parent never retains child-side FDs.
+        drop(cmd);
+
+        let stdin_handle = stdin_pair
+            .zip(opts.stdin.as_deref())
+            .map(|(pipe, data)| spawn_unix_writer(pipe, data.to_vec(), Arc::clone(&cancel)));
+        let stdout_handle = spawn_unix_reader(
+            parent_out,
+            max_buf,
+            Arc::clone(&truncated),
+            Arc::clone(&cancel),
+        );
+        let stderr_handle = spawn_unix_reader(
+            parent_err,
+            max_buf,
+            Arc::clone(&truncated),
+            Arc::clone(&cancel),
+        );
+
+        let _ = Shutdown::Both;
+        (
+            child,
+            stdin_handle,
+            Some(stdout_handle),
+            Some(stderr_handle),
+        )
+    };
+
+    #[cfg(not(unix))]
+    let (mut child, stdin_handle, stdout_handle, stderr_handle) = {
+        if opts.stdin.is_some() {
+            cmd.stdin(Stdio::piped());
+        } else {
+            cmd.stdin(Stdio::null());
+        }
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|err| map_io_error("spawn child process", err))?;
+        drop(cmd);
+
+        let stdin_pipe = child.stdin.take();
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+
+        let stdin_handle = stdin_pipe
+            .zip(opts.stdin.as_deref())
+            .map(|(pipe, data)| spawn_writer(pipe, data.to_vec()));
+        let stdout_handle =
+            stdout_pipe.map(|pipe| spawn_reader(pipe, max_buf, Arc::clone(&truncated)));
+        let stderr_handle =
+            stderr_pipe.map(|pipe| spawn_reader(pipe, max_buf, Arc::clone(&truncated)));
+        (child, stdin_handle, stdout_handle, stderr_handle)
+    };
 
     let mut timed_out = false;
     let mut exit_status: Option<ExitStatus> = None;
@@ -166,13 +226,13 @@ pub fn spawn_sync(
         None
     };
 
-    if let Some(signal) = stdin_signal {
-        wait_for_done(&signal, grace_deadline);
+    if let Some(ref handle) = stdin_handle {
+        wait_for_done(&handle.signal, grace_deadline);
     }
 
     let mut read_error: Option<io::Error> = None;
-    let stdout = if let Some(state) = stdout_state {
-        let (buf, err) = collect_stream(&state, grace_deadline);
+    let stdout = if let Some(ref handle) = stdout_handle {
+        let (buf, err) = collect_stream(&handle.signal, grace_deadline);
         if read_error.is_none() {
             read_error = err;
         }
@@ -180,8 +240,8 @@ pub fn spawn_sync(
     } else {
         Vec::new()
     };
-    let stderr = if let Some(state) = stderr_state {
-        let (buf, err) = collect_stream(&state, grace_deadline);
+    let stderr = if let Some(ref handle) = stderr_handle {
+        let (buf, err) = collect_stream(&handle.signal, grace_deadline);
         if read_error.is_none() {
             read_error = err;
         }
@@ -189,6 +249,21 @@ pub fn spawn_sync(
     } else {
         Vec::new()
     };
+
+    // On timeout/wait failure, unblock and join Unix stdio worker threads so
+    // grandchildren holding inherited FDs never leak background threads.
+    if grace_deadline.is_some() {
+        cancel.store(true, Ordering::Release);
+    }
+    if let Some(handle) = stdin_handle {
+        handle.finish(grace_deadline.is_some());
+    }
+    if let Some(handle) = stdout_handle {
+        handle.finish(grace_deadline.is_some());
+    }
+    if let Some(handle) = stderr_handle {
+        handle.finish(grace_deadline.is_some());
+    }
 
     if let Some(err) = wait_error {
         return Err(NodeCoreError::ProcessError {
@@ -272,10 +347,109 @@ fn validate_spawn_inputs(
             }
         }
     }
+    if opts.max_buffer > MAX_MAX_BUFFER {
+        return Err(NodeCoreError::InputTooLarge {
+            limit: MAX_MAX_BUFFER,
+            actual: Some(opts.max_buffer),
+        });
+    }
     if let Some(ms) = opts.timeout_ms {
         deadline_from_duration(Instant::now(), Duration::from_millis(ms))?;
     }
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn is_bare_program_name(program: &str) -> bool {
+    let bytes = program.as_bytes();
+    let has_drive = bytes.get(1) == Some(&b':');
+    !program.contains('/') && !program.contains('\\') && !has_drive
+}
+
+#[cfg(any(windows, test))]
+fn resolve_bare_program_in_path(
+    program: &str,
+    path_var: Option<&OsStr>,
+    pathext_var: Option<&OsStr>,
+    path_sep: char,
+) -> Option<PathBuf> {
+    let path_str = path_var?.to_str()?;
+    let has_ext = Path::new(program).extension().is_some();
+    let exts: Vec<&str> = if has_ext {
+        vec![""]
+    } else {
+        let raw = pathext_var
+            .and_then(|v| v.to_str())
+            .unwrap_or(".COM;.EXE;.BAT;.CMD");
+        let parsed: Vec<&str> = raw.split(';').filter(|s| !s.is_empty()).collect();
+        if parsed.is_empty() {
+            vec![".COM", ".EXE", ".BAT", ".CMD"]
+        } else {
+            parsed
+        }
+    };
+
+    for dir_raw in path_str.split(path_sep) {
+        if dir_raw.is_empty() {
+            continue;
+        }
+        let dir = Path::new(dir_raw);
+        if !dir.is_absolute() {
+            continue;
+        }
+        for ext in &exts {
+            let candidate = if ext.is_empty() {
+                dir.join(program)
+            } else {
+                dir.join(format!("{program}{ext}"))
+            };
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_program_for_spawn(program: &str, opts: &SpawnOptions) -> Result<PathBuf, NodeCoreError> {
+    #[cfg(windows)]
+    {
+        if !is_bare_program_name(program) {
+            return Ok(PathBuf::from(program));
+        }
+        let env_lookup = |target: &str| -> Option<std::ffi::OsString> {
+            if let Some(env) = &opts.env {
+                let mut found = None;
+                for (k, v) in env {
+                    if k.eq_ignore_ascii_case(target) {
+                        found = Some(std::ffi::OsString::from(v));
+                    }
+                }
+                if found.is_some() {
+                    return found;
+                }
+            }
+            if opts.clear_env {
+                None
+            } else {
+                std::env::var_os(target)
+            }
+        };
+        let path_var = env_lookup("PATH");
+        let pathext_var = env_lookup("PATHEXT");
+        resolve_bare_program_in_path(program, path_var.as_deref(), pathext_var.as_deref(), ';')
+            .ok_or_else(|| NodeCoreError::NotFound {
+                source: io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "executable not found on absolute PATH entries",
+                ),
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = opts;
+        Ok(PathBuf::from(program))
+    }
 }
 
 fn deadline_from_duration(now: Instant, duration: Duration) -> Result<Instant, NodeCoreError> {
@@ -292,26 +466,186 @@ struct StreamState {
     err: Option<io::Error>,
 }
 
-fn spawn_reader(
-    mut reader: impl std::io::Read + Send + 'static,
+struct WorkerHandle<T> {
+    signal: Arc<(Mutex<T>, Condvar)>,
+    #[cfg(unix)]
+    shutdown_stream: Option<std::os::unix::net::UnixStream>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl<T> WorkerHandle<T> {
+    fn finish(self, should_join: bool) {
+        #[cfg(unix)]
+        if let Some(stream) = self.shutdown_stream {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        if let Some(join) = self.join {
+            #[cfg(unix)]
+            {
+                let _ = should_join;
+                let _ = join.join();
+            }
+            #[cfg(not(unix))]
+            if !should_join {
+                let _ = join.join();
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn spawn_unix_writer(
+    mut stream: std::os::unix::net::UnixStream,
+    payload: Vec<u8>,
+    cancel: Arc<AtomicBool>,
+) -> WorkerHandle<bool> {
+    let signal = Arc::new((Mutex::new(false), Condvar::new()));
+    let worker_signal = Arc::clone(&signal);
+    let shutdown_stream = stream.try_clone().ok();
+    let _ = stream.set_write_timeout(Some(STREAM_POLL_INTERVAL));
+    let join = std::thread::spawn(move || {
+        let mut offset = 0;
+        while offset < payload.len() && !cancel.load(Ordering::Acquire) {
+            match stream.write(&payload[offset..]) {
+                Ok(0) => break,
+                Ok(n) => offset += n,
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::Interrupted
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        drop(stream);
+        let (lock, cvar) = &*worker_signal;
+        let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *done = true;
+        cvar.notify_all();
+    });
+    WorkerHandle {
+        signal,
+        shutdown_stream,
+        join: Some(join),
+    }
+}
+
+#[cfg(not(unix))]
+fn spawn_writer(mut pipe: impl Write + Send + 'static, payload: Vec<u8>) -> WorkerHandle<bool> {
+    let signal = Arc::new((Mutex::new(false), Condvar::new()));
+    let worker_signal = Arc::clone(&signal);
+    let join = std::thread::spawn(move || {
+        let _ = pipe.write_all(&payload);
+        drop(pipe);
+        let (lock, cvar) = &*worker_signal;
+        let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *done = true;
+        cvar.notify_all();
+    });
+    WorkerHandle {
+        signal,
+        join: Some(join),
+    }
+}
+
+#[cfg(unix)]
+fn spawn_unix_reader(
+    mut stream: std::os::unix::net::UnixStream,
     max_buffer: usize,
     truncated: Arc<AtomicBool>,
-) -> Arc<(Mutex<StreamState>, Condvar)> {
-    let shared = Arc::new((Mutex::new(StreamState::default()), Condvar::new()));
-    let worker_shared = Arc::clone(&shared);
-    std::thread::spawn(move || {
+    cancel: Arc<AtomicBool>,
+) -> WorkerHandle<StreamState> {
+    let signal = Arc::new((Mutex::new(StreamState::default()), Condvar::new()));
+    let worker_signal = Arc::clone(&signal);
+    let shutdown_stream = stream.try_clone().ok();
+    let _ = stream.set_read_timeout(Some(STREAM_POLL_INTERVAL));
+    let join = std::thread::spawn(move || {
         let mut chunk = [0u8; 8192];
         loop {
-            match reader.read(&mut chunk) {
+            if cancel.load(Ordering::Acquire) {
+                let (lock, cvar) = &*worker_signal;
+                let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                state.done = true;
+                cvar.notify_all();
+                break;
+            }
+            match stream.read(&mut chunk) {
                 Ok(0) => {
-                    let (lock, cvar) = &*worker_shared;
+                    let (lock, cvar) = &*worker_signal;
                     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
                     state.done = true;
                     cvar.notify_all();
                     break;
                 }
                 Ok(n) => {
-                    let (lock, _) = &*worker_shared;
+                    let (lock, _) = &*worker_signal;
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let remaining = max_buffer.saturating_sub(state.buf.len());
+                    if remaining > 0 {
+                        let take = n.min(remaining);
+                        state.buf.extend_from_slice(&chunk[..take]);
+                        if take < n {
+                            truncated.store(true, Ordering::Relaxed);
+                        }
+                    } else {
+                        truncated.store(true, Ordering::Relaxed);
+                    }
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::Interrupted
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(err) => {
+                    let (lock, cvar) = &*worker_signal;
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    state.err = Some(err);
+                    state.done = true;
+                    cvar.notify_all();
+                    break;
+                }
+            }
+        }
+    });
+    WorkerHandle {
+        signal,
+        shutdown_stream,
+        join: Some(join),
+    }
+}
+
+#[cfg(not(unix))]
+fn spawn_reader(
+    mut reader: impl io::Read + Send + 'static,
+    max_buffer: usize,
+    truncated: Arc<AtomicBool>,
+) -> WorkerHandle<StreamState> {
+    let signal = Arc::new((Mutex::new(StreamState::default()), Condvar::new()));
+    let worker_signal = Arc::clone(&signal);
+    let join = std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => {
+                    let (lock, cvar) = &*worker_signal;
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    state.done = true;
+                    cvar.notify_all();
+                    break;
+                }
+                Ok(n) => {
+                    let (lock, _) = &*worker_signal;
                     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
                     let remaining = max_buffer.saturating_sub(state.buf.len());
                     if remaining > 0 {
@@ -326,7 +660,7 @@ fn spawn_reader(
                 }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => {
-                    let (lock, cvar) = &*worker_shared;
+                    let (lock, cvar) = &*worker_signal;
                     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
                     state.err = Some(err);
                     state.done = true;
@@ -336,7 +670,10 @@ fn spawn_reader(
             }
         }
     });
-    shared
+    WorkerHandle {
+        signal,
+        join: Some(join),
+    }
 }
 
 fn wait_for_done(signal: &(Mutex<bool>, Condvar), deadline: Option<Instant>) {
@@ -516,5 +853,49 @@ mod tests {
                 NodeCoreErrorCode::InvalidInput | NodeCoreErrorCode::NotFound
             ));
         }
+    }
+
+    #[test]
+    fn max_buffer_above_cap_is_rejected() {
+        let opts = SpawnOptions {
+            max_buffer: MAX_MAX_BUFFER + 1,
+            ..SpawnOptions::default()
+        };
+        let err = spawn_sync("echo", &[], &opts).expect_err("oversized max_buffer must fail");
+        assert_eq!(err.code(), NodeCoreErrorCode::InputTooLarge);
+    }
+
+    #[test]
+    fn resolve_bare_program_in_path_skips_relative_and_cwd_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abs_bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&abs_bin).unwrap();
+        let tool_exe = abs_bin.join("mytool.exe");
+        std::fs::write(&tool_exe, b"stub").unwrap();
+
+        let pathext = OsStr::new(".com;.exe");
+        let rel_path = OsStr::new(".;relative_dir");
+        assert_eq!(
+            resolve_bare_program_in_path("mytool", Some(rel_path), Some(pathext), ';'),
+            None
+        );
+
+        let mixed = format!(".;{};{}", "relative_dir", abs_bin.display());
+        let resolved =
+            resolve_bare_program_in_path("mytool", Some(OsStr::new(&mixed)), Some(pathext), ';')
+                .expect("should resolve from absolute PATH entry");
+        assert_eq!(resolved, tool_exe);
+
+        let with_ext = resolve_bare_program_in_path(
+            "mytool.exe",
+            Some(OsStr::new(&mixed)),
+            Some(pathext),
+            ';',
+        )
+        .expect("should resolve bare name with explicit extension");
+        assert_eq!(with_ext, tool_exe);
+        assert!(is_bare_program_name("mytool.exe"));
+        assert!(!is_bare_program_name("./mytool.exe"));
+        assert!(!is_bare_program_name(r"C:\bin\mytool.exe"));
     }
 }

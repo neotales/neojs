@@ -21,16 +21,19 @@ use rquickjs::{
     qjs,
 };
 use vaeljs_node_core::buffer::{Encoding, decode as buf_decode, encode as buf_encode};
-use vaeljs_node_core::child_process::{DEFAULT_MAX_BUFFER, SpawnOptions, spawn_sync};
+use vaeljs_node_core::child_process::{
+    DEFAULT_MAX_BUFFER, MAX_MAX_BUFFER, SpawnOptions, spawn_sync,
+};
 use vaeljs_node_core::crypto::hash::{DigestTable, HashAlgorithm, HashErrorCode, OutputEncoding};
-use vaeljs_node_core::crypto::password::pbkdf2 as core_pbkdf2;
+use vaeljs_node_core::crypto::password::pbkdf2_zeroizing as core_pbkdf2_zeroizing;
 use vaeljs_node_core::fs::{
     CopyOptions, DirEntry, FileInfo, FsError, FsErrorCode, MkdirOptions, ReadOptions,
     RemoveOptions, WriteOptions, copy_file, exists, lstat, mkdir, read_dir, read_file, realpath,
     remove, rename, stat, write_file,
 };
 use vaeljs_node_core::helpers::{
-    fs_error_code_str, mkdtemp, node_error_code_str, random_uuid, timing_safe_equal,
+    DEFAULT_MAX_FS_READ_BYTES, fs_error_code_str, mkdtemp, node_error_code_str, random_uuid,
+    timing_safe_equal,
 };
 use vaeljs_node_core::os::{
     arch as os_arch, cpus_count, endianness, eol, homedir, hostname, machine, os_type,
@@ -590,7 +593,13 @@ fn host_url_update<'js>(
 }
 
 fn host_fs_read_file_sync<'js>(ctx: Ctx<'js>, path: String) -> Result<TypedArray<'js, u8>> {
-    let bytes = read_file(path, ReadOptions::default()).map_err(|e| throw_fs_error(&ctx, e))?;
+    let bytes = read_file(
+        path,
+        ReadOptions {
+            max_bytes: Some(DEFAULT_MAX_FS_READ_BYTES),
+        },
+    )
+    .map_err(|e| throw_fs_error(&ctx, e))?;
     TypedArray::<u8>::new(ctx, bytes)
 }
 
@@ -765,6 +774,12 @@ fn host_child_spawn_sync<'js>(
         let Some(n) = max_buf_val.as_number() else {
             return Err(Exception::throw_type(&ctx, "maxBuffer must be a number"));
         };
+        if !n.is_finite() || n < 0.0 || n > MAX_MAX_BUFFER as f64 {
+            return Err(Exception::throw_range(
+                &ctx,
+                &format!("options.maxBuffer must be between 0 and {MAX_MAX_BUFFER}"),
+            ));
+        }
         spawn_opts.max_buffer = n as usize;
     } else {
         spawn_opts.max_buffer = DEFAULT_MAX_BUFFER;
@@ -912,19 +927,28 @@ fn host_crypto_pbkdf2_sync<'js>(
             "Invalid digest",
         )
     })?;
-    let pw_bytes = read_bytes(&ctx, &password, "password must be a Uint8Array")?;
-    let salt_bytes = read_bytes(&ctx, &salt, "salt must be a Uint8Array")?;
+    let pw_bytes = vaeljs_node_core::crypto::Zeroizing::new(read_bytes(
+        &ctx,
+        &password,
+        "password must be a Uint8Array",
+    )?);
+    let salt_bytes = vaeljs_node_core::crypto::Zeroizing::new(read_bytes(
+        &ctx,
+        &salt,
+        "salt must be a Uint8Array",
+    )?);
     if keylen == 0 {
         return TypedArray::<u8>::new(ctx, Vec::new());
     }
-    let out = core_pbkdf2(alg, &pw_bytes, &salt_bytes, iterations, keylen).map_err(|e| {
-        let kind = match e.code() {
-            vaeljs_node_core::crypto::password::PasswordErrorCode::Range => Some("RangeError"),
-            _ => None,
-        };
-        throw_with_code(&ctx, kind, e.code().as_str(), e.message())
-    })?;
-    TypedArray::<u8>::new(ctx, out)
+    let out =
+        core_pbkdf2_zeroizing(alg, &pw_bytes, &salt_bytes, iterations, keylen).map_err(|e| {
+            let kind = match e.code() {
+                vaeljs_node_core::crypto::password::PasswordErrorCode::Range => Some("RangeError"),
+                _ => None,
+            };
+            throw_with_code(&ctx, kind, e.code().as_str(), e.message())
+        })?;
+    TypedArray::<u8>::new_copy(ctx, &out)
 }
 
 fn host_crypto_timing_safe_equal<'js>(ctx: Ctx<'js>, a: Value<'js>, b: Value<'js>) -> Result<bool> {

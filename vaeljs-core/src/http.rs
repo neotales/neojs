@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use std::cell::RefCell;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Read as _;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -519,6 +519,77 @@ fn op_vael_http_router_match<'s>(
     obj.into()
 }
 
+#[cfg(unix)]
+const fn unix_o_nofollow() -> i32 {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        0x0100
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "m68k"
+        )
+    ))]
+    {
+        0x8000
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        not(any(
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "m68k"
+        ))
+    ))]
+    {
+        0x20000
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "linux",
+        target_os = "android"
+    )))]
+    {
+        0x20000
+    }
+}
+
+fn open_static_file_nofollow(path: &Path) -> std::io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.custom_flags(unix_o_nofollow());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    opts.open(path)
+}
+
 #[op2]
 fn op_vael_http_static_resolve<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -560,7 +631,29 @@ fn op_vael_http_static_resolve<'s>(
         }
     };
 
-    if resolved.size > MAX_STATIC_FILE_BYTES {
+    let Ok(file) = open_static_file_nofollow(&resolved.path) else {
+        let obj = response_obj(scope);
+        set_bool(scope, obj, "ok", false);
+        set_number(scope, obj, "status", 404.0);
+        set_string(scope, obj, "message", "Not Found");
+        return obj.into();
+    };
+    let Ok(meta) = file.metadata() else {
+        let obj = response_obj(scope);
+        set_bool(scope, obj, "ok", false);
+        set_number(scope, obj, "status", 500.0);
+        set_string(scope, obj, "message", "Internal Server Error");
+        return obj.into();
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        let obj = response_obj(scope);
+        set_bool(scope, obj, "ok", false);
+        set_number(scope, obj, "status", 404.0);
+        set_string(scope, obj, "message", "Not Found");
+        return obj.into();
+    }
+    let meta_size = meta.len();
+    if meta_size > MAX_STATIC_FILE_BYTES {
         let obj = response_obj(scope);
         set_bool(scope, obj, "ok", false);
         set_number(scope, obj, "status", 413.0);
@@ -569,31 +662,10 @@ fn op_vael_http_static_resolve<'s>(
     }
 
     let (body, actual_size) = if head_only {
-        (Vec::new(), resolved.size)
+        (Vec::new(), meta_size)
     } else {
-        let Ok(file) = File::open(&resolved.path) else {
-            let obj = response_obj(scope);
-            set_bool(scope, obj, "ok", false);
-            set_number(scope, obj, "status", 404.0);
-            set_string(scope, obj, "message", "Not Found");
-            return obj.into();
-        };
-        let Ok(meta) = file.metadata() else {
-            let obj = response_obj(scope);
-            set_bool(scope, obj, "ok", false);
-            set_number(scope, obj, "status", 500.0);
-            set_string(scope, obj, "message", "Internal Server Error");
-            return obj.into();
-        };
-        if !meta.is_file() {
-            let obj = response_obj(scope);
-            set_bool(scope, obj, "ok", false);
-            set_number(scope, obj, "status", 404.0);
-            set_string(scope, obj, "message", "Not Found");
-            return obj.into();
-        }
         let mut buf = Vec::new();
-        let cap = (meta.len().min(MAX_STATIC_FILE_BYTES)) as usize;
+        let cap = (meta_size.min(MAX_STATIC_FILE_BYTES)) as usize;
         if buf.try_reserve_exact(cap).is_err() {
             let obj = response_obj(scope);
             set_bool(scope, obj, "ok", false);
@@ -1657,3 +1729,28 @@ deno_core::extension!(
     },
     docs = "HTTP/1.1 server, Go-style ServeMux router, static files, and cookies behind `Vael.getBuiltInModule(\"vael:http\")`."
 );
+
+#[cfg(test)]
+mod tests {
+    use super::open_static_file_nofollow;
+
+    #[test]
+    fn static_open_nofollow_opens_regular_file_and_rejects_symlink() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let real = dir.path().join("real.txt");
+        std::fs::write(&real, b"hello").expect("write real");
+
+        let opened = open_static_file_nofollow(&real).expect("regular file opens");
+        assert!(opened.metadata().expect("meta").is_file());
+
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.txt");
+            std::os::unix::fs::symlink(&real, &link).expect("symlink");
+            assert!(
+                open_static_file_nofollow(&link).is_err(),
+                "O_NOFOLLOW must refuse opening a symlink"
+            );
+        }
+    }
+}

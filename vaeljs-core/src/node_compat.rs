@@ -23,7 +23,9 @@ use deno_error::AdditionalProperties;
 use deno_error::JsErrorClass;
 use deno_error::PropertyValue;
 use vaeljs_node_core::buffer::{Encoding, decode as buf_decode, encode as buf_encode};
-use vaeljs_node_core::child_process::{DEFAULT_MAX_BUFFER, SpawnOptions, spawn_sync};
+use vaeljs_node_core::child_process::{
+    DEFAULT_MAX_BUFFER, MAX_MAX_BUFFER, SpawnOptions, spawn_sync,
+};
 use vaeljs_node_core::crypto::hash::{DigestState, HashAlgorithm, MAX_OPEN_DIGESTS};
 
 const MAX_CHILD_ARGS: usize = 4096;
@@ -35,7 +37,8 @@ use vaeljs_node_core::fs::{
     mkdir, read_dir, read_file, realpath, remove, rename, stat, write_file,
 };
 use vaeljs_node_core::helpers::{
-    fs_error_code_str, mkdtemp, node_error_code_str, random_uuid, timing_safe_equal,
+    DEFAULT_MAX_FS_READ_BYTES, fs_error_code_str, mkdtemp, node_error_code_str, random_uuid,
+    timing_safe_equal,
 };
 use vaeljs_node_core::os::{
     arch as os_arch, cpus_count, endianness, eol, homedir, hostname, machine, os_type,
@@ -720,7 +723,13 @@ fn rm_impl(path: &str, recursive: bool, force: bool) -> Result<(), NodeOpError> 
 #[op2]
 #[buffer]
 fn op_node_fs_read_file_sync(#[string] path: String) -> Result<Vec<u8>, NodeOpError> {
-    read_file(path, ReadOptions::default()).map_err(NodeOpError::from_fs)
+    read_file(
+        path,
+        ReadOptions {
+            max_bytes: Some(DEFAULT_MAX_FS_READ_BYTES),
+        },
+    )
+    .map_err(NodeOpError::from_fs)
 }
 
 #[op2(fast)]
@@ -837,8 +846,16 @@ async fn run_blocking<T: Send + 'static>(
 #[op2]
 #[buffer]
 async fn op_node_fs_read_file_async(#[string] path: String) -> Result<Vec<u8>, NodeOpError> {
-    run_blocking(move || read_file(path, ReadOptions::default()).map_err(NodeOpError::from_fs))
-        .await
+    run_blocking(move || {
+        read_file(
+            path,
+            ReadOptions {
+                max_bytes: Some(DEFAULT_MAX_FS_READ_BYTES),
+            },
+        )
+        .map_err(NodeOpError::from_fs)
+    })
+    .await
 }
 
 #[op2]
@@ -989,6 +1006,14 @@ fn validate_child_limits(args: &[String], opts: &SpawnOptsDto) -> Result<(), Nod
             "RangeError",
             Some("ERR_OUT_OF_RANGE"),
             format!("options.env exceeds maximum entries ({MAX_CHILD_ENV})"),
+        ));
+    }
+    if let Some(max_buf) = opts.max_buffer
+        && max_buf > MAX_MAX_BUFFER
+    {
+        return Err(NodeOpError::range_err(
+            Some("ERR_OUT_OF_RANGE"),
+            format!("options.maxBuffer exceeds maximum ({MAX_MAX_BUFFER})"),
         ));
     }
     Ok(())

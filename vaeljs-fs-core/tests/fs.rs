@@ -730,6 +730,33 @@ fn copy_file_overwrite_self_copy_is_safe_noop() {
 }
 
 #[test]
+fn copy_file_overwrite_rejects_destination_symlink_to_different_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.txt");
+    let victim = dir.path().join("victim.txt");
+    let link = dir.path().join("dst-link.txt");
+    write_text_file(&src, "new-content", WriteOptions::default()).unwrap();
+    write_text_file(&victim, "untouched", WriteOptions::default()).unwrap();
+    create_symlink(&victim, &link).unwrap();
+
+    let err = copy_file(&src, &link, CopyOptions { overwrite: true })
+        .expect_err("overwrite must not follow destination symlink to another file");
+    assert_eq!(err.code(), FsErrorCode::InvalidPath);
+    assert_eq!(
+        read_text_file(&victim, ReadOptions::default()).unwrap(),
+        "untouched"
+    );
+
+    let dangling = dir.path().join("dangling-dst.txt");
+    let ghost = dir.path().join("ghost.txt");
+    create_symlink(&ghost, &dangling).unwrap();
+    let err_dangling = copy_file(&src, &dangling, CopyOptions { overwrite: true })
+        .expect_err("overwrite must not create dangling symlink target");
+    assert_eq!(err_dangling.code(), FsErrorCode::InvalidPath);
+    assert!(!exists(&ghost).unwrap());
+}
+
+#[test]
 fn remove_and_lstat_do_not_follow_symlink_trailing_separators_or_dot() {
     let dir = tempfile::tempdir().unwrap();
     let outside = dir.path().join("outside");

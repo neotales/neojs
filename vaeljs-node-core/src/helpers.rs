@@ -17,6 +17,9 @@ use crate::error::{NodeCoreError, NodeCoreErrorCode, map_io_error};
 /// onto `globalThis` or `Vael`.
 pub const NODE_COMPAT_FACTORY_SOURCE: &str = include_str!("node_compat.js");
 
+/// Default maximum file size read by `node:fs` `readFileSync` / `promises.readFile` (`64 MiB`).
+pub const DEFAULT_MAX_FS_READ_BYTES: u64 = 64 * 1024 * 1024;
+
 const MKDTEMP_ATTEMPTS: usize = 16;
 const MKDTEMP_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 

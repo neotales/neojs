@@ -73,23 +73,40 @@ impl fmt::Display for Driver {
     }
 }
 
-/// A secret string whose `Debug` output is redacted.
+/// A secret string whose `Debug` output is redacted and whose buffer is wiped
+/// on drop.
 ///
 /// There is deliberately no `Display`, `Serialize`, or public accessor. A
-/// provider in this crate may read the value; callers outside it cannot. The
-/// bytes are not zeroized on drop, and this type makes no such promise.
+/// provider in this crate may read the value; callers outside it cannot.
+/// Best-effort zeroing wipes the owned byte buffer on `Drop` without adding an
+/// external crate dependency.
 #[derive(Clone)]
-struct Secret(String);
+struct Secret(Vec<u8>);
 
 impl Secret {
+    fn new(value: String) -> Self {
+        Self(value.into_bytes())
+    }
+
     pub(crate) fn expose(&self) -> &str {
-        &self.0
+        std::str::from_utf8(&self.0).unwrap_or("")
     }
 
     #[cfg(test)]
     pub(crate) fn as_str_for_test(&self) -> &str {
-        &self.0
+        self.expose()
     }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        zeroize_bytes(&mut self.0);
+    }
+}
+
+fn zeroize_bytes(bytes: &mut [u8]) {
+    bytes.fill(0);
+    std::hint::black_box(bytes);
 }
 
 impl fmt::Debug for Secret {
@@ -156,11 +173,21 @@ impl SqliteConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        if self.database.as_os_str().is_empty()
-            || self.database.as_os_str().as_encoded_bytes().contains(&0)
-        {
+        let bytes = self.database.as_os_str().as_encoded_bytes();
+        if bytes.is_empty() || bytes.contains(&0) {
             return Err(Error::config(
                 "database must be a non-empty path without NUL",
+            ));
+        }
+        if bytes.len() >= 5 && bytes[..5].eq_ignore_ascii_case(b"file:") {
+            return Err(Error::config(
+                "SQLite file: URIs are not permitted; pass a plain file path or :memory:",
+            ));
+        }
+        let is_win_extended = bytes.starts_with(br"\\?\") || bytes.starts_with(b"//?/");
+        if !is_win_extended && bytes.contains(&b'?') {
+            return Err(Error::config(
+                "SQLite URI query strings are not permitted in database paths",
             ));
         }
         let timeout_ms = self.busy_timeout.as_millis();
@@ -225,7 +252,7 @@ impl NetworkConfig {
     /// Sets the password. Its value is redacted from `Debug`.
     #[must_use]
     pub fn password(mut self, password: impl Into<String>) -> Self {
-        self.password = Some(Secret(password.into()));
+        self.password = Some(Secret::new(password.into()));
         self
     }
 
@@ -454,7 +481,7 @@ impl DbConfig {
             None => default_port,
         };
         let password = match object.get("password") {
-            Some(JsonValue::String(value)) => Some(Secret(value.clone())),
+            Some(JsonValue::String(value)) => Some(Secret::new(value.clone())),
             Some(_) => return Err(Error::config("password must be a string")),
             None => None,
         };
@@ -525,9 +552,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn secret_debug_is_redacted() {
-        let secret = Secret("hunter2".to_owned());
+    fn secret_debug_is_redacted_and_drop_zeroizes_bytes() {
+        let secret = Secret::new("hunter2".to_owned());
         assert_eq!(format!("{secret:?}"), "[redacted]");
         assert_eq!(secret.as_str_for_test(), "hunter2");
+        assert_eq!(secret.expose(), "hunter2");
+
+        let mut buf = b"hunter2".to_vec();
+        zeroize_bytes(&mut buf);
+        assert!(buf.iter().all(|&b| b == 0));
     }
 }
