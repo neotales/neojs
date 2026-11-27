@@ -1,5 +1,7 @@
 //! Command-line entry point for vaeljs.
 
+#![forbid(unsafe_code)]
+
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -1125,7 +1127,7 @@ Options:
 {npm_options}
   --no-node-compat disable built-in `node:*` compatibility modules
   --config <path>  use an explicit vael.jsonc manifest instead of discovery
-  --no-config      disable automatic vael.jsonc manifest discovery
+  --no-config      disable vael.jsonc and project .npmrc discovery
   -h, --help       show this help; alone, after `test`, or after `--allow-remote`
   -V, --version    show the version; alone, or after `--allow-remote`
   --               end option parsing, for a file or pattern beginning with `-`

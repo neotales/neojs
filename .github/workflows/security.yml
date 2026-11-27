@@ -77,7 +77,7 @@ jobs:
         run: cargo deny --locked --workspace --all-features check advisories bans licenses sources
 
       - name: Check vaeljs-lite standalone graph
-        run: cargo deny --locked --all-features --manifest-path vaeljs-lite/Cargo.toml check advisories bans licenses sources
+        run: cargo deny --locked --all-features --manifest-path vaeljs-lite/Cargo.toml check -A unmatched-skip advisories bans licenses sources
 
   gitleaks:
     name: Secret Scan (gitleaks)

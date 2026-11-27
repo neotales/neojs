@@ -1,0 +1,55 @@
+title = "vaeljs gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Published X25519 age test vector and invalid-key fixture in age tests"
+condition = "AND"
+paths = [
+  '''^(?:vaeljs|neojs)-core/src/age\.rs$''',
+  '''^(?:vaeljs|neojs)-core/tests/age\.rs$''',
+  '''^(?:vaeljs|neojs)/tests/cli\.rs$''',
+]
+regexes = [
+  '''AGE-SECRET-KEY-1GQ9778VQXMMJVE8SK7J6VT8UJ4HDQAJUVSFCWCM02D8GEWQ72PVQ2Y5J33''',
+  '''AGE-SECRET-KEY-1A{64}''',
+]
+
+[[allowlists]]
+description = "Encrypted OpenSSH test fixture in vaeljs-lite-core SSH tests"
+condition = "AND"
+paths = [
+  '''^(?:vaeljs|neojs)-lite-core/tests/ssh\.rs$''',
+]
+regexTarget = "match"
+regexes = [
+  '''b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHI''',
+]
+
+[[allowlists]]
+description = "Dynamic PKCS#8 PEM test helper template in SSH integration tests"
+condition = "AND"
+paths = [
+  '''^(?:vaeljs|neojs)-lite-core/tests/ssh\.rs$''',
+  '''^(?:vaeljs|neojs)-core/tests/ssh\.rs$''',
+  '''^(?:vaeljs|neojs)-ssh-core/tests/ssh\.rs$''',
+]
+regexTarget = "match"
+regexes = [
+  '''-----BEGIN PRIVATE KEY-----\\n\{encoded\}\\n-----END PRIVATE KEY-----''',
+]
+
+[[allowlists]]
+description = "Dummy 4-byte PEM unit-test fixture and PEM header constants in SSH client"
+condition = "AND"
+paths = [
+  '''^(?:vaeljs|neojs)-ssh-core/src/client\.rs$''',
+  '''^neojs-core/src/ssh\.rs$''',
+]
+regexTarget = "match"
+regexes = [
+  '''-----BEGIN PRIVATE KEY-----\\nAAEC\\nAw==\\n-----END PRIVATE KEY-----''',
+  '''const PKCS8_PEM''',
+  '''PEM block''',
+]

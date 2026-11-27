@@ -6,7 +6,8 @@ use vaeljs_crypto_core::password::{
     BCRYPT_HASH_BYTES, DEFAULT_BCRYPT_COST, MAX_BCRYPT_COST, MAX_BCRYPT_PASSWORD_BYTES,
     MAX_PBKDF2_INPUT_BYTES, MAX_PBKDF2_ITERATIONS, MAX_PBKDF2_OUTPUT_BYTES, MIN_BCRYPT_COST,
     PasswordError, PasswordErrorCode, bcrypt_hash as core_bcrypt_hash,
-    bcrypt_verify as core_bcrypt_verify, is_valid_bcrypt_hash, pbkdf2 as core_pbkdf2,
+    bcrypt_verify as core_bcrypt_verify, is_valid_bcrypt_hash,
+    pbkdf2_zeroizing as core_pbkdf2_zeroizing,
 };
 
 use super::hash::parse_hash_algorithm;
@@ -83,10 +84,8 @@ pub(super) fn pbkdf2<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<Typed
     let password = read_secret_input(&ctx, &args.0[1], MAX_PBKDF2_INPUT_BYTES)?;
     let salt = read_secret_input(&ctx, &args.0[2], MAX_PBKDF2_INPUT_BYTES)?;
 
-    let derived = Zeroizing::new(
-        core_pbkdf2(algorithm, &password, &salt, iterations, length)
-            .map_err(|e| throw_password_error(&ctx, e))?,
-    );
+    let derived = core_pbkdf2_zeroizing(algorithm, &password, &salt, iterations, length)
+        .map_err(|e| throw_password_error(&ctx, e))?;
     bytes_to_uint8_array(&ctx, &derived)
 }
 

@@ -472,7 +472,7 @@ impl Compiler<'_> {
         let previous = index.checked_sub(1).and_then(|value| self.bytes.get(value));
         let before_previous = index.checked_sub(2).and_then(|value| self.bytes.get(value));
         matches!(previous, Some(b'E' | b'e'))
-            && before_previous.is_none_or(|byte| !is_ident_byte(*byte))
+            && before_previous.is_none_or(|byte| !is_pg_ident_cont(*byte))
     }
 
     fn unicode_escape_prefix(&self, index: usize) -> bool {
@@ -486,7 +486,7 @@ impl Compiler<'_> {
             && index
                 .checked_sub(3)
                 .and_then(|value| self.bytes.get(value))
-                .is_none_or(|byte| !is_ident_byte(*byte))
+                .is_none_or(|byte| !is_pg_ident_cont(*byte))
     }
 
     fn copy_string(

@@ -1,5 +1,7 @@
 //! Command-line entry point for VaelJS Lite on QuickJS.
 
+#![forbid(unsafe_code)]
+
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -1174,7 +1176,7 @@ Usage:
 Options:
 {remote_npm_options}
   --config <path>   Use an explicit vael.jsonc manifest instead of discovery
-  --no-config       Disable automatic vael.jsonc manifest discovery
+  --no-config       Disable vael.jsonc and project .npmrc discovery
   --no-node-compat  Disable node:* built-in compatibility modules
   -h, --help        Print this help (alone or after `test`)
   -V, --version     Print the version

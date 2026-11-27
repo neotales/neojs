@@ -573,7 +573,26 @@ const fn unix_o_nofollow() -> i32 {
     }
 }
 
+fn is_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
+}
+
 fn open_static_file_nofollow(path: &Path) -> std::io::Result<File> {
+    let pre_meta = std::fs::symlink_metadata(path)?;
+    if is_symlink_or_reparse(&pre_meta) || !pre_meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "static path is not a regular file",
+        ));
+    }
     let mut opts = OpenOptions::new();
     opts.read(true);
     #[cfg(unix)]
@@ -587,7 +606,15 @@ fn open_static_file_nofollow(path: &Path) -> std::io::Result<File> {
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    opts.open(path)
+    let file = opts.open(path)?;
+    let post_meta = file.metadata()?;
+    if is_symlink_or_reparse(&post_meta) || !post_meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "static path is not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 #[op2]
@@ -645,7 +672,7 @@ fn op_vael_http_static_resolve<'s>(
         set_string(scope, obj, "message", "Internal Server Error");
         return obj.into();
     };
-    if meta.file_type().is_symlink() || !meta.is_file() {
+    if is_symlink_or_reparse(&meta) || !meta.is_file() {
         let obj = response_obj(scope);
         set_bool(scope, obj, "ok", false);
         set_number(scope, obj, "status", 404.0);

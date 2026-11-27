@@ -432,7 +432,8 @@ fn is_native_binary_path(rel_path: &str) -> bool {
         return true;
     }
     if let Some((_, suffix)) = file_name.split_once(".so.")
-        && !suffix.is_empty()
+        && suffix.bytes().next().is_some_and(|b| b.is_ascii_digit())
+        && suffix.bytes().all(|b| b.is_ascii_digit() || b == b'.')
     {
         return true;
     }
@@ -905,5 +906,16 @@ mod tests {
             parse_sha512_sri("sha512-not-valid"),
             Err(TarballError::MalformedIntegrity { .. })
         ));
+    }
+
+    #[test]
+    fn native_binary_path_checks_versioned_so_suffixes() {
+        assert!(is_native_binary_path("lib/addon.node"));
+        assert!(is_native_binary_path("lib/libfoo.so"));
+        assert!(is_native_binary_path("lib/libfoo.so.1"));
+        assert!(is_native_binary_path("lib/libfoo.so.1.2.3"));
+        assert!(!is_native_binary_path("dist/foo.so.js"));
+        assert!(!is_native_binary_path("dist/foo.so.1.js"));
+        assert!(!is_native_binary_path("dist/foo.so."));
     }
 }

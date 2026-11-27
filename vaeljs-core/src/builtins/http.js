@@ -25,6 +25,7 @@
     const makeError = Error;
     const makeTypeError = TypeError;
     const makeRangeError = RangeError;
+    const makeString = String;
     const makeUint8Array = Uint8Array;
     const freeze = Object.freeze;
     const defineProperty = Object.defineProperty;
@@ -48,6 +49,8 @@
     const stringIncludes = Function.prototype.call.bind(String.prototype.includes);
     const stringStartsWith = Function.prototype.call.bind(String.prototype.startsWith);
     const stringEndsWith = Function.prototype.call.bind(String.prototype.endsWith);
+    const stringCharCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
+    const numberToString = Function.prototype.call.bind(Number.prototype.toString);
 
     const typedArrayProto = getPrototypeOf(Uint8Array.prototype);
     const typedArraySet = Function.prototype.call.bind(Uint8Array.prototype.set);
@@ -917,16 +920,16 @@
     }
 
     function sanitizeLogText(value) {
-        const text = String(value);
+        const text = makeString(value);
         let out = "";
         let lastClean = 0;
         for (let i = 0; i < text.length; i++) {
-            const code = text.charCodeAt(i);
+            const code = stringCharCodeAt(text, i);
             if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
                 if (i > lastClean) {
                     out += stringSlice(text, lastClean, i);
                 }
-                const hex = code.toString(16);
+                const hex = numberToString(code, 16);
                 out += code < 0x10 ? `\\x0${hex}` : `\\x${hex}`;
                 lastClean = i + 1;
             }

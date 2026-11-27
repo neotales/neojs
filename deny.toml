@@ -1,4 +1,6 @@
 # Supply-chain, advisory, license, crate-ban, and source policy for vaeljs.
+# Requires cargo-deny >= 0.19 (v2 config schema and `-A unmatched-skip` support;
+# CI pins `cargo-deny@0.22.1`).
 # Checked in CI across both the V8 workspace and `vaeljs-lite` (`cargo deny`).
 
 [graph]

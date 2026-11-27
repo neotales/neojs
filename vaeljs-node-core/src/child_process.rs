@@ -122,7 +122,6 @@ pub fn spawn_sync(
 
     #[cfg(unix)]
     let (mut child, stdin_handle, stdout_handle, stderr_handle) = {
-        use std::net::Shutdown;
         use std::os::fd::OwnedFd;
         use std::os::unix::net::UnixStream;
 
@@ -166,7 +165,6 @@ pub fn spawn_sync(
             Arc::clone(&cancel),
         );
 
-        let _ = Shutdown::Both;
         (
             child,
             stdin_handle,
@@ -374,35 +372,47 @@ fn resolve_bare_program_in_path(
     path_sep: char,
 ) -> Option<PathBuf> {
     let path_str = path_var?.to_str()?;
-    let has_ext = Path::new(program).extension().is_some();
-    let exts: Vec<&str> = if has_ext {
-        vec![""]
+    let raw_pathext = pathext_var
+        .and_then(|v| v.to_str())
+        .unwrap_or(".COM;.EXE;.BAT;.CMD");
+    let parsed_pathext: Vec<&str> = raw_pathext.split(';').filter(|s| !s.is_empty()).collect();
+    let pathext_list: Vec<&str> = if parsed_pathext.is_empty() {
+        vec![".COM", ".EXE", ".BAT", ".CMD"]
     } else {
-        let raw = pathext_var
-            .and_then(|v| v.to_str())
-            .unwrap_or(".COM;.EXE;.BAT;.CMD");
-        let parsed: Vec<&str> = raw.split(';').filter(|s| !s.is_empty()).collect();
-        if parsed.is_empty() {
-            vec![".COM", ".EXE", ".BAT", ".CMD"]
-        } else {
-            parsed
-        }
+        parsed_pathext
     };
 
+    let program_ext = Path::new(program).extension().and_then(|e| e.to_str());
+    let has_pathext = program_ext.is_some_and(|ext| {
+        pathext_list.iter().any(|candidate| {
+            let trimmed = candidate.strip_prefix('.').unwrap_or(candidate);
+            trimmed.eq_ignore_ascii_case(ext)
+        })
+    });
+
     for dir_raw in path_str.split(path_sep) {
-        if dir_raw.is_empty() {
+        let dir_trimmed = dir_raw
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(dir_raw);
+        if dir_trimmed.is_empty() {
             continue;
         }
-        let dir = Path::new(dir_raw);
+        let dir = Path::new(dir_trimmed);
         if !dir.is_absolute() {
             continue;
         }
-        for ext in &exts {
-            let candidate = if ext.is_empty() {
-                dir.join(program)
-            } else {
-                dir.join(format!("{program}{ext}"))
-            };
+        if program_ext.is_some() {
+            let exact = dir.join(program);
+            if exact.is_file() {
+                return Some(exact);
+            }
+            if has_pathext {
+                continue;
+            }
+        }
+        for ext in &pathext_list {
+            let candidate = dir.join(format!("{program}{ext}"));
             if candidate.is_file() {
                 return Some(candidate);
             }
@@ -897,5 +907,46 @@ mod tests {
         assert!(is_bare_program_name("mytool.exe"));
         assert!(!is_bare_program_name("./mytool.exe"));
         assert!(!is_bare_program_name(r"C:\bin\mytool.exe"));
+    }
+
+    #[test]
+    fn resolve_bare_program_in_path_handles_quoted_dirs_and_dotted_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let quoted_bin = tmp.path().join("quoted dir");
+        std::fs::create_dir_all(&quoted_bin).unwrap();
+        let dotted_exe = quoted_bin.join("my.tool.exe");
+        std::fs::write(&dotted_exe, b"stub").unwrap();
+        let exact_dotted = quoted_bin.join("exact.bin");
+        std::fs::write(&exact_dotted, b"stub").unwrap();
+
+        let pathext = OsStr::new(".com;.exe");
+        let quoted_path = format!("\"relative\";\"{}\";\"\"", quoted_bin.display());
+        let resolved_dotted = resolve_bare_program_in_path(
+            "my.tool",
+            Some(OsStr::new(&quoted_path)),
+            Some(pathext),
+            ';',
+        )
+        .expect("dotted bare command name should resolve with PATHEXT from quoted PATH entry");
+        assert_eq!(resolved_dotted, dotted_exe);
+
+        let resolved_exact = resolve_bare_program_in_path(
+            "exact.bin",
+            Some(OsStr::new(&quoted_path)),
+            Some(pathext),
+            ';',
+        )
+        .expect("exact dotted command name should resolve when present without PATHEXT suffix");
+        assert_eq!(resolved_exact, exact_dotted);
+
+        assert_eq!(
+            resolve_bare_program_in_path(
+                "missing.exe",
+                Some(OsStr::new(&quoted_path)),
+                Some(pathext),
+                ';',
+            ),
+            None
+        );
     }
 }

@@ -28,6 +28,7 @@ cargo tree -p vaeljs-remote --no-default-features -e normal
 * `remote`: `RemoteOptions`, `RemoteClient`, `RemoteTransport`, `Cache` (with
   atomic writes, per-key lock files capped at 250 ms, monotonic `.rev` revision
   ordering, `.tomb` `no-store` tombstones, `.redir` bounded redirect pointers,
+  Unix `O_NOFOLLOW` / Windows `FILE_ATTRIBUTE_REPARSE_POINT` symlink guards,
   and lock-free `Cache::load_offline`), `validate_url`, `display_url`, and
   `diagnostic_url`.
 * `github`: `github_url` normalization for `gh:` and `github:` specifiers
@@ -49,7 +50,11 @@ cargo tree -p vaeljs-remote --no-default-features -e normal
 * `Cache-Control: no-store` on a `200`, `304`, or `3xx` hop suppresses caching
   and tombstones stale records so offline reads do not resurrect `no-store`
   content.
-* This is not SSRF protection, not a sandbox, and not a cryptographic
-  authentication boundary for the local cache: an attacker who can rewrite both
-  cached metadata and body files in the user's cache directory can keep
-  checksums consistent.
+* Live HTTPS transport (`UreqTransport` + `SsrfGuardResolver`) blocks private,
+  loopback, link-local, multicast, and metadata IP literals and DNS answers by
+  default (`allow_private_ips = false`), bounds blocking DNS resolution (capped
+  at `min(timeout, 10s)`), disables redirects and environment proxies, and keeps
+  no idle connection pool.
+* Local cache verification is not a cryptographic authentication boundary: an
+  attacker who can rewrite both cached metadata and body files in the user's
+  cache directory can keep checksums consistent.

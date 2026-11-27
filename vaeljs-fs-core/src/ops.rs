@@ -164,8 +164,20 @@ const fn unix_o_nofollow() -> i32 {
     }
 }
 
+fn is_symlink_or_reparse(meta: &Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
+}
+
 fn map_copy_dest_open_error(to: &Path, err: io::Error) -> FsError {
-    if fs::symlink_metadata(to).is_ok_and(|meta| meta.file_type().is_symlink()) {
+    if fs::symlink_metadata(to).is_ok_and(|meta| is_symlink_or_reparse(&meta)) {
         return FsError::InvalidPath {
             reason: "copy_file destination must not be a symbolic link",
             source: Some(err),
@@ -909,7 +921,7 @@ pub fn copy_file(
         }
         let existed = match fs::symlink_metadata(to) {
             Ok(meta) => {
-                if meta.file_type().is_symlink() {
+                if is_symlink_or_reparse(&meta) {
                     return Err(FsError::InvalidPath {
                         reason: "copy_file destination must not be a symbolic link",
                         source: None,
@@ -945,7 +957,7 @@ pub fn copy_file(
             .open(to)
             .map_err(|err| map_copy_dest_open_error(to, err))?;
         let dst_meta = dst.metadata().map_err(map_io_error)?;
-        if dst_meta.file_type().is_symlink() {
+        if is_symlink_or_reparse(&dst_meta) {
             return Err(FsError::InvalidPath {
                 reason: "copy_file destination must not be a symbolic link",
                 source: None,

@@ -296,9 +296,21 @@ const fn o_nofollow_flag() -> i32 {
     }
 }
 
+fn is_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
+}
+
 fn open_regular_nofollow(path: &Path) -> std::io::Result<File> {
     let pre_meta = std::fs::symlink_metadata(path)?;
-    if pre_meta.file_type().is_symlink() || !pre_meta.is_file() {
+    if is_symlink_or_reparse(&pre_meta) || !pre_meta.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "manifest path is not a regular file",
@@ -322,7 +334,7 @@ fn open_regular_nofollow(path: &Path) -> std::io::Result<File> {
     }
     let file = opts.open(path)?;
     let post_meta = file.metadata()?;
-    if post_meta.file_type().is_symlink() || !post_meta.is_file() {
+    if is_symlink_or_reparse(&post_meta) || !post_meta.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "manifest path is not a regular file",

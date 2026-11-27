@@ -654,9 +654,13 @@ impl RemoteClient {
             .as_ref()
             .map(|dir| Arc::new(Cache::new(dir.clone())));
         let allow_private_ips = options.allow_private_ips;
+        let dns_timeout = options.timeout.min(DEFAULT_DNS_TIMEOUT);
         Self {
             options,
-            transport: Arc::new(UreqTransport::new(allow_private_ips)),
+            transport: Arc::new(UreqTransport::new_with_dns_timeout(
+                allow_private_ips,
+                dns_timeout,
+            )),
             cache,
             budget: Arc::new(RemoteBudget::default()),
             attempted: Arc::new(Mutex::new(BTreeSet::new())),
@@ -2411,10 +2415,22 @@ const fn o_nofollow_flag() -> i32 {
     }
 }
 
+fn is_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
+}
+
 fn ensure_cache_dir_ready(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let meta = std::fs::symlink_metadata(dir)?;
-    if meta.file_type().is_symlink() || !meta.is_dir() {
+    if is_symlink_or_reparse(&meta) || !meta.is_dir() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "cache directory is not a regular directory",
@@ -2425,7 +2441,7 @@ fn ensure_cache_dir_ready(dir: &Path) -> std::io::Result<()> {
 
 fn open_regular_nofollow(path: &Path) -> std::io::Result<File> {
     let pre_meta = std::fs::symlink_metadata(path)?;
-    if pre_meta.file_type().is_symlink() || !pre_meta.is_file() {
+    if is_symlink_or_reparse(&pre_meta) || !pre_meta.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "cache entry is not a regular file",
@@ -2449,7 +2465,7 @@ fn open_regular_nofollow(path: &Path) -> std::io::Result<File> {
     }
     let file = opts.open(path)?;
     let post_meta = file.metadata()?;
-    if post_meta.file_type().is_symlink() || !post_meta.is_file() {
+    if is_symlink_or_reparse(&post_meta) || !post_meta.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "cache entry is not a regular file",
@@ -2579,16 +2595,45 @@ fn filter_resolved_addrs(
 }
 
 #[cfg(feature = "network")]
+const DEFAULT_DNS_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(feature = "network")]
 struct SsrfGuardResolver {
     allow_private_ips: bool,
+    timeout: Duration,
 }
 
 #[cfg(feature = "network")]
 impl ureq::Resolver for SsrfGuardResolver {
     fn resolve(&self, netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
         use std::net::ToSocketAddrs as _;
-        let addrs: Vec<SocketAddr> = netloc.to_socket_addrs()?.collect();
-        filter_resolved_addrs(addrs, self.allow_private_ips)
+        use std::sync::mpsc;
+
+        if self.timeout.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "DNS resolution timed out",
+            ));
+        }
+        let host = netloc.to_owned();
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("vaeljs-dns-resolve".to_owned())
+            .spawn(move || {
+                let res = host.to_socket_addrs().map(|iter| iter.collect::<Vec<_>>());
+                let _ = tx.send(res);
+            })?;
+        match rx.recv_timeout(self.timeout) {
+            Ok(Ok(addrs)) => filter_resolved_addrs(addrs, self.allow_private_ips),
+            Ok(Err(err)) => Err(err),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "DNS resolution timed out",
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::other(
+                "DNS resolution worker exited unexpectedly",
+            )),
+        }
     }
 }
 
@@ -2602,13 +2647,16 @@ struct UreqTransport {
 #[cfg(feature = "network")]
 impl UreqTransport {
     /// Returns the production agent configuration with SSRF DNS resolution
-    /// policy (`allow_private_ips`).
+    /// policy (`allow_private_ips`) and bounded DNS lookup timeout.
     ///
     /// Tests with a local CA variant must start from this builder, so the
     /// transport policy (HTTPS-only, no redirects, no environment proxy, no idle
     /// pooling, timeout, user agent, SSRF DNS resolver) is shared rather than
     /// duplicated.
-    fn agent_builder_with_policy(allow_private_ips: bool) -> ureq::AgentBuilder {
+    fn agent_builder_with_policy_and_dns_timeout(
+        allow_private_ips: bool,
+        dns_timeout: Duration,
+    ) -> ureq::AgentBuilder {
         // `https_only` and `redirects(0)` mirror the policy in `RemoteClient`;
         // they are defence in depth, because every hop is already checked there.
         // Environment proxy detection is not enabled, and no cookie store or
@@ -2627,15 +2675,29 @@ impl UreqTransport {
             .max_idle_connections(0)
             .max_idle_connections_per_host(0)
             .timeout(DEFAULT_TIMEOUT)
-            .resolver(SsrfGuardResolver { allow_private_ips })
+            .resolver(SsrfGuardResolver {
+                allow_private_ips,
+                timeout: dns_timeout,
+            })
             .user_agent(concat!("vaeljs/", env!("CARGO_PKG_VERSION")))
     }
 
-    fn new(allow_private_ips: bool) -> Self {
+    #[cfg(test)]
+    fn agent_builder_with_policy(allow_private_ips: bool) -> ureq::AgentBuilder {
+        Self::agent_builder_with_policy_and_dns_timeout(allow_private_ips, DEFAULT_DNS_TIMEOUT)
+    }
+
+    fn new_with_dns_timeout(allow_private_ips: bool, dns_timeout: Duration) -> Self {
         Self {
-            agent: Self::agent_builder_with_policy(allow_private_ips).build(),
+            agent: Self::agent_builder_with_policy_and_dns_timeout(allow_private_ips, dns_timeout)
+                .build(),
             allow_private_ips,
         }
+    }
+
+    #[cfg(test)]
+    fn new(allow_private_ips: bool) -> Self {
+        Self::new_with_dns_timeout(allow_private_ips, DEFAULT_DNS_TIMEOUT)
     }
 
     /// Wraps an agent built from [`Self::agent_builder_with_policy`] with a test trust store.
@@ -6520,5 +6582,32 @@ mod tests {
             cache.load(&url, 1024).is_none(),
             "symlinked cache entry must not load"
         );
+    }
+
+    #[cfg(feature = "network")]
+    #[test]
+    fn ssrf_guard_resolver_enforces_timeout_and_filters_ips() {
+        use ureq::Resolver as _;
+
+        let zero = super::SsrfGuardResolver {
+            allow_private_ips: false,
+            timeout: Duration::ZERO,
+        };
+        let err = zero.resolve("127.0.0.1:443").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+
+        let public_only = super::SsrfGuardResolver {
+            allow_private_ips: false,
+            timeout: super::DEFAULT_DNS_TIMEOUT,
+        };
+        let err = public_only.resolve("127.0.0.1:443").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let allowed = super::SsrfGuardResolver {
+            allow_private_ips: true,
+            timeout: super::DEFAULT_DNS_TIMEOUT,
+        };
+        let addrs = allowed.resolve("127.0.0.1:443").expect("loopback allowed");
+        assert_eq!(addrs, vec!["127.0.0.1:443".parse().unwrap()]);
     }
 }

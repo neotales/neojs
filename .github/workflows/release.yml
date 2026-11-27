@@ -164,7 +164,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo deny --locked --workspace --all-features check advisories bans licenses sources
-          cargo deny --locked --all-features --manifest-path vaeljs-lite/Cargo.toml check advisories bans licenses sources
+          cargo deny --locked --all-features --manifest-path vaeljs-lite/Cargo.toml check -A unmatched-skip advisories bans licenses sources
 
       - name: Download and verify pinned gitleaks binary
         run: |
@@ -220,11 +220,13 @@ jobs:
 
       - name: Install pinned Rust toolchain and target
         shell: bash
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
           rustup default "${RUST_TOOLCHAIN}"
-          rustup target add "${{ matrix.target }}"
+          rustup target add "${MATRIX_TARGET}"
 
       - name: Build release binaries
         shell: bash
@@ -543,6 +545,9 @@ jobs:
         with:
           tool: cargo-cyclonedx@0.5.10
 
+      - name: Create SBOM staging directory
+        run: mkdir -p sbom
+
       - name: Generate SPDX JSON SBOM
         uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56 # v0.24.4
         with:
@@ -560,10 +565,10 @@ jobs:
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
 
           mkdir -p sbom
-          cargo cyclonedx --manifest-path vaeljs/Cargo.toml --format json --describe crate --override-filename bom
+          cargo cyclonedx --locked --manifest-path vaeljs/Cargo.toml --format json --describe crate --override-filename bom
           mv vaeljs/bom.cdx.json "sbom/vjs-${tag}.cdx.json"
 
-          cargo cyclonedx --manifest-path vaeljs-lite/Cargo.toml --format json --describe crate --override-filename bom
+          cargo cyclonedx --locked --manifest-path vaeljs-lite/Cargo.toml --format json --describe crate --override-filename bom
           mv vaeljs-lite/bom.cdx.json "sbom/vjs-lite-${tag}.cdx.json"
 
           for f in "sbom/vjs-${tag}.cdx.json" "sbom/vjs-lite-${tag}.cdx.json" "sbom/vaeljs-${tag}.spdx.json"; do

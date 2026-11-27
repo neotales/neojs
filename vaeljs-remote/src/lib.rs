@@ -31,6 +31,8 @@
 //! # let _ = (RemoteOptions::new(), std::any::type_name::<RemoteClient>());
 //! ```
 
+#![forbid(unsafe_code)]
+
 pub mod github;
 pub mod jsr;
 pub mod remote;

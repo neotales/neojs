@@ -147,6 +147,22 @@ impl NpmOptions {
         self.npmrc_home_dir = Some(dir.into());
         self
     }
+
+    /// Returns whether project-level `.npmrc` discovery is enabled.
+    pub fn discover_project_npmrc(&self) -> bool {
+        self.discover_project_npmrc
+    }
+
+    /// Returns whether auth directives and `${ENV_VAR}` interpolation from
+    /// project-level `.npmrc` files are allowed.
+    pub fn allow_project_npmrc_auth(&self) -> bool {
+        self.allow_project_npmrc_auth
+    }
+
+    /// Returns the overridden home directory used to locate `~/.npmrc`, if set.
+    pub fn npmrc_home_dir(&self) -> Option<&Path> {
+        self.npmrc_home_dir.as_deref()
+    }
 }
 
 /// Outcome of resolving a bare specifier or `#imports` from a local project `package.json`.

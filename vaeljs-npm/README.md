@@ -13,8 +13,8 @@ cargo tree --locked -p vaeljs-npm -e normal
 ## Architecture invariants
 
 - **Zero `node_modules`:** Packages never materialize onto the workspace or host filesystem by package name. Resolved modules receive peer-context-isolated virtual URLs of the form `npm://<registry_host>/<pkg>/<version>/<ctx>/<rel_path>`.
-- **Content-verified CAS execution:** Extracted files live in `cas/sha256/<aa>/<bb>/<digest>` (`0444` on Unix), indexed by canonical `.tree` manifests (`npm/<origin>/trees/sha512-<hex>.tree`). Every read opens with `O_NOFOLLOW` on Unix, verifies `fstat` regular-file metadata and exact byte length, verifies SHA-256 in memory, and returns owned `Vec<u8>`.
-- **Zero auto-install scripts & native addons:** Lifecycle hooks (`preinstall`, `install`, `postinstall`, `prepare`, etc.) are audited into `ScriptAudit` and never executed. Native binaries (`.node`, `.dll`, `.so`, `.dylib`) are excluded from CAS.
+- **Content-verified CAS execution:** Extracted files live in `cas/sha256/<aa>/<bb>/<digest>` (`0444` on Unix), indexed by canonical `.tree` manifests (`npm/<origin>/trees/sha512-<hex>.tree`). Every read opens with `O_NOFOLLOW` on Unix (and `FILE_FLAG_OPEN_REPARSE_POINT` plus `FILE_ATTRIBUTE_REPARSE_POINT` checks on Windows), verifies `fstat` regular-file metadata and exact byte length, verifies SHA-256 in memory, and returns owned `Vec<u8>`.
+- **Zero auto-install scripts & native addons:** Lifecycle hooks (`preinstall`, `install`, `postinstall`, `prepare`, etc.) are audited into `ScriptAudit` and never executed. Native binaries (`.node`, `.dll`, `.so`, `.so.<version>`, `.dylib`, `.exe`, `.wasm`) are excluded from CAS.
 - **Strict ESM only:** `exports` and `#imports` preserve JSON manifest key insertion order with active conditions fixed to `["import", "default"]`. Every module file is classified via `vaeljs_module_policy::package_module_format` using the nearest `package.json` `"type"` inside `.tree`.
 - **Project `package.json` bare imports:** `ProjectPackageResolver` maps declared `dependencies`, `optionalDependencies`, `#imports`, and package self-reference into `npm:` graph roots or local project files without `node_modules` and without intercepting `vael:` or `node:` built-ins.
 
@@ -25,5 +25,5 @@ cargo tree --locked -p vaeljs-npm -e normal
 - `package_json`: bounded `PackageJson` parser (`MAX_PACKAGE_JSON_BYTES = 1 MiB`), ordered `ExportsField`, `ScriptAudit`, and `TargetPlatform`.
 - `exports`: `ExportsResolver` for `exports`, `#imports`, self-reference, restricted `main` fallback, and nearest-`package.json` ESM classification.
 - `cas` & `tarball`: `CasStore`, `TarballIngestor` (SRI `sha512` check + bounded POSIX/ustar/PAX tar reader directly over `flate2::read::GzDecoder`), and `PackageTree`.
-- `npmrc`: bounded `.npmrc` parser (`MAX_NPMRC_BYTES = 256 KiB`), `@scope:registry` routing, HTTPS-only `_authToken`/`_auth` matching with lazy `${ENV_VAR}` resolution, redaction, and `ZeroizeOnDrop`.
+- `npmrc`: bounded `.npmrc` parser (`MAX_NPMRC_BYTES = 256 KiB`), `@scope:registry` routing, HTTPS-only `_authToken`/`_auth` matching with lazy `${ENV_VAR}` resolution (disabled in project `.npmrc` by default unless `allow_project_npmrc_auth` is enabled; skipped when `--no-config` disables project `.npmrc` discovery), `nofollow` file opens, redaction, and `ZeroizeOnDrop`.
 - `resolver`: `NpmRegistry` trait, `RemoteNpmRegistry`, `NpmGraphResolver`, `ResolvedNpmGraph`, and `ProjectPackageResolver`.

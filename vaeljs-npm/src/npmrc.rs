@@ -555,6 +555,18 @@ impl NpmrcConfig {
     }
 }
 
+fn is_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
+}
+
 fn read_optional_npmrc_file(path: &Path) -> Result<Option<Zeroizing<String>>, NpmrcError> {
     let pre_meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -566,7 +578,7 @@ fn read_optional_npmrc_file(path: &Path) -> Result<Option<Zeroizing<String>>, Np
             });
         }
     };
-    if pre_meta.file_type().is_symlink() || !pre_meta.is_file() {
+    if is_symlink_or_reparse(&pre_meta) || !pre_meta.is_file() {
         return Err(NpmrcError::NotRegularFile);
     }
 
@@ -599,7 +611,7 @@ fn read_optional_npmrc_file(path: &Path) -> Result<Option<Zeroizing<String>>, Np
         operation: "stat",
         reason: err.to_string(),
     })?;
-    if meta.file_type().is_symlink() || !meta.is_file() {
+    if is_symlink_or_reparse(&meta) || !meta.is_file() {
         return Err(NpmrcError::NotRegularFile);
     }
     if meta.len() > MAX_NPMRC_BYTES as u64 {

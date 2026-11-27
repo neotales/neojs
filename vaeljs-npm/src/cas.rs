@@ -258,7 +258,7 @@ pub fn read_bounded_regular_file(
         operation: "stat",
         reason: err.to_string(),
     })?;
-    if meta.file_type().is_symlink() || !meta.is_file() {
+    if is_symlink_or_reparse(&meta) || !meta.is_file() {
         return Err(CasError::NotRegularFile);
     }
     let actual_len = meta.len();
@@ -390,12 +390,24 @@ pub(crate) fn atomic_write_file(
     write_res
 }
 
+fn is_symlink_or_reparse(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
+}
+
 pub(crate) fn open_nofollow(path: &Path) -> Result<File, CasError> {
     let pre_meta = fs::symlink_metadata(path).map_err(|err| CasError::Io {
         operation: "open",
         reason: err.to_string(),
     })?;
-    if pre_meta.file_type().is_symlink() || !pre_meta.is_file() {
+    if is_symlink_or_reparse(&pre_meta) || !pre_meta.is_file() {
         return Err(CasError::NotRegularFile);
     }
 
@@ -420,7 +432,7 @@ pub(crate) fn open_nofollow(path: &Path) -> Result<File, CasError> {
         operation: "stat",
         reason: err.to_string(),
     })?;
-    if post_meta.file_type().is_symlink() || !post_meta.is_file() {
+    if is_symlink_or_reparse(&post_meta) || !post_meta.is_file() {
         return Err(CasError::NotRegularFile);
     }
     #[cfg(unix)]

@@ -53,6 +53,8 @@
 //! | npm, JSR, and Node loading by this crate | Not implemented |
 //! | GitHub loading | Implemented by the V8 runtime, not this crate |
 //! | Node compatibility transform | Not implemented |
+
+#![forbid(unsafe_code)]
 //!
 //! No function in this crate reads the network or writes a file.
 //! [`Manifest::from_path`], [`discover_manifest`], [`Workspace::load`], and

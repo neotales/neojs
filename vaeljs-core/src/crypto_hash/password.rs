@@ -20,7 +20,7 @@ use vaeljs_crypto_core::password::{
     BCRYPT_HASH_BYTES, DEFAULT_BCRYPT_COST, MAX_BCRYPT_COST, MAX_BCRYPT_PASSWORD_BYTES,
     MAX_PBKDF2_INPUT_BYTES, MAX_PBKDF2_ITERATIONS, MAX_PBKDF2_OUTPUT_BYTES, MIN_BCRYPT_COST,
     PasswordError as CorePasswordError, PasswordErrorCode as CorePasswordErrorCode, bcrypt_hash,
-    bcrypt_verify, is_valid_bcrypt_hash, pbkdf2,
+    bcrypt_verify, is_valid_bcrypt_hash, pbkdf2_zeroizing,
 };
 use zeroize::Zeroizing;
 
@@ -157,10 +157,10 @@ const WORKER_RANDOM: u8 = 1;
 const WORKER_LIMIT: u8 = 2;
 const WORKER_INTERNAL: u8 = 3;
 
-fn worker_success(payload: Vec<u8>) -> Vec<u8> {
+fn worker_success(payload: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(payload.len() + 1);
     output.push(WORKER_OK);
-    output.extend_from_slice(&payload);
+    output.extend_from_slice(payload);
     output
 }
 
@@ -228,10 +228,12 @@ fn derive(
     salt: &[u8],
     iterations: u32,
     length: usize,
-) -> Result<Vec<u8>, PasswordError> {
+) -> Result<Zeroizing<Vec<u8>>, PasswordError> {
     #[cfg(feature = "test-support")]
     super::record_pbkdf2_placement();
-    Ok(pbkdf2(algorithm, password, salt, iterations, length)?)
+    Ok(pbkdf2_zeroizing(
+        algorithm, password, salt, iterations, length,
+    )?)
 }
 
 fn hash(password: &[u8], cost: u32) -> Result<String, PasswordError> {
@@ -271,17 +273,21 @@ fn outcome_id<'s>(
 
 fn outcome_bytes<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    result: Result<Vec<u8>, PasswordError>,
+    result: Result<Zeroizing<Vec<u8>>, PasswordError>,
 ) -> v8::Local<'s, v8::Value> {
     let object = response(scope);
     match result {
-        Ok(bytes) => match bytes_to_v8(scope, bytes) {
-            Some(value) => {
-                set(scope, object, "ok", v8::Boolean::new(scope, true).into());
-                set(scope, object, "value", value.into());
+        Ok(bytes) => {
+            let v8_bytes = bytes_to_v8(scope, bytes.to_vec());
+            drop(bytes);
+            match v8_bytes {
+                Some(value) => {
+                    set(scope, object, "ok", v8::Boolean::new(scope, true).into());
+                    set(scope, object, "value", value.into());
+                }
+                None => set_failure(scope, object, PasswordError::new(PasswordErrorCode::Limit)),
             }
-            None => set_failure(scope, object, PasswordError::new(PasswordErrorCode::Limit)),
-        },
+        }
         Err(error) => set_failure(scope, object, error),
     }
     object.into()
@@ -385,7 +391,7 @@ impl Pbkdf2Job {
         algorithm: Algorithm,
         iterations: u32,
         length: usize,
-    ) -> Result<Vec<u8>, PasswordError> {
+    ) -> Result<Zeroizing<Vec<u8>>, PasswordError> {
         derive(
             algorithm,
             self.password.as_slice(),
@@ -506,7 +512,7 @@ pub(super) fn op_vael_crypto_pbkdf2_async_submit<'s, 'i>(
 
         let join = state.borrow::<CryptoExecutor>().spawn_blocking(move || {
             match job.run(algorithm, iterations, length as usize) {
-                Ok(result) => worker_success(result),
+                Ok(result) => worker_success(&result),
                 Err(error) => worker_error(error),
             }
         });
@@ -563,7 +569,7 @@ pub(super) fn op_vael_crypto_bcrypt_hash_async_submit<'s, 'i>(
         let join = state
             .borrow::<CryptoExecutor>()
             .spawn_blocking(move || match job.run(cost) {
-                Ok(hash) => worker_success(hash.into_bytes()),
+                Ok(hash) => worker_success(hash.as_bytes()),
                 Err(error) => worker_error(error),
             });
         Ok(state.resource_table.add(AsyncPasswordJob {
@@ -631,7 +637,7 @@ pub(super) fn op_vael_crypto_bcrypt_verify_async_submit<'s, 'i>(
 
         let join = state
             .borrow::<CryptoExecutor>()
-            .spawn_blocking(move || worker_success(vec![u8::from(job.run())]));
+            .spawn_blocking(move || worker_success(&[u8::from(job.run())]));
         Ok(VerifyAsync::Job(state.resource_table.add(
             AsyncPasswordJob {
                 handle: RefCell::new(Some(join)),

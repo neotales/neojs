@@ -31,7 +31,7 @@ use vaeljs_node_core::crypto::hash::{DigestState, HashAlgorithm, MAX_OPEN_DIGEST
 const MAX_CHILD_ARGS: usize = 4096;
 const MAX_CHILD_ENV: usize = 4096;
 use serde::{Deserialize, Serialize};
-use vaeljs_node_core::crypto::password::pbkdf2 as core_pbkdf2;
+use vaeljs_node_core::crypto::password::pbkdf2_zeroizing as core_pbkdf2_zeroizing;
 use vaeljs_node_core::fs::{
     CopyOptions, MkdirOptions, ReadOptions, RemoveOptions, WriteOptions, copy_file, exists, lstat,
     mkdir, read_dir, read_file, realpath, remove, rename, stat, write_file,
@@ -1252,13 +1252,15 @@ fn op_node_crypto_pbkdf2_sync(
     if keylen == 0 {
         return Ok(Vec::new());
     }
-    core_pbkdf2(alg, password, salt, iterations, keylen).map_err(|err| {
-        let class = match err.code() {
-            vaeljs_node_core::crypto::password::PasswordErrorCode::Range => "RangeError",
-            _ => "Error",
-        };
-        NodeOpError::new(class, err.code().as_str(), err.to_string())
-    })
+    let derived =
+        core_pbkdf2_zeroizing(alg, password, salt, iterations, keylen).map_err(|err| {
+            let class = match err.code() {
+                vaeljs_node_core::crypto::password::PasswordErrorCode::Range => "RangeError",
+                _ => "Error",
+            };
+            NodeOpError::new(class, err.code().as_str(), err.to_string())
+        })?;
+    Ok(derived.to_vec())
 }
 
 #[op2(fast)]

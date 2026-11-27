@@ -499,3 +499,22 @@ fn postgres_identifier_embedded_dollar_does_not_open_dollar_quote() {
     .expect_err("col$a$ must not hide ; DROP TABLE as dollar-quoted string");
     assert_eq!(err.kind(), ErrorKind::Sql);
 }
+
+#[test]
+fn postgres_identifier_ending_in_dollar_e_does_not_trigger_escape_string() {
+    let err = compile(
+        r"SELECT a$e'x\'; DROP TABLE t;--'",
+        &Params::none(),
+        Dialect::Postgres,
+    )
+    .expect_err("a$e'...' must not be treated as E'...' escape string");
+    assert_eq!(err.kind(), ErrorKind::Sql);
+
+    let unicode_err = compile(
+        r"SELECT a$u&'x\'; DROP TABLE t;--'",
+        &Params::none(),
+        Dialect::Postgres,
+    )
+    .expect_err("a$u&'...' must not be treated as U&'...' string");
+    assert_eq!(unicode_err.kind(), ErrorKind::Sql);
+}

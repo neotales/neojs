@@ -1,9 +1,12 @@
 # GitHub Actions Workflows
 
-All GitHub Actions referenced in `ci.yml` and `release.yml` are pinned by
-immutable 40-character commit SHAs to Node 24 releases (`actions/checkout` v7.0.1,
-`actions/upload-artifact` v7.0.2, `actions/download-artifact` v8.0.2, and
-`Swatinem/rust-cache` v2.9.3).
+All GitHub Actions referenced in `ci.yml`, `release.yml`, and `security.yml`
+are pinned by immutable 40-character commit SHAs to Node 24 releases
+(`actions/checkout` v7.0.1, `actions/upload-artifact` v7.0.2,
+`actions/download-artifact` v8.0.2, `Swatinem/rust-cache` v2.9.3,
+`taiki-e/install-action` v2.90.11, `anchore/sbom-action` v0.24.4,
+`actions/attest-build-provenance` v4.2.2, `actions/attest-sbom` v4.1.0, and
+`github/codeql-action` v4.39.5).
 
 ## `ci.yml`
 
@@ -65,12 +68,14 @@ Jobs:
 
 ## `release.yml`
 
-Tag-only (`v*`) 6-target release build, packaging, smoke verification, and
-GitHub Release publishing workflow. Workflow-level permissions are strictly
-`contents: read` so `verify-tag` and all 6 `build` matrix jobs remain
-read-only; `contents: write` is granted exclusively to `publish-release` to
-create or update the GitHub Release via `GITHUB_TOKEN` (zero external secrets;
-no crates.io publishing).
+Tag-only (`v*`) 6-target release build, packaging, smoke verification,
+security gating, SBOM/provenance generation, and immutable GitHub Release
+publishing workflow. Workflow-level permissions are strictly `contents: read` so
+`verify-tag`, `security-gates`, and all 6 `build` matrix jobs remain read-only;
+`contents: write`, `id-token: write`, and `attestations: write` are granted
+exclusively to `publish-release` to generate SBOMs/attestations and create the
+GitHub Release via `GITHUB_TOKEN` (zero external secrets; no crates.io
+publishing).
 
 Jobs:
 - **verify-tag (`ubuntu-24.04`)**:
@@ -83,6 +88,10 @@ Jobs:
   - Generates canonical V8 and Lite TypeScript declaration trees once via
     `cargo run --locked -p vaeljs-lite --bin vjs-lite -- types --profile v8 --out-dir dist-types/v8`
     and `--profile lite --out-dir dist-types/lite`, uploading `release-types`.
+- **security-gates (`needs: verify-tag`, `ubuntu-24.04`)**:
+  - Runs `cargo audit --deny warnings --deny yanked`, `cargo deny` across both
+    the V8 workspace and standalone `vaeljs-lite` (`-A unmatched-skip`), and full
+    git-history `gitleaks` scanning using `.gitleaks.toml`.
 - **build (`needs: verify-tag`, `fail-fast: false`, 6 targets)**:
   - `linux-amd64` (`x86_64-unknown-linux-gnu` on `ubuntu-24.04`, `.tar.gz`, native)
   - `linux-arm64` (`aarch64-unknown-linux-gnu` on `ubuntu-24.04-arm`, `.tar.gz`, native)
@@ -107,18 +116,21 @@ Jobs:
       checks `LICENSE.md` and `types/index.d.ts`, and runs the native smoke suite
       under `arch -x86_64` when Rosetta 2 is available.
   - Uploads `release-archives-<slug>`.
-- **publish-release (`needs: build`, `ubuntu-24.04`, `permissions: contents: write`)**:
-  - Checks out the tagged repository (`CHANGELOG.md`), downloads all 12 archives
-    into `dist/`, asserts exact count `== 12`, generates sorted `SHA256SUMS.txt`
-    via `sha256sum`, verifies `sha256sum -c SHA256SUMS.txt`, and uploads
-    `release-bundle-<tag>` (`retention-days: 30`).
+- **publish-release (`needs: [build, security-gates]`, `ubuntu-24.04`, `permissions: contents: write, id-token: write, attestations: write`)**:
+  - Generates an SPDX JSON SBOM (`anchore/sbom-action`) and locked CycloneDX
+    JSON SBOMs (`cargo cyclonedx --locked`) for `vaeljs` and `vaeljs-lite`.
+  - Downloads all 12 archives into `dist/`, moves the 3 SBOMs into `dist/`,
+    generates sorted `SHA256SUMS.txt` via `sha256sum`, verifies
+    `sha256sum -c SHA256SUMS.txt`, attests SLSA build provenance
+    (`actions/attest-build-provenance`) and the SPDX SBOM (`actions/attest-sbom`),
+    and uploads `release-bundle-<tag>` (`retention-days: 30`).
   - Extracts the `## [<tag_version>]` section from `CHANGELOG.md` (with a
     concise fallback referencing `CHANGELOG.md` and `SHA256SUMS.txt`), marks
-    tags containing `-` with `--prerelease`, idempotently deletes any existing
-    release (`gh release delete --yes`, preserving the git tag) before running
-    `gh release create --verify-tag` using `GITHUB_TOKEN` with all 13 assets
-    (12 archives + `SHA256SUMS.txt`) attached, and verifies `isDraft == false`
-    and the attached asset count equals `13`.
+    tags containing `-` with `--prerelease`, fails closed if any release already
+    exists for `<tag>`, runs `gh release create --verify-tag` using
+    `GITHUB_TOKEN` with all 16 assets (12 archives + 3 SBOMs + `SHA256SUMS.txt`)
+    attached, and verifies `isDraft == false` and the attached asset count
+    equals `16`.
 
 ### Documented failure modes (`release.yml`)
 - **Lightweight tag pushed**: `git cat-file -t refs/tags/<tag>` returns `commit`
@@ -129,13 +141,23 @@ Jobs:
 - **Cross-compiled target runtime smoke gaps**: If Rosetta 2 is absent on `macos-15`,
   `macos-amd64` falls back to binary-header/`otool` checks and still requires a
   native macOS x86_64 smoke pass before promoting the release.
-- **GitHub Release publish or asset-count failure**: Re-running `publish-release`
-  is idempotent (`gh release delete --yes` without `--cleanup-tag` removes any
-  pre-existing draft or stale-asset release while preserving the git tag, then
-  `gh release create --verify-tag` creates a fresh published release), and fails
-  if `isDraft` is not `false` or fewer/more than 13 assets are attached.
-- **Signing, attestation & crates.io (`system-admin` boundary)**: This workflow
-  never signs artifacts, generates checksum attestations, or publishes crates
-  (`publish = false` blocks crates.io publishing). Coordinate with `system-admin`
-  outside this workflow for signing, attestations, or any future crates.io
-  publishing.
+- **Existing release on immutable tag**: `publish-release` refuses to overwrite or
+  delete an existing draft or published GitHub Release for `<tag>`. Resolve
+  manually or cut a new version tag.
+- **OS code signing & crates.io (`system-admin` boundary)**: This workflow does
+  not perform OS binary code signing or publish crates (`publish = false` blocks
+  crates.io publishing). Coordinate with `system-admin` outside this workflow for
+  OS signing or any future crates.io publishing.
+
+## `security.yml`
+
+Runs on pushes/PRs to `dev` and `main`, on a daily `06:00 UTC` schedule, and on
+`workflow_dispatch`:
+- **cargo-audit**: `cargo audit --deny warnings --deny yanked`.
+- **cargo-deny**: Checks advisories, bans, licenses, and sources against
+  `deny.toml` (requires `cargo-deny >= 0.19`) for both the V8 workspace and
+  standalone `vaeljs-lite` (with `-A unmatched-skip`).
+- **gitleaks**: Scans PR commit ranges or full repository history using
+  `.gitleaks.toml`.
+- **codeql**: Runs CodeQL (`security-extended,security-and-quality`) for `rust`
+  and `javascript-typescript`.
