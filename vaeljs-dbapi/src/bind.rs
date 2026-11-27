@@ -401,9 +401,21 @@ impl Compiler<'_> {
                     }
                     return Err(Error::sql("multiple SQL statements are not supported"));
                 }
+                byte if self.dialect == Dialect::Postgres && is_pg_ident_start(byte) => {
+                    let start = index;
+                    index += 1;
+                    while index < self.bytes.len() && is_pg_ident_cont(self.bytes[index]) {
+                        index += 1;
+                    }
+                    self.push_code(&self.sql[start..index]);
+                }
                 _ => {
                     let start = index;
-                    while index < self.bytes.len() && !is_special(self.bytes[index]) {
+                    while index < self.bytes.len()
+                        && !is_special(self.bytes[index])
+                        && !(self.dialect == Dialect::Postgres
+                            && is_pg_ident_start(self.bytes[index]))
+                    {
                         index += 1;
                     }
                     if index == start {
@@ -444,19 +456,13 @@ impl Compiler<'_> {
     fn string_escape(&self, index: usize, delimiter: u8) -> StringEscape {
         match (self.dialect, delimiter) {
             (Dialect::MySql, b'\'' | b'"') => StringEscape::ServerDependent,
-            (Dialect::Postgres, b'\'') if self.explicit_escape_prefix(index) => {
-                StringEscape::Escape
-            }
+            (Dialect::Postgres, b'\'') if self.e_string_prefix(index) => StringEscape::Escape,
             (Dialect::Postgres, b'\'') => StringEscape::ServerDependent,
             (Dialect::Postgres, b'"') | (Dialect::Sqlite | Dialect::Mssql, _) => {
                 StringEscape::Literal
             }
             (Dialect::MySql, _) | (Dialect::Postgres, _) => StringEscape::Literal,
         }
-    }
-
-    fn explicit_escape_prefix(&self, index: usize) -> bool {
-        self.e_string_prefix(index) || self.unicode_escape_prefix(index)
     }
 
     fn e_string_prefix(&self, index: usize) -> bool {
@@ -559,11 +565,17 @@ impl Compiler<'_> {
         Err(Error::sql("unterminated quoted identifier"))
     }
 
-    fn copy_line_comment(&mut self, start: usize) -> usize {
-        let end = self.bytes[start..]
+    fn find_line_comment_end(&self, start: usize) -> usize {
+        self.bytes[start..]
             .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(self.bytes.len(), |offset| start + offset);
+            .position(|byte| {
+                *byte == b'\n' || (self.dialect == Dialect::Postgres && *byte == b'\r')
+            })
+            .map_or(self.bytes.len(), |offset| start + offset)
+    }
+
+    fn copy_line_comment(&mut self, start: usize) -> usize {
+        let end = self.find_line_comment_end(start);
         self.out.push_str(&self.sql[start..end]);
         end
     }
@@ -752,10 +764,7 @@ impl Compiler<'_> {
                 b'-' if self.bytes.get(index + 1) == Some(&b'-')
                     && self.mysql_dash_starts_comment(index) =>
                 {
-                    index = self.bytes[index..]
-                        .iter()
-                        .position(|byte| *byte == b'\n')
-                        .map_or(self.bytes.len(), |offset| index + offset);
+                    index = self.find_line_comment_end(index);
                 }
                 b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
                     if self.executable_comment(index) {
@@ -830,4 +839,12 @@ fn is_ident_start(byte: u8) -> bool {
 
 fn is_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn is_pg_ident_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80
+}
+
+fn is_pg_ident_cont(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || byte >= 0x80
 }

@@ -442,3 +442,60 @@ fn typed_null_keeps_its_declared_type() {
     .expect("compiled");
     assert_eq!(compiled.parameters().len(), 1);
 }
+
+#[test]
+fn postgres_line_comments_terminate_on_bare_carriage_return() {
+    let err = compile(
+        "SELECT 1; -- comment\rDROP TABLE users",
+        &Params::none(),
+        Dialect::Postgres,
+    )
+    .expect_err("bare CR terminates Postgres -- comment before second statement");
+    assert_eq!(err.kind(), ErrorKind::Sql);
+
+    let err_no_semi = compile(
+        "SELECT 1 -- comment\r; DROP TABLE users",
+        &Params::none(),
+        Dialect::Postgres,
+    )
+    .expect_err("bare CR terminates Postgres -- comment before ; DROP");
+    assert_eq!(err_no_semi.kind(), ErrorKind::Sql);
+
+    let compiled = compile("SELECT 1 -- comment\r, @id", &id(9), Dialect::Postgres)
+        .expect("placeholder after bare CR must still bind");
+    assert_eq!(compiled.sql(), "SELECT 1 -- comment\r, $1");
+    assert_eq!(compiled.parameters().len(), 1);
+}
+
+#[test]
+fn postgres_unicode_escape_strings_reject_ambiguous_backslash_quotes() {
+    let err = compile(r"SELECT U&'it\'s @id', @id", &id(1), Dialect::Postgres)
+        .expect_err("U&'...' follows standard_conforming_strings and must reject ambiguous \\'");
+    assert_eq!(err.kind(), ErrorKind::Sql);
+
+    let ok = compile(r"SELECT U&'d\0061t', @id", &id(1), Dialect::Postgres).expect("valid U&");
+    assert_eq!(ok.sql(), r"SELECT U&'d\0061t', $1");
+}
+
+#[test]
+fn postgres_identifier_embedded_dollar_does_not_open_dollar_quote() {
+    let compiled = compile(
+        "SELECT col$a, col$a$, v$session FROM t WHERE x$1 = @id",
+        &id(5),
+        Dialect::Postgres,
+    )
+    .expect("identifiers containing $ must scan cleanly");
+    assert_eq!(
+        compiled.sql(),
+        "SELECT col$a, col$a$, v$session FROM t WHERE x$1 = $1"
+    );
+    assert_eq!(compiled.parameters().len(), 1);
+
+    let err = compile(
+        "SELECT col$a$ FROM t; DROP TABLE x --$a$",
+        &Params::none(),
+        Dialect::Postgres,
+    )
+    .expect_err("col$a$ must not hide ; DROP TABLE as dollar-quoted string");
+    assert_eq!(err.kind(), ErrorKind::Sql);
+}

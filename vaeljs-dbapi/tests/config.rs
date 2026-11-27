@@ -184,3 +184,28 @@ fn parameter_placeholder_is_never_interpolated() {
     assert_eq!(compiled.sql(), "SELECT ?");
     assert_eq!(compiled.parameters().len(), 1);
 }
+
+#[test]
+fn sqlite_config_rejects_uri_prefixes_and_query_flags() {
+    for bad in [
+        "file:app.sqlite",
+        "FILE:app.sqlite",
+        "file::memory:?cache=shared",
+        "file:app.sqlite?mode=ro",
+        "app.sqlite?mode=ro",
+        "app.sqlite?vfs=memdb",
+    ] {
+        let config = DbConfig::sqlite(SqliteConfig::new(bad));
+        let err = config.validate().expect_err(bad);
+        assert_eq!(err.kind(), ErrorKind::Config, "{bad}");
+
+        let json = format!(r#"{{"driver":"sqlite","database":"{bad}"}}"#);
+        let json_err = DbConfig::from_json(&json).expect_err(&json);
+        assert_eq!(json_err.kind(), ErrorKind::Config, "{json}");
+    }
+
+    for ok in [":memory:", "app.sqlite", "/tmp/dir/app.sqlite"] {
+        let config = DbConfig::sqlite(SqliteConfig::new(ok));
+        config.validate().expect(ok);
+    }
+}

@@ -748,3 +748,39 @@ if (txSettled.status === "fulfilled") {
 "#,
     );
 }
+
+#[test]
+fn sqlite_uri_prefixes_and_query_flags_are_rejected_in_js() {
+    run_js(
+        r#"
+import { DbError, open, openSqlite } from "vael:db";
+
+for (const bad of [
+    "file:app.sqlite",
+    "file::memory:?cache=shared",
+    "file:app.sqlite?mode=ro",
+    "app.sqlite?vfs=memdb",
+]) {
+    let err1 = null;
+    try {
+        await openSqlite(bad);
+    } catch (e) {
+        err1 = e;
+    }
+    if (!(err1 instanceof DbError) || err1.code !== "CONFIG") {
+        throw new Error(`expected CONFIG for openSqlite(${bad}), got ${err1}`);
+    }
+
+    let err2 = null;
+    try {
+        await open({ driver: "sqlite", database: bad });
+    } catch (e) {
+        err2 = e;
+    }
+    if (!(err2 instanceof DbError) || err2.code !== "CONFIG") {
+        throw new Error(`expected CONFIG for open(${bad}), got ${err2}`);
+    }
+}
+"#,
+    );
+}

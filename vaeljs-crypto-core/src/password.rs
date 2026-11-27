@@ -143,7 +143,53 @@ impl PasswordError {
     }
 }
 
+/// Derive `length` bytes using PBKDF2-HMAC over `algorithm`, returning a
+/// [`Zeroizing`] buffer that wipes derived key bytes when dropped.
+///
+/// # Example
+///
+/// ```
+/// use vaeljs_crypto_core::hash::HashAlgorithm;
+/// use vaeljs_crypto_core::password::pbkdf2_zeroizing;
+///
+/// let dk = pbkdf2_zeroizing(HashAlgorithm::Sha256, b"passwd", b"salt", 1, 32)?;
+/// assert_eq!(dk.len(), 32);
+/// # Ok::<(), vaeljs_crypto_core::password::PasswordError>(())
+/// ```
+pub fn pbkdf2_zeroizing(
+    algorithm: HashAlgorithm,
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    length: usize,
+) -> Result<Zeroizing<Vec<u8>>, PasswordError> {
+    if iterations == 0 || iterations > MAX_PBKDF2_ITERATIONS {
+        return Err(PasswordError::new(PasswordErrorCode::Range));
+    }
+    if length == 0 || length > MAX_PBKDF2_OUTPUT_BYTES {
+        return Err(PasswordError::new(PasswordErrorCode::Range));
+    }
+    if password.len() > MAX_PBKDF2_INPUT_BYTES || salt.len() > MAX_PBKDF2_INPUT_BYTES {
+        return Err(PasswordError::new(PasswordErrorCode::Limit));
+    }
+
+    let mut output = Zeroizing::new(Vec::new());
+    output
+        .try_reserve_exact(length)
+        .map_err(|_| PasswordError::new(PasswordErrorCode::Limit))?;
+    output.resize(length, 0);
+    match algorithm {
+        HashAlgorithm::Sha256 => pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut output),
+        HashAlgorithm::Sha384 => pbkdf2_hmac::<Sha384>(password, salt, iterations, &mut output),
+        HashAlgorithm::Sha512 => pbkdf2_hmac::<Sha512>(password, salt, iterations, &mut output),
+    }
+    Ok(output)
+}
+
 /// Derive `length` bytes using PBKDF2-HMAC over `algorithm`.
+///
+/// Intermediate allocation is guarded by [`Zeroizing`] during derivation; call
+/// [`pbkdf2_zeroizing`] when the caller also retains the derived key in Rust.
 ///
 /// # Example
 ///
@@ -162,27 +208,8 @@ pub fn pbkdf2(
     iterations: u32,
     length: usize,
 ) -> Result<Vec<u8>, PasswordError> {
-    if iterations == 0 || iterations > MAX_PBKDF2_ITERATIONS {
-        return Err(PasswordError::new(PasswordErrorCode::Range));
-    }
-    if length == 0 || length > MAX_PBKDF2_OUTPUT_BYTES {
-        return Err(PasswordError::new(PasswordErrorCode::Range));
-    }
-    if password.len() > MAX_PBKDF2_INPUT_BYTES || salt.len() > MAX_PBKDF2_INPUT_BYTES {
-        return Err(PasswordError::new(PasswordErrorCode::Limit));
-    }
-
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(length)
-        .map_err(|_| PasswordError::new(PasswordErrorCode::Limit))?;
-    output.resize(length, 0);
-    match algorithm {
-        HashAlgorithm::Sha256 => pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut output),
-        HashAlgorithm::Sha384 => pbkdf2_hmac::<Sha384>(password, salt, iterations, &mut output),
-        HashAlgorithm::Sha512 => pbkdf2_hmac::<Sha512>(password, salt, iterations, &mut output),
-    }
-    Ok(output)
+    let mut output = pbkdf2_zeroizing(algorithm, password, salt, iterations, length)?;
+    Ok(std::mem::take(&mut *output))
 }
 
 /// Hash `password` with bcrypt (`$2b$`) using a fresh 16-byte CSPRNG salt.
@@ -318,6 +345,10 @@ mod tests {
         for (password, salt, iterations, length, expected) in cases {
             let output = pbkdf2(HashAlgorithm::Sha256, password, salt, iterations, length).unwrap();
             assert_eq!(encode_hex(&output), expected);
+            let zeroized: Zeroizing<Vec<u8>> =
+                pbkdf2_zeroizing(HashAlgorithm::Sha256, password, salt, iterations, length)
+                    .unwrap();
+            assert_eq!(&*zeroized, &output);
         }
     }
 

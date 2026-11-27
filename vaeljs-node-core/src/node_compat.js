@@ -4,6 +4,7 @@
     const isV8 = Boolean(host.isV8);
     const MAX_CHILD_ARGS = 4096;
     const MAX_CHILD_ENV = 4096;
+    const MAX_MAX_BUFFER = 64 * 1024 * 1024;
 
     const objectCreate = Object.create;
     const objectKeys = Object.keys;
@@ -23,6 +24,11 @@
     const arrayBufferProto = ArrayBuffer.prototype;
     const callBind = Function.prototype.call.bind(Function.prototype.bind);
     const fnCallBind = (fn) => callBind(Function.prototype.call, fn);
+    const hasOwn = fnCallBind(Object.prototype.hasOwnProperty);
+
+    function ownOpt(obj, key) {
+        return hasOwn(obj, key) ? obj[key] : undefined;
+    }
 
     const taBufferOf = fnCallBind(getOwnPropertyDescriptor(typedArrayProto, "buffer").get);
     const taByteOffsetOf = fnCallBind(getOwnPropertyDescriptor(typedArrayProto, "byteOffset").get);
@@ -834,9 +840,10 @@
         if (options === undefined || options === null) return null;
         if (typeof options === "string") return normalizeEncoding(options);
         if (typeof options === "object") {
-            return options.encoding === undefined || options.encoding === null
+            const rawEnc = ownOpt(options, "encoding");
+            return rawEnc === undefined || rawEnc === null
                 ? null
-                : normalizeEncoding(options.encoding);
+                : normalizeEncoding(rawEnc);
         }
         throw new TypeError("options must be a string or an object");
     }
@@ -849,10 +856,11 @@
             return { encoding: normalizeEncoding(options), append: defaultAppend };
         }
         if (typeof options === "object") {
-            const encoding = options.encoding === undefined || options.encoding === null
+            const rawEnc = ownOpt(options, "encoding");
+            const encoding = rawEnc === undefined || rawEnc === null
                 ? "utf8"
-                : normalizeEncoding(options.encoding);
-            const append = defaultAppend || options.flag === "a";
+                : normalizeEncoding(rawEnc);
+            const append = defaultAppend || ownOpt(options, "flag") === "a";
             return { encoding, append };
         }
         throw new TypeError("options must be a string or an object");
@@ -918,17 +926,17 @@
             return new Stats(host.fsStatSync(toFsPath(path), false));
         },
         readdirSync(path, options) {
-            const withFileTypes = Boolean(options && typeof options === "object" && options.withFileTypes);
+            const withFileTypes = Boolean(options && typeof options === "object" && ownOpt(options, "withFileTypes"));
             const entries = host.fsReaddirSync(toFsPath(path));
             return withFileTypes ? entries.map((e) => new Dirent(e)) : entries.map((e) => e.name);
         },
         mkdirSync(path, options) {
-            const recursive = Boolean(options && typeof options === "object" && options.recursive);
+            const recursive = Boolean(options && typeof options === "object" && ownOpt(options, "recursive"));
             host.fsMkdirSync(toFsPath(path), recursive);
         },
         rmSync(path, options) {
-            const recursive = Boolean(options && typeof options === "object" && options.recursive);
-            const force = Boolean(options && typeof options === "object" && options.force);
+            const recursive = Boolean(options && typeof options === "object" && ownOpt(options, "recursive"));
+            const force = Boolean(options && typeof options === "object" && ownOpt(options, "force"));
             host.fsRmSync(toFsPath(path), recursive, force);
         },
         unlinkSync(path) {
@@ -973,17 +981,17 @@
                 return new Stats(await host.fsStatAsync(toFsPath(path), false));
             },
             async readdir(path, options) {
-                const withFileTypes = Boolean(options && typeof options === "object" && options.withFileTypes);
+                const withFileTypes = Boolean(options && typeof options === "object" && ownOpt(options, "withFileTypes"));
                 const entries = await host.fsReaddirAsync(toFsPath(path));
                 return withFileTypes ? entries.map((e) => new Dirent(e)) : entries.map((e) => e.name);
             },
             async mkdir(path, options) {
-                const recursive = Boolean(options && typeof options === "object" && options.recursive);
+                const recursive = Boolean(options && typeof options === "object" && ownOpt(options, "recursive"));
                 await host.fsMkdirAsync(toFsPath(path), recursive);
             },
             async rm(path, options) {
-                const recursive = Boolean(options && typeof options === "object" && options.recursive);
-                const force = Boolean(options && typeof options === "object" && options.force);
+                const recursive = Boolean(options && typeof options === "object" && ownOpt(options, "recursive"));
+                const force = Boolean(options && typeof options === "object" && ownOpt(options, "force"));
                 await host.fsRmAsync(toFsPath(path), recursive, force);
             },
             async unlink(path) {
@@ -1041,21 +1049,23 @@
                 throw new makeTypeError("args must be an array of strings");
             }
         }
-        if (options.shell) {
+        if (ownOpt(options, "shell")) {
             const err = new makeError("shell execution is disabled in vaeljs");
             defineDataProp(err, "code", "ERR_UNSUPPORTED");
             throw err;
         }
         let cwd;
-        if (options.cwd !== undefined) {
-            cwd = toFsPath(options.cwd);
+        const rawCwd = ownOpt(options, "cwd");
+        if (rawCwd !== undefined) {
+            cwd = toFsPath(rawCwd);
         }
         let env;
-        if (options.env !== undefined) {
-            if (options.env === null || typeof options.env !== "object") {
+        const rawEnv = ownOpt(options, "env");
+        if (rawEnv !== undefined) {
+            if (rawEnv === null || typeof rawEnv !== "object") {
                 throw new makeTypeError("options.env must be an object");
             }
-            const keys = objectKeys(options.env);
+            const keys = objectKeys(rawEnv);
             if (keys.length > MAX_CHILD_ENV) {
                 throw new makeRangeError(`options.env exceeds maximum entries (${MAX_CHILD_ENV})`);
             }
@@ -1063,38 +1073,55 @@
             let envIdx = 0;
             for (let i = 0; i < keys.length; i++) {
                 const key = keys[i];
-                const val = options.env[key];
+                const val = ownOpt(rawEnv, key);
                 if (val !== undefined && val !== null) {
                     env[envIdx++] = [String(key), String(val)];
                 }
             }
         }
         let input;
-        if (options.input !== undefined && options.input !== null) {
-            input = toBytes(options.input, "utf8");
+        const rawInput = ownOpt(options, "input");
+        if (rawInput !== undefined && rawInput !== null) {
+            input = toBytes(rawInput, "utf8");
         }
         let timeoutMs;
-        if (options.timeout !== undefined) {
-            if (typeof options.timeout !== "number" || !numberIsFinite(options.timeout) || options.timeout < 0) {
+        const rawTimeout = ownOpt(options, "timeout");
+        if (rawTimeout !== undefined) {
+            if (typeof rawTimeout !== "number" || !numberIsFinite(rawTimeout) || rawTimeout < 0) {
                 throw new makeRangeError("options.timeout must be a non-negative finite number");
             }
-            timeoutMs = mathTrunc(options.timeout);
+            timeoutMs = mathTrunc(rawTimeout);
         }
         let maxBuffer;
-        if (options.maxBuffer !== undefined) {
-            if (typeof options.maxBuffer !== "number" || !numberIsFinite(options.maxBuffer) || options.maxBuffer < 0) {
-                throw new makeRangeError("options.maxBuffer must be a non-negative finite number");
+        const rawMaxBuffer = ownOpt(options, "maxBuffer");
+        if (rawMaxBuffer !== undefined) {
+            if (
+                typeof rawMaxBuffer !== "number" ||
+                !numberIsFinite(rawMaxBuffer) ||
+                rawMaxBuffer < 0 ||
+                rawMaxBuffer > MAX_MAX_BUFFER
+            ) {
+                throw new makeRangeError(
+                    `options.maxBuffer must be a non-negative finite number <= ${MAX_MAX_BUFFER}`,
+                );
             }
-            maxBuffer = mathTrunc(options.maxBuffer);
+            maxBuffer = mathTrunc(rawMaxBuffer);
         }
         let encoding = null;
-        if (options.encoding !== undefined && options.encoding !== null && options.encoding !== "buffer") {
-            encoding = normalizeEncoding(options.encoding);
+        const rawEncoding = ownOpt(options, "encoding");
+        if (rawEncoding !== undefined && rawEncoding !== null && rawEncoding !== "buffer") {
+            encoding = normalizeEncoding(rawEncoding);
         }
+        const nativeOpts = objectCreate(null);
+        nativeOpts.cwd = cwd;
+        nativeOpts.env = env;
+        nativeOpts.input = input;
+        nativeOpts.timeoutMs = timeoutMs;
+        nativeOpts.maxBuffer = maxBuffer;
         return {
             command,
             args,
-            nativeOpts: { cwd, env, input, timeoutMs, maxBuffer },
+            nativeOpts,
             encoding,
         };
     }
