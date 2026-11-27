@@ -23,6 +23,10 @@ unmaintained = "workspace"
 unused-ignored-advisory = "warn"
 ignore = [
   # Add time-bounded RUSTSEC-* exceptions only with justification, expiry, and tracking issue.
+  # Pulled transitively by neotales-age, neotales-ssh, and neotales-x509 (rsa 0.9.10, Marvin Attack).
+  # vaeljs does not perform RSA PKCS#1 v1.5 decryption (vael:age is X25519-only; vael:ssh only signs
+  # auth challenges); tracked for removal once upstream neotales-* migrates to stable rsa >= 0.10.
+  "RUSTSEC-2023-0071",
 ]
 
 [licenses]
@@ -37,7 +41,6 @@ allow = [
   "BSD-3-Clause",
   "ISC",
   "MPL-2.0",
-  "MPL-2.0+",
   "Unicode-3.0",
   "Zlib",
   "CC0-1.0",
@@ -100,7 +103,6 @@ skip = [
   { name = "pkcs8", version = "0.10.2" },
   { name = "spki", version = "0.7.3" },
   { name = "signature", version = "2.2.0" },
-  { name = "webpki-roots", version = "0.26.11" },
   { name = "windows-sys", version = "0.52.0" },
   { name = "windows-sys", version = "0.59.0" },
   { name = "linux-raw-sys", version = "0.4.15" },
@@ -109,12 +111,8 @@ skip = [
   # Hashing / utility / proc-macro splits:
   { name = "hashbrown", version = "0.14.5" },
   { name = "hashbrown", version = "0.16.1" },
-  { name = "bindgen", version = "0.70.1" },
-  { name = "bit-vec", version = "0.8.0" },
   { name = "cpufeatures", version = "0.2.17" },
   { name = "inout", version = "0.1.4" },
-  { name = "r-efi", version = "5.3.0" },
-  { name = "rustc-hash", version = "1.1.0" },
   { name = "shlex", version = "1.3.0" },
   { name = "siphasher", version = "0.3.11" },
   { name = "syn", version = "2.0.119" },

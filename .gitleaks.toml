@@ -53,3 +53,66 @@ regexes = [
   '''const PKCS8_PEM''',
   '''PEM block''',
 ]
+
+[[allowlists]]
+description = "Invalid all-A age key negative test in age.rs (matched against line because age-secret-key captures 58 Bech32 chars)"
+condition = "AND"
+paths = [
+  '''^(?:vaeljs|neojs)-core/src/age\.rs$''',
+]
+regexTarget = "line"
+regexes = [
+  '''AGE-SECRET-KEY-1A{64}''',
+]
+
+[[allowlists]]
+description = "NIST SP 800-38D AES-256-GCM Case 15 public test vector in crypto envelope tests"
+condition = "AND"
+paths = [
+  '''^(?:vaeljs|neojs)-(?:core/src/crypto|crypto-core/src/(?:envelope|lib))\.rs$''',
+]
+regexes = [
+  '''feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308''',
+]
+
+[[allowlists]]
+description = "Synthetic SSH redaction canary in ssh-core integration tests"
+condition = "AND"
+paths = [
+  '''^(?:vaeljs|neojs)-ssh-core/tests/ssh\.rs$''',
+]
+regexes = [
+  '''UNIQUE-PASSPHRASE-2b8d41''',
+]
+
+[[allowlists]]
+description = "Synthetic .npmrc auth token test fixture in npm_loader tests"
+condition = "AND"
+paths = [
+  '''^vaeljs-core/tests/npm_loader\.rs$''',
+]
+regexes = [
+  '''vael_priv_tok_42''',
+]
+
+[[allowlists]]
+description = "Deterministic build-measurement JSON key and context_key fields in measurements.jsonl"
+condition = "AND"
+paths = [
+  '''^eng/size/measurements\.jsonl$''',
+]
+regexTarget = "match"
+regexes = [
+  '''"?(?:context_)?key":"[A-Za-z0-9._-]+"''',
+]
+
+[[allowlists]]
+description = "Historical V8 source build header SHA-256 checksum in build-bounded.sh"
+condition = "AND"
+paths = [
+  '''^eng/v8-source/build-bounded\.sh$''',
+]
+regexTarget = "match"
+regexes = [
+  '''KEYS_H_SHA=[0-9a-f]{64}''',
+]

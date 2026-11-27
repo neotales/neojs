@@ -1,0 +1,18 @@
+# RustSec advisory policy for `cargo audit --deny warnings --deny yanked`.
+# Only verified non-exploitable or unmaintained upstream transitive advisories
+# present in Cargo.lock are listed here; any new advisory, unmaintained crate,
+# or yanked crate continues to fail the audit gate.
+
+[advisories]
+ignore = [
+  # rsa 0.9.10 (Marvin Attack) via neotales-age / neotales-ssh / neotales-x509;
+  # vaeljs performs no RSA PKCS#1 v1.5 decryption (vael:age is X25519-only,
+  # vael:ssh only signs auth challenges); pending stable rsa >= 0.10 upstream.
+  "RUSTSEC-2023-0071",
+
+  # paste 1.0.15 (unmaintained proc-macro) via v8 150.4.0 -> deno_v8 -> deno_core.
+  "RUSTSEC-2024-0436",
+
+  # smartstring 1.0.1 (unmaintained) via swc_ecma_* -> deno_ast 0.53.3.
+  "RUSTSEC-2026-0249",
+]
