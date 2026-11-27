@@ -749,3 +749,315 @@ fn age_missing_export_is_a_link_error() {
     );
     assert!(message.contains("vael:age"), "{message}");
 }
+
+/// Official C2SP/CCTV `age` test vector suite (`tests/fixtures/age_cctv/testdata/`).
+///
+/// Accounts for every vector in the 147-file corpus against `vael:age`'s documented
+/// binary X25519 v1 contract:
+/// - 66 binary X25519 / header / HMAC / stanza / STREAM / version vectors (including
+///   `scrypt_and_x25519` and `hybrid_x25519_arg`, which include an X25519 identity) execute
+///   directly through `vael:age`'s `decrypt()` (`success` vectors verify SHA-256 against
+///   `payload`).
+/// - 37 `armored: yes` vectors are asserted to fail with `VAEL_AGE_FORMAT` (`vael:age` is
+///   binary-only and does not implement ASCII armor).
+/// - 3 oversize STREAM vectors (`stream_257_chunks`, `stream_257_chunks_full`,
+///   `stream_258_chunks`, ~16.8 MiB) are asserted to fail with `VAEL_AGE_LIMIT` because
+///   `vael:age` enforces `MAX_CIPHERTEXT_BYTES` (9 MiB) and `MAX_PLAINTEXT_BYTES` (8 MiB).
+/// - 24 pure binary `scrypt` passphrase vectors are excluded because `vael:age` has no
+///   passphrase API (`armor_scrypt` is counted under `armored`, and `scrypt_and_x25519` is
+///   executed under `binary_x25519_executed`).
+/// - 17 pure binary `mlkem768x25519` hybrid PQ vectors are excluded because `vael:age` is
+///   X25519-only (`AGE-SECRET-KEY-PQ-1...` is asserted to fail with `VAEL_AGE_UNSUPPORTED`).
+mod cctv {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::io::Read;
+    use std::path::Path;
+
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use flate2::read::ZlibDecoder;
+    use vaeljs_core::Runtime;
+
+    #[derive(Debug)]
+    struct CctvVector {
+        name: String,
+        expect: String,
+        payload_sha256: Option<String>,
+        identities: Vec<String>,
+        passphrases: Vec<String>,
+        armored: bool,
+        body: Vec<u8>,
+    }
+
+    fn load_cctv_vectors() -> Vec<CctvVector> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/age_cctv/testdata");
+        let mut entries: Vec<_> = fs::read_dir(&dir)
+            .expect("read age_cctv/testdata")
+            .map(|entry| entry.expect("dir entry").path())
+            .filter(|path| path.is_file())
+            .collect();
+        entries.sort();
+
+        assert_eq!(
+            entries.len(),
+            147,
+            "expected all 147 official C2SP/CCTV age test vectors"
+        );
+
+        entries
+            .into_iter()
+            .map(|path| {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .expect("utf-8 filename")
+                    .to_string();
+                let raw = fs::read(&path).expect("read vector");
+                let sep = raw
+                    .windows(2)
+                    .position(|w| w == b"\n\n")
+                    .expect("vector header/body separator");
+                let header = std::str::from_utf8(&raw[..sep]).expect("utf-8 vector header");
+                let mut body = raw[sep + 2..].to_vec();
+
+                let mut expect = None;
+                let mut payload_sha256 = None;
+                let mut identities = Vec::new();
+                let mut passphrases = Vec::new();
+                let mut armored = false;
+                let mut compressed = false;
+
+                for line in header.lines() {
+                    let (key, value) = line.split_once(": ").expect("header key: value");
+                    match key {
+                        "expect" => expect = Some(value.to_string()),
+                        "payload" => payload_sha256 = Some(value.to_string()),
+                        "identity" => identities.push(value.to_string()),
+                        "passphrase" => passphrases.push(value.to_string()),
+                        "armored" => armored = value == "yes",
+                        "compressed" => {
+                            assert_eq!(value, "zlib", "{name}: unsupported compression {value}");
+                            compressed = true;
+                        }
+                        "file key" | "comment" => {}
+                        other => panic!("{name}: unknown CCTV header key {other:?}"),
+                    }
+                }
+
+                if compressed {
+                    let mut decoder = ZlibDecoder::new(body.as_slice());
+                    let mut decompressed = Vec::new();
+                    decoder.read_to_end(&mut decompressed).expect("zlib decode");
+                    body = decompressed;
+                }
+
+                CctvVector {
+                    name,
+                    expect: expect.expect("expect header"),
+                    payload_sha256,
+                    identities,
+                    passphrases,
+                    armored,
+                    body,
+                }
+            })
+            .collect()
+    }
+
+    const JS_HELPERS: &str = r#"
+import { decrypt } from "vael:age";
+import { createHash } from "vael:crypto";
+
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64_LUT = new Int16Array(128).fill(-1);
+for (let i = 0; i < B64.length; i++) B64_LUT[B64.charCodeAt(i)] = i;
+
+export function decodeBase64(text) {
+    if (text.length === 0) return new Uint8Array(0);
+    let pad = 0;
+    if (text.endsWith("==")) pad = 2;
+    else if (text.endsWith("=")) pad = 1;
+    const outLen = (text.length / 4) * 3 - pad;
+    const out = new Uint8Array(outLen);
+    let o = 0;
+    for (let i = 0; i < text.length; i += 4) {
+        const a = B64_LUT[text.charCodeAt(i)];
+        const b = B64_LUT[text.charCodeAt(i + 1)];
+        const c = text[i + 2] === "=" ? 0 : B64_LUT[text.charCodeAt(i + 2)];
+        const d = text[i + 3] === "=" ? 0 : B64_LUT[text.charCodeAt(i + 3)];
+        const n = (a << 18) | (b << 12) | (c << 6) | d;
+        if (o < outLen) out[o++] = (n >> 16) & 255;
+        if (o < outLen) out[o++] = (n >> 8) & 255;
+        if (o < outLen) out[o++] = n & 255;
+    }
+    return out;
+}
+
+export function sha256Hex(bytes) {
+    return createHash("sha256").update(bytes).digest("hex");
+}
+
+export { decrypt };
+"#;
+
+    const FALLBACK_X25519_IDENTITY: &str =
+        "AGE-SECRET-KEY-1EGTZVFFV20835NWYV6270LXYVK2VKNX2MMDKWYKLMGR48UAWX40Q2P2LM0";
+
+    fn run_js_cases(cases: &[(&CctvVector, &[&str])]) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(dir.path().join("helpers.mjs"), JS_HELPERS).expect("write helpers");
+
+        let mut script = String::from(
+            "import { decodeBase64, decrypt, sha256Hex } from \"./helpers.mjs\";\nconst failures = [];\n",
+        );
+
+        for (vec, expected_codes) in cases.iter() {
+            let b64 = STANDARD.encode(&vec.body);
+            let x25519_ids: Vec<&str> = vec
+                .identities
+                .iter()
+                .filter(|id| id.starts_with("AGE-SECRET-KEY-1"))
+                .map(String::as_str)
+                .collect();
+            let id_to_use = x25519_ids
+                .first()
+                .copied()
+                .unwrap_or(FALLBACK_X25519_IDENTITY);
+            let id_json = serde_json::to_string(id_to_use).unwrap();
+            let name_json = serde_json::to_string(&vec.name).unwrap();
+            let expect_json = serde_json::to_string(&vec.expect).unwrap();
+            let codes_json = serde_json::to_string(expected_codes).unwrap();
+            let payload_json = serde_json::to_string(&vec.payload_sha256).unwrap();
+
+            script.push_str(&format!(
+                r#"{{
+    const name = {name_json};
+    const expectOutcome = {expect_json};
+    const allowedCodes = {codes_json};
+    const expectedHash = {payload_json};
+    const bytes = decodeBase64("{b64}");
+    try {{
+        const pt = decrypt({id_json}, bytes);
+        if (!allowedCodes.includes("OK")) {{
+            failures.push(`${{name}} (expect ${{expectOutcome}}): unexpectedly decrypted ${{pt.length}} bytes`);
+        }} else if (expectedHash !== null) {{
+            const actualHash = sha256Hex(pt);
+            if (actualHash !== expectedHash) {{
+                failures.push(`${{name}}: payload sha256 mismatch: got ${{actualHash}}, expected ${{expectedHash}}`);
+            }}
+        }}
+    }} catch (err) {{
+        if (!allowedCodes.includes(err.code)) {{
+            failures.push(`${{name}} (expect ${{expectOutcome}}): got ${{err.code}} (${{err.message}}), expected one of ${{JSON.stringify(allowedCodes)}}`);
+        }}
+    }}
+}}
+"#,
+            ));
+        }
+        script.push_str("if (failures.length > 0) throw new Error(failures.join(\"\\n\"));\n");
+
+        let main = dir.path().join("main.mjs");
+        fs::write(&main, script).expect("write main");
+        let mut runtime = Runtime::new().expect("runtime");
+        if let Err(err) = runtime.run_file(&main) {
+            panic!("CCTV vector assertions failed:\n{err}");
+        }
+    }
+
+    #[test]
+    fn age_cctv_corpus_audit_and_compliance() {
+        let vectors = load_cctv_vectors();
+        let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut binary_cases: Vec<(&CctvVector, &[&str])> = Vec::new();
+        let mut armor_cases: Vec<(&CctvVector, &[&str])> = Vec::new();
+        let mut pq_only_vectors: Vec<&CctvVector> = Vec::new();
+
+        const MAX_VAEL_CIPHERTEXT: usize = 9 * 1024 * 1024;
+
+        for vec in &vectors {
+            let has_x25519_id = vec
+                .identities
+                .iter()
+                .any(|id| id.starts_with("AGE-SECRET-KEY-1"));
+            let has_pq_id = vec
+                .identities
+                .iter()
+                .any(|id| id.starts_with("AGE-SECRET-KEY-PQ-1"));
+
+            if vec.armored {
+                // vael:age is binary-only and rejects ASCII armor before header parsing.
+                *counts.entry("armored_rejected_as_format").or_default() += 1;
+                armor_cases.push((vec, &["VAEL_AGE_FORMAT"]));
+            } else if !vec.passphrases.is_empty() && !has_x25519_id {
+                // Excluded: pure scrypt passphrase vectors (vael:age has no passphrase API).
+                *counts.entry("excluded_scrypt_passphrase").or_default() += 1;
+            } else if has_pq_id && !has_x25519_id {
+                // Excluded: ML-KEM-768+X25519 PQ hybrid vectors (vael:age is X25519-only).
+                *counts.entry("excluded_pq_hybrid").or_default() += 1;
+                pq_only_vectors.push(vec);
+            } else if vec.body.len() > MAX_VAEL_CIPHERTEXT {
+                // vael:age enforces MAX_CIPHERTEXT_BYTES (9 MiB) before parsing.
+                *counts.entry("oversize_rejected_as_limit").or_default() += 1;
+                binary_cases.push((vec, &["VAEL_AGE_LIMIT"]));
+            } else {
+                *counts.entry("binary_x25519_executed").or_default() += 1;
+                let expected: &[&str] = match vec.expect.as_str() {
+                    "success" => &["OK"],
+                    "no match" => &["VAEL_AGE_IDENTITY_MISMATCH"],
+                    "HMAC failure" => &["VAEL_AGE_AUTH"],
+                    "header failure" => &["VAEL_AGE_FORMAT"],
+                    "payload failure" => &["VAEL_AGE_AUTH", "VAEL_AGE_FORMAT"],
+                    other => panic!("{}: unexpected expect value {other:?}", vec.name),
+                };
+                binary_cases.push((vec, expected));
+            }
+        }
+
+        // Verify exact accounting of all 147 CCTV vectors.
+        let total: usize = counts.values().sum();
+        assert_eq!(total, 147, "accounting mismatch: {counts:?}");
+        assert_eq!(counts.get("binary_x25519_executed").copied(), Some(66));
+        assert_eq!(counts.get("armored_rejected_as_format").copied(), Some(37));
+        assert_eq!(counts.get("excluded_scrypt_passphrase").copied(), Some(24));
+        assert_eq!(counts.get("excluded_pq_hybrid").copied(), Some(17));
+        assert_eq!(counts.get("oversize_rejected_as_limit").copied(), Some(3));
+
+        run_js_cases(&binary_cases);
+        run_js_cases(&armor_cases);
+
+        // Verify PQ hybrid identities are explicitly rejected with VAEL_AGE_UNSUPPORTED.
+        let pq_dir = tempfile::tempdir().expect("temp dir");
+        fs::write(pq_dir.path().join("helpers.mjs"), JS_HELPERS).expect("write helpers");
+        let pq_id = pq_only_vectors
+            .iter()
+            .flat_map(|v| v.identities.iter())
+            .find(|id| id.starts_with("AGE-SECRET-KEY-PQ-1"))
+            .expect("at least one PQ identity");
+        let pq_body = STANDARD.encode(&pq_only_vectors[0].body);
+        let pq_main = pq_dir.path().join("main.mjs");
+        fs::write(
+            &pq_main,
+            format!(
+                r#"import {{ decodeBase64, decrypt }} from "./helpers.mjs";
+const bytes = decodeBase64("{pq_body}");
+let code;
+try {{
+    decrypt("{pq_id}", bytes);
+}} catch (err) {{
+    code = err.code;
+}}
+if (code !== "VAEL_AGE_UNSUPPORTED") {{
+    throw new Error("expected VAEL_AGE_UNSUPPORTED for PQ identity, got " + code);
+}}
+"#
+            ),
+        )
+        .expect("write pq main");
+        Runtime::new()
+            .expect("runtime")
+            .run_file(&pq_main)
+            .expect("PQ identity rejection");
+    }
+}

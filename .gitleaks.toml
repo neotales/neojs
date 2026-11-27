@@ -17,6 +17,20 @@ regexes = [
 ]
 
 [[allowlists]]
+description = "Published C2SP/CCTV age test vector keys in vendored CCTV corpus and age tests"
+condition = "AND"
+paths = [
+  '''^vaeljs-core/tests/age\.rs$''',
+  '''^vaeljs-core/tests/fixtures/age_cctv/testdata/''',
+]
+regexes = [
+  '''AGE-SECRET-KEY-143WN7DCXU4G8R5AXQSSYD9AEPYDNT3HXSLWSPK36CDU6E8M59SSSAGZ3KG''',
+  '''AGE-SECRET-KEY-1EGTZVFFV20835NWYV6270LXYVK2VKNX2MMDKWYKLMGR48UAWX40Q2P2LM0''',
+  '''AGE-SECRET-KEY-PQ-143WN7DCXU4G8R5AXQSSYD9AEPYDNT3HXSLWSPK36CDU6E8M59SSS8XZSCQ''',
+  '''AGE-SECRET-KEY-PQ-1HZLGZUPT4ETPKDEV8HSGFDCYZ4E522W0A7PU2LHT8EH9W6YLNC3SW78XKG''',
+]
+
+[[allowlists]]
 description = "Encrypted OpenSSH test fixture in vaeljs-lite-core SSH tests"
 condition = "AND"
 paths = [

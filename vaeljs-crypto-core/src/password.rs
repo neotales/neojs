@@ -375,6 +375,148 @@ mod tests {
         }
     }
 
+    // Unit test: RFC 6070 pattern adapted to SHA-256 / SHA-512, multi-block dkLen > hLen, and > block-size passwords.
+    #[test]
+    fn published_rfc6070_and_multiblock_pbkdf2_vectors_match() {
+        type Case = (
+            &'static str,
+            HashAlgorithm,
+            &'static [u8],
+            &'static [u8],
+            u32,
+            usize,
+            &'static str,
+        );
+        const LONG_SHA256_PW: [u8; 131] = [b'x'; 131];
+        const LONG_SHA512_PW: [u8; 131] = [b'y'; 131];
+        let long_sha512_salt = b"saltsaltsaltsaltsaltsaltsaltsaltsaltsalt";
+        let cases: [Case; 12] = [
+            (
+                "rfc6070-sha256 c=1",
+                HashAlgorithm::Sha256,
+                b"password",
+                b"salt",
+                1,
+                32,
+                "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b",
+            ),
+            (
+                "rfc6070-sha256 c=2",
+                HashAlgorithm::Sha256,
+                b"password",
+                b"salt",
+                2,
+                32,
+                "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43",
+            ),
+            (
+                "rfc6070-sha256 c=4096",
+                HashAlgorithm::Sha256,
+                b"password",
+                b"salt",
+                4096,
+                32,
+                "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a",
+            ),
+            (
+                "rfc6070-sha256 dkLen=40 > hLen=32 (INT(i)>=2)",
+                HashAlgorithm::Sha256,
+                b"passwordPASSWORDpassword",
+                b"saltSALTsaltSALTsaltSALTsaltSALTsalt",
+                4096,
+                40,
+                "348c89dbcbd32b2f32d814b8116e84cf2b17347ebc1800181c4e2a1fb8dd53e1c635518c7dac47e9",
+            ),
+            (
+                "rfc6070-sha256 embedded NUL",
+                HashAlgorithm::Sha256,
+                b"pass\0word",
+                b"sa\0lt",
+                4096,
+                16,
+                "89b69d0516f829893c696226650a8687",
+            ),
+            (
+                "sha256 password > 64B block and dkLen=96 (3 blocks)",
+                HashAlgorithm::Sha256,
+                &LONG_SHA256_PW,
+                b"salt",
+                16,
+                96,
+                "04892fc73a33c4b29eac633381ea18a80b13e815a53b81592bd762095dc3a47369e814284506ff74f1b1a722588114beb56fbccd812ae24e269a4b06c12b15a713e872f17d14b840770f7107f794306635b7e3a9677031a8fc9ec3375fe559f8",
+            ),
+            (
+                "rfc6070-sha512 c=1",
+                HashAlgorithm::Sha512,
+                b"password",
+                b"salt",
+                1,
+                64,
+                "867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5d513554e1c8cf252c02d470a285a0501bad999bfe943c08f050235d7d68b1da55e63f73b60a57fce",
+            ),
+            (
+                "rfc6070-sha512 c=2",
+                HashAlgorithm::Sha512,
+                b"password",
+                b"salt",
+                2,
+                64,
+                "e1d9c16aa681708a45f5c7c4e215ceb66e011a2e9f0040713f18aefdb866d53cf76cab2868a39b9f7840edce4fef5a82be67335c77a6068e04112754f27ccf4e",
+            ),
+            (
+                "rfc6070-sha512 c=4096",
+                HashAlgorithm::Sha512,
+                b"password",
+                b"salt",
+                4096,
+                64,
+                "d197b1b33db0143e018b12f3d1d1479e6cdebdcc97c5c0f87f6902e072f457b5143f30602641b3d55cd335988cb36b84376060ecd532e039b742a239434af2d5",
+            ),
+            (
+                "rfc6070-sha512 dkLen=80 > hLen=64 (INT(i)>=2)",
+                HashAlgorithm::Sha512,
+                b"passwordPASSWORDpassword",
+                b"saltSALTsaltSALTsaltSALTsaltSALTsalt",
+                4096,
+                80,
+                "8c0511f4c6e597c6ac6315d8f0362e225f3c501495ba23b868c005174dc4ee71115b59f9e60cd9532fa33e0f75aefe30225c583a186cd82bd4daea9724a3d3b804f75bdd41494fa324cab24bcc680fb3",
+            ),
+            (
+                "rfc6070-sha512 embedded NUL",
+                HashAlgorithm::Sha512,
+                b"pass\0word",
+                b"sa\0lt",
+                4096,
+                64,
+                "9d9e9c4cd21fe4be24d5b8244c759665f39d98fc12a9ca759bb021db3cfadf345844aebe70dd8b2f6966f25f3613e1187bbd24ed2ca43ed13b246e4675be7ab9",
+            ),
+            (
+                "sha512 password > 128B block and dkLen=160 (3 blocks)",
+                HashAlgorithm::Sha512,
+                &LONG_SHA512_PW,
+                long_sha512_salt,
+                16,
+                160,
+                "bb6ee1aef596780c7969ac6eaa60a11f9e2464fae90586bcb6b6400c2b68776f80ddcac20af45d3786a4b23143b3cf51d110fa8368dfc611a77d250bea2bbb49cac4f15806dbb4886a046380ba7fc0dd5d0fbedd82ec0afcd06004596cf83e3c6b24d5faef9ec7c5f8714fabe3733f251e002ca87084797f0a276515b30f3cf80ba337ec569ea92f5069b1d2f9736e096cd295de5648bc4efac5c287920c0049",
+            ),
+        ];
+
+        for (label, algorithm, password, salt, iterations, length, expected) in cases {
+            let output = pbkdf2(algorithm, password, salt, iterations, length).unwrap();
+            assert_eq!(encode_hex(&output), expected, "{label}");
+            let zeroized = pbkdf2_zeroizing(algorithm, password, salt, iterations, length).unwrap();
+            assert_eq!(&*zeroized, &output, "{label} zeroizing");
+        }
+
+        // RFC 6070 Case 4 uses 16,777,216 iterations, above MAX_PBKDF2_ITERATIONS (1,000,000).
+        assert_eq!(
+            pbkdf2(HashAlgorithm::Sha256, b"password", b"salt", 16_777_216, 32)
+                .unwrap_err()
+                .code(),
+            PasswordErrorCode::Range
+        );
+    }
+
     // Unit test: codec exact-bytes handling for NUL and UTF-8 inputs.
     #[test]
     fn nul_and_unicode_inputs_are_exact_bytes() {
@@ -533,6 +675,108 @@ mod tests {
         ));
         let non_ascii = valid.replace('X', "\u{012f}");
         assert!(!bcrypt_verify(b"allmine", &non_ascii));
+    }
+
+    // Unit test: Openwall crypt_blowfish bcrypt KATs across $2a$/$2b$/$2y$, 8-bit chars,
+    // 72-byte boundary, cost edge 04, NUL byte handling, and explicit $2x$ rejection.
+    #[test]
+    fn openwall_crypt_blowfish_kats_match_and_reject_2x() {
+        // Published Openwall crypt_blowfish test vectors.
+        let openwall_cases: [(&[u8], &str); 7] = [
+            (
+                b"",
+                "$2a$05$CCCCCCCCCCCCCCCCCCCCC.7uG0VCzI2bS7j6ymqJi9CdcdxiRTWNy",
+            ),
+            (
+                b"\0",
+                "$2a$05$CCCCCCCCCCCCCCCCCCCCC.7uG0VCzI2bS7j6ymqJi9CdcdxiRTWNy",
+            ),
+            (
+                b"U*U",
+                "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW",
+            ),
+            (
+                b"U*U*",
+                "$2a$05$CCCCCCCCCCCCCCCCCCCCC.VGOzA784oUp/Z0DY336zx7pLYAy0lwK",
+            ),
+            (
+                b"U*U*U",
+                "$2a$05$CCCCCCCCCCCCCCCCCCCCC.Bw3BobdGs1SFsKsRLIx9rC4T.Q7DtEm",
+            ),
+            (
+                b"U*U*U*",
+                "$2a$05$XXXXXXXXXXXXXXXXXXXXXO0zuuJUswEmdYFjLNaL6bchKRoDkpBe.",
+            ),
+            (
+                b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                "$2a$05$abcdefghijklmnopqrstuu5s2v8.iXieOjg/.AySBTTZIIVFJeBui",
+            ),
+        ];
+        for (password, hash) in openwall_cases {
+            assert!(bcrypt_verify(password, hash), "openwall vector {hash}");
+        }
+
+        // Openwall's 73+ byte vector is rejected rather than silently truncated.
+        let over_72 = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789chars after 72 are ignored";
+        assert!(!bcrypt_verify(
+            over_72,
+            "$2a$05$abcdefghijklmnopqrstuu5s2v8.iXieOjg/.AySBTTZIIVFJeBui"
+        ));
+        assert_eq!(
+            bcrypt_hash(over_72, 5).unwrap_err().code(),
+            PasswordErrorCode::Limit
+        );
+
+        // Cost edge 04 across $2a$, $2b$, and $2y$ with an all-zero salt.
+        let zero_salt = [0u8; 16];
+        let cost4_hash = "$2b$04$......................qiOQjkB8hxU8OzRhS.GhRMa4VUnkPty";
+        assert_eq!(
+            bcrypt_hash_with_salt(b"test", 4, zero_salt).unwrap(),
+            cost4_hash
+        );
+        for version in ["2a", "2b", "2y"] {
+            let vhash =
+                format!("${version}$04$......................qiOQjkB8hxU8OzRhS.GhRMa4VUnkPty");
+            assert!(bcrypt_verify(b"test", &vhash), "cost 04 {version}");
+        }
+
+        // Openwall 8-bit character vectors ($2a$, $2b$, $2y$).
+        for version in ["2a", "2b", "2y"] {
+            let single_byte =
+                format!("${version}$05$......................8gqRJRps9cXtUASBfXm8yg/yGAetTF6");
+            assert!(bcrypt_verify(b"\xa3", &single_byte), "0xa3 {version}");
+        }
+        for version in ["2b", "2y"] {
+            let multi_byte =
+                format!("${version}$05$......................LX0xAAeeY9g0Guf20ELnJ4uqI6OPZ2.");
+            assert!(
+                bcrypt_verify(b"\xff\xff\xa3", &multi_byte),
+                "0xff_ff_a3 {version}"
+            );
+        }
+
+        // Explicit $2x$ rejection (even for hashes matching the Openwall $2x$ sign-extension digest).
+        for bad_2x in [
+            "$2x$05$......................LX0xAAeeY9g0Guf20ELnJ4uqI6OPZ2.",
+            "$2x$05$......................8gqRJRps9cXtUASBfXm8yg/yGAetTF6",
+            "$2x$10$XajjQvNhvvRt5GSeFk1xFeyqRrsxkhBkUiQeg0dt.wU1qD4aFDcga",
+        ] {
+            assert!(!is_valid_bcrypt_hash(bad_2x), "must reject $2x$: {bad_2x}");
+        }
+        assert!(!bcrypt_verify(
+            b"\xa3",
+            "$2x$05$......................LX0xAAeeY9g0Guf20ELnJ4uqI6OPZ2."
+        ));
+        assert!(!bcrypt_verify(
+            b"\xff\xff\xa3",
+            "$2x$05$......................LX0xAAeeY9g0Guf20ELnJ4uqI6OPZ2."
+        ));
+
+        // vaeljs-crypto-core treats passwords as exact byte slices (not NUL-terminated C strings):
+        // b"ab" matches its hash, while b"ab\0cd" does NOT truncate to b"ab".
+        let ab_hash = "$2b$04$......................6SF/NoCiwx2tCeR6R7XScy9m84sMSPi";
+        assert!(bcrypt_verify(b"ab", ab_hash));
+        assert!(!bcrypt_verify(b"ab\0cd", ab_hash));
     }
 
     // Unit test: bounds check for 72-byte password limit and cost range.

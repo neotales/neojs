@@ -809,6 +809,133 @@ mod tests {
         }
     }
 
+    // Unit test: published RFC 4231 HMAC test vectors Cases 4-7, including 131-byte keys > block size.
+    #[test]
+    fn published_rfc4231_cases_4_to_7_match() {
+        let case4_key = decode_hex("0102030405060708090a0b0c0d0e0f10111213141516171819");
+        let case6_data = b"Test Using Larger Than Block-Size Key - Hash Key First";
+        let case7_data = b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.";
+
+        type HmacCase = (
+            &'static str,
+            Vec<u8>,
+            &'static [u8],
+            HashAlgorithm,
+            &'static str,
+        );
+        let cases: [HmacCase; 12] = [
+            // Case 4 (25-byte key, 50-byte 0xcd data)
+            (
+                "case 4 sha256",
+                case4_key.clone(),
+                &[0xcd; 50],
+                HashAlgorithm::Sha256,
+                "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b",
+            ),
+            (
+                "case 4 sha384",
+                case4_key.clone(),
+                &[0xcd; 50],
+                HashAlgorithm::Sha384,
+                "3e8a69b7783c25851933ab6290af6ca77a9981480850009cc5577c6e1f573b4e6801dd23c4a7d679ccf8a386c674cffb",
+            ),
+            (
+                "case 4 sha512",
+                case4_key,
+                &[0xcd; 50],
+                HashAlgorithm::Sha512,
+                "b0ba465637458c6990e5a8c5f61d4af7e576d97ff94b872de76f8050361ee3dba91ca5c11aa25eb4d679275cc5788063a5f19741120c4f2de2adebeb10a298dd",
+            ),
+            // Case 5 (test with truncation; RFC 4231 notes 128-bit prefix is first 32 hex chars)
+            (
+                "case 5 sha256",
+                vec![0x0c; 20],
+                b"Test With Truncation",
+                HashAlgorithm::Sha256,
+                "a3b6167473100ee06e0c796c2955552bfa6f7c0a6a8aef8b93f860aab0cd20c5",
+            ),
+            (
+                "case 5 sha384",
+                vec![0x0c; 20],
+                b"Test With Truncation",
+                HashAlgorithm::Sha384,
+                "3abf34c3503b2a23a46efc619baef897f4c8e42c934ce55ccbae9740fcbc1af4ca62269e2a37cd88ba926341efe4aeea",
+            ),
+            (
+                "case 5 sha512",
+                vec![0x0c; 20],
+                b"Test With Truncation",
+                HashAlgorithm::Sha512,
+                "415fad6271580a531d4179bc891d87a650188707922a4fbb36663a1eb16da008711c5b50ddd0fc235084eb9d3364a1454fb2ef67cd1d29fe6773068ea266e96b",
+            ),
+            // Case 6 (131-byte key > 64-byte SHA-256 and 128-byte SHA-384/512 block sizes)
+            (
+                "case 6 sha256",
+                vec![0xaa; 131],
+                case6_data,
+                HashAlgorithm::Sha256,
+                "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
+            ),
+            (
+                "case 6 sha384",
+                vec![0xaa; 131],
+                case6_data,
+                HashAlgorithm::Sha384,
+                "4ece084485813e9088d2c63a041bc5b44f9ef1012a2b588f3cd11f05033ac4c60c2ef6ab4030fe8296248df163f44952",
+            ),
+            (
+                "case 6 sha512",
+                vec![0xaa; 131],
+                case6_data,
+                HashAlgorithm::Sha512,
+                "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598",
+            ),
+            // Case 7 (131-byte key + 152-byte data > block size for all three digests)
+            (
+                "case 7 sha256",
+                vec![0xaa; 131],
+                case7_data,
+                HashAlgorithm::Sha256,
+                "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2",
+            ),
+            (
+                "case 7 sha384",
+                vec![0xaa; 131],
+                case7_data,
+                HashAlgorithm::Sha384,
+                "6617178e941f020d351e2f254e8fd32c602420feb0b8fb9adccebb82461e99c5a678cc31e799176d3860e6110c46523e",
+            ),
+            (
+                "case 7 sha512",
+                vec![0xaa; 131],
+                case7_data,
+                HashAlgorithm::Sha512,
+                "e37b6a775dc87dbaa4dfa9f96e5e3ffddebd71f8867289865df5a32d20cdc944b6022cac3c4982b10d5eeb55c3e4de15134676fb6de0446065c97440fa8c6a58",
+            ),
+        ];
+
+        for (label, key, data, algorithm, expected) in cases {
+            let mut state = HmacHasher::new(algorithm, &key).unwrap();
+            let split = data.len() / 2;
+            state.update(&data[..split]).unwrap();
+            state.update(&data[split..]).unwrap();
+            let raw = state.finalize();
+            assert_eq!(encode_hex(&raw), expected, "{label} incremental");
+            assert_eq!(
+                hmac(algorithm, &key, data, OutputEncoding::Hex).unwrap(),
+                expected.as_bytes(),
+                "{label} single-shot"
+            );
+            if label.starts_with("case 5 ") {
+                assert_eq!(
+                    &encode_hex(&raw[..16]),
+                    &expected[..32],
+                    "{label} 128-bit prefix"
+                );
+            }
+        }
+    }
+
     // Unit test: edge case for zero-length HMAC key.
     #[test]
     fn empty_hmac_key_is_accepted() {
