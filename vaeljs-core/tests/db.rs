@@ -784,3 +784,280 @@ for (const bad of [
 "#,
     );
 }
+
+#[test]
+fn wal_concurrent_readers_writers_and_busy_contention() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_path = dir.path().join("wal-js.sqlite");
+    let db_path_json = serde_json::to_string(db_path.to_str().expect("utf8 path")).unwrap();
+
+    run_js(&format!(
+        r#"
+import {{ DbError, open }} from "vael:db";
+
+const dbPath = {db_path_json};
+const db = await open({{
+    driver: "sqlite",
+    database: dbPath,
+    max_connections: 4,
+    busy_timeout_ms: 2000,
+}});
+
+const walRow = await db.queryOne("PRAGMA journal_mode = WAL");
+if (!walRow || walRow.journal_mode !== "wal") {{
+    throw new Error(`expected WAL journal_mode, got ${{JSON.stringify(walRow)}}`);
+}}
+
+await db.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, worker INTEGER NOT NULL, seq INTEGER NOT NULL)");
+
+// Concurrent writers + readers across the WAL pool.
+const tasks = [];
+for (let worker = 0; worker < 4; worker++) {{
+    tasks.push((async () => {{
+        for (let seq = 0; seq < 20; seq++) {{
+            await db.execute(
+                "INSERT INTO events (id, worker, seq) VALUES (@id, @worker, @seq)",
+                {{ id: worker * 100 + seq, worker, seq }},
+            );
+        }}
+    }})());
+}}
+for (let reader = 0; reader < 4; reader++) {{
+    tasks.push((async () => {{
+        for (let i = 0; i < 15; i++) {{
+            const row = await db.queryOne("SELECT COUNT(*) AS n FROM events");
+            if (!row || row.n < 0 || row.n > 80) {{
+                throw new Error(`unexpected concurrent read count: ${{JSON.stringify(row)}}`);
+            }}
+        }}
+    }})());
+}}
+await Promise.all(tasks);
+
+const afterBulk = await db.queryOne("SELECT COUNT(*) AS n FROM events");
+if (!afterBulk || afterBulk.n !== 80) {{
+    throw new Error(`expected 80 rows after concurrent writes, got ${{JSON.stringify(afterBulk)}}`);
+}}
+
+// Contention check with a second pool having short busy_timeout_ms.
+const dbShort = await open({{
+    driver: "sqlite",
+    database: dbPath,
+    max_connections: 1,
+    busy_timeout_ms: 25,
+}});
+
+let notifyLocked;
+const lockHeld = new Promise((r) => {{ notifyLocked = r; }});
+let releaseLock;
+const unlockGate = new Promise((r) => {{ releaseLock = r; }});
+
+const writerTx = db.transaction(async (tx) => {{
+    await tx.execute("INSERT INTO events (id, worker, seq) VALUES (999, 9, 9)");
+    notifyLocked();
+    await unlockGate;
+}});
+
+await lockHeld;
+
+// Reader on dbShort reads committed WAL snapshot without blocking on writerTx.
+const snap = await dbShort.queryOne("SELECT COUNT(*) AS n FROM events");
+if (!snap || snap.n !== 80) {{
+    throw new Error(`expected WAL snapshot count 80, got ${{JSON.stringify(snap)}}`);
+}}
+
+// Competing writer on dbShort fails cleanly with DbError(DATABASE / Busy).
+let busyErr = null;
+try {{
+    await dbShort.execute("INSERT INTO events (id, worker, seq) VALUES (1000, 10, 10)");
+}} catch (e) {{
+    busyErr = e;
+}}
+if (!(busyErr instanceof DbError) || busyErr.code !== "DATABASE" || busyErr.databaseKind !== "Busy") {{
+    throw new Error(`expected DbError(DATABASE, Busy), got ${{busyErr}} (kind=${{busyErr?.databaseKind}})`);
+}}
+
+releaseLock();
+await writerTx;
+
+// Subsequent write on dbShort succeeds after lock release.
+await dbShort.execute("INSERT INTO events (id, worker, seq) VALUES (1000, 10, 10)");
+const finalCount = await db.queryOne("SELECT COUNT(*) AS n FROM events");
+if (!finalCount || finalCount.n !== 82) {{
+    throw new Error(`expected 82 rows total, got ${{JSON.stringify(finalCount)}}`);
+}}
+
+await dbShort.close();
+await db.close();
+"#,
+    ));
+}
+
+#[test]
+fn pool_saturation_contention_and_recovery_after_tx_release() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_path = dir.path().join("pool-sat.sqlite");
+    let db_path_json = serde_json::to_string(db_path.to_str().expect("utf8 path")).unwrap();
+
+    run_js(&format!(
+        r#"
+import {{ open }} from "vael:db";
+
+const db = await open({{
+    driver: "sqlite",
+    database: {db_path_json},
+    max_connections: 2,
+    busy_timeout_ms: 1000,
+}});
+await db.queryOne("PRAGMA journal_mode = WAL");
+await db.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, tag TEXT NOT NULL)");
+
+let entered1, entered2;
+const tx1Ready = new Promise((r) => {{ entered1 = r; }});
+const tx2Ready = new Promise((r) => {{ entered2 = r; }});
+let release1, fail2;
+const gate1 = new Promise((r) => {{ release1 = r; }});
+const gate2 = new Promise((_, rej) => {{ fail2 = rej; }});
+
+const p1 = db.transaction(async (tx) => {{
+    await tx.execute("INSERT INTO items (id, tag) VALUES (1, 'tx1')");
+    entered1();
+    await gate1;
+}});
+const p2 = db.transaction(async (tx) => {{
+    await tx.query("SELECT * FROM items");
+    entered2();
+    await gate2;
+}});
+
+await Promise.all([tx1Ready, tx2Ready]);
+
+// Pool is now saturated at max_connections=2. A 3rd query must wait.
+let thirdSettled = false;
+const p3 = db.queryOne("SELECT COUNT(*) AS n FROM items").then((row) => {{
+    thirdSettled = true;
+    return row;
+}});
+
+await new Promise((r) => Deno.core.createTimer(() => r(), 50));
+if (thirdSettled) {{
+    throw new Error("3rd query resolved while max_connections=2 were both held");
+}}
+
+// Release tx1 -> p3 unblocks and observes tx1's committed row.
+release1();
+await p1;
+const row3 = await p3;
+if (!row3 || row3.n !== 1) {{
+    throw new Error(`expected count 1 after tx1 commit, got ${{JSON.stringify(row3)}}`);
+}}
+
+// Fail tx2 so it rolls back and releases/cleans up its pool slot.
+fail2(new Error("abort-tx2"));
+let caught2 = false;
+try {{
+    await p2;
+}} catch (e) {{
+    if (e.message === "abort-tx2") caught2 = true;
+}}
+if (!caught2) throw new Error("expected tx2 failure");
+
+// Full pool capacity (2 concurrent transactions) recovers cleanly.
+await Promise.all([
+    db.transaction(async (tx) => {{
+        await tx.execute("INSERT INTO items (id, tag) VALUES (2, 'rec1')");
+    }}),
+    db.transaction(async (tx) => {{
+        await tx.execute("INSERT INTO items (id, tag) VALUES (3, 'rec2')");
+    }}),
+]);
+const finalRow = await db.queryOne("SELECT COUNT(*) AS n FROM items");
+if (!finalRow || finalRow.n !== 3) {{
+    throw new Error(`expected 3 rows after pool recovery, got ${{JSON.stringify(finalRow)}}`);
+}}
+
+await db.close();
+"#,
+    ));
+}
+
+#[test]
+fn transaction_durability_and_abrupt_runtime_drop_recovery() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_path = dir.path().join("durability-js.sqlite");
+    let db_path_json = serde_json::to_string(db_path.to_str().expect("utf8 path")).unwrap();
+
+    // Phase 1: Commit baseline row, perform explicit rollback, and leave an open
+    // uncommitted transaction mid-flight when Runtime drops.
+    run_js(&format!(
+        r#"
+import {{ open }} from "vael:db";
+
+const db = await open({{
+    driver: "sqlite",
+    database: {db_path_json},
+    max_connections: 2,
+    busy_timeout_ms: 2000,
+}});
+await db.queryOne("PRAGMA journal_mode = WAL");
+await db.execute("PRAGMA synchronous = FULL");
+await db.execute("CREATE TABLE ledger (id INTEGER PRIMARY KEY, status TEXT NOT NULL)");
+
+await db.transaction(async (tx) => {{
+    await tx.execute("INSERT INTO ledger (id, status) VALUES (1, 'committed-before')");
+}});
+
+try {{
+    await db.transaction(async (tx) => {{
+        await tx.execute("INSERT INTO ledger (id, status) VALUES (2, 'explicit-rollback')");
+        throw new Error("rollback-me");
+    }});
+}} catch {{
+    // Expected rollback.
+}}
+
+let notifyInserted;
+const inserted = new Promise((r) => {{ notifyInserted = r; }});
+void db.transaction(async (tx) => {{
+    await tx.execute("INSERT INTO ledger (id, status) VALUES (3, 'abrupt-uncommitted')");
+    notifyInserted();
+    await new Promise(() => {{}});
+}});
+await inserted;
+"#,
+    ));
+
+    // Phase 2: Fresh V8 Runtime reopens the file and verifies integrity & recovery.
+    run_js(&format!(
+        r#"
+import {{ open }} from "vael:db";
+
+const db = await open({{
+    driver: "sqlite",
+    database: {db_path_json},
+    max_connections: 2,
+    busy_timeout_ms: 2000,
+}});
+
+const integrity = await db.queryOne("PRAGMA integrity_check");
+if (!integrity || integrity.integrity_check !== "ok") {{
+    throw new Error(`integrity_check failed: ${{JSON.stringify(integrity)}}`);
+}}
+
+const rows = await db.query("SELECT id, status FROM ledger ORDER BY id ASC");
+if (rows.length !== 1 || rows[0].id !== 1 || rows[0].status !== "committed-before") {{
+    throw new Error(`unexpected recovered rows: ${{JSON.stringify(rows)}}`);
+}}
+
+await db.transaction(async (tx) => {{
+    await tx.execute("INSERT INTO ledger (id, status) VALUES (4, 'committed-after')");
+}});
+const finalRows = await db.query("SELECT id, status FROM ledger ORDER BY id ASC");
+if (finalRows.length !== 2 || finalRows[1].id !== 4 || finalRows[1].status !== "committed-after") {{
+    throw new Error(`unexpected post-recovery rows: ${{JSON.stringify(finalRows)}}`);
+}}
+
+await db.close();
+"#,
+    ));
+}

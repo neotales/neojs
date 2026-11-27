@@ -1615,6 +1615,7 @@
         const serverRid = bound.serverRid;
         let closed = false;
         let closingPromise = null;
+        let closeOpPromise = null;
         const inFlight = new makeSet();
 
         function detachSignal() {
@@ -1701,6 +1702,9 @@
                 if (setSize(inFlight) > 0) {
                     await promiseAllSettled(arrayFrom(setValues(inFlight)));
                 }
+                if (closeOpPromise) {
+                    await closeOpPromise;
+                }
                 detachSignal();
             }
         })();
@@ -1711,8 +1715,9 @@
             }
             closed = true;
             detachSignal();
+            closeOpPromise = opClose(serverRid);
             closingPromise = (async () => {
-                await opClose(serverRid);
+                await closeOpPromise;
                 await finished;
             })();
             return closingPromise;

@@ -741,8 +741,6 @@ if (typeof server[Symbol.asyncDispose] !== "function") {{
     throw new Error("missing Symbol.asyncDispose");
 }}
 await slowGate;
-// Give /slow response a turn to flush, then dispose.
-await new Promise((r) => Deno.core.createTimer(() => r(), 20));
 await server[Symbol.asyncDispose]();
 await server.finished;
 "#,
@@ -1061,5 +1059,452 @@ await server.finished;
         assert!(r_close.ends_with("bye"), "{r_close}");
 
         handle.join().expect("framing server exited cleanly");
+    }
+
+    fn spawn_test_server(
+        js_template: &str,
+    ) -> (tempfile::TempDir, String, std::thread::JoinHandle<()>) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ready_file = dir.path().join("server.addr");
+        let entry = dir.path().join("server.js");
+        let ready_lit = serde_json::to_string(ready_file.to_str().unwrap()).unwrap();
+        let js = js_template.replace("__READY_PATH__", &ready_lit);
+        fs::write(&entry, js).expect("write test server script");
+
+        let handle = std::thread::spawn(move || {
+            let mut runtime = Runtime::new().expect("runtime");
+            runtime.run_file(&entry).expect("test server run_file");
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let addr = loop {
+            if let Ok(contents) = fs::read_to_string(&ready_file)
+                && !contents.trim().is_empty()
+            {
+                break contents.trim().to_owned();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for test server ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        (dir, addr, handle)
+    }
+
+    fn read_http_response(stream: &mut TcpStream, buf: &mut Vec<u8>) -> (String, Vec<u8>) {
+        let header_end = loop {
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos;
+            }
+            let mut tmp = [0_u8; 4096];
+            let n = stream.read(&mut tmp).expect("read response header");
+            assert!(n > 0, "unexpected EOF while reading response headers");
+            buf.extend_from_slice(&tmp[..n]);
+        };
+
+        let headers_bytes = buf[..header_end].to_vec();
+        let headers_str = String::from_utf8_lossy(&headers_bytes).into_owned();
+        let mut rest = buf.split_off(header_end + 4);
+        *buf = rest;
+
+        let content_length = headers_str
+            .lines()
+            .skip(1)
+            .find_map(|line| {
+                let (name, val) = line.split_once(':')?;
+                if name.trim().eq_ignore_ascii_case("content-length") {
+                    val.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        while buf.len() < content_length {
+            let mut tmp = [0_u8; 4096];
+            let n = stream.read(&mut tmp).expect("read response body");
+            assert!(n > 0, "unexpected EOF while reading response body");
+            buf.extend_from_slice(&tmp[..n]);
+        }
+
+        let body = buf[..content_length].to_vec();
+        rest = buf.split_off(content_length);
+        *buf = rest;
+
+        (headers_str, body)
+    }
+
+    #[test]
+    fn live_server_rejects_oversized_chunked_body_without_oom() {
+        let (_dir, addr, handle) = spawn_test_server(
+            r#"
+import { writeTextFile } from "vael:fs";
+import { createRouter, json, serve } from "vael:http";
+
+let server;
+const mux = createRouter()
+    .post("/upload", async (req) => {
+        const text = await req.text();
+        return json({ len: text.length, body: text });
+    })
+    .post("/shutdown", () => {
+        Promise.resolve().then(() => server.close());
+        return json({ ok: true });
+    });
+
+server = serve({ host: "127.0.0.1", port: 0, maxBodyBytes: 64 }, mux);
+writeTextFile(__READY_PATH__, server.addr);
+await server.finished;
+"#,
+        );
+
+        // 1. Complete chunked request exceeding maxBodyBytes (80 > 64) without Content-Length.
+        let chunk1 = "a".repeat(40);
+        let chunk2 = "b".repeat(40);
+        let req_full = format!(
+            "POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+            chunk1.len(),
+            chunk1,
+            chunk2.len(),
+            chunk2,
+        );
+        let resp_full = send_raw_http(&addr, &req_full);
+        assert!(
+            resp_full.starts_with("HTTP/1.1 413 Payload Too Large\r\n"),
+            "{resp_full}"
+        );
+
+        // 2. Streaming chunked request exceeding maxBodyBytes mid-stream without terminating 0-chunk.
+        let mut stream = TcpStream::connect(&addr).expect("connect streaming chunked");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("set read timeout");
+        stream
+            .write_all(
+                b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n20\r\n",
+            )
+            .expect("write chunked head");
+        stream.write_all(&[b'x'; 32]).expect("write chunk 1");
+        stream.write_all(b"\r\n").expect("write chunk 1 crlf");
+        stream.flush().expect("flush chunk 1");
+        std::thread::sleep(Duration::from_millis(10));
+        stream.write_all(b"40\r\n").expect("write chunk 2 size");
+        stream.write_all(&[b'y'; 64]).expect("write chunk 2");
+        stream.write_all(b"\r\n").expect("write chunk 2 crlf");
+        stream.flush().expect("flush chunk 2");
+
+        let mut resp_buf = Vec::new();
+        let _ = stream.read_to_end(&mut resp_buf);
+        let resp_stream = String::from_utf8_lossy(&resp_buf);
+        assert!(
+            resp_stream.starts_with("HTTP/1.1 413 Payload Too Large\r\n"),
+            "{resp_stream}"
+        );
+        drop(stream);
+
+        // 3. Valid small chunked request still succeeds afterward.
+        let valid_chunk = "hello-chunk!";
+        let req_ok = format!(
+            "POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+            valid_chunk.len(),
+            valid_chunk,
+        );
+        let resp_ok = send_raw_http(&addr, &req_ok);
+        assert!(resp_ok.starts_with("HTTP/1.1 200 OK\r\n"), "{resp_ok}");
+        assert!(resp_ok.contains(r#""len":12"#), "{resp_ok}");
+        assert!(resp_ok.contains(valid_chunk), "{resp_ok}");
+
+        let shut = send_raw_http(
+            &addr,
+            "POST /shutdown HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        assert!(shut.starts_with("HTTP/1.1 200 OK\r\n"), "{shut}");
+        handle.join().expect("chunked server exited cleanly");
+    }
+
+    #[test]
+    fn live_server_reuses_keep_alive_connections_sequentially_and_concurrently() {
+        let (_dir, addr, handle) = spawn_test_server(
+            r#"
+import { writeTextFile } from "vael:fs";
+import { createRouter, serve, text } from "vael:http";
+
+let server;
+const mux = createRouter()
+    .get("/ping/{n}", (req) => text(`pong:${req.param("n")}`))
+    .post("/echo", async (req) => text(`echo:${await req.text()}`))
+    .post("/shutdown", () => {
+        Promise.resolve().then(() => server.close());
+        return text("bye");
+    });
+
+server = serve({ host: "127.0.0.1", port: 0 }, mux);
+writeTextFile(__READY_PATH__, server.addr);
+await server.finished;
+"#,
+        );
+
+        // 1. Sequential reuse over one TCP connection.
+        {
+            let mut stream = TcpStream::connect(&addr).expect("connect sequential keep-alive");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut buf = Vec::new();
+            for i in 0..10 {
+                let conn_hdr = if i == 9 { "close" } else { "keep-alive" };
+                let req = if i % 2 == 0 {
+                    format!(
+                        "GET /ping/{i} HTTP/1.1\r\nHost: localhost\r\nConnection: {conn_hdr}\r\n\r\n"
+                    )
+                } else {
+                    let payload = format!("msg-{i}");
+                    format!(
+                        "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: {conn_hdr}\r\n\r\n{payload}",
+                        payload.len()
+                    )
+                };
+                stream
+                    .write_all(req.as_bytes())
+                    .expect("write keep-alive request");
+                let (headers, body) = read_http_response(&mut stream, &mut buf);
+                assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"), "{headers}");
+                let expected = if i % 2 == 0 {
+                    format!("pong:{i}")
+                } else {
+                    format!("echo:msg-{i}")
+                };
+                assert_eq!(String::from_utf8_lossy(&body), expected);
+            }
+        }
+
+        // 2. Pipelined requests over one TCP connection.
+        {
+            let mut stream = TcpStream::connect(&addr).expect("connect pipelined keep-alive");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let pipelined = concat!(
+                "GET /ping/100 HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+                "GET /ping/101 HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+                "GET /ping/102 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            );
+            stream
+                .write_all(pipelined.as_bytes())
+                .expect("write pipelined requests");
+            let mut buf = Vec::new();
+            for expected in ["pong:100", "pong:101", "pong:102"] {
+                let (headers, body) = read_http_response(&mut stream, &mut buf);
+                assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"), "{headers}");
+                assert_eq!(String::from_utf8_lossy(&body), expected);
+            }
+        }
+
+        // 3. Concurrent keep-alive clients.
+        let mut workers = Vec::new();
+        for worker_id in 0..4 {
+            let worker_addr = addr.clone();
+            workers.push(std::thread::spawn(move || {
+                let mut stream =
+                    TcpStream::connect(&worker_addr).expect("connect concurrent keep-alive");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("read timeout");
+                let mut buf = Vec::new();
+                for step in 0..5 {
+                    let conn_hdr = if step == 4 { "close" } else { "keep-alive" };
+                    let req = format!(
+                        "GET /ping/{worker_id}-{step} HTTP/1.1\r\nHost: localhost\r\nConnection: {conn_hdr}\r\n\r\n"
+                    );
+                    stream.write_all(req.as_bytes()).expect("write request");
+                    let (headers, body) = read_http_response(&mut stream, &mut buf);
+                    assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"), "{headers}");
+                    assert_eq!(
+                        String::from_utf8_lossy(&body),
+                        format!("pong:{worker_id}-{step}")
+                    );
+                }
+            }));
+        }
+        for w in workers {
+            w.join().expect("keep-alive worker succeeded");
+        }
+
+        let shut = send_raw_http(
+            &addr,
+            "POST /shutdown HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        assert!(shut.starts_with("HTTP/1.1 200 OK\r\n"), "{shut}");
+        handle.join().expect("keep-alive server exited cleanly");
+    }
+
+    #[test]
+    fn live_server_times_out_slowloris_partial_headers_and_slow_body_with_408() {
+        let (_dir, addr, handle) = spawn_test_server(
+            r#"
+import { writeTextFile } from "vael:fs";
+import { createRouter, serve, text } from "vael:http";
+
+const timeoutRes = Deno.core.ops.op_vael_http_set_test_timeouts(150, 150);
+if (!timeoutRes || timeoutRes.ok !== true) {
+    throw new Error("failed to configure test timeouts");
+}
+
+let server;
+const mux = createRouter()
+    .get("/ok", () => text("ok"))
+    .post("/echo", async (req) => text(await req.text()))
+    .post("/shutdown", () => {
+        Promise.resolve().then(() => server.close());
+        return text("bye");
+    });
+
+server = serve({ host: "127.0.0.1", port: 0 }, mux);
+writeTextFile(__READY_PATH__, server.addr);
+await server.finished;
+"#,
+        );
+
+        // 1. Slowloris partial headers (never finishes \r\n\r\n) -> 408 Request Timeout.
+        {
+            let mut stream = TcpStream::connect(&addr).expect("connect slowloris header");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("read timeout");
+            stream
+                .write_all(b"GET /ok HTTP/1.1\r\nHost: local")
+                .expect("write partial headers");
+            stream.flush().expect("flush partial headers");
+
+            let mut buf = Vec::new();
+            stream
+                .read_to_end(&mut buf)
+                .expect("read slowloris header 408 response");
+            let resp = String::from_utf8_lossy(&buf);
+            assert!(
+                resp.starts_with("HTTP/1.1 408 Request Timeout\r\n"),
+                "expected 408 for slowloris headers, got: {resp:?}"
+            );
+        }
+
+        // 2. Slow trickle POST body (incomplete Content-Length) -> 408 Request Timeout.
+        {
+            let mut stream = TcpStream::connect(&addr).expect("connect slow trickle body");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("read timeout");
+            stream
+                .write_all(
+                    b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\nConnection: close\r\n\r\nhello",
+                )
+                .expect("write partial body");
+            stream.flush().expect("flush partial body");
+            std::thread::sleep(Duration::from_millis(30));
+            let _ = stream.write_all(b"!");
+            let _ = stream.flush();
+
+            let mut buf = Vec::new();
+            stream
+                .read_to_end(&mut buf)
+                .expect("read slow body 408 response");
+            let resp = String::from_utf8_lossy(&buf);
+            assert!(
+                resp.starts_with("HTTP/1.1 408 Request Timeout\r\n"),
+                "expected 408 for slow body, got: {resp:?}"
+            );
+        }
+
+        // 3. Normal fast request still succeeds and server shuts down cleanly.
+        let ok_resp = send_raw_http(
+            &addr,
+            "GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(ok_resp.starts_with("HTTP/1.1 200 OK\r\n"), "{ok_resp}");
+        assert!(ok_resp.ends_with("ok"), "{ok_resp}");
+
+        let shut = send_raw_http(
+            &addr,
+            "POST /shutdown HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        assert!(shut.starts_with("HTTP/1.1 200 OK\r\n"), "{shut}");
+        handle.join().expect("slowloris server exited cleanly");
+    }
+
+    #[test]
+    fn live_server_handles_connection_churn_and_abrupt_disconnects_without_permit_leak() {
+        let (_dir, addr, handle) = spawn_test_server(
+            r#"
+import { writeTextFile } from "vael:fs";
+import { createRouter, serve, text } from "vael:http";
+
+let server;
+const mux = createRouter()
+    .get("/ok", () => text("ok"))
+    .get("/slow-ack", async () => {
+        await new Promise((r) => Deno.core.createTimer(() => r(), 5));
+        return text("done");
+    })
+    .post("/shutdown", () => {
+        Promise.resolve().then(() => server.close());
+        return text("bye");
+    });
+
+server = serve({ host: "127.0.0.1", port: 0 }, mux);
+writeTextFile(__READY_PATH__, server.addr);
+await server.finished;
+"#,
+        );
+
+        // Exceed MAX_CONCURRENT_CONNECTIONS (1024) across rapid abrupt disconnect cycles
+        // to prove semaphore permits and active connection guards never leak.
+        for i in 0..1100 {
+            let mut stream = TcpStream::connect(&addr).expect("connect churn");
+            match i % 3 {
+                0 => {
+                    // Immediate disconnect with zero bytes.
+                }
+                1 => {
+                    // Partial request line then abrupt disconnect.
+                    let _ = stream.write_all(b"GET /ok HTTP/1.");
+                }
+                _ => {
+                    // Complete request then drop before reading async response.
+                    let _ = stream.write_all(
+                        b"GET /slow-ack HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            }
+            drop(stream);
+
+            if i % 200 == 199 {
+                let probe = send_raw_http(
+                    &addr,
+                    "GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                );
+                assert!(probe.starts_with("HTTP/1.1 200 OK\r\n"), "{probe}");
+                assert!(probe.ends_with("ok"), "{probe}");
+            }
+        }
+
+        let final_ok = send_raw_http(
+            &addr,
+            "GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert!(final_ok.starts_with("HTTP/1.1 200 OK\r\n"), "{final_ok}");
+        assert!(final_ok.ends_with("ok"), "{final_ok}");
+
+        let shut = send_raw_http(
+            &addr,
+            "POST /shutdown HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        assert!(shut.starts_with("HTTP/1.1 200 OK\r\n"), "{shut}");
+
+        handle.join().expect("churn server exited cleanly");
+        assert!(
+            TcpStream::connect(&addr).is_err(),
+            "listener port {addr} must be closed after server.close()"
+        );
     }
 }
