@@ -7,6 +7,7 @@ members = [
     "vaeljs",
     "vaeljs-dbapi",
     "vaeljs-dts",
+    "vaeljs-fetch-core",
     "vaeljs-fs-core",
     "vaeljs-http-core",
     "vaeljs-manifest",
@@ -34,6 +35,7 @@ default-members = [
     "vaeljs",
     "vaeljs-dbapi",
     "vaeljs-dts",
+    "vaeljs-fetch-core",
     "vaeljs-fs-core",
     "vaeljs-http-core",
     "vaeljs-manifest",
@@ -95,6 +97,8 @@ vaeljs-builtins = { version = "0.0.0-alpha.1", path = "vaeljs-builtins" }
 vaeljs-crypto-core = { version = "0.0.0-alpha.1", path = "vaeljs-crypto-core" }
 # Engine-neutral TypeScript declaration (.d.ts) bundles for V8 and QuickJS.
 vaeljs-dts = { version = "0.0.0-alpha.1", path = "vaeljs-dts" }
+# Engine-neutral synchronous HTTP fetch and streaming download core for `vael:fetch`.
+vaeljs-fetch-core = { version = "0.0.0-alpha.1", path = "vaeljs-fetch-core" }
 # Driver-neutral SQL API with strict JSON configuration and SQLite provider.
 vaeljs-dbapi = { version = "0.0.0-alpha.1", path = "vaeljs-dbapi" }
 # Engine-neutral core filesystem operations for `vael:fs`.
