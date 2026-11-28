@@ -109,10 +109,16 @@ mod runtime;
 mod chars;
 #[cfg(feature = "vael-crypto")]
 mod crypto;
+#[cfg(feature = "vael-exec")]
+mod exec;
+#[cfg(feature = "vael-fetch")]
+mod fetch;
 #[cfg(feature = "vael-fs")]
 mod fs;
 #[cfg(any(
     feature = "vael-crypto",
+    feature = "vael-exec",
+    feature = "vael-fetch",
     feature = "vael-fs",
     feature = "vael-ssh",
     feature = "vael-template",
