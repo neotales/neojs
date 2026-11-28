@@ -1235,6 +1235,156 @@ mod tests {
         );
     }
 
+    // Unit test: NIST SP 800-38D AES-256-GCM Case 13 (empty plaintext + empty AAD).
+    #[test]
+    fn published_nist_gcm_case_13_empty_matches() {
+        let key = [0u8; KEY_LEN];
+        let nonce = [0u8; GCM_IV_LEN];
+        let expected_tag_hex = "530f8afbc74536b9a963b4f1c4cb738b";
+        let expected_tag = tag_array(&decode_hex(expected_tag_hex));
+
+        let (ciphertext, tag) = gcm_encrypt(&key, &nonce, &[], Vec::new()).unwrap();
+        assert!(ciphertext.is_empty());
+        assert_eq!(encode_hex(&tag), expected_tag_hex);
+        assert!(
+            gcm_decrypt(&key, &nonce, &[], Vec::new(), &expected_tag)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Stateful Encryptor / Decryptor with omitted and explicit empty AAD / update.
+        for (explicit_empty_aad, explicit_empty_update) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut enc = Encryptor::new(CipherAlgorithm::Aes256Gcm, &key, &nonce, false).unwrap();
+            if explicit_empty_aad {
+                enc.set_aad(Vec::new()).unwrap();
+            }
+            if explicit_empty_update {
+                enc.update(&[]).unwrap();
+            }
+            assert!(enc.finalize().unwrap().is_empty());
+            assert_eq!(encode_hex(&enc.auth_tag().unwrap()), expected_tag_hex);
+
+            let mut dec = Decryptor::new(CipherAlgorithm::Aes256Gcm, &key, &nonce, false).unwrap();
+            if explicit_empty_aad {
+                dec.set_aad(Vec::new()).unwrap();
+            }
+            dec.set_auth_tag(&expected_tag).unwrap();
+            if explicit_empty_update {
+                dec.update(&[]).unwrap();
+            }
+            assert!(dec.finalize().unwrap().is_empty());
+        }
+    }
+
+    // Unit test: AES-256-CBC PKCS#7 boundary KATs (0, 15, 16, 17 bytes) and multi-update streaming.
+    #[test]
+    fn aes_cbc_pkcs7_boundary_kats_and_streaming_updates_match() {
+        let key = decode_hex(NIST_CBC_KEY);
+        let iv = decode_hex(NIST_CBC_IV);
+        let boundaries: [(usize, &str); 4] = [
+            (0, "7e9248e5d829ca7593f0c549db2f5b8c"),
+            (15, "f989480d3e67623eef67835cdb1310a8"),
+            (
+                16,
+                "258816364f93d7b76b41e61b20f00beb3d12ec3e531c65fff9bc53684adda0ff",
+            ),
+            (
+                17,
+                "258816364f93d7b76b41e61b20f00bebfde699989fb7d8d94ccf51ec3f19ba53",
+            ),
+        ];
+
+        for (len, expected_hex) in boundaries {
+            let plaintext: Vec<u8> = (1..=len as u8).collect();
+            let expected_ct = decode_hex(expected_hex);
+
+            let ct = cbc_encrypt(&key, &iv, true, &plaintext).unwrap();
+            assert_eq!(encode_hex(&ct), expected_hex, "cbc_encrypt len={len}");
+            assert_eq!(
+                cbc_decrypt(&key, &iv, true, &expected_ct).unwrap(),
+                plaintext,
+                "cbc_decrypt len={len}"
+            );
+
+            // Multi-update streaming across unaligned chunk sizes (empty, 1, 7, 9, rest).
+            let mut enc = Encryptor::new(CipherAlgorithm::Aes256Cbc, &key, &iv, true).unwrap();
+            let mut dec = Decryptor::new(CipherAlgorithm::Aes256Cbc, &key, &iv, true).unwrap();
+            let mut offset = 0usize;
+            for step in [0usize, 1, 7, 9] {
+                let end = (offset + step).min(plaintext.len());
+                enc.update(&plaintext[offset..end]).unwrap();
+                offset = end;
+            }
+            if offset < plaintext.len() {
+                enc.update(&plaintext[offset..]).unwrap();
+            }
+            let streamed_ct = enc.finalize().unwrap();
+            assert_eq!(streamed_ct, expected_ct, "streamed cbc len={len}");
+
+            let mut ct_offset = 0usize;
+            for step in [0usize, 3, 13, 5] {
+                let end = (ct_offset + step).min(streamed_ct.len());
+                dec.update(&streamed_ct[ct_offset..end]).unwrap();
+                ct_offset = end;
+            }
+            if ct_offset < streamed_ct.len() {
+                dec.update(&streamed_ct[ct_offset..]).unwrap();
+            }
+            assert_eq!(
+                dec.finalize().unwrap(),
+                plaintext,
+                "streamed cbc dec len={len}"
+            );
+        }
+    }
+
+    // Unit test: multi-update streaming alignment across AES-256-CBC (no padding) and AES-256-GCM.
+    #[test]
+    fn multi_update_streaming_matches_nist_single_shot_vectors() {
+        // NIST SP 800-38A CBC (64 bytes, no padding) fed in awkward 0/1/15/17/13/18-byte chunks.
+        let cbc_key = decode_hex(NIST_CBC_KEY);
+        let cbc_iv = decode_hex(NIST_CBC_IV);
+        let cbc_pt = decode_hex(NIST_CBC_PLAINTEXT);
+        let cbc_ct = decode_hex(NIST_CBC_CIPHERTEXT);
+
+        let mut cbc_enc =
+            Encryptor::new(CipherAlgorithm::Aes256Cbc, &cbc_key, &cbc_iv, false).unwrap();
+        let mut cbc_dec =
+            Decryptor::new(CipherAlgorithm::Aes256Cbc, &cbc_key, &cbc_iv, false).unwrap();
+        for (start, end) in [(0, 0), (0, 1), (1, 16), (16, 33), (33, 46), (46, 64)] {
+            cbc_enc.update(&cbc_pt[start..end]).unwrap();
+            cbc_dec.update(&cbc_ct[start..end]).unwrap();
+        }
+        assert_eq!(cbc_enc.finalize().unwrap(), cbc_ct);
+        assert_eq!(cbc_dec.finalize().unwrap(), cbc_pt);
+
+        // NIST SP 800-38D GCM Case 16 (60 bytes + 20-byte AAD) fed in unaligned chunks.
+        let gcm_key = decode_hex(NIST_GCM_KEY);
+        let gcm_nonce = decode_hex(NIST_GCM_NONCE);
+        let gcm_aad = decode_hex(NIST_GCM_AAD);
+        let gcm_pt = decode_hex(NIST_GCM_PLAINTEXT);
+        let gcm_ct = decode_hex(NIST_GCM_CIPHERTEXT);
+        let gcm_tag = decode_hex(NIST_GCM_TAG);
+
+        let mut gcm_enc =
+            Encryptor::new(CipherAlgorithm::Aes256Gcm, &gcm_key, &gcm_nonce, false).unwrap();
+        gcm_enc.set_aad(gcm_aad.clone()).unwrap();
+        let mut gcm_dec =
+            Decryptor::new(CipherAlgorithm::Aes256Gcm, &gcm_key, &gcm_nonce, false).unwrap();
+        gcm_dec.set_aad(gcm_aad).unwrap();
+        gcm_dec.set_auth_tag(&gcm_tag).unwrap();
+
+        for (start, end) in [(0, 0), (0, 5), (5, 16), (16, 31), (31, 32), (32, 60)] {
+            gcm_enc.update(&gcm_pt[start..end]).unwrap();
+            gcm_dec.update(&gcm_ct[start..end]).unwrap();
+        }
+        assert_eq!(gcm_enc.finalize().unwrap(), gcm_ct);
+        assert_eq!(gcm_enc.auth_tag().unwrap().as_slice(), gcm_tag.as_slice());
+        assert_eq!(gcm_dec.finalize().unwrap(), gcm_pt);
+    }
+
     // Unit test: Node/OpenSSL CBC interop fixture.
     #[test]
     fn node_cbc_fixture_matches_through_the_state() {

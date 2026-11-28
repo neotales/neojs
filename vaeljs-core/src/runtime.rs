@@ -761,6 +761,8 @@ impl Runtime {
         extensions.push(crate::cron::test_support_extension());
         #[cfg(feature = "test-support")]
         extensions.push(crate::crypto_hash::test_support_extension());
+        #[cfg(all(feature = "vael-http", feature = "test-support"))]
+        extensions.push(crate::http::test_support_extension());
         let redactions = remote.as_ref().map(RemoteClient::redactions);
         let js = {
             let _guard = driver.enter();

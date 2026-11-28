@@ -30,8 +30,9 @@ use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
+use tokio::io::AsyncWriteExt as _;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use vaeljs_http_core::{
     DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_HEADER_BYTES, HttpCoreError, RouteMatch, Router, SameSite,
@@ -72,6 +73,9 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Timeout for reading an incoming HTTP/1.1 request body.
 const DEFAULT_BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Graceful shutdown drain window for active HTTP/1.1 connections.
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Default body size limit exposed to `vael:http` (`DEFAULT_MAX_BODY_BYTES`).
 const DEFAULT_BODY_LIMIT: usize = DEFAULT_MAX_BODY_BYTES;
 
@@ -86,6 +90,8 @@ struct ResourceCounts {
 pub(crate) struct HttpState {
     driver: Option<tokio::runtime::Handle>,
     counts: Arc<ResourceCounts>,
+    header_read_timeout: Duration,
+    body_read_timeout: Duration,
 }
 
 impl HttpState {
@@ -93,6 +99,8 @@ impl HttpState {
         Self {
             driver: tokio::runtime::Handle::try_current().ok(),
             counts: Arc::new(ResourceCounts::default()),
+            header_read_timeout: HEADER_READ_TIMEOUT,
+            body_read_timeout: DEFAULT_BODY_READ_TIMEOUT,
         }
     }
 }
@@ -160,11 +168,36 @@ impl Resource for IncomingRequestResource {
     }
 }
 
+struct ActiveConnGuard {
+    active_conns: Arc<AtomicUsize>,
+    conns_drained: Arc<Notify>,
+}
+
+impl ActiveConnGuard {
+    fn new(active_conns: Arc<AtomicUsize>, conns_drained: Arc<Notify>) -> Self {
+        active_conns.fetch_add(1, Ordering::AcqRel);
+        Self {
+            active_conns,
+            conns_drained,
+        }
+    }
+}
+
+impl Drop for ActiveConnGuard {
+    fn drop(&mut self) {
+        if self.active_conns.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.conns_drained.notify_waiters();
+        }
+    }
+}
+
 struct ServerInner {
     rx: AsyncMutex<mpsc::Receiver<IncomingRequest>>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
     accept_task: StdMutex<Option<JoinHandle<()>>>,
+    active_conns: Arc<AtomicUsize>,
+    conns_drained: Arc<Notify>,
     counts: Arc<ResourceCounts>,
 }
 
@@ -1057,7 +1090,7 @@ fn op_vael_http_listen<'s>(
     }
     let max_body = max_body_val as usize;
 
-    let (driver_opt, counts) = {
+    let (driver_opt, counts, header_read_timeout, body_read_timeout) = {
         let Some(http_state) = state.try_borrow::<HttpState>() else {
             return failure(
                 scope,
@@ -1066,7 +1099,12 @@ fn op_vael_http_listen<'s>(
                 "HTTP state unavailable",
             );
         };
-        (http_state.driver.clone(), Arc::clone(&http_state.counts))
+        (
+            http_state.driver.clone(),
+            Arc::clone(&http_state.counts),
+            http_state.header_read_timeout,
+            http_state.body_read_timeout,
+        )
     };
 
     let Some(driver) = driver_opt else {
@@ -1143,16 +1181,24 @@ fn op_vael_http_listen<'s>(
     let (req_tx, req_rx) = mpsc::channel::<IncomingRequest>(REQUEST_CHANNEL_CAPACITY);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let conn_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let active_conns = Arc::new(AtomicUsize::new(0));
+    let conns_drained = Arc::new(Notify::new());
 
     let accept_driver = driver.clone();
     let accept_shutdown = shutdown_rx.clone();
+    let accept_active_conns = Arc::clone(&active_conns);
+    let accept_conns_drained = Arc::clone(&conns_drained);
     let accept_task = driver.spawn(run_accept_loop(
         listener,
         req_tx,
         accept_shutdown,
         accept_driver,
         max_body,
+        header_read_timeout,
+        body_read_timeout,
         conn_semaphore,
+        accept_active_conns,
+        accept_conns_drained,
     ));
 
     let inner = Arc::new(ServerInner {
@@ -1160,6 +1206,8 @@ fn op_vael_http_listen<'s>(
         shutdown_tx,
         shutdown_rx,
         accept_task: StdMutex::new(Some(accept_task)),
+        active_conns,
+        conns_drained,
         counts,
     });
 
@@ -1180,13 +1228,18 @@ fn op_vael_http_listen<'s>(
     obj.into()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_accept_loop(
     listener: TcpListener,
     req_tx: mpsc::Sender<IncomingRequest>,
     mut shutdown_rx: watch::Receiver<bool>,
     driver: tokio::runtime::Handle,
     max_body_bytes: usize,
+    header_read_timeout: Duration,
+    body_read_timeout: Duration,
     conn_semaphore: Arc<Semaphore>,
+    active_conns: Arc<AtomicUsize>,
+    conns_drained: Arc<Notify>,
 ) {
     loop {
         if *shutdown_rx.borrow() {
@@ -1229,11 +1282,23 @@ async fn run_accept_loop(
             }
         };
 
+        let conn_guard =
+            ActiveConnGuard::new(Arc::clone(&active_conns), Arc::clone(&conns_drained));
         let conn_tx = req_tx.clone();
         let conn_shutdown = shutdown_rx.clone();
         driver.spawn(async move {
+            let _conn_guard = conn_guard;
             let _permit = permit;
-            serve_connection(stream, remote_addr, conn_tx, conn_shutdown, max_body_bytes).await;
+            serve_connection(
+                stream,
+                remote_addr,
+                conn_tx,
+                conn_shutdown,
+                max_body_bytes,
+                header_read_timeout,
+                body_read_timeout,
+            )
+            .await;
         });
     }
     drop(listener);
@@ -1245,28 +1310,49 @@ async fn serve_connection(
     req_tx: mpsc::Sender<IncomingRequest>,
     mut shutdown_rx: watch::Receiver<bool>,
     max_body_bytes: usize,
+    header_read_timeout: Duration,
+    body_read_timeout: Duration,
 ) {
     let io = TokioIo::new(stream);
     let service = service_fn(move |req: hyper::Request<Incoming>| {
         let tx = req_tx.clone();
-        handle_hyper_request(req, remote_addr, tx, max_body_bytes)
+        Box::pin(handle_hyper_request(
+            req,
+            remote_addr,
+            tx,
+            max_body_bytes,
+            body_read_timeout,
+        ))
     });
 
     let mut builder = http1::Builder::new();
     builder
         .timer(TokioTimer::new())
-        .header_read_timeout(HEADER_READ_TIMEOUT)
+        .header_read_timeout(header_read_timeout)
         .max_buf_size(DEFAULT_MAX_HEADER_BYTES.max(16 * 1024));
 
-    let conn = builder.serve_connection(io, service);
-    tokio::pin!(conn);
+    let mut conn = builder.serve_connection(io, service);
 
-    tokio::select! {
-        _ = &mut conn => {}
+    let res = tokio::select! {
+        res = &mut conn => Some(res),
         _ = wait_for_shutdown(&mut shutdown_rx) => {
-            conn.as_mut().graceful_shutdown();
-            let _ = tokio::time::timeout(Duration::from_secs(5), conn).await;
+            Pin::new(&mut conn).graceful_shutdown();
+            let _ = tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, &mut conn).await;
+            None
         }
+    };
+
+    if let Some(Err(err)) = res
+        && err.is_timeout()
+    {
+        let parts = conn.into_parts();
+        let mut stream = parts.io.into_inner();
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 408 Request Timeout\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 15\r\nConnection: close\r\n\r\nRequest Timeout",
+            )
+            .await;
+        let _ = stream.shutdown().await;
     }
 }
 
@@ -1283,6 +1369,7 @@ async fn handle_hyper_request(
     remote_addr: SocketAddr,
     req_tx: mpsc::Sender<IncomingRequest>,
     max_body_bytes: usize,
+    body_read_timeout: Duration,
 ) -> Result<HttpLibResponse<Full<Bytes>>, std::convert::Infallible> {
     let method = req.method().as_str().to_owned();
     let is_head = *req.method() == hyper::Method::HEAD;
@@ -1330,7 +1417,7 @@ async fn handle_hyper_request(
     }
 
     let collected = match tokio::time::timeout(
-        DEFAULT_BODY_READ_TIMEOUT,
+        body_read_timeout,
         Limited::new(req.into_body(), max_body_bytes).collect(),
     )
     .await
@@ -1707,6 +1794,51 @@ fn op_vael_http_respond<'s>(
     ok_unit(scope)
 }
 
+#[cfg(feature = "test-support")]
+#[op2]
+fn op_vael_http_set_test_timeouts<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    state: &mut OpState,
+    header_timeout_ms: v8::Local<'s, v8::Value>,
+    body_timeout_ms: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Value> {
+    let parse_ms =
+        |val: v8::Local<'s, v8::Value>, name: &str| -> Result<Duration, (&'static str, String)> {
+            let Ok(num) = v8::Local::<v8::Number>::try_from(val) else {
+                return Err(("TypeError", format!("{name} must be a positive integer")));
+            };
+            let ms = num.value();
+            if !ms.is_finite() || ms.fract() != 0.0 || !(1.0..=600_000.0).contains(&ms) {
+                return Err((
+                    "RangeError",
+                    format!("{name} must be an integer between 1 and 600000"),
+                ));
+            }
+            Ok(Duration::from_millis(ms as u64))
+        };
+
+    let header_timeout = match parse_ms(header_timeout_ms, "headerTimeoutMs") {
+        Ok(d) => d,
+        Err((kind, msg)) => return failure(scope, kind, None, &msg),
+    };
+    let body_timeout = match parse_ms(body_timeout_ms, "bodyTimeoutMs") {
+        Ok(d) => d,
+        Err((kind, msg)) => return failure(scope, kind, None, &msg),
+    };
+
+    let Some(http_state) = state.try_borrow_mut::<HttpState>() else {
+        return failure(
+            scope,
+            "Error",
+            Some("VAEL_HTTP_INTERNAL"),
+            "HTTP state unavailable",
+        );
+    };
+    http_state.header_read_timeout = header_timeout;
+    http_state.body_read_timeout = body_timeout;
+    ok_unit(scope)
+}
+
 #[op2]
 async fn op_vael_http_close(state: Rc<RefCell<OpState>>, #[smi] server_rid: ResourceId) -> bool {
     let server = {
@@ -1727,6 +1859,36 @@ async fn op_vael_http_close(state: Rc<RefCell<OpState>>, #[smi] server_rid: Reso
     if let Some(handle) = accept_handle {
         let _ = handle.await;
     }
+
+    {
+        let mut rx = server.inner.rx.lock().await;
+        rx.close();
+        while let Ok(req) = rx.try_recv() {
+            let _ = req.resp_tx.send(HttpResponseData {
+                status: 503,
+                is_head: req.is_head,
+                headers: vec![(
+                    "content-type".to_owned(),
+                    "text/plain; charset=utf-8".to_owned(),
+                )],
+                body: b"Service Unavailable".to_vec(),
+            });
+        }
+    }
+
+    let deadline = tokio::time::Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
+    loop {
+        let notified = server.inner.conns_drained.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if server.inner.active_conns.load(Ordering::Acquire) == 0 {
+            break;
+        }
+        if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            break;
+        }
+    }
+
     true
 }
 
@@ -1756,6 +1918,19 @@ deno_core::extension!(
     },
     docs = "HTTP/1.1 server, Go-style ServeMux router, static files, and cookies behind `Vael.getBuiltInModule(\"vael:http\")`."
 );
+
+#[cfg(feature = "test-support")]
+deno_core::extension!(
+    vaeljs_http_test,
+    ops = [op_vael_http_set_test_timeouts],
+    docs = "Test-only timeout override for `vael:http`, compiled only with `test-support`."
+);
+
+/// The test-only `vael:http` extension.
+#[cfg(feature = "test-support")]
+pub(crate) fn test_support_extension() -> deno_core::Extension {
+    vaeljs_http_test::init()
+}
 
 #[cfg(test)]
 mod tests {

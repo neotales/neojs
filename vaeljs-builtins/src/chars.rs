@@ -6,12 +6,14 @@
 //! JavaScript implementation and no JavaScript module wrapper in this crate.
 //!
 //! Character classification uses the Unicode General_Category tables from
-//! [`unicode_general_category`], fixed at Unicode 16.0. Case mapping uses Rust's
-//! `char::to_lowercase` and `char::to_uppercase`; that is the Unicode data shipped
-//! with the Rust compiler, which is not guaranteed to be the same release as the
-//! category table and can differ from the tables the engines used before this
-//! binding. A mapping that expands to more than one code point leaves the input
-//! unchanged, because the API returns one code point.
+//! [`unicode_general_category`], fixed at Unicode 16.0. Case mapping uses
+//! generated lookup tables from the pinned Unicode 16.0 `UnicodeData.txt`
+//! (`Simple_Uppercase_Mapping` field 12 and `Simple_Lowercase_Mapping` field 13)
+//! and `SpecialCasing.txt` (unconditional rules), so both classification and
+//! case mapping follow Unicode 16.0 independently of the Rust compiler's
+//! standard library. A mapping that expands to more than one code point (such as
+//! `U+0130` lowercase -> `0069 0307` or `U+00DF` uppercase -> `0053 0053`)
+//! leaves the input unchanged, because the API returns one code point.
 //!
 //! Every predicate is total: a non-number, a non-integer, a surrogate, an
 //! out-of-range value, or `NaN` is not a Unicode scalar value and returns
@@ -20,6 +22,10 @@
 //!
 //! The module has no host operation, no capability, and no I/O. It is not a
 //! sandbox.
+
+mod case_map;
+#[cfg(test)]
+mod case_map_test;
 
 use unicode_general_category::{GeneralCategory, get_general_category};
 
@@ -224,31 +230,20 @@ pub fn is_symbol(value: f64) -> bool {
     })
 }
 
-/// Returns the one-code-point lowercase mapping, or the input when the full
-/// mapping expands to more than one code point.
+/// Returns the Unicode 16.0 one-code-point lowercase mapping for `value`, or
+/// the input when the mapping expands to more than one code point or none is
+/// defined.
 #[must_use]
 pub fn to_lower(value: Scalar) -> u32 {
-    one_code_point(value, value.to_char().to_lowercase())
+    case_map::simple_lower(value.get())
 }
 
-/// Returns the one-code-point uppercase mapping, or the input when the full
-/// mapping expands to more than one code point.
+/// Returns the Unicode 16.0 one-code-point uppercase mapping for `value`, or
+/// the input when the mapping expands to more than one code point or none is
+/// defined.
 #[must_use]
 pub fn to_upper(value: Scalar) -> u32 {
-    one_code_point(value, value.to_char().to_uppercase())
-}
-
-/// Returns the single code point of an iterator, or the original when the
-/// iterator is empty or has more than one item.
-fn one_code_point(value: Scalar, mut mapped: impl Iterator<Item = char>) -> u32 {
-    let Some(first) = mapped.next() else {
-        return value.get();
-    };
-    if mapped.next().is_some() {
-        value.get()
-    } else {
-        first as u32
-    }
+    case_map::simple_upper(value.get())
 }
 
 /// Validates a numeric case-mapping argument and returns its lowercase mapping.
@@ -435,15 +430,13 @@ mod tests {
     }
 
     #[test]
-    fn case_mapping_documents_the_compiler_table_dependency() {
-        // These code points are classified by the Unicode 16.0 category table.
-        // The mappings here come from the Rust compiler's case tables, which are
-        // a separate release stream. If a compiler upgrade changes them, update
-        // this test and the documented limitation rather than the category
-        // table.
+    fn case_mapping_uses_pinned_unicode_16_tables() {
+        // Both classification and simple case mapping are pinned to Unicode 16.0
+        // independently of the Rust compiler's stdlib Unicode tables.
         assert_eq!(to_lower(scalar(0x1C89)), 0x1C8A);
         assert_eq!(to_upper(scalar(0x1C8A)), 0x1C89);
-        // An expanding mapping still returns the input unchanged.
+        // Expanding mappings with no simple mapping in UnicodeData.txt still
+        // return the input unchanged.
         assert_eq!(to_upper(scalar(0x00DF)), 0x00DF);
     }
 

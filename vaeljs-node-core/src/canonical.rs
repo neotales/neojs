@@ -60,6 +60,7 @@ const KNOWN_BARE_NODE_MODULES: &[&str] = &[
     "readline",
     "readline/promises",
     "repl",
+    "sea",
     "sqlite",
     "stream",
     "stream/consumers",
@@ -154,5 +155,11 @@ mod tests {
             assert!(is_supported_node_module(spec));
             assert!(!is_known_bare_node_module(spec));
         }
+    }
+
+    #[test]
+    fn recognizes_sea_as_known_bare_node_module() {
+        assert!(is_known_bare_node_module("sea"));
+        assert!(!is_known_bare_node_module("node:sea"));
     }
 }

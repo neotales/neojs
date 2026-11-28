@@ -38,6 +38,7 @@
     const arrayFrom = Array.from;
     const isInteger = Number.isInteger;
     const promiseAllSettled = Promise.allSettled.bind(Promise);
+    const promiseFinally = Function.prototype.call.bind(Promise.prototype.finally);
     const jsonStringify = JSON.stringify;
     const jsonParse = JSON.parse;
     const stringToLowerCase = Function.prototype.call.bind(String.prototype.toLowerCase);
@@ -1615,6 +1616,7 @@
         const serverRid = bound.serverRid;
         let closed = false;
         let closingPromise = null;
+        let closeOpPromise = null;
         const inFlight = new makeSet();
 
         function detachSignal() {
@@ -1693,13 +1695,16 @@
                     }
                     const task = dispatchOne(reqRid);
                     setAdd(inFlight, task);
-                    task.finally(() => {
+                    promiseFinally(task, () => {
                         setDelete(inFlight, task);
                     });
                 }
             } finally {
                 if (setSize(inFlight) > 0) {
                     await promiseAllSettled(arrayFrom(setValues(inFlight)));
+                }
+                if (closeOpPromise) {
+                    await closeOpPromise;
                 }
                 detachSignal();
             }
@@ -1711,8 +1716,9 @@
             }
             closed = true;
             detachSignal();
+            closeOpPromise = opClose(serverRid);
             closingPromise = (async () => {
-                await opClose(serverRid);
+                await closeOpPromise;
                 await finished;
             })();
             return closingPromise;

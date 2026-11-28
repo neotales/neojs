@@ -804,4 +804,166 @@ mod tests {
         );
         assert!(shamir_split_packed(b"secret", 2, 3).is_ok());
     }
+
+    // Unit test: splitting and combining beyond NOISE_BUFFER_BYTES (64 KiB) across chunk boundaries.
+    #[test]
+    fn shamir_beyond_noise_buffer_bytes_roundtrips_split_and_packed() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        for length in [NOISE_BUFFER_BYTES, 70_000, 135_000] {
+            let secret: Vec<u8> = (0..length).map(|i| ((i * 37 + 13) & 0xff) as u8).collect();
+            for (threshold, share_count) in [(2usize, 3usize), (5usize, 7usize)] {
+                let shares = shamir_split(&secret, threshold, share_count).unwrap();
+                assert_eq!(shares.len(), share_count);
+                assert_eq!(&*shamir_combine(&shares[..threshold]).unwrap(), &secret);
+                assert_eq!(
+                    &*shamir_combine(&shares[share_count - threshold..]).unwrap(),
+                    &secret
+                );
+
+                let packed = shamir_split_packed(&secret, threshold, share_count).unwrap();
+                let payload = parse_split_payload(&packed).unwrap();
+                assert_eq!(payload.count, share_count);
+                assert_eq!(payload.length, length);
+                let stride = 1 + payload.length;
+                let extracted: Vec<ShamirShare> = (0..threshold)
+                    .map(|idx| {
+                        let rec = &payload.body[idx * stride..(idx + 1) * stride];
+                        ShamirShare::new(rec[0], rec[1..].to_vec())
+                    })
+                    .collect();
+                assert_eq!(&*shamir_combine(&extracted).unwrap(), &secret);
+            }
+        }
+    }
+
+    // Unit test: deterministic multi-chunk split_with matches single-byte polynomial evaluation beyond NOISE_BUFFER_BYTES.
+    #[test]
+    fn shamir_deterministic_noise_chunking_beyond_64k_matches_polynomial() {
+        let length = 70_000usize;
+        let threshold = 4usize;
+        let share_count = 6usize;
+        let secret: Vec<u8> = (0..length).map(|i| ((i * 19 + 5) & 0xff) as u8).collect();
+
+        let mut counter = 0u64;
+        let shares = split_with(&secret, threshold, share_count, |buf| {
+            for byte in buf.iter_mut() {
+                counter = counter.wrapping_add(1);
+                *byte = ((counter * 73 + 17) & 0xff) as u8;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        // Check noise_size chunking produced exact bytewise polynomial outputs at chunk boundaries.
+        let (chunk_bytes, _) = noise_size(length, threshold).unwrap();
+        assert!(chunk_bytes < length);
+        let stride = threshold - 1;
+        for pos in [0, chunk_bytes - 1, chunk_bytes, chunk_bytes + 1, length - 1] {
+            let base = pos * stride;
+            let coeffs = [
+                (((base + 1) as u64 * 73 + 17) & 0xff) as u8,
+                (((base + 2) as u64 * 73 + 17) & 0xff) as u8,
+                (((base + 3) as u64 * 73 + 17) & 0xff) as u8,
+            ];
+            for share in &shares {
+                assert_eq!(
+                    share.value()[pos],
+                    evaluate(secret[pos], &coeffs, share.index()),
+                    "deterministic share mismatch at pos={pos}, share={}",
+                    share.index()
+                );
+            }
+        }
+        assert_eq!(&*shamir_combine(&shares[0..threshold]).unwrap(), &secret);
+        assert_eq!(
+            &*shamir_combine(&[
+                ShamirShare::new(shares[0].index(), shares[0].value().to_vec()),
+                ShamirShare::new(shares[2].index(), shares[2].value().to_vec()),
+                ShamirShare::new(shares[4].index(), shares[4].value().to_vec()),
+                ShamirShare::new(shares[5].index(), shares[5].value().to_vec()),
+            ])
+            .unwrap(),
+            &secret
+        );
+
+        // Fewer than threshold shares (k - 1 = 3) must not recover the secret.
+        let wrong = shamir_combine(&shares[..threshold - 1]).unwrap();
+        assert_ne!(&*wrong, &secret);
+    }
+
+    // Unit test: threshold boundaries (k=1 rejected, k=n succeeds including MAX_SHAMIR_SHARES, k-1 fails) and malformed share IDs.
+    #[test]
+    fn shamir_threshold_boundaries_and_malformed_share_ids() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let secret = b"threshold-boundary-secret";
+
+        // k = 1 is rejected with Range in both split and noise_size/validate_split.
+        assert_eq!(
+            shamir_split(secret, 1, 2).unwrap_err().code(),
+            ShamirErrorCode::Range
+        );
+        assert_eq!(
+            shamir_split_packed(secret, 1, 2).unwrap_err().code(),
+            ShamirErrorCode::Range
+        );
+        assert_eq!(
+            validate_split(secret.len(), 1, 1).unwrap_err().code(),
+            ShamirErrorCode::Range
+        );
+
+        // k = n succeeds at small n and at MAX_SHAMIR_SHARES (255-of-255).
+        let shares_5_of_5 = shamir_split(secret, 5, 5).unwrap();
+        assert_eq!(&*shamir_combine(&shares_5_of_5).unwrap(), secret);
+        let shares_255 = shamir_split(b"max", MAX_SHAMIR_SHARES, MAX_SHAMIR_SHARES).unwrap();
+        assert_eq!(shares_255.len(), MAX_SHAMIR_SHARES);
+        assert_eq!(shares_255.first().unwrap().index(), 1);
+        assert_eq!(shares_255.last().unwrap().index(), 255);
+        assert_eq!(&*shamir_combine(&shares_255).unwrap(), b"max");
+
+        // k - 1 failure: 1 share rejected by combine; 2 shares from deterministic 3-of-5 fail to reconstruct.
+        let det_shares = split_with(b"abc", 3, 5, |buf| {
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_add(1);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            shamir_combine(&det_shares[..1]).unwrap_err().code(),
+            ShamirErrorCode::Range
+        );
+        assert_ne!(&*shamir_combine(&det_shares[..2]).unwrap(), b"abc");
+
+        // Duplicate, zero, >255, and malformed packed shares.
+        assert_eq!(
+            shamir_combine(&[
+                ShamirShare::new(1, b"abc".to_vec()),
+                ShamirShare::new(2, b"def".to_vec()),
+                ShamirShare::new(1, b"ghi".to_vec()),
+            ])
+            .unwrap_err()
+            .code(),
+            ShamirErrorCode::DuplicateIndex
+        );
+        assert_eq!(
+            shamir_combine(&[
+                ShamirShare::new(2, b"abc".to_vec()),
+                ShamirShare::new(0, b"def".to_vec()),
+            ])
+            .unwrap_err()
+            .code(),
+            ShamirErrorCode::Range
+        );
+        let too_many: Vec<ShamirShare> = (0..=MAX_SHAMIR_SHARES)
+            .map(|i| ShamirShare::new((i % 255 + 1) as u8, vec![1]))
+            .collect();
+        assert_eq!(
+            shamir_combine(&too_many).unwrap_err().code(),
+            ShamirErrorCode::Range
+        );
+        assert_eq!(
+            parse_split_payload(&[0u8; 7]).unwrap_err().code(),
+            ShamirErrorCode::Internal
+        );
+    }
 }
