@@ -47,6 +47,8 @@ declare module "vael:exec" {
     | "VAEL_EXEC_UNSUPPORTED_SIGNAL"
     | "VAEL_EXEC_LOCK_WOULD_BLOCK"
     | "VAEL_EXEC_LOCK_TIMEOUT"
+    | "VAEL_EXEC_NON_ZERO"
+    | "VAEL_EXEC_STDERR"
     | "VAEL_EXEC_IO";
 
   /**
@@ -115,6 +117,13 @@ declare module "vael:exec" {
     env?: Record<string, string | undefined>;
 
     /**
+     * Environment variable names to remove from the subprocess environment.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    envRemove?: readonly string[];
+
+    /**
      * Clear all inherited environment variables before applying `env`
      * (default `false`).
      *
@@ -146,11 +155,18 @@ declare module "vael:exec" {
 
     /**
      * Finite positive execution timeout in milliseconds. On expiry, sends
-     * `killSignal` and escalates to `"SIGKILL"` after `killGrace`.
+     * `killSignal` and escalates to `"SIGKILL"` after `killGrace` / `killGraceMs`.
      *
      * @since 0.0.0-alpha.2
      */
     timeout?: number;
+
+    /**
+     * Alias for `timeout` (mutually exclusive with `timeout`).
+     *
+     * @since 0.0.0-alpha.2
+     */
+    timeoutMs?: number;
 
     /**
      * Initial termination signal sent when `timeout` expires (default `"SIGTERM"`).
@@ -166,6 +182,13 @@ declare module "vael:exec" {
      * @since 0.0.0-alpha.2
      */
     killGrace?: number;
+
+    /**
+     * Alias for `killGrace` (mutually exclusive with `killGrace`).
+     *
+     * @since 0.0.0-alpha.2
+     */
+    killGraceMs?: number;
 
     /**
      * Maximum bytes captured per output stream (`stdout` and `stderr`,
@@ -254,8 +277,27 @@ declare module "vael:exec" {
   }
 
   /**
-   * Error thrown by `Output.validate()` when a subprocess exits with a
-   * non-zero status code, signal termination, or timeout.
+   * Optional metadata attached to a `CommandError`.
+   *
+   * @since 0.0.0-alpha.2
+   */
+  export interface CommandErrorOptions {
+    /** Exit status code from the failed subprocess. @since 0.0.0-alpha.2 */
+    readonly exitCode?: number;
+    /** Termination signal name, or `null`. @since 0.0.0-alpha.2 */
+    readonly signal?: Signal | string | null;
+    /** Whether the failure resulted from exceeding `timeout`. @since 0.0.0-alpha.2 */
+    readonly timedOut?: boolean;
+    /** Captured `Output` from the failed command, when available. @since 0.0.0-alpha.2 */
+    readonly output?: Output;
+    /** Target executable name/path, when applicable. @since 0.0.0-alpha.2 */
+    readonly fileName?: string;
+  }
+
+  /**
+   * Error thrown by `Output.validate()` or `vael:exec` operations when a
+   * subprocess exits with a non-zero status code, signal termination, timeout,
+   * or execution error.
    *
    * @since 0.0.0-alpha.2
    */
@@ -268,25 +310,25 @@ declare module "vael:exec" {
     override name: "CommandError";
 
     /**
-     * Machine-readable error code (`"VAEL_EXEC_TIMEOUT"` on timeout or non-zero command failure code).
+     * Machine-readable error code.
      *
      * @since 0.0.0-alpha.2
      */
-    readonly code: string;
+    readonly code: ExecErrorCode | string;
 
     /**
-     * Exit status code from the failed subprocess.
+     * Exit status code from the failed subprocess, when available.
      *
      * @since 0.0.0-alpha.2
      */
-    readonly exitCode: number;
+    readonly exitCode?: number;
 
     /**
      * Termination signal name, or `null` if not killed by a signal.
      *
      * @since 0.0.0-alpha.2
      */
-    readonly signal: string | null;
+    readonly signal?: Signal | string | null;
 
     /**
      * `true` when the failure resulted from exceeding `timeout`.
@@ -303,13 +345,21 @@ declare module "vael:exec" {
     readonly output?: Output;
 
     /**
-     * Construct a `CommandError`.
+     * Target executable or path associated with the error, when available.
      *
-     * @param message Human-readable error message.
-     * @param output Optional captured `Output` from the failed command.
      * @since 0.0.0-alpha.2
      */
-    constructor(message: string, output?: Output);
+    readonly fileName?: string;
+
+    /**
+     * Construct a `CommandError`.
+     *
+     * @param code Machine-readable `ExecErrorCode` or custom code string.
+     * @param message Human-readable error message.
+     * @param options Optional failure metadata.
+     * @since 0.0.0-alpha.2
+     */
+    constructor(code: ExecErrorCode | string, message: string, options?: CommandErrorOptions);
   }
 
   /**
@@ -334,20 +384,20 @@ declare module "vael:exec" {
     readonly code: "VAEL_EXEC_NOT_FOUND";
 
     /**
-     * Program name or path that failed lookup, when available.
+     * Program name or path that failed lookup.
      *
      * @since 0.0.0-alpha.2
      */
-    readonly command?: string;
+    readonly fileName: string;
 
     /**
      * Construct a `NotFoundOnPathError`.
      *
-     * @param message Human-readable error message.
-     * @param command Optional program name that was not found.
+     * @param fileName Program name or path that was not found.
+     * @param message Optional custom human-readable error message.
      * @since 0.0.0-alpha.2
      */
-    constructor(message: string, command?: string);
+    constructor(fileName: string, message?: string);
   }
 
   /**
@@ -423,6 +473,14 @@ declare module "vael:exec" {
     lines(): string[];
 
     /**
+     * Decode `stdout` as UTF-8 and parse it as JSON.
+     *
+     * @returns Parsed JSON value.
+     * @since 0.0.0-alpha.2
+     */
+    json<T = unknown>(): T;
+
+    /**
      * Decode `stderr` as UTF-8 (replacing invalid sequences with `U+FFFD`).
      *
      * @returns Decoded standard error string.
@@ -439,11 +497,22 @@ declare module "vael:exec" {
     errorLines(): string[];
 
     /**
-     * Assert that the subprocess succeeded (`this.success === true`), returning
-     * `this` on success or throwing `CommandError` on failure.
+     * Decode `stderr` as UTF-8 and parse it as JSON.
      *
-     * @returns `this` when `success` is `true`.
-     * @throws {CommandError} when `success` is `false`.
+     * @returns Parsed JSON value.
+     * @since 0.0.0-alpha.2
+     */
+    errorJson<T = unknown>(): T;
+
+    /**
+     * Assert that the subprocess succeeded (`this.success === true`, or
+     * `predicate(this.code)` returns `true`), returning `this` on success or
+     * throwing `CommandError` on failure.
+     *
+     * @param predicate Optional exit-code predicate `(code: number) => boolean`.
+     * @param failOnStderr If `true`, throw `CommandError` (`"VAEL_EXEC_STDERR"`) when `stderr` is non-empty.
+     * @returns `this` when validation passes.
+     * @throws {CommandError} when validation fails.
      * @example
      * ```ts
      * import { execSync } from "vael:exec";
@@ -453,7 +522,7 @@ declare module "vael:exec" {
      * ```
      * @since 0.0.0-alpha.2
      */
-    validate(): this;
+    validate(predicate?: (code: number) => boolean, failOnStderr?: boolean): this;
   }
 
   /**
@@ -466,14 +535,17 @@ declare module "vael:exec" {
    */
   export class Command {
     /**
-     * Construct a `Command` specification for `program` or an `[program, ...args]` array.
+     * Construct a `Command` specification for `program`, `(program, args, options?)`, or `(argv, options?)`.
      *
      * @param program Executable name/path or non-empty `[program, ...args]` array.
-     * @param options Optional command configuration.
+     * @param argsOrOptions Literal argument array or command options.
+     * @param options Optional command configuration when `argsOrOptions` is an argument array.
      * @throws {Error} (`"VAEL_EXEC_INVALID_ARGUMENT"`) when `program` is empty or contains NUL bytes.
      * @since 0.0.0-alpha.2
      */
-    constructor(program: string | readonly string[], options?: CommandOptions);
+    constructor(program: string, options?: CommandOptions);
+    constructor(program: string, args: readonly string[], options?: CommandOptions);
+    constructor(argv: readonly string[], options?: CommandOptions);
 
     /**
      * Append a single literal argument (never shell-expanded).
@@ -488,12 +560,12 @@ declare module "vael:exec" {
     /**
      * Append multiple literal arguments in order (never shell-expanded).
      *
-     * @param values Iterable or array of literal argument strings.
+     * @param values Array of literal argument strings.
      * @returns `this` for fluent chaining.
      * @throws {Error} (`"VAEL_EXEC_INVALID_ARGUMENT"`) if any argument contains a NUL byte.
      * @since 0.0.0-alpha.2
      */
-    args(values: readonly string[] | Iterable<string>): this;
+    args(values: readonly string[]): this;
 
     /**
      * Set the subprocess working directory.
@@ -519,14 +591,12 @@ declare module "vael:exec" {
     /**
      * Set multiple environment variables on the subprocess.
      *
-     * @param entries Plain object map or `[key, value]` iterable (`undefined` values are skipped).
+     * @param vars Plain object map (`undefined` values are skipped).
      * @returns `this` for fluent chaining.
      * @throws {Error} (`"VAEL_EXEC_INVALID_ARGUMENT"`) on invalid keys or NUL-containing values.
      * @since 0.0.0-alpha.2
      */
-    envs(
-      entries: Record<string, string | undefined> | Iterable<readonly [string, string]>,
-    ): this;
+    envs(vars: Record<string, string | undefined>): this;
 
     /**
      * Remove an inherited or previously configured environment variable.
@@ -633,6 +703,16 @@ declare module "vael:exec" {
      * @throws {Error} with `code: ExecErrorCode` on spawn, timeout, or output-limit failure.
      * @since 0.0.0-alpha.2
      */
+    output(): Promise<Output>;
+
+    /**
+     * Alias for `output()`.
+     *
+     * Available in `vjs` (`vaeljs`) only.
+     *
+     * @returns Promise resolving to captured `Output`.
+     * @since 0.0.0-alpha.2
+     */
     exec(): Promise<Output>;
 
     /**
@@ -641,6 +721,14 @@ declare module "vael:exec" {
      * @returns Captured `Output`.
      * @throws {NotFoundOnPathError} if the executable cannot be found.
      * @throws {Error} with `code: ExecErrorCode` on spawn, timeout, or output-limit failure.
+     * @since 0.0.0-alpha.2
+     */
+    outputSync(): Output;
+
+    /**
+     * Alias for `outputSync()`.
+     *
+     * @returns Captured `Output`.
      * @since 0.0.0-alpha.2
      */
     execSync(): Output;
@@ -655,6 +743,16 @@ declare module "vael:exec" {
      * @throws {Error} with `code: ExecErrorCode` on spawn or timeout failure.
      * @since 0.0.0-alpha.2
      */
+    status(): Promise<CommandStatus>;
+
+    /**
+     * Alias for `status()`.
+     *
+     * Available in `vjs` (`vaeljs`) only.
+     *
+     * @returns Promise resolving to `CommandStatus`.
+     * @since 0.0.0-alpha.2
+     */
     run(): Promise<CommandStatus>;
 
     /**
@@ -665,7 +763,39 @@ declare module "vael:exec" {
      * @throws {Error} with `code: ExecErrorCode` on spawn or timeout failure.
      * @since 0.0.0-alpha.2
      */
+    statusSync(): CommandStatus;
+
+    /**
+     * Alias for `statusSync()`.
+     *
+     * @returns `CommandStatus`.
+     * @since 0.0.0-alpha.2
+     */
     runSync(): CommandStatus;
+
+    /**
+     * Execute asynchronously, validate zero exit status, and decode `stdout` as UTF-8 text.
+     *
+     * @returns Promise resolving to decoded `stdout` text.
+     * @since 0.0.0-alpha.2
+     */
+    text(): Promise<string>;
+
+    /**
+     * Execute asynchronously, validate zero exit status, and split `stdout` into lines.
+     *
+     * @returns Promise resolving to `stdout` lines.
+     * @since 0.0.0-alpha.2
+     */
+    lines(): Promise<string[]>;
+
+    /**
+     * Execute asynchronously, validate zero exit status, and parse `stdout` as JSON.
+     *
+     * @returns Promise resolving to parsed JSON value.
+     * @since 0.0.0-alpha.2
+     */
+    json<T = unknown>(): Promise<T>;
 
     /**
      * Spawn this command as a managed `ChildProcess` handle with piped streams.
@@ -773,7 +903,17 @@ declare module "vael:exec" {
       maxOutputBytes?: number;
       /** Finite timeout in milliseconds. @since 0.0.0-alpha.2 */
       timeout?: number;
+      /** Alias for `timeout` in milliseconds. @since 0.0.0-alpha.2 */
+      timeoutMs?: number;
     }): Promise<Output>;
+
+    /**
+     * Alias for `waitWithOutput()`.
+     *
+     * @returns Promise resolving to captured `Output`.
+     * @since 0.0.0-alpha.2
+     */
+    output(): Promise<Output>;
 
     /**
      * Dispose the child handle when leaving an `await using` block by sending
@@ -795,11 +935,25 @@ declare module "vael:exec" {
    */
   export class FileLock {
     /**
+     * Target lock file path associated with this guard.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    readonly path: string;
+
+    /**
      * Lock sharing mode held by this guard (`"shared"` or `"exclusive"`).
      *
      * @since 0.0.0-alpha.2
      */
     readonly mode: LockMode;
+
+    /**
+     * `true` while the advisory OS lock is currently held by this guard.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    readonly locked: boolean;
 
     /**
      * Explicitly unlock and close the underlying file handle. Idempotent on
@@ -816,13 +970,22 @@ declare module "vael:exec" {
      * @since 0.0.0-alpha.2
      */
     [Symbol.dispose](): void;
+
+    /**
+     * Release the advisory file lock when exiting an `await using` scope.
+     *
+     * @returns Promise resolving after unlocking.
+     * @since 0.0.0-alpha.2
+     */
+    [Symbol.asyncDispose](): Promise<void>;
   }
 
   /**
    * Create a fluent `Command` builder without executing it.
    *
    * @param program Executable name/path or `[program, ...args]` array.
-   * @param options Optional command configuration.
+   * @param argsOrOptions Optional literal argument array or command configuration.
+   * @param options Optional command configuration when `argsOrOptions` is an argument array.
    * @returns Configured `Command` builder.
    * @throws {Error} (`"VAEL_EXEC_INVALID_ARGUMENT"`) if `program` is empty or contains NUL bytes.
    * @example
@@ -834,7 +997,13 @@ declare module "vael:exec" {
    * ```
    * @since 0.0.0-alpha.2
    */
-  export function cmd(program: string | readonly string[], options?: CommandOptions): Command;
+  export function cmd(program: string, options?: CommandOptions): Command;
+  export function cmd(
+    program: string,
+    args: readonly string[],
+    options?: CommandOptions,
+  ): Command;
+  export function cmd(argv: readonly string[], options?: CommandOptions): Command;
 
   /**
    * Execute a command asynchronously and capture `stdout` and `stderr`
@@ -1093,7 +1262,10 @@ declare module "vael:exec" {
    * @throws {Error} (`"VAEL_EXEC_INVALID_ARGUMENT"`) if `name` is empty or contains NUL bytes.
    * @since 0.0.0-alpha.2
    */
-  export function which(name: string, prependPath?: string): Promise<string | null>;
+  export function which(
+    name: string,
+    prependPath?: string | { readonly prependPath?: string },
+  ): Promise<string | null>;
 
   /**
    * Synchronously find the first executable matching `name` on `PATH`
@@ -1102,12 +1274,15 @@ declare module "vael:exec" {
    * Available in both `vjs` (`vaeljs`) and `vjs-lite` (`vaeljs-lite`).
    *
    * @param name Bare executable name or explicit path.
-   * @param prependPath Optional `PATH`-formatted prefix searched before `PATH`.
+   * @param prependPath Optional `PATH`-formatted prefix or options object `{ prependPath? }`.
    * @returns Resolved executable path, or `null` if not found.
    * @throws {Error} (`"VAEL_EXEC_INVALID_ARGUMENT"`) if `name` is empty or contains NUL bytes.
    * @since 0.0.0-alpha.2
    */
-  export function whichSync(name: string, prependPath?: string): string | null;
+  export function whichSync(
+    name: string,
+    prependPath?: string | { readonly prependPath?: string },
+  ): string | null;
 
   /**
    * Asynchronously find all executables matching `name` across `prependPath`
@@ -1116,12 +1291,15 @@ declare module "vael:exec" {
    * Available in `vjs` (`vaeljs`) only; use `whichAllSync` in `vjs-lite`.
    *
    * @param name Bare executable name or explicit path.
-   * @param prependPath Optional `PATH`-formatted prefix searched before `PATH`.
+   * @param prependPath Optional `PATH`-formatted prefix or options object `{ prependPath? }`.
    * @returns Promise resolving to an array of matching executable paths.
    * @throws {Error} (`"VAEL_EXEC_INVALID_ARGUMENT"`) if `name` is empty or contains NUL bytes.
    * @since 0.0.0-alpha.2
    */
-  export function whichAll(name: string, prependPath?: string): Promise<string[]>;
+  export function whichAll(
+    name: string,
+    prependPath?: string | { readonly prependPath?: string },
+  ): Promise<string[]>;
 
   /**
    * Synchronously find all executables matching `name` across `prependPath`
@@ -1130,12 +1308,15 @@ declare module "vael:exec" {
    * Available in both `vjs` (`vaeljs`) and `vjs-lite` (`vaeljs-lite`).
    *
    * @param name Bare executable name or explicit path.
-   * @param prependPath Optional `PATH`-formatted prefix searched before `PATH`.
+   * @param prependPath Optional `PATH`-formatted prefix or options object `{ prependPath? }`.
    * @returns Array of matching executable paths in search order.
    * @throws {Error} (`"VAEL_EXEC_INVALID_ARGUMENT"`) if `name` is empty or contains NUL bytes.
    * @since 0.0.0-alpha.2
    */
-  export function whichAllSync(name: string, prependPath?: string): string[];
+  export function whichAllSync(
+    name: string,
+    prependPath?: string | { readonly prependPath?: string },
+  ): string[];
 
   /**
    * Asynchronously acquire an OS advisory file lock on `path` (rejecting

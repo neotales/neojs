@@ -134,6 +134,12 @@ impl FileLock {
             use std::os::unix::fs::OpenOptionsExt as _;
             open_opts.custom_flags(libc::O_NOFOLLOW);
         }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            open_opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
 
         let file = open_opts.open(&*normalized).map_err(|err| {
             #[cfg(unix)]
@@ -150,16 +156,14 @@ impl FileLock {
             map_io_error("open lock file", err)
         })?;
 
-        #[cfg(windows)]
-        if fs::symlink_metadata(&normalized).is_ok_and(|meta| is_symlink_or_reparse(&meta)) {
+        let meta = file
+            .metadata()
+            .map_err(|err| map_io_error("inspect lock file metadata", err))?;
+        if is_symlink_or_reparse(&meta) {
             return Err(ExecError::InvalidArgument {
                 reason: "lock path must not be a symbolic link",
             });
         }
-
-        let meta = file
-            .metadata()
-            .map_err(|err| map_io_error("inspect lock file metadata", err))?;
         if !meta.is_file() {
             return Err(ExecError::InvalidArgument {
                 reason: "lock path must refer to a regular file",

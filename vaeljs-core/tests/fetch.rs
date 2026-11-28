@@ -339,8 +339,13 @@ try {{ r4.text(); }} catch (e) {{ utf8Err = e; }}
 if (!(utf8Err instanceof FetchError) || utf8Err.code !== "VAEL_FETCH_INVALID_UTF8") {{
     throw new Error(`expected VAEL_FETCH_INVALID_UTF8, got ${{utf8Err}}`);
 }}
+let utf8JsonErr = null;
+try {{ r4.json(); }} catch (e) {{ utf8JsonErr = e; }}
+if (!(utf8JsonErr instanceof FetchError) || utf8JsonErr.code !== "VAEL_FETCH_INVALID_UTF8") {{
+    throw new Error(`expected VAEL_FETCH_INVALID_UTF8, got ${{utf8JsonErr}}`);
+}}
 let jsonErr = null;
-try {{ r4.json(); }} catch (e) {{ jsonErr = e; }}
+try {{ r3.json(); }} catch (e) {{ jsonErr = e; }}
 if (!(jsonErr instanceof FetchError) || jsonErr.code !== "VAEL_FETCH_INVALID_JSON") {{
     throw new Error(`expected VAEL_FETCH_INVALID_JSON, got ${{jsonErr}}`);
 }}
@@ -618,4 +623,159 @@ if (order.join(",") !== "fast,slow") {{
 }}
 "#,
     ));
+}
+
+#[test]
+fn fetch_contract_details_headers_utf8_url_and_abort_on_progress_throw() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let sync_abort_dest = dir.path().join("sync-abort.bin");
+    let async_abort_dest = dir.path().join("async-abort.bin");
+    let missing_dest = dir.path().join("missing.bin");
+    let empty_dest = dir.path().join("empty.bin");
+
+    let server = TestServer::spawn(6, |idx, _| match idx {
+        0 => ScriptedReply {
+            status: 200,
+            reason: "OK",
+            headers: vec![
+                ("Set-Cookie".to_owned(), "a=1".to_owned()),
+                ("Set-Cookie".to_owned(), "b=2".to_owned()),
+            ],
+            body: b"ok".to_vec(),
+            delay: Duration::ZERO,
+            omit_content_length: false,
+        },
+        1 => ScriptedReply {
+            status: 200,
+            reason: "OK",
+            headers: vec![("Content-Type".to_owned(), "application/json".to_owned())],
+            body: vec![0xff, 0xfe, 0xfd],
+            delay: Duration::ZERO,
+            omit_content_length: false,
+        },
+        2 => ScriptedReply::ok(b""),
+        3 => ScriptedReply::ok(b"payload-sync"),
+        4 => ScriptedReply::ok(b"payload-async"),
+        _ => ScriptedReply {
+            status: 404,
+            reason: "Not Found",
+            headers: Vec::new(),
+            body: Vec::new(),
+            delay: Duration::ZERO,
+            omit_content_length: false,
+        },
+    });
+
+    let base_url = serde_json::to_string(&server.url("/item")).unwrap();
+    let empty_url = serde_json::to_string(&server.url("/empty")).unwrap();
+    let err_url = serde_json::to_string(&server.url("/missing")).unwrap();
+    let empty_dest_js = serde_json::to_string(&empty_dest.to_string_lossy().into_owned()).unwrap();
+    let sync_abort_js =
+        serde_json::to_string(&sync_abort_dest.to_string_lossy().into_owned()).unwrap();
+    let async_abort_js =
+        serde_json::to_string(&async_abort_dest.to_string_lossy().into_owned()).unwrap();
+    let missing_dest_js =
+        serde_json::to_string(&missing_dest.to_string_lossy().into_owned()).unwrap();
+
+    run_js(&format!(
+        r#"
+import {{ FetchError, download, downloadSync, fetch, fetchSync }} from "vael:fetch";
+
+const r0 = fetchSync({base_url}, {{ allowPrivateIps: true, userAgent: null }});
+const cookies = r0.headerValues("set-cookie");
+if (cookies.length !== 2 || cookies[0] !== "a=1" || cookies[1] !== "b=2") {{
+    throw new Error(`unexpected headerValues: ${{JSON.stringify(cookies)}}`);
+}}
+
+const r1 = fetchSync({base_url}, {{ allowPrivateIps: true }});
+let utf8Err = null;
+try {{
+    r1.json();
+}} catch (err) {{
+    utf8Err = err;
+}}
+if (!(utf8Err instanceof FetchError) || utf8Err.code !== "VAEL_FETCH_INVALID_UTF8") {{
+    throw new Error(`expected VAEL_FETCH_INVALID_UTF8, got ${{utf8Err}}`);
+}}
+
+let emptyEvents = 0;
+const emptyRes = downloadSync({empty_url}, {empty_dest_js}, {{
+    allowPrivateIps: true,
+    onProgress: (p) => {{
+        emptyEvents += 1;
+        if (Object.getPrototypeOf(p) !== null || !Object.isFrozen(p)) {{
+            throw new Error("progress payload must be null-prototype frozen");
+        }}
+    }},
+}});
+if (emptyEvents < 1 || emptyRes.bytesWritten !== 0) {{
+    throw new Error(`expected 0-byte progress event, got ${{emptyEvents}}`);
+}}
+
+let syncAbortErr = null;
+try {{
+    downloadSync({base_url}, {sync_abort_js}, {{
+        allowPrivateIps: true,
+        onProgress: () => {{ throw new Error("abort-sync"); }},
+    }});
+}} catch (err) {{
+    syncAbortErr = err;
+}}
+if (!syncAbortErr || syncAbortErr.message !== "abort-sync") {{
+    throw new Error(`unexpected sync abort error: ${{syncAbortErr}}`);
+}}
+
+let asyncAbortErr = null;
+try {{
+    await download({base_url}, {async_abort_js}, {{
+        allowPrivateIps: true,
+        onProgress: () => {{ throw new Error("abort-async"); }},
+    }});
+}} catch (err) {{
+    asyncAbortErr = err;
+}}
+if (!asyncAbortErr || asyncAbortErr.message !== "abort-async") {{
+    throw new Error(`unexpected async abort error: ${{asyncAbortErr}}`);
+}}
+
+let statusErr = null;
+try {{
+    await download({err_url}, {missing_dest_js}, {{ allowPrivateIps: true }});
+}} catch (err) {{
+    statusErr = err;
+}}
+if (!(statusErr instanceof FetchError) || statusErr.code !== "VAEL_FETCH_HTTP_STATUS" || statusErr.status !== 404 || statusErr.url !== {err_url}) {{
+    throw new Error(`expected FetchError.url=${{{err_url}}}, got ${{statusErr?.url}}`);
+}}
+
+let typeErr = null;
+try {{
+    fetchSync({base_url}, {{ allowPrivateIps: "yes" }});
+}} catch (err) {{
+    typeErr = err;
+}}
+if (!(typeErr instanceof TypeError)) {{
+    throw new Error(`expected TypeError for invalid option type, got ${{typeErr}}`);
+}}
+"#,
+    ));
+
+    let reqs = server.requests();
+    assert!(
+        reqs[0]
+            .headers
+            .get("user-agent")
+            .is_none_or(String::is_empty),
+        "expected null userAgent to suppress default User-Agent, got {:?}",
+        reqs[0].headers.get("user-agent")
+    );
+    assert!(
+        !sync_abort_dest.exists(),
+        "aborted sync download must not commit destination file"
+    );
+    assert!(
+        !async_abort_dest.exists(),
+        "aborted async download must not commit destination file"
+    );
+    assert!(empty_dest.exists(), "0-byte download should commit file");
 }

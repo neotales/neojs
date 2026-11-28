@@ -184,8 +184,15 @@ if (!(stderrErr instanceof CommandError) || stderrErr.code !== "VAEL_EXEC_STDERR
 }}
 
 let predErr = null;
-try {{ outJson.validate((o) => o.json().n === 999); }} catch (e) {{ predErr = e; }}
-if (!(predErr instanceof CommandError)) throw new Error("predicate false must throw CommandError");
+try {{ outJson.validate((code) => code === 999); }} catch (e) {{ predErr = e; }}
+if (!(predErr instanceof CommandError) || predErr.output !== outJson || predErr.timedOut !== false) {{
+    throw new Error("predicate false must throw CommandError with output and timedOut");
+}}
+let nonFnPredErr = null;
+try {{ outJson.validate(7); }} catch (e) {{ nonFnPredErr = e; }}
+if (!(nonFnPredErr instanceof TypeError)) {{
+    throw new Error("non-function validate predicate must throw TypeError");
+}}
 
 // 3. Non-zero exit code: exec/run return Output/status with success=false, Command.text() throws CommandError
 const failOut = await exec("/bin/sh", ["-c", "echo err-line >&2; exit 23"]);
@@ -556,4 +563,56 @@ if (!held.locked) throw new Error("expected locked");
     )
     .expect("runtime drop should release OS advisory lock");
     reacquired.unlock().expect("unlock");
+}
+
+#[cfg(unix)]
+#[test]
+fn grandchild_pipe_does_not_hang_v8_exec_or_async_dispose() {
+    run_js(
+        r#"
+import { exec, execSync, spawn } from "vael:exec";
+
+const t0 = Date.now();
+const syncOut = execSync("/bin/sh", ["-c", "sleep 2 & printf 'v8-sync\\n'"], {
+    timeout: 150,
+});
+if (Date.now() - t0 > 1200) {
+    throw new Error("execSync hung on grandchild stdout FD");
+}
+if (!syncOut.text().includes("v8-sync")) {
+    throw new Error("expected parent output before timeout");
+}
+
+const t1 = Date.now();
+const child = spawn("/bin/sh", ["-c", "sleep 2 & printf 'v8-spawn\\n'"]);
+const childOut = await child.waitWithOutput({ timeout: 150 });
+if (Date.now() - t1 > 1200) {
+    throw new Error("waitWithOutput hung on grandchild stdout FD");
+}
+if (!childOut.text().includes("v8-spawn")) {
+    throw new Error("expected spawned output before timeout");
+}
+
+// asyncDispose must kill & reap promptly even when readStdout is concurrently pending!
+const child2 = spawn("/bin/sh", ["-c", "sleep 20"]);
+const pendingRead = child2.readStdout().catch(() => new Uint8Array(0));
+const t2 = Date.now();
+await child2[Symbol.asyncDispose]();
+if (Date.now() - t2 > 1200) {
+    throw new Error("asyncDispose deadlocked on pending readStdout");
+}
+await pendingRead;
+
+// ChildProcess.wait() enforces Command.timeout!
+const child3 = spawn("/bin/sh", ["-c", "sleep 20"], { timeout: 120, killGrace: 20 });
+const t3 = Date.now();
+const st = await child3.wait();
+if (Date.now() - t3 > 1200) {
+    throw new Error("ChildProcess.wait() did not enforce Command.timeout");
+}
+if (st.success !== false) {
+    throw new Error("timed out wait() status must have success=false");
+}
+"#,
+    );
 }

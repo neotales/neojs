@@ -10,6 +10,10 @@
 //!   shutdown so grandchildren inheriting FDs never leak background threads.
 
 use std::io::{self, Read as _, Write as _};
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -71,62 +75,136 @@ pub fn spawn(spec: &CommandSpec) -> Result<SpawnedChild, ExecError> {
     let stdout_mode = spec.stdout.as_ref().unwrap_or(&StdioMode::Piped);
     let stderr_mode = spec.stderr.as_ref().unwrap_or(&StdioMode::Piped);
 
-    let stdin_bytes = match stdin_mode {
-        StdioMode::Inherit => {
-            cmd.stdin(Stdio::inherit());
-            None
-        }
-        StdioMode::Piped => {
-            cmd.stdin(Stdio::piped());
-            None
-        }
-        StdioMode::Null => {
-            cmd.stdin(Stdio::null());
-            None
-        }
-        StdioMode::Bytes(bytes) => {
-            cmd.stdin(Stdio::piped());
-            Some(bytes.clone())
-        }
-    };
+    #[cfg(unix)]
+    {
+        let (stdin_pair, piped_stdin) = match stdin_mode {
+            StdioMode::Inherit => {
+                cmd.stdin(Stdio::inherit());
+                (None, false)
+            }
+            StdioMode::Null => {
+                cmd.stdin(Stdio::null());
+                (None, false)
+            }
+            StdioMode::Piped => {
+                let (parent_in, child_in) =
+                    UnixStream::pair().map_err(|err| map_io_error("create stdin pipe", err))?;
+                cmd.stdin(Stdio::from(OwnedFd::from(child_in)));
+                (Some((parent_in, None)), true)
+            }
+            StdioMode::Bytes(bytes) => {
+                let (parent_in, child_in) =
+                    UnixStream::pair().map_err(|err| map_io_error("create stdin pipe", err))?;
+                cmd.stdin(Stdio::from(OwnedFd::from(child_in)));
+                (Some((parent_in, Some(bytes.clone()))), false)
+            }
+        };
 
-    configure_output_stdio(&mut cmd, stdout_mode, true)?;
-    configure_output_stdio(&mut cmd, stderr_mode, false)?;
+        let stdout_stream = configure_unix_output_stdio(&mut cmd, stdout_mode, true)?;
+        let stderr_stream = configure_unix_output_stdio(&mut cmd, stderr_mode, false)?;
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|err| map_io_error("spawn child process", err))?;
-    drop(cmd);
+        let child = cmd
+            .spawn()
+            .map_err(|err| map_io_error("spawn child process", err))?;
+        drop(cmd);
 
-    let stdin_writer = if let Some(bytes) = stdin_bytes {
-        child.stdin.take().map(|pipe| {
-            std::thread::spawn(move || {
-                let mut pipe = pipe;
-                let _ = pipe.write_all(&bytes);
-                let _ = pipe.flush();
-            })
+        let stdin_cancel = Arc::new(AtomicBool::new(false));
+        let (stdin_pipe, stdin_writer) = match stdin_pair {
+            Some((stream, None)) if piped_stdin => (Some(stream), None),
+            Some((stream, Some(bytes))) => (
+                None,
+                Some(spawn_unix_writer(stream, bytes, Arc::clone(&stdin_cancel))),
+            ),
+            _ => (None, None),
+        };
+
+        Ok(SpawnedChild {
+            child,
+            stdin_pipe,
+            stdout_pipe: stdout_stream,
+            stderr_pipe: stderr_stream,
+            stdin_writer,
+            stdin_cancel,
+            kill_signal: spec.kill_signal,
+            kill_grace: spec.kill_grace,
+            status: None,
         })
-    } else {
-        None
-    };
+    }
 
-    Ok(SpawnedChild {
-        child,
-        stdin_writer,
-        kill_signal: spec.kill_signal,
-        kill_grace: spec.kill_grace,
-        status: None,
-    })
+    #[cfg(not(unix))]
+    {
+        let stdin_bytes = match stdin_mode {
+            StdioMode::Inherit => {
+                cmd.stdin(Stdio::inherit());
+                None
+            }
+            StdioMode::Piped => {
+                cmd.stdin(Stdio::piped());
+                None
+            }
+            StdioMode::Null => {
+                cmd.stdin(Stdio::null());
+                None
+            }
+            StdioMode::Bytes(bytes) => {
+                cmd.stdin(Stdio::piped());
+                Some(bytes.clone())
+            }
+        };
+
+        configure_output_stdio(&mut cmd, stdout_mode, true)?;
+        configure_output_stdio(&mut cmd, stderr_mode, false)?;
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|err| map_io_error("spawn child process", err))?;
+        drop(cmd);
+
+        let stdin_cancel = Arc::new(AtomicBool::new(false));
+        let stdin_writer = if let Some(bytes) = stdin_bytes {
+            child
+                .stdin
+                .take()
+                .map(|pipe| spawn_generic_writer(pipe, bytes))
+        } else {
+            None
+        };
+
+        Ok(SpawnedChild {
+            child,
+            stdin_writer,
+            stdin_cancel,
+            kill_signal: spec.kill_signal,
+            kill_grace: spec.kill_grace,
+            status: None,
+        })
+    }
 }
 
 /// Managed child process handle returned by [`spawn`].
 #[derive(Debug)]
 pub struct SpawnedChild {
     child: Child,
-    stdin_writer: Option<JoinHandle<()>>,
+    #[cfg(unix)]
+    stdin_pipe: Option<UnixStream>,
+    #[cfg(unix)]
+    stdout_pipe: Option<UnixStream>,
+    #[cfg(unix)]
+    stderr_pipe: Option<UnixStream>,
+    stdin_writer: Option<WorkerHandle<bool>>,
+    stdin_cancel: Arc<AtomicBool>,
     kill_signal: Signal,
     kill_grace: Duration,
     status: Option<CommandStatus>,
+}
+
+impl Drop for SpawnedChild {
+    fn drop(&mut self) {
+        self.stdin_cancel.store(true, Ordering::Release);
+        if let Some(writer) = self.stdin_writer.take() {
+            writer.finish(true);
+        }
+    }
 }
 
 impl SpawnedChild {
@@ -138,21 +216,53 @@ impl SpawnedChild {
 
     /// Takes ownership of the child's piped standard input handle, if still present.
     pub fn take_stdin(&mut self) -> Option<ChildStdin> {
-        self.child.stdin.take()
+        #[cfg(unix)]
+        {
+            self.stdin_pipe
+                .take()
+                .map(|s| ChildStdin::from(OwnedFd::from(s)))
+        }
+        #[cfg(not(unix))]
+        {
+            self.child.stdin.take()
+        }
     }
 
     /// Takes ownership of the child's piped standard output handle, if still present.
     pub fn take_stdout(&mut self) -> Option<ChildStdout> {
-        self.child.stdout.take()
+        #[cfg(unix)]
+        {
+            self.stdout_pipe
+                .take()
+                .map(|s| ChildStdout::from(OwnedFd::from(s)))
+        }
+        #[cfg(not(unix))]
+        {
+            self.child.stdout.take()
+        }
     }
 
     /// Takes ownership of the child's piped standard error handle, if still present.
     pub fn take_stderr(&mut self) -> Option<ChildStderr> {
-        self.child.stderr.take()
+        #[cfg(unix)]
+        {
+            self.stderr_pipe
+                .take()
+                .map(|s| ChildStderr::from(OwnedFd::from(s)))
+        }
+        #[cfg(not(unix))]
+        {
+            self.child.stderr.take()
+        }
     }
 
     /// Writes `bytes` to the child's piped standard input and flushes it.
     pub fn write_stdin(&mut self, bytes: &[u8]) -> Result<(), ExecError> {
+        #[cfg(unix)]
+        let stdin = self.stdin_pipe.as_mut().ok_or(ExecError::InvalidArgument {
+            reason: "child stdin is not piped or already closed",
+        })?;
+        #[cfg(not(unix))]
         let stdin = self
             .child
             .stdin
@@ -170,6 +280,12 @@ impl SpawnedChild {
 
     /// Closes the parent's handle to the child's standard input (sending EOF).
     pub fn close_stdin(&mut self) {
+        #[cfg(unix)]
+        if let Some(stream) = self.stdin_pipe.take() {
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            drop(stream);
+        }
+        #[cfg(not(unix))]
         drop(self.child.stdin.take());
     }
 
@@ -183,6 +299,14 @@ impl SpawnedChild {
                 reason: "max_bytes exceeds hard limit of 64 MiB",
             });
         }
+        #[cfg(unix)]
+        let stdout = self
+            .stdout_pipe
+            .as_mut()
+            .ok_or(ExecError::InvalidArgument {
+                reason: "child stdout is not piped or already taken",
+            })?;
+        #[cfg(not(unix))]
         let stdout = self
             .child
             .stdout
@@ -203,6 +327,14 @@ impl SpawnedChild {
                 reason: "max_bytes exceeds hard limit of 64 MiB",
             });
         }
+        #[cfg(unix)]
+        let stderr = self
+            .stderr_pipe
+            .as_mut()
+            .ok_or(ExecError::InvalidArgument {
+                reason: "child stderr is not piped or already taken",
+            })?;
+        #[cfg(not(unix))]
         let stderr = self
             .child
             .stderr
@@ -258,7 +390,7 @@ impl SpawnedChild {
             return Ok(status.clone());
         }
         if let Some(writer) = self.stdin_writer.take() {
-            let _ = writer.join();
+            writer.finish(false);
         }
         let exit_status = self
             .child
@@ -284,17 +416,40 @@ impl SpawnedChild {
         if let Some(dur) = timeout {
             validate_positive_duration(dur, "timeout")?;
         }
+        let overall_deadline = timeout.and_then(|dur| Instant::now().checked_add(dur));
 
         // Close un-taken stdin so children awaiting EOF do not deadlock.
-        drop(self.child.stdin.take());
+        self.close_stdin();
 
         let stdout_exceeded = Arc::new(AtomicBool::new(false));
         let stderr_exceeded = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(AtomicBool::new(false));
 
+        #[cfg(unix)]
+        let stdout_handle = self.stdout_pipe.take().map(|pipe| {
+            spawn_unix_reader(
+                pipe,
+                max_output_bytes,
+                Arc::clone(&stdout_exceeded),
+                Arc::clone(&cancel),
+            )
+        });
+        #[cfg(not(unix))]
         let stdout_handle =
             self.child.stdout.take().map(|pipe| {
                 spawn_generic_reader(pipe, max_output_bytes, Arc::clone(&stdout_exceeded))
             });
+
+        #[cfg(unix)]
+        let stderr_handle = self.stderr_pipe.take().map(|pipe| {
+            spawn_unix_reader(
+                pipe,
+                max_output_bytes,
+                Arc::clone(&stderr_exceeded),
+                Arc::clone(&cancel),
+            )
+        });
+        #[cfg(not(unix))]
         let stderr_handle =
             self.child.stderr.take().map(|pipe| {
                 spawn_generic_reader(pipe, max_output_bytes, Arc::clone(&stderr_exceeded))
@@ -323,21 +478,23 @@ impl SpawnedChild {
 
         let timed_out = exit_pair.as_ref().is_some_and(|(_, t)| *t)
             || cached_status.as_ref().is_some_and(|s| s.timed_out);
-        let grace_deadline = if timed_out || wait_err.is_some() {
+        let drain_deadline = if timed_out || wait_err.is_some() {
             Instant::now().checked_add(PIPE_DRAIN_GRACE)
         } else {
-            None
+            overall_deadline
         };
 
-        if let Some(writer) = self.stdin_writer.take()
-            && !timed_out
-        {
-            let _ = writer.join();
+        if let Some(writer) = self.stdin_writer.take() {
+            if let Some(dl) = drain_deadline {
+                wait_for_done(&writer.signal, Some(dl));
+                self.stdin_cancel.store(true, Ordering::Release);
+            }
+            writer.finish(drain_deadline.is_some());
         }
 
         let mut read_error: Option<io::Error> = None;
         let stdout = if let Some(ref handle) = stdout_handle {
-            let (buf, err) = collect_stream(&handle.signal, grace_deadline);
+            let (buf, err) = collect_stream(&handle.signal, drain_deadline);
             if read_error.is_none() {
                 read_error = err;
             }
@@ -346,7 +503,7 @@ impl SpawnedChild {
             Vec::new()
         };
         let stderr = if let Some(ref handle) = stderr_handle {
-            let (buf, err) = collect_stream(&handle.signal, grace_deadline);
+            let (buf, err) = collect_stream(&handle.signal, drain_deadline);
             if read_error.is_none() {
                 read_error = err;
             }
@@ -355,11 +512,14 @@ impl SpawnedChild {
             Vec::new()
         };
 
+        if drain_deadline.is_some() {
+            cancel.store(true, Ordering::Release);
+        }
         if let Some(handle) = stdout_handle {
-            handle.finish(grace_deadline.is_some());
+            handle.finish(drain_deadline.is_some());
         }
         if let Some(handle) = stderr_handle {
-            handle.finish(grace_deadline.is_some());
+            handle.finish(drain_deadline.is_some());
         }
 
         if let Some(err) = wait_err {
@@ -430,6 +590,50 @@ fn read_chunk(
     }
 }
 
+#[cfg(unix)]
+fn configure_unix_output_stdio(
+    cmd: &mut Command,
+    mode: &StdioMode,
+    is_stdout: bool,
+) -> Result<Option<UnixStream>, ExecError> {
+    let stream = match mode {
+        StdioMode::Inherit => {
+            if is_stdout {
+                cmd.stdout(Stdio::inherit());
+            } else {
+                cmd.stderr(Stdio::inherit());
+            }
+            None
+        }
+        StdioMode::Null => {
+            if is_stdout {
+                cmd.stdout(Stdio::null());
+            } else {
+                cmd.stderr(Stdio::null());
+            }
+            None
+        }
+        StdioMode::Piped => {
+            let (parent, child) =
+                UnixStream::pair().map_err(|err| map_io_error("create output pipe", err))?;
+            let stdio = Stdio::from(OwnedFd::from(child));
+            if is_stdout {
+                cmd.stdout(stdio);
+            } else {
+                cmd.stderr(stdio);
+            }
+            Some(parent)
+        }
+        StdioMode::Bytes(_) => {
+            return Err(ExecError::InvalidArgument {
+                reason: "StdioMode::Bytes is only valid for stdin",
+            });
+        }
+    };
+    Ok(stream)
+}
+
+#[cfg(not(unix))]
 fn configure_output_stdio(
     cmd: &mut Command,
     mode: &StdioMode,
@@ -598,6 +802,7 @@ fn execute_sync_inner(
         (child, stdin_handle, stdout_handle, stderr_handle)
     };
 
+    let overall_deadline = spec.timeout.and_then(|d| Instant::now().checked_add(d));
     let mut timed_out = false;
     let mut exit_status: Option<ExitStatus> = None;
     let mut wait_error: Option<io::Error> = None;
@@ -622,7 +827,7 @@ fn execute_sync_inner(
     let grace_deadline = if timed_out || wait_error.is_some() {
         Instant::now().checked_add(PIPE_DRAIN_GRACE)
     } else {
-        None
+        overall_deadline
     };
 
     if let Some(ref handle) = stdin_handle {
@@ -891,6 +1096,14 @@ struct WorkerHandle<T> {
     join: Option<JoinHandle<()>>,
 }
 
+impl<T> std::fmt::Debug for WorkerHandle<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerHandle")
+            .field("has_join", &self.join.is_some())
+            .finish()
+    }
+}
+
 impl<T> WorkerHandle<T> {
     fn finish(self, timed_out: bool) {
         #[cfg(unix)]
@@ -1051,6 +1264,7 @@ fn spawn_unix_reader(
     }
 }
 
+#[cfg(not(unix))]
 fn spawn_generic_reader(
     mut reader: impl io::Read + Send + 'static,
     max_bytes: usize,

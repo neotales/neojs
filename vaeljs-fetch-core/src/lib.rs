@@ -33,7 +33,7 @@ mod error;
 mod security;
 mod types;
 
-pub use client::{download_sync, fetch_request_sync, fetch_sync};
+pub use client::{download_sync, download_sync_cancellable, fetch_request_sync, fetch_sync};
 pub use error::{FetchError, FetchErrorCode};
 pub use types::{
     DEFAULT_DOWNLOAD_MAX_BYTES, DEFAULT_MAX_REDIRECTS, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT,

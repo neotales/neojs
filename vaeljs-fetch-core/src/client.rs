@@ -3,7 +3,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -53,7 +53,12 @@ pub fn fetch_sync(url: &str, opts: &FetchOptions) -> Result<FetchResponse, Fetch
     let body_bytes = prepare_body(&method, &opts.body, &mut active_headers)?;
     let initial_url = validate_and_prepare_initial_url(url, &opts.query, opts.allow_private_ips)?;
 
-    let agent = build_agent(opts.allow_private_ips, deadline, opts.timeout);
+    let agent = build_agent(
+        opts.allow_private_ips,
+        deadline,
+        opts.timeout,
+        opts.user_agent.as_deref(),
+    );
     let (response, final_url, redirected) = execute_with_redirects(
         &agent,
         initial_url,
@@ -123,7 +128,36 @@ pub fn download_sync(
     url: &str,
     dest_path: &Path,
     opts: &DownloadOptions,
-    mut on_progress: Option<&mut dyn FnMut(DownloadProgress)>,
+    on_progress: Option<&mut dyn FnMut(DownloadProgress)>,
+) -> Result<DownloadResult, FetchError> {
+    match on_progress {
+        Some(cb) => {
+            let mut adapter = |p: DownloadProgress| {
+                cb(p);
+                Ok(())
+            };
+            download_sync_cancellable(url, dest_path, opts, None, Some(&mut adapter))
+        }
+        None => download_sync_cancellable(url, dest_path, opts, None, None),
+    }
+}
+
+/// Streaming atomic download supporting cooperative cancellation (`cancel`) and
+/// fallible progress callbacks (`on_progress`) that abort and unlink the
+/// temporary file before committing `dest_path`.
+///
+/// # Errors
+///
+/// Returns [`FetchError`] on invalid options or URL, SSRF block, timeout,
+/// cancellation, callback abort, non-2xx HTTP status, `max_bytes` overflow,
+/// SHA-256 mismatch, existing destination when `overwrite` is `false`,
+/// symlink/reparse destination, or I/O failure.
+pub fn download_sync_cancellable(
+    url: &str,
+    dest_path: &Path,
+    opts: &DownloadOptions,
+    cancel: Option<&AtomicBool>,
+    mut on_progress: Option<&mut dyn FnMut(DownloadProgress) -> Result<(), FetchError>>,
 ) -> Result<DownloadResult, FetchError> {
     let deadline = validate_timeout(opts.timeout)?;
     validate_max_redirects(opts.max_redirects)?;
@@ -135,7 +169,7 @@ pub fn download_sync(
         .map(parse_expected_sha256)
         .transpose()?;
 
-    let parent_dir = validate_destination_upfront(dest_path, opts.overwrite)?;
+    let (parent_dir, parent_canon) = validate_destination_upfront(dest_path, opts.overwrite)?;
 
     let active_headers = prepare_headers(
         &opts.headers,
@@ -145,7 +179,18 @@ pub fn download_sync(
 
     let initial_url = validate_and_prepare_initial_url(url, &opts.query, opts.allow_private_ips)?;
 
-    let agent = build_agent(opts.allow_private_ips, deadline, opts.timeout);
+    if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(FetchError::Io {
+            reason: "download cancelled".to_owned(),
+        });
+    }
+
+    let agent = build_agent(
+        opts.allow_private_ips,
+        deadline,
+        opts.timeout,
+        opts.user_agent.as_deref(),
+    );
     let (response, final_url, _redirected) = execute_with_redirects(
         &agent,
         initial_url,
@@ -179,6 +224,8 @@ pub fn download_sync(
     let content_type = find_header(&response_headers, "content-type").map(str::to_owned);
     let etag = find_header(&response_headers, "etag").map(str::to_owned);
 
+    verify_parent_dir(parent_dir, &parent_canon)?;
+
     // Bind RAII temp guard before the file handle so the OS handle closes before
     // `TempFileGuard::drop` unlinks the file on any early error return.
     let (mut guard, file) = create_unique_temp_file(parent_dir)?;
@@ -192,6 +239,11 @@ pub fn download_sync(
         let mut buf = vec![0u8; DOWNLOAD_CHUNK_BYTES];
 
         loop {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                return Err(FetchError::Io {
+                    reason: "download cancelled".to_owned(),
+                });
+            }
             if Instant::now() >= deadline {
                 return Err(FetchError::Timeout {
                     url: redact_url(&final_url),
@@ -236,8 +288,17 @@ pub fn download_sync(
                 cb(DownloadProgress {
                     bytes_written,
                     total_bytes,
-                });
+                })?;
             }
+        }
+
+        if bytes_written == 0
+            && let Some(cb) = on_progress
+        {
+            cb(DownloadProgress {
+                bytes_written: 0,
+                total_bytes,
+            })?;
         }
 
         file.flush().map_err(map_io_error)?;
@@ -256,6 +317,13 @@ pub fn download_sync(
         });
     }
 
+    if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(FetchError::Io {
+            reason: "download cancelled".to_owned(),
+        });
+    }
+
+    verify_parent_dir(parent_dir, &parent_canon)?;
     commit_temp_file(&mut guard, dest_path, parent_dir, opts.overwrite)?;
 
     Ok(DownloadResult {
@@ -335,7 +403,12 @@ fn reject_body_on_get_or_head(method: &str) -> Result<(), FetchError> {
     Ok(())
 }
 
-fn build_agent(allow_private_ips: bool, deadline: Instant, timeout: Duration) -> ureq::Agent {
+fn build_agent(
+    allow_private_ips: bool,
+    deadline: Instant,
+    timeout: Duration,
+    user_agent: Option<&str>,
+) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .https_only(false)
         .redirects(0)
@@ -344,7 +417,11 @@ fn build_agent(allow_private_ips: bool, deadline: Instant, timeout: Duration) ->
         .max_idle_connections_per_host(0)
         .timeout(timeout)
         .resolver(SsrfGuardResolver::new(allow_private_ips, deadline))
-        .user_agent(DEFAULT_USER_AGENT)
+        .user_agent(if user_agent.is_some() {
+            DEFAULT_USER_AGENT
+        } else {
+            ""
+        })
         .build()
 }
 
@@ -596,7 +673,10 @@ fn is_timeout_io_error(err: &io::Error) -> bool {
     )
 }
 
-fn validate_destination_upfront(dest_path: &Path, overwrite: bool) -> Result<&Path, FetchError> {
+fn validate_destination_upfront(
+    dest_path: &Path,
+    overwrite: bool,
+) -> Result<(&Path, PathBuf), FetchError> {
     let encoded = dest_path.as_os_str().as_encoded_bytes();
     if encoded.is_empty() || encoded.contains(&0) {
         return Err(FetchError::InvalidOption {
@@ -626,6 +706,7 @@ fn validate_destination_upfront(dest_path: &Path, overwrite: bool) -> Result<&Pa
             reason: "destination parent directory must be a non-symlink directory",
         });
     }
+    let parent_canon = std::fs::canonicalize(parent).map_err(map_io_error)?;
 
     match std::fs::symlink_metadata(dest_path) {
         Ok(meta) => {
@@ -642,7 +723,23 @@ fn validate_destination_upfront(dest_path: &Path, overwrite: bool) -> Result<&Pa
         Err(err) => return Err(map_io_error(err)),
     }
 
-    Ok(parent)
+    Ok((parent, parent_canon))
+}
+
+fn verify_parent_dir(parent_dir: &Path, expected_canon: &Path) -> Result<(), FetchError> {
+    let meta = std::fs::symlink_metadata(parent_dir).map_err(map_io_error)?;
+    if is_symlink_or_reparse(&meta) || !meta.is_dir() {
+        return Err(FetchError::InvalidOption {
+            reason: "destination parent directory must be a non-symlink directory",
+        });
+    }
+    let canon = std::fs::canonicalize(parent_dir).map_err(map_io_error)?;
+    if canon != expected_canon {
+        return Err(FetchError::InvalidOption {
+            reason: "destination parent directory changed during download",
+        });
+    }
+    Ok(())
 }
 
 fn commit_temp_file(

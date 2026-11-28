@@ -8,8 +8,9 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use vaeljs_fetch_core::{
-    DownloadOptions, DownloadProgress, FetchBody, FetchError, FetchErrorCode, FetchOptions,
-    FetchRequest, Zeroizing, download_sync, fetch_request_sync, fetch_sync,
+    DEFAULT_USER_AGENT, DownloadOptions, DownloadProgress, FetchBody, FetchError, FetchErrorCode,
+    FetchOptions, FetchRequest, Zeroizing, download_sync, download_sync_cancellable,
+    fetch_request_sync, fetch_sync,
 };
 
 #[derive(Clone, Debug)]
@@ -759,4 +760,124 @@ fn request_timeout_returns_timeout_error_without_query_leak() {
     assert_eq!(err.code(), FetchErrorCode::Timeout);
     let rendered = format!("{err} {err:?}");
     assert!(!rendered.contains("do-not-leak"));
+}
+
+#[test]
+fn user_agent_none_omits_header_and_zero_byte_download_emits_progress() {
+    let server = TestServer::spawn(3, |_, _| ScriptedReply::ok(b""));
+    let default_resp = fetch_sync(
+        &server.url("/default-ua"),
+        &FetchOptions {
+            allow_private_ips: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(default_resp.status, 200);
+
+    let no_ua_resp = fetch_sync(
+        &server.url("/no-ua"),
+        &FetchOptions {
+            allow_private_ips: true,
+            user_agent: None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(no_ua_resp.status, 200);
+
+    let dir = tempdir().unwrap();
+    let empty_dest = dir.path().join("empty.bin");
+    let mut events = Vec::new();
+    let mut cb = |p: DownloadProgress| events.push(p);
+    let dl = download_sync(
+        &server.url("/empty"),
+        &empty_dest,
+        &DownloadOptions {
+            allow_private_ips: true,
+            user_agent: None,
+            ..Default::default()
+        },
+        Some(&mut cb),
+    )
+    .unwrap();
+    assert_eq!(dl.bytes_written, 0);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].bytes_written, 0);
+    assert_eq!(events[0].total_bytes, Some(0));
+
+    let reqs = server.requests();
+    assert_eq!(reqs.len(), 3);
+    assert_eq!(
+        reqs[0].headers.get("user-agent").map(String::as_str),
+        Some(DEFAULT_USER_AGENT)
+    );
+    assert!(
+        reqs[1]
+            .headers
+            .get("user-agent")
+            .is_none_or(String::is_empty),
+        "expected no non-empty user-agent when FetchOptions::user_agent is None, got {:?}",
+        reqs[1].headers
+    );
+    assert!(
+        reqs[2]
+            .headers
+            .get("user-agent")
+            .is_none_or(String::is_empty),
+        "expected no non-empty user-agent when DownloadOptions::user_agent is None, got {:?}",
+        reqs[2].headers
+    );
+}
+
+#[test]
+fn download_sync_cancellable_aborts_before_commit_on_callback_error_or_cancel_flag() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let server = TestServer::spawn(2, |_, _| ScriptedReply::ok(b"should-not-commit"));
+    let dir = tempdir().unwrap();
+
+    // 1. Callback error prevents committing dest_path and cleans temp file.
+    let dest1 = dir.path().join("aborted.bin");
+    let mut abort_cb = |_p: DownloadProgress| -> Result<(), FetchError> {
+        Err(FetchError::Io {
+            reason: "aborted by progress".to_owned(),
+        })
+    };
+    let err1 = download_sync_cancellable(
+        &server.url("/abort"),
+        &dest1,
+        &DownloadOptions {
+            allow_private_ips: true,
+            ..Default::default()
+        },
+        None,
+        Some(&mut abort_cb),
+    )
+    .unwrap_err();
+    assert_eq!(err1.code(), FetchErrorCode::Io);
+    assert!(!dest1.exists());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+    // 2. Cancel flag flipped inside progress callback prevents commit.
+    let dest2 = dir.path().join("cancelled.bin");
+    let cancel = AtomicBool::new(false);
+    let mut cancel_cb = |_p: DownloadProgress| -> Result<(), FetchError> {
+        cancel.store(true, Ordering::Release);
+        Ok(())
+    };
+    let err2 = download_sync_cancellable(
+        &server.url("/cancel"),
+        &dest2,
+        &DownloadOptions {
+            allow_private_ips: true,
+            ..Default::default()
+        },
+        Some(&cancel),
+        Some(&mut cancel_cb),
+    )
+    .unwrap_err();
+    assert_eq!(err2.code(), FetchErrorCode::Io);
+    assert!(!dest2.exists());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }

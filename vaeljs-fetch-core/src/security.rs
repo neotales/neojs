@@ -2,6 +2,7 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -381,19 +382,21 @@ fn is_disallowed_ipv6(v6: Ipv6Addr) -> bool {
     }
     // NAT64 local-use prefix 64:ff9b:1::/48 (RFC 8215).
     if segs[0] == 0x0064 && segs[1] == 0xff9b && segs[2] == 0x0001 {
-        let embedded = Ipv4Addr::new(
-            (segs[6] >> 8) as u8,
-            (segs[6] & 0xff) as u8,
-            (segs[7] >> 8) as u8,
-            (segs[7] & 0xff) as u8,
-        );
-        return is_disallowed_ipv4(embedded);
+        return true;
+    }
+    // 6to4 prefix 2002::/16 carrying an embedded IPv4 address in segments 1..=2.
+    if segs[0] == 0x2002 {
+        let embedded = Ipv4Addr::from((u32::from(segs[1]) << 16) | u32::from(segs[2]));
+        if is_disallowed_ipv4(embedded) {
+            return true;
+        }
     }
     v6.is_unspecified() // ::
         || v6.is_loopback() // ::1
         || v6.is_multicast() // ff00::/8
         || (segs[0] & 0xfe00) == 0xfc00 // fc00::/7 (ULA)
         || (segs[0] & 0xffc0) == 0xfe80 // fe80::/10 (link-local)
+        || (segs[0] & 0xffc0) == 0xfec0 // fec0::/10 (deprecated site-local)
 }
 
 pub(crate) fn filter_resolved_addrs(
@@ -433,6 +436,37 @@ impl SsrfGuardResolver {
     }
 }
 
+const MAX_INFLIGHT_DNS_LOOKUPS: usize = 64;
+static INFLIGHT_DNS_LOOKUPS: AtomicUsize = AtomicUsize::new(0);
+
+struct DnsSlotGuard;
+
+impl DnsSlotGuard {
+    fn try_acquire() -> Option<Self> {
+        let mut cur = INFLIGHT_DNS_LOOKUPS.load(Ordering::Relaxed);
+        loop {
+            if cur >= MAX_INFLIGHT_DNS_LOOKUPS {
+                return None;
+            }
+            match INFLIGHT_DNS_LOOKUPS.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(Self),
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+}
+
+impl Drop for DnsSlotGuard {
+    fn drop(&mut self) {
+        INFLIGHT_DNS_LOOKUPS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 impl ureq::Resolver for SsrfGuardResolver {
     fn resolve(&self, netloc: &str) -> io::Result<Vec<SocketAddr>> {
         let remaining = self.deadline.saturating_duration_since(Instant::now());
@@ -443,11 +477,15 @@ impl ureq::Resolver for SsrfGuardResolver {
                 "DNS resolution timed out",
             ));
         }
+        let slot = DnsSlotGuard::try_acquire().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::WouldBlock, "too many concurrent DNS lookups")
+        })?;
         let host = netloc.to_owned();
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("vaeljs-fetch-dns".to_owned())
             .spawn(move || {
+                let _slot = slot;
                 let res = host.to_socket_addrs().map(|iter| iter.collect::<Vec<_>>());
                 let _ = tx.send(res);
             })?;
@@ -497,6 +535,9 @@ mod tests {
             "64:ff9b::7f00:1",
             "64:ff9b::a9fe:a9fe",
             "64:ff9b:1::0a00:0001",
+            "64:ff9b:1:0:a9fe:a9fe:0808:0808",
+            "fec0::1",
+            "2002:7f00:1::",
         ];
         for raw in blocked {
             let ip: IpAddr = raw.parse().unwrap();
@@ -512,6 +553,7 @@ mod tests {
             "172.32.0.1",
             "2606:2800:220:1:248:1893:25c8:1946",
             "64:ff9b::0101:0101",
+            "2002:0101:0101::",
         ];
         for raw in allowed {
             let ip: IpAddr = raw.parse().unwrap();

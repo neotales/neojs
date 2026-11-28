@@ -204,4 +204,25 @@ impl FetchError {
             Self::InvalidJson { .. } => FetchErrorCode::InvalidJson,
         }
     }
+
+    /// Returns the redacted target URL associated with this error, if applicable.
+    #[must_use]
+    pub fn url(&self) -> Option<&str> {
+        match self {
+            Self::SsrfBlocked { url }
+            | Self::DnsTimeout { url }
+            | Self::Timeout { url }
+            | Self::TooManyRedirects { url, .. }
+            | Self::BodyTooLarge { url, .. }
+            | Self::HttpStatus { url, .. }
+            | Self::Network { url, .. } => Some(url.as_str()),
+            Self::InvalidUrl { .. }
+            | Self::InvalidOption { .. }
+            | Self::ChecksumMismatch { .. }
+            | Self::AlreadyExists
+            | Self::Io { .. }
+            | Self::InvalidUtf8
+            | Self::InvalidJson { .. } => None,
+        }
+    }
 }

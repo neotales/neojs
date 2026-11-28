@@ -13,6 +13,8 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use deno_core::FromV8;
@@ -26,13 +28,14 @@ use deno_error::JsErrorBox;
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use vaeljs_fetch_core::{
     DownloadOptions, DownloadProgress, DownloadResult, FetchBody, FetchError, FetchOptions,
-    FetchResponse, Zeroizing, download_sync, fetch_sync,
+    FetchResponse, Zeroizing, download_sync_cancellable, fetch_sync,
 };
 
 const MAX_SAFE_INTEGER_F64: f64 = 9_007_199_254_740_991.0;
 const MAX_JSON_DEPTH: usize = 128;
 const MAX_JSON_NODES: usize = 100_000;
 const MAX_PAIR_ENTRIES: usize = 4_096;
+const MAX_OPEN_DOWNLOADS: usize = 64;
 const DOWNLOAD_PROGRESS_CHANNEL_CAP: usize = 1_024;
 
 #[derive(Debug)]
@@ -51,12 +54,14 @@ impl From<FetchError> for FetchBindingError {
 /// when `run_file_async` is polled outside an ambient Tokio runtime.
 struct FetchState {
     driver: Option<tokio::runtime::Handle>,
+    open_downloads: Arc<AtomicUsize>,
 }
 
 impl FetchState {
     fn capture() -> Self {
         Self {
             driver: tokio::runtime::Handle::try_current().ok(),
+            open_downloads: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -84,9 +89,26 @@ where
     }))
 }
 
+type ProgressChannelItem = (DownloadProgress, std::sync::mpsc::SyncSender<bool>);
+
 struct DownloadStreamResource {
-    progress_rx: AsyncMutex<mpsc::Receiver<DownloadProgress>>,
+    progress_rx: AsyncMutex<mpsc::Receiver<ProgressChannelItem>>,
+    pending_ack: AsyncMutex<Option<std::sync::mpsc::SyncSender<bool>>>,
     result_rx: AsyncMutex<Option<oneshot::Receiver<Result<DownloadResult, FetchError>>>>,
+    cancel: Arc<AtomicBool>,
+    open_downloads: Arc<AtomicUsize>,
+}
+
+impl Drop for DownloadStreamResource {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.pending_ack.try_lock()
+            && let Some(tx) = guard.take()
+        {
+            let _ = tx.send(false);
+        }
+        self.open_downloads.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl Resource for DownloadStreamResource {
@@ -163,6 +185,9 @@ fn set_failure<'s>(
             set_string(scope, object, "message", &fetch_err.to_string());
             if let FetchError::HttpStatus { status, .. } = fetch_err {
                 set_number(scope, object, "status", f64::from(*status));
+            }
+            if let Some(url) = fetch_err.url() {
+                set_string(scope, object, "url", url);
             }
         }
     }
@@ -1057,14 +1082,14 @@ fn parse_fetch_options(
     Ok(opts)
 }
 
-fn parse_download_options(
-    scope: &v8::PinScope<'_, '_>,
-    value: v8::Local<'_, v8::Value>,
-) -> Result<(DownloadOptions, bool), FetchBindingError> {
+fn parse_download_options<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> Result<(DownloadOptions, Option<v8::Local<'s, v8::Function>>), FetchBindingError> {
     let mut opts = DownloadOptions::default();
-    let mut has_progress = false;
+    let mut progress_fn: Option<v8::Local<'s, v8::Function>> = None;
     if value.is_undefined() {
-        return Ok((opts, has_progress));
+        return Ok((opts, progress_fn));
     }
 
     visit_plain_object_own(
@@ -1167,12 +1192,12 @@ fn parse_download_options(
             }
             "onProgress" => {
                 if !val.is_undefined() {
-                    if !val.is_function() {
+                    let Ok(func) = v8::Local::<v8::Function>::try_from(val) else {
                         return Err(FetchBindingError::Type(
                             "options.onProgress must be a function",
                         ));
-                    }
-                    has_progress = true;
+                    };
+                    progress_fn = Some(func);
                 }
                 Ok(())
             }
@@ -1180,7 +1205,7 @@ fn parse_download_options(
         },
     )?;
 
-    Ok((opts, has_progress))
+    Ok((opts, progress_fn))
 }
 
 // ---------------------------------------------------------------------------
@@ -1366,7 +1391,7 @@ fn op_vael_fetch_download_sync<'s>(
             return obj.into();
         }
     };
-    let (opts, has_progress) = match parse_download_options(scope, options) {
+    let (opts, progress_fn) = match parse_download_options(scope, options) {
         Ok(pair) => pair,
         Err(err) => {
             let obj = response_obj(scope);
@@ -1375,15 +1400,34 @@ fn op_vael_fetch_download_sync<'s>(
         }
     };
 
-    let mut progress_events = Vec::new();
-    let result = if has_progress {
-        let mut cb = |p: DownloadProgress| {
-            progress_events.push(p);
+    let mut caught_exc: Option<v8::Global<v8::Value>> = None;
+    let result = if let Some(cb_fn) = progress_fn {
+        let mut cb = |p: DownloadProgress| -> Result<(), FetchError> {
+            v8::tc_scope!(let tc, scope);
+            let p_obj = progress_to_v8(tc, p);
+            let _ = p_obj.set_integrity_level(tc, v8::IntegrityLevel::Frozen);
+            let undef: v8::Local<'_, v8::Value> = v8::undefined(tc).into();
+            let _ = cb_fn.call(tc, undef, &[p_obj.into()]);
+            if tc.has_caught() {
+                if let Some(exc) = tc.exception() {
+                    caught_exc = Some(v8::Global::new(tc, exc));
+                }
+                return Err(FetchError::Io {
+                    reason: "download aborted by onProgress callback".to_owned(),
+                });
+            }
+            Ok(())
         };
-        download_sync(&url, &dest, &opts, Some(&mut cb))
+        download_sync_cancellable(&url, &dest, &opts, None, Some(&mut cb))
     } else {
-        download_sync(&url, &dest, &opts, None)
+        download_sync_cancellable(&url, &dest, &opts, None, None)
     };
+
+    if let Some(exc_global) = caught_exc {
+        let exc = v8::Local::new(scope, exc_global);
+        scope.throw_exception(exc);
+        return v8::undefined(scope).into();
+    }
 
     let obj = response_obj(scope);
     match result {
@@ -1391,14 +1435,6 @@ fn op_vael_fetch_download_sync<'s>(
             set_bool(scope, obj, "ok", true);
             let res_v8 = download_result_to_v8(scope, &res);
             set(scope, obj, "value", res_v8.into());
-            if has_progress {
-                let items: Vec<v8::Local<'s, v8::Value>> = progress_events
-                    .into_iter()
-                    .map(|p| progress_to_v8(scope, p).into())
-                    .collect();
-                let arr = v8::Array::new_with_elements(scope, &items);
-                set(scope, obj, "progress", arr.into());
-            }
         }
         Err(err) => set_failure(scope, obj, &FetchBindingError::Fetch(err)),
     }
@@ -1429,7 +1465,7 @@ fn op_vael_fetch_download_start<'s>(
             return obj.into();
         }
     };
-    let (opts, has_progress) = match parse_download_options(scope, options) {
+    let (opts, progress_fn) = match parse_download_options(scope, options) {
         Ok(pair) => pair,
         Err(err) => {
             let obj = response_obj(scope);
@@ -1437,33 +1473,51 @@ fn op_vael_fetch_download_start<'s>(
             return obj.into();
         }
     };
+    let has_progress = progress_fn.is_some();
 
+    let open_downloads = state
+        .try_borrow::<FetchState>()
+        .map(|s| Arc::clone(&s.open_downloads))
+        .unwrap_or_default();
+    let prev_open = open_downloads.fetch_add(1, Ordering::Relaxed);
+    if prev_open >= MAX_OPEN_DOWNLOADS {
+        open_downloads.fetch_sub(1, Ordering::Relaxed);
+        let obj = response_obj(scope);
+        set_failure(
+            scope,
+            obj,
+            &FetchBindingError::Fetch(FetchError::Io {
+                reason: "maximum number of open concurrent downloads exceeded".to_owned(),
+            }),
+        );
+        return obj.into();
+    }
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_worker = Arc::clone(&cancel);
     let (progress_tx, progress_rx) =
-        mpsc::channel::<DownloadProgress>(DOWNLOAD_PROGRESS_CHANNEL_CAP);
+        mpsc::channel::<ProgressChannelItem>(DOWNLOAD_PROGRESS_CHANNEL_CAP);
     let (result_tx, result_rx) = oneshot::channel::<Result<DownloadResult, FetchError>>();
 
     let worker = move || {
         let res = if has_progress {
-            let mut last_progress: Option<DownloadProgress> = None;
-            let mut cb = |p: DownloadProgress| {
-                last_progress = Some(p);
-                let _ = progress_tx.try_send(p);
-            };
-            let res = download_sync(&url, &dest, &opts, Some(&mut cb));
-            if let Ok(ref ok_res) = res {
-                let final_p = DownloadProgress {
-                    bytes_written: ok_res.bytes_written,
-                    total_bytes: last_progress
-                        .and_then(|p| p.total_bytes)
-                        .or(Some(ok_res.bytes_written)),
-                };
-                if last_progress.is_none_or(|p| p.bytes_written != final_p.bytes_written) {
-                    let _ = progress_tx.try_send(final_p);
+            let mut cb = |p: DownloadProgress| -> Result<(), FetchError> {
+                let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<bool>(1);
+                if progress_tx.blocking_send((p, ack_tx)).is_err() {
+                    return Err(FetchError::Io {
+                        reason: "download cancelled".to_owned(),
+                    });
                 }
-            }
-            res
+                match ack_rx.recv() {
+                    Ok(true) => Ok(()),
+                    _ => Err(FetchError::Io {
+                        reason: "download aborted by onProgress callback".to_owned(),
+                    }),
+                }
+            };
+            download_sync_cancellable(&url, &dest, &opts, Some(&cancel_worker), Some(&mut cb))
         } else {
-            download_sync(&url, &dest, &opts, None)
+            download_sync_cancellable(&url, &dest, &opts, Some(&cancel_worker), None)
         };
         drop(progress_tx);
         let _ = result_tx.send(res);
@@ -1477,6 +1531,7 @@ fn op_vael_fetch_download_start<'s>(
     {
         driver.spawn_blocking(worker);
     } else {
+        open_downloads.fetch_sub(1, Ordering::Relaxed);
         let obj = response_obj(scope);
         set_failure(
             scope,
@@ -1490,7 +1545,10 @@ fn op_vael_fetch_download_start<'s>(
 
     let rid = state.resource_table.add(DownloadStreamResource {
         progress_rx: AsyncMutex::new(progress_rx),
+        pending_ack: AsyncMutex::new(None),
         result_rx: AsyncMutex::new(Some(result_rx)),
+        cancel,
+        open_downloads,
     });
 
     let obj = response_obj(scope);
@@ -1514,11 +1572,17 @@ async fn op_vael_fetch_download_next(
         res
     };
 
+    if let Some(prev_ack) = resource.pending_ack.lock().await.take() {
+        let _ = prev_ack.send(true);
+    }
+
     let mut progress_rx = resource.progress_rx.lock().await;
-    if let Ok(progress) = progress_rx.try_recv() {
+    if let Ok((progress, ack_tx)) = progress_rx.try_recv() {
+        *resource.pending_ack.lock().await = Some(ack_tx);
         return DownloadNextOutcome::Progress(progress);
     }
-    if let Some(progress) = progress_rx.recv().await {
+    if let Some((progress, ack_tx)) = progress_rx.recv().await {
+        *resource.pending_ack.lock().await = Some(ack_tx);
         return DownloadNextOutcome::Progress(progress);
     }
     drop(progress_rx);
@@ -1540,7 +1604,14 @@ async fn op_vael_fetch_download_next(
 
 #[op2(fast)]
 fn op_vael_fetch_download_close(state: &mut OpState, #[smi] rid: ResourceId) {
-    let _ = state.resource_table.take::<DownloadStreamResource>(rid);
+    if let Ok(res) = state.resource_table.take::<DownloadStreamResource>(rid) {
+        res.cancel.store(true, Ordering::Release);
+        if let Ok(mut guard) = res.pending_ack.try_lock()
+            && let Some(tx) = guard.take()
+        {
+            let _ = tx.send(false);
+        }
+    }
 }
 
 #[op2]

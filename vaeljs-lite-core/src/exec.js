@@ -81,7 +81,7 @@
     }
 
     class CommandError extends makeError {
-        constructor(message, code = "VAEL_EXEC_IO", options = undefined) {
+        constructor(code = "VAEL_EXEC_IO", message = "", options = undefined) {
             super(message === undefined ? "" : makeString(message));
             defineOwn(this, "name", "CommandError", false, true);
             defineOwn(
@@ -91,7 +91,10 @@
                 true,
                 false,
             );
-            if (options && typeof options === "object") {
+            const hasOpts = options !== undefined && options !== null && typeof options === "object";
+            const timedOut = hasOpts && hasOwn(options, "timedOut") && options.timedOut === true;
+            defineOwn(this, "timedOut", timedOut, true, false);
+            if (hasOpts) {
                 if (
                     hasOwn(options, "exitCode") &&
                     options.exitCode !== undefined &&
@@ -106,6 +109,9 @@
                 ) {
                     defineOwn(this, "signal", options.signal, true, false);
                 }
+                if (hasOwn(options, "output") && options.output !== undefined) {
+                    defineOwn(this, "output", options.output, true, false);
+                }
                 if (
                     hasOwn(options, "fileName") &&
                     options.fileName !== undefined &&
@@ -116,6 +122,8 @@
             }
         }
     }
+    freeze(CommandError.prototype);
+    freeze(CommandError);
 
     class NotFoundOnPathError extends makeError {
         constructor(fileName, message = undefined) {
@@ -129,18 +137,22 @@
             defineOwn(this, "fileName", file, true, false);
         }
     }
+    freeze(NotFoundOnPathError.prototype);
+    freeze(NotFoundOnPathError);
 
     function throwExecFailure(res, spawnFileName) {
-        if (res.notFound && spawnFileName !== undefined) {
-            throw new NotFoundOnPathError(spawnFileName, res.message);
+        const message = hasOwn(res, "message") ? res.message : "";
+        const code = hasOwn(res, "code") ? res.code : "VAEL_EXEC_IO";
+        if (hasOwn(res, "notFound") && res.notFound && spawnFileName !== undefined) {
+            throw new NotFoundOnPathError(spawnFileName, message);
         }
         const opts = objectCreate(null);
-        if (res.fileName !== undefined) {
+        if (hasOwn(res, "fileName") && res.fileName !== undefined) {
             defineOwn(opts, "fileName", res.fileName, true, true);
-        } else if (spawnFileName !== undefined && res.code === "VAEL_EXEC_PERMISSION_DENIED") {
+        } else if (spawnFileName !== undefined && code === "VAEL_EXEC_PERMISSION_DENIED") {
             defineOwn(opts, "fileName", spawnFileName, true, true);
         }
-        throw new CommandError(res.message, res.code, opts);
+        throw new CommandError(code, message, opts);
     }
 
     function assertValidProgram(program) {
@@ -149,14 +161,14 @@
         }
         if (program.length === 0) {
             throw new CommandError(
-                "program name must not be empty",
                 "VAEL_EXEC_INVALID_ARGUMENT",
+                "program name must not be empty",
             );
         }
         if (stringIncludes(program, "\0")) {
             throw new CommandError(
-                "program name must not contain a NUL byte",
                 "VAEL_EXEC_INVALID_ARGUMENT",
+                "program name must not contain a NUL byte",
             );
         }
         return program;
@@ -168,8 +180,8 @@
         }
         if (stringIncludes(arg, "\0")) {
             throw new CommandError(
-                "process argument must not contain a NUL byte",
                 "VAEL_EXEC_INVALID_ARGUMENT",
+                "process argument must not contain a NUL byte",
             );
         }
         return arg;
@@ -181,8 +193,8 @@
         }
         if (key.length === 0 || stringIncludes(key, "=") || stringIncludes(key, "\0")) {
             throw new CommandError(
-                "environment variable key must be non-empty and contain neither '=' nor NUL",
                 "VAEL_EXEC_INVALID_ARGUMENT",
+                "environment variable key must be non-empty and contain neither '=' nor NUL",
             );
         }
         return key;
@@ -205,8 +217,8 @@
         }
         if (!numberIsFinite(ms) || ms <= 0) {
             throw new CommandError(
-                "timeout must be greater than zero",
                 "VAEL_EXEC_INVALID_ARGUMENT",
+                "timeout must be greater than zero",
             );
         }
         const res = hostValidateTimeoutMs(ms);
@@ -222,8 +234,8 @@
         }
         if (mode !== "inherit" && mode !== "piped" && mode !== "null") {
             throw new CommandError(
-                `${label} mode must be "inherit", "piped", or "null"`,
                 "VAEL_EXEC_INVALID_ARGUMENT",
+                `${label} mode must be "inherit", "piped", or "null"`,
             );
         }
         return mode;
@@ -238,7 +250,12 @@
         #timedOut;
         #truncated;
 
-        constructor(raw) {
+        constructor(token, raw) {
+            if (token !== INTERNAL_TOKEN) {
+                throw new makeTypeError(
+                    "Output cannot be constructed directly; use execSync() or Command.outputSync()",
+                );
+            }
             if (!raw || typeof raw !== "object" || !hasOwn(raw, "stdoutBytes")) {
                 throw new makeTypeError("Output requires valid output data");
             }
@@ -297,52 +314,51 @@
         }
 
         validate(predicate = undefined, failOnStderr = false) {
-            if (failOnStderr !== undefined && typeof failOnStderr !== "boolean") {
-                throw new makeTypeError("failOnStderr must be a boolean");
+            if (arguments.length > 2) {
+                throw new makeTypeError("validate takes at most two arguments");
             }
-            let passed;
-            if (predicate === undefined || predicate === null) {
-                passed = this.#success;
-            } else if (typeof predicate === "function") {
-                passed = Boolean(predicate(this));
-            } else if (typeof predicate === "number") {
-                passed = !this.#timedOut && this.#code === predicate;
-            } else if (arrayIsArray(predicate)) {
-                passed = false;
-                if (!this.#timedOut) {
-                    for (let i = 0; i < predicate.length; i++) {
-                        if (hasOwn(predicate, i) && predicate[i] === this.#code) {
-                            passed = true;
-                            break;
-                        }
-                    }
-                }
-            } else {
-                throw new makeTypeError(
-                    "predicate must be a function, exit code, or array of exit codes",
-                );
+            if (
+                predicate !== undefined &&
+                predicate !== null &&
+                typeof predicate !== "function"
+            ) {
+                throw new makeTypeError("validate predicate must be a function");
+            }
+            if (failOnStderr !== undefined && typeof failOnStderr !== "boolean") {
+                throw new makeTypeError("validate failOnStderr must be a boolean");
             }
 
+            const passed =
+                predicate !== undefined && predicate !== null
+                    ? Boolean(predicate(this.#code))
+                    : this.#success;
+
             if (!passed) {
-                const code = this.#timedOut ? "VAEL_EXEC_TIMEOUT" : "VAEL_EXEC_NONZERO_EXIT";
+                const code = this.#timedOut ? "VAEL_EXEC_TIMEOUT" : "VAEL_EXEC_NON_ZERO";
                 const msg = this.#timedOut
                     ? "command timed out"
                     : this.#signal !== null
                     ? `command terminated by signal ${this.#signal}`
                     : `command failed with exit code ${this.#code}`;
-                throw new CommandError(msg, code, {
+                throw new CommandError(code, msg, {
+                    __proto__: null,
                     exitCode: this.#code,
                     signal: this.#signal === null ? undefined : this.#signal,
+                    timedOut: this.#timedOut,
+                    output: this,
                 });
             }
 
             if (failOnStderr === true && typedArrayByteLength(this.#stderr) > 0) {
                 throw new CommandError(
-                    "command produced unexpected output on stderr",
                     "VAEL_EXEC_STDERR",
+                    "command produced unexpected output on stderr",
                     {
+                        __proto__: null,
                         exitCode: this.#code,
                         signal: this.#signal === null ? undefined : this.#signal,
+                        timedOut: this.#timedOut,
+                        output: this,
                     },
                 );
             }
@@ -350,6 +366,8 @@
             return this;
         }
     }
+    freeze(Output.prototype);
+    freeze(Output);
 
     class Command {
         #spec;
@@ -374,8 +392,8 @@
                 }
                 if (parsed.items.length === 0) {
                     throw new CommandError(
-                        "program name must not be empty",
                         "VAEL_EXEC_INVALID_ARGUMENT",
+                        "program name must not be empty",
                     );
                 }
                 program = assertValidProgram(parsed.items[0]);
@@ -504,8 +522,8 @@
             }
             if (dir.length === 0 || stringIncludes(dir, "\0")) {
                 throw new CommandError(
-                    "working directory must not be empty or contain NUL",
                     "VAEL_EXEC_INVALID_ARGUMENT",
+                    "working directory must not be empty or contain NUL",
                 );
             }
             spec.cwd = dir;
@@ -520,8 +538,8 @@
             }
             if (stringIncludes(v, "\0")) {
                 throw new CommandError(
-                    "environment variable value must not contain a NUL byte",
                     "VAEL_EXEC_INVALID_ARGUMENT",
+                    "environment variable value must not contain a NUL byte",
                 );
             }
             pushOwn(spec.envOps, ["set", k, v]);
@@ -601,8 +619,8 @@
             }
             if (!numberIsInteger(n) || n < 0 || n > MAX_OUTPUT_BYTES) {
                 throw new CommandError(
-                    "maxOutputBytes exceeds hard limit of 64 MiB",
                     "VAEL_EXEC_INVALID_ARGUMENT",
+                    "maxOutputBytes exceeds hard limit of 64 MiB",
                 );
             }
             spec.maxOutputBytes = n;
@@ -622,8 +640,8 @@
             }
             if (!numberIsFinite(ms) || ms < 0) {
                 throw new CommandError(
-                    "killGrace must be a non-negative finite number",
                     "VAEL_EXEC_INVALID_ARGUMENT",
+                    "killGrace must be a non-negative finite number",
                 );
             }
             spec.killGraceMs = ms;
@@ -645,7 +663,7 @@
             if (!res.ok) {
                 throwExecFailure(res, spec.program);
             }
-            return new Output(res);
+            return new Output(INTERNAL_TOKEN, res);
         }
 
         execSync() {
@@ -670,6 +688,8 @@
             return this.statusSync();
         }
     }
+    freeze(Command.prototype);
+    freeze(Command);
 
     class FileLock {
         #handle;
@@ -708,6 +728,8 @@
     }
 
     defineOwn(FileLock.prototype, symbolDispose, FileLock.prototype.unlock, false, true);
+    freeze(FileLock.prototype);
+    freeze(FileLock);
 
     function cmd(programOrArgv, argsOrOptions, maybeOptions) {
         return new Command(programOrArgv, argsOrOptions, maybeOptions);
@@ -760,7 +782,7 @@
         return new FileLock(INTERNAL_TOKEN, res.handle, path, res.mode);
     }
 
-    const mod = {};
+    const mod = objectCreate(null);
     defineOwn(mod, "Command", Command, true, false);
     defineOwn(mod, "CommandError", CommandError, true, false);
     defineOwn(mod, "FileLock", FileLock, true, false);

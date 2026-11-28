@@ -105,23 +105,34 @@
      * timeout, output limit, or file-locking failures.
      */
     class CommandError extends makeError {
-        constructor(message, details) {
-            super(message);
+        constructor(code, message, options) {
+            super(message === undefined ? "" : message);
             defineOwn(this, "name", "CommandError", false, true);
-            const code =
-                details !== undefined && details !== null && hasOwn(details, "code")
-                    ? details.code
-                    : "VAEL_EXEC_IO";
-            defineOwn(this, "code", code, true, false);
-            if (details !== undefined && details !== null) {
-                if (hasOwn(details, "exitCode") && details.exitCode !== undefined) {
-                    defineOwn(this, "exitCode", details.exitCode, true, false);
+            defineOwn(this, "code", code === undefined ? "VAEL_EXEC_IO" : code, true, false);
+            const hasOpts = options !== undefined && options !== null;
+            const timedOut =
+                hasOpts && hasOwn(options, "timedOut") && options.timedOut === true;
+            defineOwn(this, "timedOut", timedOut, true, false);
+            if (hasOpts) {
+                if (
+                    hasOwn(options, "exitCode") &&
+                    options.exitCode !== undefined &&
+                    options.exitCode !== null
+                ) {
+                    defineOwn(this, "exitCode", options.exitCode, true, false);
                 }
-                if (hasOwn(details, "signal") && details.signal !== undefined) {
-                    defineOwn(this, "signal", details.signal, true, false);
+                if (hasOwn(options, "signal") && options.signal !== undefined) {
+                    defineOwn(this, "signal", options.signal, true, false);
                 }
-                if (hasOwn(details, "fileName") && details.fileName !== undefined) {
-                    defineOwn(this, "fileName", details.fileName, true, false);
+                if (hasOwn(options, "output") && options.output !== undefined) {
+                    defineOwn(this, "output", options.output, true, false);
+                }
+                if (
+                    hasOwn(options, "fileName") &&
+                    options.fileName !== undefined &&
+                    options.fileName !== null
+                ) {
+                    defineOwn(this, "fileName", options.fileName, true, false);
                 }
             }
         }
@@ -151,8 +162,8 @@
         if (outcome.name === "NotFoundOnPathError") {
             throw new NotFoundOnPathError(outcome.fileName, outcome.message);
         }
-        throw new CommandError(outcome.message, {
-            code: outcome.code,
+        throw new CommandError(outcome.code, outcome.message, {
+            __proto__: null,
             exitCode: outcome.exitCode,
             signal: outcome.signal,
             fileName: outcome.fileName,
@@ -166,6 +177,7 @@
 
     function freezeStatus(raw) {
         return freeze({
+            __proto__: null,
             code: raw.code,
             signal: raw.signal,
             success: raw.success,
@@ -289,30 +301,41 @@
             if (arguments.length > 2) {
                 throw new makeTypeError("validate takes at most two arguments");
             }
-            if (predicate !== undefined && typeof predicate !== "function") {
+            if (
+                predicate !== undefined &&
+                predicate !== null &&
+                typeof predicate !== "function"
+            ) {
                 throw new makeTypeError("validate predicate must be a function");
             }
             if (failOnStderr !== undefined && typeof failOnStderr !== "boolean") {
                 throw new makeTypeError("validate failOnStderr must be a boolean");
             }
-            const ok = predicate !== undefined ? Boolean(predicate(this)) : this.#success;
+            const ok =
+                predicate !== undefined && predicate !== null
+                    ? Boolean(predicate(this.#code))
+                    : this.#success;
             if (!ok) {
                 const code = this.#timedOut ? "VAEL_EXEC_TIMEOUT" : "VAEL_EXEC_NON_ZERO";
                 const msg = this.#timedOut
                     ? `command timed out (exit code ${this.#code})`
                     : `command failed with exit code ${this.#code}`;
-                throw new CommandError(msg, {
-                    code,
+                throw new CommandError(code, msg, {
+                    __proto__: null,
                     exitCode: this.#code,
-                    signal: this.#signal !== null ? this.#signal : undefined,
+                    signal: this.#signal,
+                    timedOut: this.#timedOut,
+                    output: this,
                     fileName: this.#fileName,
                 });
             }
             if (failOnStderr === true && typedArrayByteLength(this.#stderr) > 0) {
-                throw new CommandError("command produced non-empty stderr", {
-                    code: "VAEL_EXEC_STDERR",
+                throw new CommandError("VAEL_EXEC_STDERR", "command produced non-empty stderr", {
+                    __proto__: null,
                     exitCode: this.#code,
-                    signal: this.#signal !== null ? this.#signal : undefined,
+                    signal: this.#signal,
+                    timedOut: this.#timedOut,
+                    output: this,
                     fileName: this.#fileName,
                 });
             }
@@ -325,6 +348,13 @@
     const childDisposers = new WeakMap();
     const weakMapSet = Function.prototype.call.bind(WeakMap.prototype.set);
     const weakMapGet = Function.prototype.call.bind(WeakMap.prototype.get);
+
+    function disposedChildError(fileName) {
+        return new CommandError("VAEL_EXEC_INVALID_ARGUMENT", "child process handle is disposed", {
+            __proto__: null,
+            fileName,
+        });
+    }
 
     /**
      * Managed spawned child process with streaming stdin/stdout/stderr, signal
@@ -362,12 +392,7 @@
             if (arguments.length !== 1) {
                 throw new makeTypeError("writeStdin takes exactly one argument");
             }
-            if (this.#disposed) {
-                throw new CommandError("child process handle is disposed", {
-                    code: "VAEL_EXEC_INVALID_ARGUMENT",
-                    fileName: this.#fileName,
-                });
-            }
+            if (this.#disposed) throw disposedChildError(this.#fileName);
             const res = await opChildWriteStdin(this.#id, data);
             if (!res.ok) throwExec(res);
         }
@@ -385,12 +410,7 @@
             if (arguments.length > 1) {
                 throw new makeTypeError("readStdout takes zero or one argument");
             }
-            if (this.#disposed) {
-                throw new CommandError("child process handle is disposed", {
-                    code: "VAEL_EXEC_INVALID_ARGUMENT",
-                    fileName: this.#fileName,
-                });
-            }
+            if (this.#disposed) throw disposedChildError(this.#fileName);
             return unwrapExec(await opChildReadStdout(this.#id, maxBytes));
         }
 
@@ -398,12 +418,7 @@
             if (arguments.length > 1) {
                 throw new makeTypeError("readStderr takes zero or one argument");
             }
-            if (this.#disposed) {
-                throw new CommandError("child process handle is disposed", {
-                    code: "VAEL_EXEC_INVALID_ARGUMENT",
-                    fileName: this.#fileName,
-                });
-            }
+            if (this.#disposed) throw disposedChildError(this.#fileName);
             return unwrapExec(await opChildReadStderr(this.#id, maxBytes));
         }
 
@@ -411,12 +426,7 @@
             if (arguments.length > 1) {
                 throw new makeTypeError("kill takes zero or one argument");
             }
-            if (this.#disposed) {
-                throw new CommandError("child process handle is disposed", {
-                    code: "VAEL_EXEC_INVALID_ARGUMENT",
-                    fileName: this.#fileName,
-                });
-            }
+            if (this.#disposed) throw disposedChildError(this.#fileName);
             const res = opChildKill(this.#id, signal);
             if (!res.ok) throwExec(res);
         }
@@ -425,12 +435,7 @@
             if (arguments.length !== 0) {
                 throw new makeTypeError("tryWait takes no arguments");
             }
-            if (this.#disposed) {
-                throw new CommandError("child process handle is disposed", {
-                    code: "VAEL_EXEC_INVALID_ARGUMENT",
-                    fileName: this.#fileName,
-                });
-            }
+            if (this.#disposed) throw disposedChildError(this.#fileName);
             const status = unwrapExec(opChildTryWait(this.#id));
             return status === null ? null : freezeStatus(status);
         }
@@ -439,12 +444,7 @@
             if (arguments.length !== 0) {
                 throw new makeTypeError("wait takes no arguments");
             }
-            if (this.#disposed) {
-                throw new CommandError("child process handle is disposed", {
-                    code: "VAEL_EXEC_INVALID_ARGUMENT",
-                    fileName: this.#fileName,
-                });
-            }
+            if (this.#disposed) throw disposedChildError(this.#fileName);
             return freezeStatus(unwrapExec(await opChildWait(this.#id)));
         }
 
@@ -452,12 +452,7 @@
             if (arguments.length > 1) {
                 throw new makeTypeError("waitWithOutput takes zero or one argument");
             }
-            if (this.#disposed) {
-                throw new CommandError("child process handle is disposed", {
-                    code: "VAEL_EXEC_INVALID_ARGUMENT",
-                    fileName: this.#fileName,
-                });
-            }
+            if (this.#disposed) throw disposedChildError(this.#fileName);
             const raw = unwrapExec(await opChildOutput(this.#id, options));
             return new Output(outputToken, raw, this.#fileName);
         }
@@ -590,9 +585,10 @@
                 }
                 const validatedArgv = unwrapExec(opValidateArgs(programOrArgv));
                 if (validatedArgv.length === 0) {
-                    throw new CommandError("program name must not be empty", {
-                        code: "VAEL_EXEC_INVALID_ARGUMENT",
-                    });
+                    throw new CommandError(
+                        "VAEL_EXEC_INVALID_ARGUMENT",
+                        "program name must not be empty",
+                    );
                 }
                 program = unwrapExec(opValidateProgram(validatedArgv[0]));
                 initialArgs = arraySlice(validatedArgv, 1);
@@ -797,7 +793,12 @@
             if (arguments.length !== 0) {
                 throw new makeTypeError("toArgs takes no arguments");
             }
-            return [this.#program, ...this.#args];
+            const out = [];
+            defineOwn(out, 0, this.#program, true, true);
+            for (let i = 0; i < this.#args.length; i += 1) {
+                defineOwn(out, i + 1, this.#args[i], true, true);
+            }
+            return out;
         }
 
         outputSync() {

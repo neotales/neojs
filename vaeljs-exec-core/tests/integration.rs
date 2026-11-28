@@ -313,3 +313,46 @@ fn file_lock_exclusive_shared_nonblocking_timeout_and_symlink_safety() {
         ExecErrorCode::InvalidArgument
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn grandchild_holding_stdout_does_not_hang_past_timeout() {
+    use std::time::Instant;
+    use vaeljs_exec_core::{exec_sync, spawn};
+
+    let spec = CommandSpec::new("sh")
+        .unwrap()
+        .arg("-c")
+        .unwrap()
+        .arg("sleep 2 & printf 'parent-done\\n'")
+        .unwrap()
+        .timeout(Duration::from_millis(150))
+        .unwrap();
+
+    let start = Instant::now();
+    let out = exec_sync(&spec).unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(1000),
+        "exec_sync hung waiting for grandchild pipe: {elapsed:?}"
+    );
+    assert!(out.text().contains("parent-done"));
+
+    let child_spec = CommandSpec::new("sh")
+        .unwrap()
+        .arg("-c")
+        .unwrap()
+        .arg("sleep 2 & printf 'spawned-done\\n'")
+        .unwrap();
+    let child = spawn(&child_spec).unwrap();
+    let start2 = Instant::now();
+    let out2 = child
+        .wait_with_output(1024 * 1024, Some(Duration::from_millis(150)))
+        .unwrap();
+    let elapsed2 = start2.elapsed();
+    assert!(
+        elapsed2 < Duration::from_millis(1000),
+        "wait_with_output hung waiting for grandchild pipe: {elapsed2:?}"
+    );
+    assert!(out2.text().contains("spawned-done"));
+}

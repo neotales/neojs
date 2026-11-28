@@ -55,6 +55,19 @@ pub(super) const EXPORTS: &[&str] = &[
 
 const FACTORY_SOURCE: &str = include_str!("exec.js");
 const MAX_ARRAY_LEN: usize = 16_384;
+const MAX_OPEN_LOCKS: usize = 1_024;
+
+fn set_null_proto<'js>(ctx: &Ctx<'js>, obj: &Object<'js>) -> Result<()> {
+    let rc = unsafe { qjs::JS_SetPrototype(ctx.as_raw().as_ptr(), obj.as_raw(), qjs::JS_NULL) };
+    if rc < 0 {
+        return Err(if ctx.has_exception() {
+            rquickjs::Error::Exception
+        } else {
+            rquickjs::Error::Unknown
+        });
+    }
+    Ok(())
+}
 
 /// Per-context table owning active OS advisory file locks so dropping the
 /// QuickJS context releases any locks that were not explicitly unlocked.
@@ -69,11 +82,18 @@ impl ExecLockTable {
         Self::default()
     }
 
-    fn insert(&mut self, lock: FileLock) -> u64 {
+    fn is_full(&self) -> bool {
+        self.locks.len() >= MAX_OPEN_LOCKS
+    }
+
+    fn insert(&mut self, lock: FileLock) -> Option<u64> {
+        if self.is_full() {
+            return None;
+        }
         self.next_id = self.next_id.wrapping_add(1);
         let id = self.next_id;
         self.locks.insert(id, lock);
-        id
+        Some(id)
     }
 
     fn take(&mut self, id: u64) -> Option<FileLock> {
@@ -214,6 +234,7 @@ pub(super) fn object<'js>(
 
 fn error_object<'js>(ctx: &Ctx<'js>, err: &ExecError) -> Result<Object<'js>> {
     let obj = Object::new(ctx.clone())?;
+    set_null_proto(ctx, &obj)?;
     obj.prop(
         "ok",
         Property::from(false).writable().enumerable().configurable(),
@@ -243,6 +264,7 @@ fn error_object<'js>(ctx: &Ctx<'js>, err: &ExecError) -> Result<Object<'js>> {
 
 fn ok_object<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
     let obj = Object::new(ctx.clone())?;
+    set_null_proto(ctx, &obj)?;
     obj.prop(
         "ok",
         Property::from(true).writable().enumerable().configurable(),
@@ -549,7 +571,6 @@ struct RawCommandOptions<'js> {
     cwd: Option<Value<'js>>,
     env: Option<Value<'js>>,
     clear_env: Option<Value<'js>>,
-    env_clear: Option<Value<'js>>,
     env_remove: Option<Value<'js>>,
     stdin: Option<Value<'js>>,
     stdout: Option<Value<'js>>,
@@ -578,7 +599,6 @@ fn host_parse_command_options<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Res
                 "cwd" => fields.cwd = Some(val.clone()),
                 "env" => fields.env = Some(val.clone()),
                 "clearEnv" => fields.clear_env = Some(val.clone()),
-                "envClear" => fields.env_clear = Some(val.clone()),
                 "envRemove" => fields.env_remove = Some(val.clone()),
                 "stdin" => fields.stdin = Some(val.clone()),
                 "stdout" => fields.stdout = Some(val.clone()),
@@ -595,12 +615,7 @@ fn host_parse_command_options<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Res
         },
     )?;
     if unknown {
-        return error_object(
-            &ctx,
-            &ExecError::InvalidArgument {
-                reason: "unknown command option",
-            },
-        );
+        return Err(Exception::throw_type(&ctx, "unknown command option"));
     }
 
     let out = ok_object(&ctx)?;
@@ -651,26 +666,21 @@ fn host_parse_command_options<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Res
         )?;
     }
 
-    let mut clear_env = false;
-    for flag_val in [fields.clear_env.as_ref(), fields.env_clear.as_ref()]
-        .into_iter()
-        .flatten()
+    if let Some(ref flag_val) = fields.clear_env
+        && !flag_val.is_undefined()
     {
-        if !flag_val.is_undefined() {
-            let Some(b) = flag_val.as_bool() else {
-                return Err(Exception::throw_type(
-                    &ctx,
-                    "options.clearEnv must be a boolean",
-                ));
-            };
-            clear_env |= b;
+        let Some(b) = flag_val.as_bool() else {
+            return Err(Exception::throw_type(
+                &ctx,
+                "options.clearEnv must be a boolean",
+            ));
+        };
+        if b {
+            out.prop(
+                "clearEnv",
+                Property::from(true).writable().enumerable().configurable(),
+            )?;
         }
-    }
-    if clear_env {
-        out.prop(
-            "clearEnv",
-            Property::from(true).writable().enumerable().configurable(),
-        )?;
     }
 
     if let Some(ref val) = fields.env
@@ -1338,7 +1348,7 @@ fn parse_which_prepend<'js>(
                 return Ok(());
             }
             match key {
-                "prependPath" | "path" => {
+                "prependPath" => {
                     if !val.is_undefined() {
                         prepend_val = Some(val.clone());
                     }
@@ -1349,9 +1359,7 @@ fn parse_which_prepend<'js>(
         },
     )?;
     if unknown {
-        return Ok(Err(ExecError::InvalidArgument {
-            reason: "unknown which option",
-        }));
+        return Err(Exception::throw_type(ctx, "unknown which option"));
     }
     if let Some(ref val) = prepend_val {
         let s = match read_strict_string(
@@ -1485,12 +1493,7 @@ fn host_lock_file_sync<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<Obj
         },
     )?;
     if unknown {
-        return error_object(
-            &ctx,
-            &ExecError::InvalidArgument {
-                reason: "unknown lock option",
-            },
-        );
+        return Err(Exception::throw_type(&ctx, "unknown lock option"));
     }
 
     if let Some(ref val) = mode_val
@@ -1564,12 +1567,26 @@ fn host_lock_file_sync<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<Obj
         lock_opts.timeout = Some(dur);
     }
 
+    let lock_limit_err = || ExecError::Io {
+        context: "file lock limit",
+        source: std::io::Error::other("maximum number of open file locks exceeded (1024)"),
+    };
+    {
+        let state = ctx
+            .userdata::<super::vael::VaelState>()
+            .ok_or(rquickjs::Error::Unknown)?;
+        if state.exec_locks.borrow().is_full() {
+            return error_object(&ctx, &lock_limit_err());
+        }
+    }
+
     let lock = match FileLock::acquire(Path::new(&path_str), &lock_opts) {
         Ok(l) => l,
         Err(e) => {
             // `ExecError::NotFound` on a lock file path is a `CommandError`
             // (not `NotFoundOnPathError`), so omit `notFound`.
             let obj = Object::new(ctx.clone())?;
+            set_null_proto(&ctx, &obj)?;
             obj.prop(
                 "ok",
                 Property::from(false).writable().enumerable().configurable(),
@@ -1601,7 +1618,9 @@ fn host_lock_file_sync<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<Obj
         let state = ctx
             .userdata::<super::vael::VaelState>()
             .ok_or(rquickjs::Error::Unknown)?;
-        let id = state.exec_locks.borrow_mut().insert(lock);
+        let Some(id) = state.exec_locks.borrow_mut().insert(lock) else {
+            return error_object(&ctx, &lock_limit_err());
+        };
         (id, Rc::downgrade(&state.exec_locks))
     };
 
@@ -1731,3 +1750,46 @@ impl ModuleDef for ExecModule {
 
 // Keep unused error code imports honest for exhaustive lint coverage.
 const _: fn(ExecErrorCode) -> &'static str = ExecErrorCode::as_str;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_lock_table_enforces_max_open_locks_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut table = ExecLockTable::new();
+        let mut ids = Vec::with_capacity(MAX_OPEN_LOCKS);
+        for idx in 0..MAX_OPEN_LOCKS {
+            let path = dir.path().join(format!("lock-{idx}.lck"));
+            let lock = FileLock::acquire(
+                &path,
+                &LockOptions {
+                    mode: LockMode::Exclusive,
+                    create: true,
+                    non_blocking: true,
+                    timeout: None,
+                },
+            )
+            .expect("acquire lock");
+            let id = table.insert(lock).expect("lock within cap");
+            ids.push(id);
+        }
+        assert!(table.is_full());
+        let extra_path = dir.path().join("lock-overflow.lck");
+        let extra = FileLock::acquire(
+            &extra_path,
+            &LockOptions {
+                mode: LockMode::Exclusive,
+                create: true,
+                non_blocking: true,
+                timeout: None,
+            },
+        )
+        .expect("acquire overflow lock");
+        assert!(table.insert(extra).is_none());
+        let removed = ids.pop().expect("id");
+        assert!(table.take(removed).is_some());
+        assert!(!table.is_full());
+    }
+}

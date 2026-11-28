@@ -284,6 +284,14 @@ declare module "vael:fetch" {
     headerValues(name: string): string[];
 
     /**
+     * Return a defensive copy of the buffered response body bytes.
+     *
+     * @returns Freshly copied `Uint8Array` of the response body.
+     * @since 0.0.0-alpha.2
+     */
+    bytes(): Uint8Array;
+
+    /**
      * Decode `body` as strict UTF-8 text.
      *
      * @returns Decoded UTF-8 response body string.

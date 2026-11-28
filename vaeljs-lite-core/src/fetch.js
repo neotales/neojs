@@ -14,7 +14,6 @@
     const fnCallBind = (fn) => callBind(Function.prototype.call, fn);
     const hasOwn = fnCallBind(Object.prototype.hasOwnProperty);
     const jsonParse = JSON.parse;
-    const jsonStringify = JSON.stringify;
     const stringToLowerCase = fnCallBind(String.prototype.toLowerCase);
 
     const typedArrayProto = getPrototypeOf(makeUint8Array.prototype);
@@ -37,6 +36,7 @@
 
     const responseBytes = new makeWeakMap();
     const responseHeaders = new makeWeakMap();
+    const responseRawHeaders = new makeWeakMap();
 
     function defineOwn(target, key, value, enumerable = true, writable = true) {
         const desc = objectCreate(null);
@@ -81,7 +81,7 @@
     }
 
     class FetchError extends makeError {
-        constructor(code = "VAEL_FETCH_NETWORK", message = "", status = undefined) {
+        constructor(code = "VAEL_FETCH_NETWORK", message = "", status = undefined, url = undefined) {
             super(message === undefined ? "" : makeString(message));
             defineOwn(this, "name", "FetchError", false, true);
             defineOwn(
@@ -94,17 +94,28 @@
             if (status !== undefined) {
                 defineOwn(this, "status", status, true, false);
             }
+            if (url !== undefined) {
+                defineOwn(this, "url", makeString(url), true, false);
+            }
         }
     }
+    freeze(FetchError.prototype);
+    freeze(FetchError);
 
     function makeFetchError(err) {
-        return new FetchError(err.code, err.message, err.status);
+        return new FetchError(
+            hasOwn(err, "code") ? err.code : undefined,
+            hasOwn(err, "message") ? err.message : undefined,
+            hasOwn(err, "status") ? err.status : undefined,
+            hasOwn(err, "url") ? err.url : undefined,
+        );
     }
 
     class FetchResponse {
-        constructor(status, statusText, ok, url, redirected, headersRecord, rawBody) {
+        constructor(status, statusText, ok, url, redirected, headersRecord, rawPairs, rawBody) {
             weakMapSet(responseBytes, this, rawBody);
             weakMapSet(responseHeaders, this, headersRecord);
+            weakMapSet(responseRawHeaders, this, rawPairs);
             defineOwn(this, "status", status, true, false);
             defineOwn(this, "statusText", statusText, true, false);
             defineOwn(this, "ok", ok, true, false);
@@ -135,6 +146,28 @@
             }
             const lower = stringToLowerCase(name);
             return hasOwn(headers, lower) ? headers[lower] : undefined;
+        }
+
+        headerValues(name) {
+            const pairs = weakMapGet(responseRawHeaders, this);
+            if (pairs === undefined) {
+                throw new makeTypeError("invalid FetchResponse receiver");
+            }
+            if (arguments.length !== 1) {
+                throw new makeTypeError("headerValues takes exactly one argument");
+            }
+            if (typeof name !== "string") {
+                throw new makeTypeError("header name must be a string");
+            }
+            const lower = stringToLowerCase(name);
+            const out = [];
+            for (let i = 0; i < pairs.length; i++) {
+                const pair = pairs[i];
+                if (pair[0] === lower) {
+                    defineOwn(out, out.length, pair[1], true, true);
+                }
+            }
+            return out;
         }
 
         bytes() {
@@ -176,14 +209,27 @@
             }
         }
     }
+    freeze(FetchResponse.prototype);
+    freeze(FetchResponse);
 
     function fetchSync(url, options) {
         if (typeof url !== "string") {
             throw new makeTypeError("url must be a string");
         }
-        const res = hostFetchSync(url, options, jsonStringify);
+        const res = hostFetchSync(url, options);
         if (!res.ok) {
             throw makeFetchError(res);
+        }
+        const rawPairs = [];
+        for (let i = 0; i < res.headers.length; i++) {
+            const pair = res.headers[i];
+            defineOwn(
+                rawPairs,
+                rawPairs.length,
+                [stringToLowerCase(pair[0]), pair[1]],
+                true,
+                true,
+            );
         }
         const headersRecord = buildCollapsedHeadersRecord(res.headers);
         return new FetchResponse(
@@ -193,6 +239,7 @@
             res.url,
             res.redirected,
             headersRecord,
+            rawPairs,
             res.body,
         );
     }
@@ -219,7 +266,7 @@
         return freeze(out);
     }
 
-    const mod = {};
+    const mod = objectCreate(null);
     defineOwn(mod, "FetchError", FetchError, true, false);
     defineOwn(mod, "downloadSync", downloadSync, true, false);
     defineOwn(mod, "fetchSync", fetchSync, true, false);

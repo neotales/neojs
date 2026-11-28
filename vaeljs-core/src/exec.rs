@@ -13,12 +13,16 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::ffi::OsString;
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{ChildStderr, ChildStdin, ChildStdout};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use deno_core::FromV8;
@@ -147,6 +151,12 @@ impl Drop for ChildProcessResource {
     fn drop(&mut self) {
         self.inner.disposed.store(true, Ordering::Release);
         self.inner.stdin_closed.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.inner.child.lock()
+            && let Some(mut child) = guard.take()
+        {
+            let _ = child.kill(Signal::SigKill);
+            let _ = child.wait();
+        }
         if let Ok(mut stdin_guard) = self.inner.stdin.try_lock() {
             drop(stdin_guard.take());
         }
@@ -155,12 +165,6 @@ impl Drop for ChildProcessResource {
         }
         if let Ok(mut stderr_guard) = self.inner.stderr.try_lock() {
             drop(stderr_guard.take());
-        }
-        if let Ok(mut guard) = self.inner.child.lock()
-            && let Some(mut child) = guard.take()
-        {
-            let _ = child.kill(Signal::SigKill);
-            let _ = child.wait();
         }
         self.counts.open_children.fetch_sub(1, Ordering::Relaxed);
     }
@@ -2256,30 +2260,8 @@ fn op_vael_exec_child_kill<'s>(
 }
 
 fn wait_child_inner_blocking(inner: &ChildInner) -> Result<CommandStatus, ExecError> {
-    let mut sleep_dur = Duration::from_millis(1);
-    loop {
-        if inner.disposed.load(Ordering::Acquire) {
-            return Err(ExecError::InvalidArgument {
-                reason: "child process handle is disposed",
-            });
-        }
-        {
-            let mut guard = inner
-                .child
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let Some(ref mut child) = *guard else {
-                return Err(ExecError::InvalidArgument {
-                    reason: "child process handle is disposed",
-                });
-            };
-            if child.try_wait()?.is_some() {
-                return child.wait();
-            }
-        }
-        std::thread::sleep(sleep_dur);
-        sleep_dur = (sleep_dur * 2).min(Duration::from_millis(10));
-    }
+    let (status, _) = wait_with_optional_timeout(inner, None)?;
+    Ok(status)
 }
 
 #[op2]
@@ -2360,27 +2342,196 @@ async fn op_vael_exec_child_wait(
     }
 }
 
-fn drain_pipe_bounded(
-    mut pipe: impl io::Read + Send + 'static,
-    max_bytes: usize,
-) -> std::thread::JoinHandle<Result<(Vec<u8>, bool), io::Error>> {
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let mut scratch = [0u8; 64 * 1024];
-        loop {
-            match pipe.read(&mut scratch) {
-                Ok(0) => return Ok((buf, false)),
-                Ok(n) => {
-                    if buf.len().saturating_add(n) > max_bytes {
-                        return Ok((buf, true));
-                    }
-                    buf.extend_from_slice(&scratch[..n]);
+#[derive(Default)]
+struct PipeDrainState {
+    buf: Vec<u8>,
+    done: bool,
+    err: Option<io::Error>,
+}
+
+struct PipeDrainHandle {
+    signal: Arc<(StdMutex<PipeDrainState>, Condvar)>,
+    #[cfg(unix)]
+    shutdown_stream: Option<UnixStream>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PipeDrainHandle {
+    fn collect(&self, deadline: Option<Instant>) -> (Vec<u8>, Option<io::Error>) {
+        let (lock, cvar) = &*self.signal;
+        let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = match deadline {
+            None => cvar
+                .wait_while(guard, |s| !s.done)
+                .unwrap_or_else(|e| e.into_inner()),
+            Some(dl) => {
+                let remaining = dl.saturating_duration_since(Instant::now());
+                if !guard.done && !remaining.is_zero() {
+                    cvar.wait_timeout_while(guard, remaining, |s| !s.done)
+                        .map(|(g, _)| g)
+                        .unwrap_or_else(|e| e.into_inner().0)
+                } else {
+                    guard
                 }
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(err) => return Err(err),
+            }
+        };
+        (std::mem::take(&mut state.buf), state.err.take())
+    }
+
+    fn finish(self, timed_out: bool) {
+        #[cfg(unix)]
+        let has_shutdown = if let Some(stream) = self.shutdown_stream {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            true
+        } else {
+            false
+        };
+        if let Some(join) = self.join {
+            #[cfg(unix)]
+            {
+                if has_shutdown || !timed_out {
+                    let _ = join.join();
+                }
+            }
+            #[cfg(not(unix))]
+            if !timed_out {
+                let _ = join.join();
             }
         }
-    })
+    }
+}
+
+#[cfg(unix)]
+fn spawn_unix_pipe_drain<P: Into<OwnedFd>>(
+    pipe: P,
+    max_bytes: usize,
+    exceeded: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+) -> PipeDrainHandle {
+    let mut stream = UnixStream::from(pipe.into());
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
+    let shutdown_stream = stream.try_clone().ok();
+    let signal = Arc::new((StdMutex::new(PipeDrainState::default()), Condvar::new()));
+    let worker_signal = Arc::clone(&signal);
+    let join = std::thread::spawn(move || {
+        let mut scratch = [0u8; 64 * 1024];
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                let (lock, cvar) = &*worker_signal;
+                let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                state.done = true;
+                cvar.notify_all();
+                break;
+            }
+            match stream.read(&mut scratch) {
+                Ok(0) => {
+                    let (lock, cvar) = &*worker_signal;
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    state.done = true;
+                    cvar.notify_all();
+                    break;
+                }
+                Ok(n) => {
+                    let (lock, cvar) = &*worker_signal;
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let remaining = max_bytes.saturating_sub(state.buf.len());
+                    if n > remaining {
+                        state.buf.extend_from_slice(&scratch[..remaining]);
+                        exceeded.store(true, Ordering::Release);
+                        state.done = true;
+                        cvar.notify_all();
+                        drop(state);
+                        drop(stream);
+                        break;
+                    }
+                    state.buf.extend_from_slice(&scratch[..n]);
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::Interrupted
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(err) => {
+                    let (lock, cvar) = &*worker_signal;
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    state.err = Some(err);
+                    state.done = true;
+                    cvar.notify_all();
+                    break;
+                }
+            }
+        }
+    });
+    PipeDrainHandle {
+        signal,
+        shutdown_stream,
+        join: Some(join),
+    }
+}
+
+#[cfg(not(unix))]
+fn spawn_generic_pipe_drain(
+    mut pipe: impl io::Read + Send + 'static,
+    max_bytes: usize,
+    exceeded: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+) -> PipeDrainHandle {
+    let signal = Arc::new((StdMutex::new(PipeDrainState::default()), Condvar::new()));
+    let worker_signal = Arc::clone(&signal);
+    let join = std::thread::spawn(move || {
+        let mut scratch = [0u8; 64 * 1024];
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                let (lock, cvar) = &*worker_signal;
+                let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                state.done = true;
+                cvar.notify_all();
+                break;
+            }
+            match pipe.read(&mut scratch) {
+                Ok(0) => {
+                    let (lock, cvar) = &*worker_signal;
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    state.done = true;
+                    cvar.notify_all();
+                    break;
+                }
+                Ok(n) => {
+                    let (lock, cvar) = &*worker_signal;
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let remaining = max_bytes.saturating_sub(state.buf.len());
+                    if n > remaining {
+                        state.buf.extend_from_slice(&scratch[..remaining]);
+                        exceeded.store(true, Ordering::Release);
+                        state.done = true;
+                        cvar.notify_all();
+                        drop(state);
+                        drop(pipe);
+                        break;
+                    }
+                    state.buf.extend_from_slice(&scratch[..n]);
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => {
+                    let (lock, cvar) = &*worker_signal;
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    state.err = Some(err);
+                    state.done = true;
+                    cvar.notify_all();
+                    break;
+                }
+            }
+        }
+    });
+    PipeDrainHandle {
+        signal,
+        join: Some(join),
+    }
 }
 
 fn wait_with_optional_timeout(
@@ -2519,48 +2670,88 @@ async fn op_vael_exec_child_output(
     };
 
     inner.stdin_closed.store(true, Ordering::Release);
-    {
-        let mut stdin_guard = inner.stdin.lock().await;
+    if let Ok(mut stdin_guard) = inner.stdin.try_lock() {
         drop(stdin_guard.take());
     }
-    let stdout_pipe = inner.stdout.lock().await.take();
-    let stderr_pipe = inner.stderr.lock().await.take();
+    let stdout_pipe = if let Ok(mut g) = inner.stdout.try_lock() {
+        g.take()
+    } else {
+        None
+    };
+    let stderr_pipe = if let Ok(mut g) = inner.stderr.try_lock() {
+        g.take()
+    } else {
+        None
+    };
+    if inner.disposed.load(Ordering::Acquire) {
+        return ExecOpOutcome::Err(ExecBindingError::invalid_arg(
+            "child process handle is disposed",
+        ));
+    }
+
+    let overall_deadline = opts
+        .timeout
+        .or(inner.timeout)
+        .and_then(|d| Instant::now().checked_add(d));
 
     let join = match spawn_blocking_work(&state, move || {
         let max_bytes = opts.max_output_bytes.unwrap_or(inner.max_output_bytes);
-        let out_handle = stdout_pipe.map(|p| drain_pipe_bounded(p, max_bytes));
-        let err_handle = stderr_pipe.map(|p| drain_pipe_bounded(p, max_bytes));
+        let out_exceeded = Arc::new(AtomicBool::new(false));
+        let err_exceeded = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(AtomicBool::new(false));
 
-        let (status, timed_out) = wait_with_optional_timeout(&inner, opts.timeout)?;
+        #[cfg(unix)]
+        let out_handle = stdout_pipe.map(|p| {
+            spawn_unix_pipe_drain(p, max_bytes, Arc::clone(&out_exceeded), Arc::clone(&cancel))
+        });
+        #[cfg(not(unix))]
+        let out_handle = stdout_pipe.map(|p| {
+            spawn_generic_pipe_drain(p, max_bytes, Arc::clone(&out_exceeded), Arc::clone(&cancel))
+        });
 
-        let (stdout, out_exceeded, out_err) = match out_handle.map(|h| h.join()) {
-            Some(Ok(Ok((buf, exceeded)))) => (buf, exceeded, None),
-            Some(Ok(Err(e))) => (Vec::new(), false, Some(e)),
-            Some(Err(_)) => (
-                Vec::new(),
-                false,
-                Some(io::Error::other("stdout reader panicked")),
-            ),
-            None => (Vec::new(), false, None),
+        #[cfg(unix)]
+        let err_handle = stderr_pipe.map(|p| {
+            spawn_unix_pipe_drain(p, max_bytes, Arc::clone(&err_exceeded), Arc::clone(&cancel))
+        });
+        #[cfg(not(unix))]
+        let err_handle = stderr_pipe.map(|p| {
+            spawn_generic_pipe_drain(p, max_bytes, Arc::clone(&err_exceeded), Arc::clone(&cancel))
+        });
+
+        let wait_res = wait_with_optional_timeout(&inner, opts.timeout);
+        let timed_out = wait_res.as_ref().is_ok_and(|(_, t)| *t);
+        let drain_deadline = if timed_out || wait_res.is_err() {
+            Instant::now().checked_add(Duration::from_millis(75))
+        } else {
+            overall_deadline
         };
-        let (stderr, err_exceeded, err_err) = match err_handle.map(|h| h.join()) {
-            Some(Ok(Ok((buf, exceeded)))) => (buf, exceeded, None),
-            Some(Ok(Err(e))) => (Vec::new(), false, Some(e)),
-            Some(Err(_)) => (
-                Vec::new(),
-                false,
-                Some(io::Error::other("stderr reader panicked")),
-            ),
-            None => (Vec::new(), false, None),
-        };
 
-        if out_exceeded {
+        let (stdout, out_err) = out_handle
+            .as_ref()
+            .map_or((Vec::new(), None), |h| h.collect(drain_deadline));
+        let (stderr, err_err) = err_handle
+            .as_ref()
+            .map_or((Vec::new(), None), |h| h.collect(drain_deadline));
+
+        if drain_deadline.is_some() {
+            cancel.store(true, Ordering::Release);
+        }
+        if let Some(h) = out_handle {
+            h.finish(drain_deadline.is_some());
+        }
+        if let Some(h) = err_handle {
+            h.finish(drain_deadline.is_some());
+        }
+
+        let (status, timed_out) = wait_res?;
+
+        if out_exceeded.load(Ordering::Acquire) {
             return Err(ExecError::OutputTooLarge {
                 limit: max_bytes,
                 stream: "stdout",
             });
         }
-        if err_exceeded {
+        if err_exceeded.load(Ordering::Acquire) {
             return Err(ExecError::OutputTooLarge {
                 limit: max_bytes,
                 stream: "stderr",
@@ -2613,18 +2804,6 @@ async fn op_vael_exec_child_dispose(
     };
     resource.inner.disposed.store(true, Ordering::Release);
     resource.inner.stdin_closed.store(true, Ordering::Release);
-    {
-        let mut g = resource.inner.stdin.lock().await;
-        drop(g.take());
-    }
-    {
-        let mut g = resource.inner.stdout.lock().await;
-        drop(g.take());
-    }
-    {
-        let mut g = resource.inner.stderr.lock().await;
-        drop(g.take());
-    }
     let inner = Arc::clone(&resource.inner);
     if let Ok(join) = spawn_blocking_work(&state, move || {
         let mut guard = inner
@@ -2637,6 +2816,15 @@ async fn op_vael_exec_child_dispose(
         }
     }) {
         let _ = join.await;
+    }
+    if let Ok(mut g) = resource.inner.stdin.try_lock() {
+        drop(g.take());
+    }
+    if let Ok(mut g) = resource.inner.stdout.try_lock() {
+        drop(g.take());
+    }
+    if let Ok(mut g) = resource.inner.stderr.try_lock() {
+        drop(g.take());
     }
     // `resource` drops here and decrements `open_children` (child already taken & reaped).
     drop(resource);

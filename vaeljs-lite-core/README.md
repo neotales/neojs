@@ -116,7 +116,8 @@ Promises, or disabled `vael-test` builds return `Error::TestRunner`.
 The runtime installs a minimal `Vael` global. Its `engine` property is
 `"vael-lite"`. With default features enabled, the registry contains the
 canonical shared modules `vael:assert`, `vael:chars`, `vael:console`, `vael:crypto`
-(13 synchronous exports only), `vael:fs`, `vael:os`, `vael:path`, `vael:slices`,
+(13 synchronous exports only), `vael:exec` (synchronous exports only), `vael:fs`,
+`vael:fetch` (synchronous exports only), `vael:os`, `vael:path`, `vael:slices`,
 `vael:ssh`, `vael:strings`, `vael:template`, `vael:test`, `vael:uuid`,
 `vael:uuid/v4`, and `vael:uuid/v7`.
 `Vael.getBuiltInModulesList()` returns one frozen array of canonical specifiers,
@@ -190,16 +191,16 @@ WebAssembly, and native addons are the same.
 ## Build features
 
 A default build enables `vael-assert`, `vael-chars`, `vael-console`, `vael-crypto`,
-`vael-fs`, `vael-os`, `vael-path`, `vael-slices`, `vael-ssh`, `vael-strings`,
-`vael-template`, `vael-test`, `vael-uuid`, `node-compat`, `typescript`,
-`remote`, and `npm`. The opt-in `manifest` feature enables `vaeljs-manifest` and
-`Runtime::with_import_resolver`.
+`vael-exec`, `vael-fetch`, `vael-fs`, `vael-os`, `vael-path`, `vael-slices`,
+`vael-ssh`, `vael-strings`, `vael-template`, `vael-test`, `vael-uuid`,
+`node-compat`, `typescript`, `remote`, and `npm`. The opt-in `manifest` feature
+enables `vaeljs-manifest` and `Runtime::with_import_resolver`.
 
 With `default-features = false`, all optional runtime dependencies
-(`vaeljs-builtins`, `vaeljs-crypto-core`, `vaeljs-fs-core`, `vaeljs-manifest`,
-`vaeljs-node-core`, `vaeljs-npm`, `vaeljs-remote`, `vaeljs-ssh-core`,
-`vaeljs-template-core`, and `deno_ast`), built-in modules, remote/JSR/npm
-loaders, and TypeScript stripping are omitted.
+(`vaeljs-builtins`, `vaeljs-crypto-core`, `vaeljs-exec-core`, `vaeljs-fetch-core`,
+`vaeljs-fs-core`, `vaeljs-manifest`, `vaeljs-node-core`, `vaeljs-npm`,
+`vaeljs-remote`, `vaeljs-ssh-core`, `vaeljs-template-core`, and `deno_ast`),
+built-in modules, remote/JSR/npm loaders, and TypeScript stripping are omitted.
 
 ```sh
 # Default: shared modules, node-compat, typescript, remote, and npm present

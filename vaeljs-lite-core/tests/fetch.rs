@@ -318,6 +318,9 @@ if (r0.status !== 200 || r0.statusText !== "OK" || r0.ok !== true || r0.redirect
 if (r0.header("content-type") !== "application/json" || r0.header("X-MULTI") !== "one, two") {{
     throw new Error(`header lookup failed: ${{r0.header("X-MULTI")}}`);
 }}
+if (JSON.stringify(r0.headerValues("x-multi")) !== JSON.stringify(["one", "two"])) {{
+    throw new Error(`headerValues lookup failed: ${{JSON.stringify(r0.headerValues("x-multi"))}}`);
+}}
 if (r0.header("x-missing") !== undefined) {{
     throw new Error("missing header should return undefined");
 }}
@@ -392,9 +395,13 @@ if (!r2.ok || r2.text() !== "raw-bytes") {{
 
         assert_eq!(reqs[2].method, "PUT");
         assert_eq!(reqs[2].body, vec![1, 2, 3, 4]);
-        assert_eq!(
-            reqs[2].headers.get("user-agent").map(String::as_str),
-            Some(vaeljs_fetch_core::DEFAULT_USER_AGENT)
+        assert!(
+            reqs[2]
+                .headers
+                .get("user-agent")
+                .is_none_or(String::is_empty),
+            "expected userAgent: null to suppress default User-Agent, got {:?}",
+            reqs[2].headers.get("user-agent")
         );
     }
 
@@ -643,8 +650,8 @@ try {{
 }} catch (e) {{
     err404 = e;
 }}
-if (!(err404 instanceof FetchError) || err404.code !== "VAEL_FETCH_HTTP_STATUS" || err404.status !== 404) {{
-    throw new Error(`expected 404 FetchError, got ${{err404 && err404.code}} ${{err404 && err404.status}}`);
+if (!(err404 instanceof FetchError) || err404.code !== "VAEL_FETCH_HTTP_STATUS" || err404.status !== 404 || err404.url !== {missing_url}) {{
+    throw new Error(`expected 404 FetchError with url, got ${{err404 && err404.code}} ${{err404 && err404.status}} ${{err404 && err404.url}}`);
 }}
 
 // Exception thrown inside onProgress propagates cleanly
@@ -660,6 +667,17 @@ try {{
 if (!cbCaught || cbCaught.message !== "progress aborted") {{
     throw new Error(`expected progress callback error, got ${{cbCaught}}`);
 }}
+
+// Unknown or wrongly-typed options throw TypeError
+let optTypeErr = null;
+try {{
+    downloadSync({ok_url}, {path_cb_err}, {{ allowPrivateIps: "yes" }});
+}} catch (e) {{
+    optTypeErr = e;
+}}
+if (!(optTypeErr instanceof TypeError)) {{
+    throw new Error(`expected TypeError for invalid option type, got ${{optTypeErr}}`);
+}}
 "#,
             len = payload.len()
         ));
@@ -667,5 +685,6 @@ if (!cbCaught || cbCaught.message !== "progress aborted") {{
         assert_eq!(fs::read(&file_ok).unwrap(), payload);
         assert!(!file_bad_sha.exists());
         assert!(!file_404.exists());
+        assert!(!file_cb_err.exists());
     }
 }

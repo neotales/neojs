@@ -71,12 +71,15 @@
      * timeout, HTTP status, checksum, I/O, UTF-8, or JSON failures.
      */
     class FetchError extends makeError {
-        constructor(code, message, status) {
+        constructor(code, message, status, url) {
             super(message);
             defineOwn(this, "name", "FetchError", false, true);
             defineOwn(this, "code", code, true, false);
             if (status !== undefined) {
                 defineOwn(this, "status", status, true, false);
+            }
+            if (url !== undefined) {
+                defineOwn(this, "url", url, true, false);
             }
         }
     }
@@ -87,7 +90,7 @@
         if (outcome.name === "TypeError") {
             throw new makeTypeError(outcome.message);
         }
-        throw new FetchError(outcome.code, outcome.message, outcome.status);
+        throw new FetchError(outcome.code, outcome.message, outcome.status, outcome.url);
     }
 
     /**
@@ -99,6 +102,7 @@
         #ok;
         #url;
         #redirected;
+        #rawHeaders;
         #headersRecord;
         #bodyBytes;
 
@@ -111,6 +115,17 @@
             this.#ok = data.ok;
             this.#url = data.url;
             this.#redirected = data.redirected;
+            const pairs = [];
+            for (let i = 0; i < data.headers.length; i += 1) {
+                defineOwn(
+                    pairs,
+                    pairs.length,
+                    [stringToLowerCase(data.headers[i][0]), data.headers[i][1]],
+                    true,
+                    true,
+                );
+            }
+            this.#rawHeaders = pairs;
             this.#headersRecord = buildCollapsedHeadersRecord(data.headers);
             this.#bodyBytes = data.body;
             freeze(this);
@@ -162,6 +177,30 @@
         }
 
         /**
+         * Return all response header values matching `name` case-insensitively.
+         *
+         * @param {string} name
+         * @returns {string[]}
+         */
+        headerValues(name) {
+            if (arguments.length !== 1) {
+                throw new makeTypeError("headerValues takes exactly one argument");
+            }
+            if (typeof name !== "string") {
+                throw new makeTypeError("header name must be a string");
+            }
+            const lower = stringToLowerCase(name);
+            const out = [];
+            for (let i = 0; i < this.#rawHeaders.length; i += 1) {
+                const pair = this.#rawHeaders[i];
+                if (pair[0] === lower) {
+                    defineOwn(out, out.length, pair[1], true, true);
+                }
+            }
+            return out;
+        }
+
+        /**
          * Return a fresh `Uint8Array` copy of the response body.
          *
          * @returns {Uint8Array}
@@ -199,9 +238,7 @@
                 throw new makeTypeError("json takes no arguments");
             }
             const res = opDecodeUtf8(this.#bodyBytes);
-            if (!res.ok) {
-                throw new FetchError("VAEL_FETCH_INVALID_JSON", "response body is not valid JSON");
-            }
+            if (!res.ok) throwFetch(res);
             try {
                 return jsonParse(res.value);
             } catch (error) {
@@ -219,6 +256,7 @@
 
     function freezeDownloadResult(raw) {
         return freeze({
+            __proto__: null,
             path: raw.path,
             status: raw.status,
             url: raw.url,
@@ -282,18 +320,6 @@
         }
         const res = opDownloadSync(url, destPath, options);
         if (!res.ok) throwFetch(res);
-        const onProgress = extractOwnOnProgress(options);
-        if (onProgress !== undefined && res.progress !== undefined) {
-            for (let i = 0; i < res.progress.length; i += 1) {
-                const p = res.progress[i];
-                onProgress(
-                    freeze({
-                        bytesWritten: p.bytesWritten,
-                        totalBytes: p.totalBytes,
-                    }),
-                );
-            }
-        }
         return freezeDownloadResult(res.value);
     }
 
@@ -322,6 +348,7 @@
                     if (onProgress !== undefined) {
                         onProgress(
                             freeze({
+                                __proto__: null,
                                 bytesWritten: ev.value.bytesWritten,
                                 totalBytes: ev.value.totalBytes,
                             }),

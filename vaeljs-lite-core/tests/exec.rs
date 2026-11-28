@@ -92,7 +92,7 @@ Object.defineProperty(Object.prototype, "code", {
     configurable: true,
 });
 
-const cmdErr = new ns.CommandError("failed", "VAEL_EXEC_IO", { exitCode: 2, fileName: "tool" });
+const cmdErr = new ns.CommandError("VAEL_EXEC_IO", "failed", { exitCode: 2, fileName: "tool" });
 if (!(cmdErr instanceof ns.CommandError) || cmdErr.name !== "CommandError" || cmdErr.code !== "VAEL_EXEC_IO" || cmdErr.exitCode !== 2 || cmdErr.fileName !== "tool") {
     throw new Error("CommandError construction failed under mutated primordials");
 }
@@ -238,17 +238,25 @@ if (!(stderrErr instanceof CommandError) || stderrErr.exitCode !== 0) {{
 const failOut = execSync(["sh", "-c", "exit 7"]);
 if (failOut.success || failOut.code !== 7) throw new Error("expected exit code 7");
 // Predicate allows exit code 7
-failOut.validate((o) => o.code === 7);
-failOut.validate(7);
-failOut.validate([0, 7]);
+failOut.validate((code) => code === 7);
+failOut.validate((code) => code === 0 || code === 7);
+let badPredErr = null;
+try {{
+    failOut.validate(7);
+}} catch (e) {{
+    badPredErr = e;
+}}
+if (!(badPredErr instanceof TypeError)) {{
+    throw new Error("validate(nonFunction) must throw TypeError");
+}}
 let failCaught = null;
 try {{
     failOut.validate();
 }} catch (e) {{
     failCaught = e;
 }}
-if (!(failCaught instanceof CommandError) || failCaught.exitCode !== 7) {{
-    throw new Error("validate() should throw CommandError with exitCode 7");
+if (!(failCaught instanceof CommandError) || failCaught.code !== "VAEL_EXEC_NON_ZERO" || failCaught.exitCode !== 7) {{
+    throw new Error("validate() should throw CommandError(VAEL_EXEC_NON_ZERO) with exitCode 7");
 }}
 
 // 4. runSync / statusSync
