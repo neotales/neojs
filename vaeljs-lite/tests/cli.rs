@@ -53,6 +53,8 @@ console.log(typeof Vael.getBuiltInModule("age"));
 console.log(typeof Vael.getBuiltInModule("vael:chars"));
 console.log(typeof Vael.getBuiltInModule("vael:console"));
 console.log(typeof Vael.getBuiltInModule("vael:crypto"));
+console.log(typeof Vael.getBuiltInModule("vael:exec"));
+console.log(typeof Vael.getBuiltInModule("vael:fetch"));
 console.log(typeof Vael.getBuiltInModule("vael:fs"));
 console.log(typeof Vael.getBuiltInModule("vael:os"));
 console.log(typeof Vael.getBuiltInModule("vael:path"));
@@ -67,11 +69,28 @@ console.log(typeof Vael.getBuiltInModule("vael:uuid"));
 
     let output = run(&[file.as_os_str()]);
     assert!(output.status.success(), "{}", stderr(&output));
-    let expected = if cfg!(feature = "vael-template") {
-        "vael-lite\n15\ntrue\nundefined\nundefined\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\n"
+    let expected_count = 14
+        + usize::from(cfg!(feature = "vael-exec"))
+        + usize::from(cfg!(feature = "vael-fetch"))
+        + usize::from(cfg!(feature = "vael-template"));
+    let expected_exec = if cfg!(feature = "vael-exec") {
+        "object"
     } else {
-        "vael-lite\n14\ntrue\nundefined\nundefined\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nundefined\nobject\n"
+        "undefined"
     };
+    let expected_fetch = if cfg!(feature = "vael-fetch") {
+        "object"
+    } else {
+        "undefined"
+    };
+    let expected_template = if cfg!(feature = "vael-template") {
+        "object"
+    } else {
+        "undefined"
+    };
+    let expected = format!(
+        "vael-lite\n{expected_count}\ntrue\nundefined\nundefined\nobject\nobject\nobject\n{expected_exec}\n{expected_fetch}\nobject\nobject\nobject\nobject\nobject\nobject\n{expected_template}\nobject\n"
+    );
     assert_eq!(stdout(&output), expected);
     assert_eq!(stderr(&output), "");
 }

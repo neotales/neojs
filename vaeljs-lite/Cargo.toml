@@ -16,7 +16,11 @@ name = "vjs-lite"
 path = "src/main.rs"
 
 [features]
-default = ["vael-template", "node-compat", "remote", "npm"]
+default = ["vael-exec", "vael-fetch", "vael-template", "node-compat", "remote", "npm"]
+# Enables `vael:exec` in `vaeljs-lite-core`. Opt-outable with `--no-default-features`.
+vael-exec = ["vaeljs-lite-core/vael-exec"]
+# Enables `vael:fetch` in `vaeljs-lite-core`. Opt-outable with `--no-default-features`.
+vael-fetch = ["vaeljs-lite-core/vael-fetch"]
 # Enables `vael:template` in `vaeljs-lite-core`. Opt-outable with `--no-default-features`.
 vael-template = ["vaeljs-lite-core/vael-template"]
 # Enables `node:*` compatibility modules in `vaeljs-lite-core`. Opt-outable with `--no-default-features`.

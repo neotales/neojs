@@ -10,12 +10,12 @@
 //! # Profiles
 //!
 //! * [`Profile::V8`] targets the full `vjs` (`vaeljs`) binary (`Vael.engine === "vael"`,
-//!   `console.{log,debug,info,warn,error}`, 20 `vael:*` built-in modules, and
-//!   11 `node:*` compatibility modules — 31 modules total).
+//!   `console.{log,debug,info,warn,error}`, 22 `vael:*` built-in modules, and
+//!   11 `node:*` compatibility modules — 33 modules total).
 //! * [`Profile::Lite`] targets the `vjs-lite` (`vaeljs-lite`) binary
 //!   (`Vael.engine === "vael-lite"`, `console.{log,debug,info,warn,error}`,
-//!   15 `vael:*` built-in modules, and 10 `node:*` compatibility modules —
-//!   25 modules total).
+//!   17 `vael:*` built-in modules, and 10 `node:*` compatibility modules —
+//!   27 modules total).
 //!
 //! # Example
 //!
@@ -45,12 +45,12 @@ use std::path::{Component, Path, PathBuf};
 #[non_exhaustive]
 pub enum Profile {
     /// Full V8-backed `vjs` (`vaeljs`) runtime (`engine: "vael"`, 5 `console`
-    /// methods, 20 `vael:*` built-ins, and 11 `node:*` compatibility modules —
-    /// 31 modules total).
+    /// methods, 22 `vael:*` built-ins, and 11 `node:*` compatibility modules —
+    /// 33 modules total).
     V8,
     /// QuickJS-backed `vjs-lite` (`vaeljs-lite`) runtime (`engine: "vael-lite"`,
-    /// `console.{log,debug,info,warn,error}`, 15 `vael:*` built-ins, and 10
-    /// `node:*` compatibility modules — 25 modules total).
+    /// `console.{log,debug,info,warn,error}`, 17 `vael:*` built-ins, and 10
+    /// `node:*` compatibility modules — 27 modules total).
     Lite,
 }
 
@@ -194,6 +194,10 @@ const VAEL_CRON_DTS: &str = include_str!("../types/vael/cron.d.ts");
 const VAEL_CRYPTO_DTS: &str = include_str!("../types/vael/crypto.d.ts");
 const VAEL_CRYPTO_LITE_DTS: &str = include_str!("../types/vael/crypto-lite.d.ts");
 const VAEL_DB_DTS: &str = include_str!("../types/vael/db.d.ts");
+const VAEL_EXEC_DTS: &str = include_str!("../types/vael/exec.d.ts");
+const VAEL_EXEC_LITE_DTS: &str = include_str!("../types/vael/exec.lite.d.ts");
+const VAEL_FETCH_DTS: &str = include_str!("../types/vael/fetch.d.ts");
+const VAEL_FETCH_LITE_DTS: &str = include_str!("../types/vael/fetch.lite.d.ts");
 const VAEL_FS_DTS: &str = include_str!("../types/vael/fs.d.ts");
 const VAEL_HTTP_DTS: &str = include_str!("../types/vael/http.d.ts");
 const VAEL_OS_DTS: &str = include_str!("../types/vael/os.d.ts");
@@ -267,6 +271,16 @@ const V8_FILES: &[DtsFile] = &[
         path: "vael/db.d.ts",
         specifier: Some("vael:db"),
         content: VAEL_DB_DTS,
+    },
+    DtsFile {
+        path: "vael/exec.d.ts",
+        specifier: Some("vael:exec"),
+        content: VAEL_EXEC_DTS,
+    },
+    DtsFile {
+        path: "vael/fetch.d.ts",
+        specifier: Some("vael:fetch"),
+        content: VAEL_FETCH_DTS,
     },
     DtsFile {
         path: "vael/fs.d.ts",
@@ -420,6 +434,16 @@ const LITE_FILES: &[DtsFile] = &[
         path: "vael/crypto.d.ts",
         specifier: Some("vael:crypto"),
         content: VAEL_CRYPTO_LITE_DTS,
+    },
+    DtsFile {
+        path: "vael/exec.d.ts",
+        specifier: Some("vael:exec"),
+        content: VAEL_EXEC_LITE_DTS,
+    },
+    DtsFile {
+        path: "vael/fetch.d.ts",
+        specifier: Some("vael:fetch"),
+        content: VAEL_FETCH_LITE_DTS,
     },
     DtsFile {
         path: "vael/fs.d.ts",
@@ -641,6 +665,75 @@ const CRYPTO_LITE_EXPORTS: ModuleExports = ModuleExports {
 const DB_EXPORTS: ModuleExports = ModuleExports {
     specifier: "vael:db",
     exports: &["DbError", "open", "openSqlite"],
+    has_default: false,
+};
+
+const EXEC_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "vael:exec",
+    exports: &[
+        "ChildProcess",
+        "Command",
+        "CommandError",
+        "FileLock",
+        "NotFoundOnPathError",
+        "Output",
+        "PathFinder",
+        "addLogger",
+        "clearLoggers",
+        "cmd",
+        "exec",
+        "execSync",
+        "lockFile",
+        "lockFileSync",
+        "pathFinder",
+        "run",
+        "runSync",
+        "spawn",
+        "which",
+        "whichAll",
+        "whichAllSync",
+        "whichSync",
+    ],
+    has_default: false,
+};
+
+const EXEC_LITE_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "vael:exec",
+    exports: &[
+        "Command",
+        "CommandError",
+        "FileLock",
+        "NotFoundOnPathError",
+        "Output",
+        "PathFinder",
+        "addLogger",
+        "clearLoggers",
+        "cmd",
+        "execSync",
+        "lockFileSync",
+        "pathFinder",
+        "runSync",
+        "whichAllSync",
+        "whichSync",
+    ],
+    has_default: false,
+};
+
+const FETCH_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "vael:fetch",
+    exports: &[
+        "FetchError",
+        "fetch",
+        "fetchSync",
+        "download",
+        "downloadSync",
+    ],
+    has_default: false,
+};
+
+const FETCH_LITE_EXPORTS: ModuleExports = ModuleExports {
+    specifier: "vael:fetch",
+    exports: &["FetchError", "fetchSync", "downloadSync"],
     has_default: false,
 };
 
@@ -1008,6 +1101,8 @@ const V8_EXPECTED_EXPORTS: &[ModuleExports] = &[
     CRON_EXPORTS,
     CRYPTO_EXPORTS,
     DB_EXPORTS,
+    EXEC_EXPORTS,
+    FETCH_EXPORTS,
     FS_EXPORTS,
     HTTP_EXPORTS,
     OS_EXPORTS,
@@ -1039,6 +1134,8 @@ const LITE_EXPECTED_EXPORTS: &[ModuleExports] = &[
     CHARS_EXPORTS,
     CONSOLE_EXPORTS,
     CRYPTO_LITE_EXPORTS,
+    EXEC_LITE_EXPORTS,
+    FETCH_LITE_EXPORTS,
     FS_EXPORTS,
     OS_EXPORTS,
     PATH_EXPORTS,

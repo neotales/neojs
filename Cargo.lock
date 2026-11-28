@@ -4472,6 +4472,8 @@ dependencies = [
  "vaeljs-crypto-core",
  "vaeljs-dbapi",
  "vaeljs-dts",
+ "vaeljs-exec-core",
+ "vaeljs-fetch-core",
  "vaeljs-fs-core",
  "vaeljs-http-core",
  "vaeljs-manifest",
@@ -4514,6 +4516,29 @@ dependencies = [
 [[package]]
 name = "vaeljs-dts"
 version = "0.0.0-alpha.1"
+
+[[package]]
+name = "vaeljs-exec-core"
+version = "0.0.0-alpha.1"
+dependencies = [
+ "libc",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "vaeljs-fetch-core"
+version = "0.0.0-alpha.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror",
+ "ureq",
+ "url",
+ "zeroize",
+]
 
 [[package]]
 name = "vaeljs-fs-core"
@@ -4563,6 +4588,8 @@ dependencies = [
  "vaeljs-builtins",
  "vaeljs-crypto-core",
  "vaeljs-dts",
+ "vaeljs-exec-core",
+ "vaeljs-fetch-core",
  "vaeljs-fs-core",
  "vaeljs-manifest",
  "vaeljs-module-policy",

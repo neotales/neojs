@@ -7,9 +7,14 @@
 //! `vael:test`) are constructed once per context from their shared factories in
 //! `vaeljs-builtins` with native QuickJS host hooks.
 
-#[cfg(any(feature = "vael-crypto", feature = "vael-test", feature = "vael-ssh"))]
+#[cfg(any(
+    feature = "vael-crypto",
+    feature = "vael-exec",
+    feature = "vael-test",
+    feature = "vael-ssh"
+))]
 use std::cell::RefCell;
-#[cfg(feature = "vael-test")]
+#[cfg(any(feature = "vael-exec", feature = "vael-test"))]
 use std::rc::Rc;
 
 use rquickjs::{
@@ -51,16 +56,28 @@ pub(super) struct VaelState {
     /// Internal QuickJS class ID for `SharedArrayBuffer`, if available.
     #[cfg(feature = "vael-crypto")]
     pub(super) shared_array_buffer_class_id: Option<rquickjs::qjs::JSClassID>,
+    /// The frozen public `vael:exec` object, when the feature is selected.
+    #[cfg(feature = "vael-exec")]
+    pub(super) exec: Option<Persistent<Object<'static>>>,
+    /// Per-context handle table of active OS advisory file locks, dropped when
+    /// the QuickJS context drops.
+    #[cfg(feature = "vael-exec")]
+    pub(super) exec_locks: Rc<RefCell<crate::exec::ExecLockTable>>,
+    /// The frozen public `vael:fetch` object, when the feature is selected.
+    #[cfg(feature = "vael-fetch")]
+    pub(super) fetch: Option<Persistent<Object<'static>>>,
     /// The frozen public `vael:fs` object, when the feature is selected.
     #[cfg(feature = "vael-fs")]
     pub(super) fs: Option<Persistent<Object<'static>>>,
     /// The captured `%TypedArray%.prototype.byteLength` native getter.
     ///
-    /// Used by `vael:crypto`, `vael:fs`, and `vael:ssh` to read the live byte
-    /// length of length-tracking resizable-`ArrayBuffer` `Uint8Array` views
-    /// without consulting mutable prototype properties.
+    /// Used by `vael:crypto`, `vael:exec`, `vael:fetch`, `vael:fs`, and `vael:ssh`
+    /// to read the live byte length of length-tracking resizable-`ArrayBuffer`
+    /// `Uint8Array` views without consulting mutable prototype properties.
     #[cfg(any(
         feature = "vael-crypto",
+        feature = "vael-exec",
+        feature = "vael-fetch",
         feature = "vael-fs",
         feature = "vael-ssh",
         feature = "node-compat"
@@ -170,10 +187,18 @@ pub(super) fn install<'js>(
             None
         }
     };
+    #[cfg(feature = "vael-exec")]
+    let exec_locks = Rc::new(RefCell::new(crate::exec::ExecLockTable::new()));
+    #[cfg(feature = "vael-exec")]
+    let exec: Option<Object<'js>> = Some(super::exec::object(ctx, &exec_locks)?);
+    #[cfg(feature = "vael-fetch")]
+    let fetch: Option<Object<'js>> = Some(super::fetch::object(ctx)?);
     #[cfg(feature = "vael-fs")]
     let fs: Option<Object<'js>> = Some(super::fs::object(ctx)?);
     #[cfg(any(
         feature = "vael-crypto",
+        feature = "vael-exec",
+        feature = "vael-fetch",
         feature = "vael-fs",
         feature = "vael-ssh",
         feature = "node-compat"
@@ -239,6 +264,8 @@ pub(super) fn install<'js>(
             feature = "vael-chars",
             feature = "vael-console",
             feature = "vael-crypto",
+            feature = "vael-exec",
+            feature = "vael-fetch",
             feature = "vael-fs",
             feature = "vael-os",
             feature = "vael-path",
@@ -270,6 +297,16 @@ pub(super) fn install<'js>(
     #[cfg(feature = "vael-crypto")]
     if crypto.is_some() {
         list.set(index, super::crypto::SPECIFIER)?;
+        index += 1;
+    }
+    #[cfg(feature = "vael-exec")]
+    if exec.is_some() {
+        list.set(index, super::exec::SPECIFIER)?;
+        index += 1;
+    }
+    #[cfg(feature = "vael-fetch")]
+    if fetch.is_some() {
+        list.set(index, super::fetch::SPECIFIER)?;
         index += 1;
     }
     #[cfg(feature = "vael-fs")]
@@ -343,10 +380,18 @@ pub(super) fn install<'js>(
         digest_table: RefCell::new(vaeljs_crypto_core::hash::DigestTable::default()),
         #[cfg(feature = "vael-crypto")]
         shared_array_buffer_class_id,
+        #[cfg(feature = "vael-exec")]
+        exec: exec.map(|exec| Persistent::save(ctx, exec)),
+        #[cfg(feature = "vael-exec")]
+        exec_locks,
+        #[cfg(feature = "vael-fetch")]
+        fetch: fetch.map(|fetch| Persistent::save(ctx, fetch)),
         #[cfg(feature = "vael-fs")]
         fs: fs.map(|fs| Persistent::save(ctx, fs)),
         #[cfg(any(
             feature = "vael-crypto",
+            feature = "vael-exec",
+            feature = "vael-fetch",
             feature = "vael-fs",
             feature = "vael-ssh",
             feature = "node-compat"
@@ -546,6 +591,20 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
         };
         return Ok(crypto.clone().restore(&ctx)?.into_value());
     }
+    #[cfg(feature = "vael-exec")]
+    if name == super::exec::SPECIFIER {
+        let Some(exec) = state.exec.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(exec.clone().restore(&ctx)?.into_value());
+    }
+    #[cfg(feature = "vael-fetch")]
+    if name == super::fetch::SPECIFIER {
+        let Some(fetch) = state.fetch.as_ref() else {
+            return Ok(Value::new_undefined(ctx.clone()));
+        };
+        return Ok(fetch.clone().restore(&ctx)?.into_value());
+    }
     #[cfg(feature = "vael-fs")]
     if name == vaeljs_fs_core::SPECIFIER {
         let Some(fs) = state.fs.as_ref() else {
@@ -640,6 +699,8 @@ fn get_builtin<'js>(ctx: Ctx<'js>, name: Opt<Value<'js>>) -> Result<Value<'js>> 
         feature = "vael-chars",
         feature = "vael-console",
         feature = "vael-crypto",
+        feature = "vael-exec",
+        feature = "vael-fetch",
         feature = "vael-fs",
         feature = "vael-os",
         feature = "vael-path",

@@ -59,6 +59,12 @@ fn expected_list() -> (String, usize) {
     if cfg!(feature = "vael-crypto") {
         entries.push(r#""vael:crypto""#);
     }
+    if cfg!(feature = "vael-exec") {
+        entries.push(r#""vael:exec""#);
+    }
+    if cfg!(feature = "vael-fetch") {
+        entries.push(r#""vael:fetch""#);
+    }
     if cfg!(feature = "vael-fs") {
         entries.push(r#""vael:fs""#);
     }

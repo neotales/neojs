@@ -21,7 +21,7 @@ readme = "README.md"
 # advertises. Cargo features are additive and unify across the dependency graph:
 # a feature is present whenever any dependent enables it. Selection is
 # compile-time surface selection, not a sandbox.
-default = ["vael-assert", "vael-chars", "vael-console", "vael-crypto", "vael-fs", "vael-os", "vael-path", "vael-slices", "vael-ssh", "vael-strings", "vael-template", "vael-test", "vael-uuid", "node-compat", "typescript", "remote", "npm"]
+default = ["vael-assert", "vael-chars", "vael-console", "vael-crypto", "vael-exec", "vael-fetch", "vael-fs", "vael-os", "vael-path", "vael-slices", "vael-ssh", "vael-strings", "vael-template", "vael-test", "vael-uuid", "node-compat", "typescript", "remote", "npm"]
 # The shared `assert` module and its Promise observation host hooks. This
 # enables the optional `vaeljs-builtins` dependency and its `assert` module.
 vael-assert = ["dep:vaeljs-builtins", "vaeljs-builtins/assert"]
@@ -37,6 +37,14 @@ vael-console = ["dep:vaeljs-builtins", "vaeljs-builtins/console"]
 # enables the optional `vaeljs-crypto-core` dependency; `--no-default-features`
 # keeps it and all RustCrypto crates out.
 vael-crypto = ["dep:vaeljs-crypto-core"]
+# The shared `exec` (`vael:exec`) synchronous process execution, PATH lookup,
+# and advisory file locking module backed by `vaeljs-exec-core` (zero Tokio/hyper).
+# `--no-default-features` keeps it out.
+vael-exec = ["dep:vaeljs-exec-core"]
+# The shared `fetch` (`vael:fetch`) synchronous HTTP fetch and streaming download
+# module backed by `vaeljs-fetch-core` (zero Tokio/hyper). `--no-default-features`
+# keeps it and `ureq`/`rustls` out.
+vael-fetch = ["dep:vaeljs-fetch-core", "dep:serde_json"]
 # The shared `fs` (`vael:fs`) core filesystem operations, native registry object,
 # native module declaration, and introspection list entry. This enables the
 # optional `vaeljs-fs-core` dependency (and its fallible `getrandom` dependency);
@@ -98,6 +106,8 @@ test-support = ["vaeljs-remote?/test-support"]
 # The shared `vael:chars` Rust logic is enabled by the `vael-chars` feature.
 vaeljs-builtins = { workspace = true, optional = true }
 vaeljs-crypto-core = { workspace = true, optional = true }
+vaeljs-exec-core = { workspace = true, optional = true }
+vaeljs-fetch-core = { workspace = true, optional = true }
 vaeljs-fs-core = { workspace = true, optional = true }
 vaeljs-manifest = { workspace = true, optional = true }
 vaeljs-module-policy = { version = "0.0.0-alpha.1", path = "../vaeljs-module-policy" }

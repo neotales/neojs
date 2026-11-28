@@ -406,6 +406,10 @@ mod crypto_shamir;
 #[cfg(feature = "vael-db")]
 mod db;
 mod error;
+#[cfg(feature = "vael-exec")]
+mod exec;
+#[cfg(feature = "vael-fetch")]
+mod fetch;
 mod fs;
 #[cfg(feature = "vael-http")]
 mod http;

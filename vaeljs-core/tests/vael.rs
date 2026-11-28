@@ -22,6 +22,12 @@ fn expected_specifiers() -> String {
     if cfg!(feature = "vael-db") {
         entries.push("vael:db");
     }
+    if cfg!(feature = "vael-exec") {
+        entries.push("vael:exec");
+    }
+    if cfg!(feature = "vael-fetch") {
+        entries.push("vael:fetch");
+    }
     entries.push("vael:fs");
     if cfg!(feature = "vael-http") {
         entries.push("vael:http");

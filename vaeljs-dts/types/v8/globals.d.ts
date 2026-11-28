@@ -96,6 +96,10 @@ interface VaelBuiltInModuleMap {
   "vael:crypto": typeof import("vael:crypto");
   /** Built-in `vael:db` module object. @since 0.0.0-alpha.0 */
   "vael:db": typeof import("vael:db");
+  /** Built-in `vael:exec` module object. @since 0.0.0-alpha.2 */
+  "vael:exec": typeof import("vael:exec");
+  /** Built-in `vael:fetch` module object. @since 0.0.0-alpha.2 */
+  "vael:fetch": typeof import("vael:fetch");
   /** Built-in `vael:fs` module object. @since 0.0.0-alpha.0 */
   "vael:fs": typeof import("vael:fs");
   /** Built-in `vael:http` module object. @since 0.0.0-alpha.0 */

@@ -15,9 +15,13 @@ name = "vjs"
 path = "src/main.rs"
 
 [features]
-default = ["vael-db", "vael-http", "vael-template", "node-compat", "npm"]
+default = ["vael-db", "vael-exec", "vael-fetch", "vael-http", "vael-template", "node-compat", "npm"]
 # Enables `vael:db` in `vaeljs-core`. Opt-outable with `--no-default-features`.
 vael-db = ["vaeljs-core/vael-db"]
+# Enables `vael:exec` in `vaeljs-core`. Opt-outable with `--no-default-features`.
+vael-exec = ["vaeljs-core/vael-exec"]
+# Enables `vael:fetch` in `vaeljs-core`. Opt-outable with `--no-default-features`.
+vael-fetch = ["vaeljs-core/vael-fetch"]
 # Enables `vael:http` in `vaeljs-core`. Opt-outable with `--no-default-features`.
 vael-http = ["vaeljs-core/vael-http"]
 # Enables `vael:template` in `vaeljs-core`. Opt-outable with `--no-default-features`.

@@ -92,6 +92,14 @@ fn exact_vael_builtin(name: &str) -> Option<&'static str> {
     if name == crate::crypto::SPECIFIER {
         return Some(crate::crypto::SPECIFIER);
     }
+    #[cfg(feature = "vael-exec")]
+    if name == crate::exec::SPECIFIER {
+        return Some(crate::exec::SPECIFIER);
+    }
+    #[cfg(feature = "vael-fetch")]
+    if name == crate::fetch::SPECIFIER {
+        return Some(crate::fetch::SPECIFIER);
+    }
     #[cfg(feature = "vael-fs")]
     if name == vaeljs_fs_core::SPECIFIER {
         return Some(vaeljs_fs_core::SPECIFIER);
@@ -815,6 +823,14 @@ impl Loader for FileLoader {
         #[cfg(feature = "vael-crypto")]
         if name == crate::crypto::SPECIFIER {
             return Module::declare_def::<crate::crypto::CryptoModule, _>(ctx.clone(), name);
+        }
+        #[cfg(feature = "vael-exec")]
+        if name == crate::exec::SPECIFIER {
+            return Module::declare_def::<crate::exec::ExecModule, _>(ctx.clone(), name);
+        }
+        #[cfg(feature = "vael-fetch")]
+        if name == crate::fetch::SPECIFIER {
+            return Module::declare_def::<crate::fetch::FetchModule, _>(ctx.clone(), name);
         }
         #[cfg(feature = "vael-fs")]
         if name == vaeljs_fs_core::SPECIFIER {
