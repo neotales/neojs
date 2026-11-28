@@ -933,3 +933,296 @@ fn html_escape_context_aware_scripts_styles_and_comments() {
     assert!(!comment_out[4..comment_out.len() - 4].contains("--"));
     assert!(!comment_out[4..comment_out.len() - 4].contains('>'));
 }
+
+#[test]
+fn html_escape_hardening_blocks_branch_divergence_non_text_calls_srcdoc_and_dynamic_names() {
+    let opts = TemplateOptions {
+        html_escape: true,
+        ..TemplateOptions::default()
+    };
+
+    // 1. Branch convergence rejects divergent contexts at compile time.
+    for divergent in [
+        "{{if .c}}<!--{{end}}<script>var a=\"{{.x}}\";</script>",
+        "<script>{{if .q}}var s=\"{{end}}{{.x}}</script>",
+        "{{if .c}}<div title=\"{{else}}<span class=\"{{end}}{{.x}}\">",
+        "{{with .c}}<!--{{end}}<p>{{.x}}</p>",
+    ] {
+        assert!(
+            matches!(
+                render(divergent, &json!({}), &opts),
+                Err(TemplateError::Parse(_))
+            ),
+            "expected compile Parse error for divergent template {divergent:?}"
+        );
+    }
+
+    // 1b. Conservative URL-start join across `if` without `else`.
+    assert_eq!(
+        render(
+            "<a href=\"{{if .p}}/v2/{{end}}{{.u}}\">x</a>",
+            &json!({ "p": false, "u": "javascript:alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<a href=\"#ZgotmplZ\">x</a>"
+    );
+    assert_eq!(
+        render(
+            "<a href=\"{{if .p}}/v2/{{end}}{{.u}}\">x</a>",
+            &json!({ "p": true, "u": "https://example.com" }),
+            &opts,
+        )
+        .unwrap(),
+        "<a href=\"/v2/https://example.com\">x</a>"
+    );
+
+    // 2. Reject {{template}} and {{block}} outside HtmlState::Text (standalone and TemplateSet).
+    for bad_call in [
+        "{{define \"u\"}}{{.u}}{{end}}<a href=\"{{template \"u\" .}}\">x</a>",
+        "<a href=\"{{block \"u\" .}}{{.u}}{{end}}\">x</a>",
+        "{{define \"u\"}}{{.u}}{{end}}<script>var x = {{template \"u\" .}};</script>",
+        "{{define \"u\"}}{{.u}}{{end}}<!-- {{template \"u\" .}} -->",
+    ] {
+        assert!(
+            matches!(
+                render(bad_call, &json!({}), &opts),
+                Err(TemplateError::Parse(_))
+            ),
+            "expected Parse error for non-text template/block call {bad_call:?}"
+        );
+    }
+    let mut set = TemplateSet::new(opts.clone());
+    set.add("u", "{{.u}}").unwrap();
+    assert!(matches!(
+        set.add("bad_href", "<a href=\"{{template \"u\" .}}\">x</a>"),
+        Err(TemplateError::Parse(_))
+    ));
+
+    // 4. Reject dynamic actions inside <iframe srcdoc="...">.
+    assert!(matches!(
+        render(
+            "<iframe srcdoc=\"{{.x}}\"></iframe>",
+            &json!({ "x": "<script>" }),
+            &opts
+        ),
+        Err(TemplateError::Parse(_))
+    ));
+    assert!(matches!(
+        render(
+            "<iframe SRCDOC={{.x}}></iframe>",
+            &json!({ "x": "ok" }),
+            &opts
+        ),
+        Err(TemplateError::Parse(_))
+    ));
+
+    // 8. Reject dynamic tag names and attribute names.
+    for bad_tag_or_attr in [
+        "<{{.tag}}>",
+        "<div {{.attr}}=\"{{.val}}\">",
+        "<div data-{{.k}}=\"1\">",
+    ] {
+        assert!(
+            matches!(
+                render(bad_tag_or_attr, &json!({}), &opts),
+                Err(TemplateError::Parse(_))
+            ),
+            "expected Parse error for dynamic tag/attr {bad_tag_or_attr:?}"
+        );
+    }
+}
+
+#[test]
+fn html_escape_hardening_blocks_marker_bypass_url_split_comment_and_js_lexer_pocs() {
+    let opts = TemplateOptions {
+        html_escape: true,
+        ..TemplateOptions::default()
+    };
+
+    // 3. escapeHtml marker only bypasses HTML text & quoted normal attributes, never URL/unquoted/on*.
+    assert_eq!(
+        render(
+            "<a href=\"{{ .u | escapeHtml }}\">x</a>",
+            &json!({ "u": "javascript:alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<a href=\"#ZgotmplZ\">x</a>"
+    );
+    assert_eq!(
+        render(
+            "<div class={{ .c | escapeHtml }}></div>",
+            &json!({ "c": "x onmouseover=alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<div class=x&#32;onmouseover&#61;alert(1)></div>"
+    );
+    assert_eq!(
+        render(
+            "<button onclick=\"f('{{ .x | escapeHtml }}')\">go</button>",
+            &json!({ "x": "'); alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<button onclick=\"f('\\u0026#39;); alert(1)\\u002f\\u002f')\">go</button>"
+    );
+}
+
+#[test]
+fn html_escape_hardening_blocks_comments_script_double_escape_and_url_split() {
+    let opts = TemplateOptions {
+        html_escape: true,
+        ..TemplateOptions::default()
+    };
+
+    // 5. HTML5 abrupt/bang comment closing, leading-hyphen neutralization, and <script> double-escape.
+    assert_eq!(
+        render(
+            "<!--><script>var x=\"{{.u}}\";</script>",
+            &json!({ "u": "\";alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<!--><script>var x=\"\\u0022;alert(1)\\u002f\\u002f\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<!-- a --!><script>var x=\"{{.u}}\";</script>",
+            &json!({ "u": "\";alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<!-- a --!><script>var x=\"\\u0022;alert(1)\\u002f\\u002f\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<!-- -{{.c}}><script>var x=\"{{.u}}\";</script>",
+            &json!({ "c": "-", "u": "-->alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<!-- -&#45;><script>var x=\"&#45;&#45;&gt;alert(1)\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<!-- -{{.c}}><script>var x=\"{{.u}}\";</script>",
+            &json!({ "c": "-!", "u": "--!>alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<!-- -&#45;&#33;><script>var x=\"&#45;&#45;&#33;&gt;alert(1)\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<script><!-- <script> </script> var x={{.u}}; --></script>",
+            &json!({ "u": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script><!-- <script> </script> var x=\"alert(1)\"; --></script>"
+    );
+
+    // 6. URL multi-action & leading HTML entity handling.
+    assert_eq!(
+        render(
+            "<a href=\"{{.a}}{{.b}}\">x</a>",
+            &json!({ "a": "", "b": "javascript:alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<a href=\"#ZgotmplZ\">x</a>"
+    );
+    assert_eq!(
+        render(
+            "<a href=\"{{.a}}{{.b}}\">x</a>",
+            &json!({ "a": "javascript", "b": ":alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<a href=\"javascript#ZgotmplZ\">x</a>"
+    );
+    assert_eq!(
+        render(
+            "<a href=\"&Tab;{{.u}}\">x</a>",
+            &json!({ "u": "javascript:alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<a href=\"&Tab;#ZgotmplZ\">x</a>"
+    );
+}
+
+#[test]
+fn html_escape_hardening_blocks_js_lexer_and_bogus_comment_pocs() {
+    let opts = TemplateOptions {
+        html_escape: true,
+        ..TemplateOptions::default()
+    };
+
+    // 7. JS lexer & on* HTML entity decoding + bogus comment `</1`.
+    assert_eq!(
+        render(
+            "<button onclick=\"/* ' */ {{.x}}\">go</button>",
+            &json!({ "x": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<button onclick=\"/* ' */ &quot;alert(1)&quot;\">go</button>"
+    );
+    assert_eq!(
+        render(
+            "<button onclick=\"f(&#96;{{.x}}&#96;)\">go</button>",
+            &json!({ "x": "${alert(1)}" }),
+            &opts,
+        )
+        .unwrap(),
+        "<button onclick=\"f(&#96;\\u0024{alert(1)}&#96;)\">go</button>"
+    );
+    assert_eq!(
+        render(
+            "<script>var r=/\\\"/; var x={{.u}};</script>",
+            &json!({ "u": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var r=/\\\"/; var x=\"alert(1)\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<script>var s=`a ${ {{.u}} }`;</script>",
+            &json!({ "u": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var s=`a ${ \"alert(1)\" }`;</script>"
+    );
+    assert_eq!(
+        render(
+            "<script>var s=`a ${\"`\"}`; var x={{.u}};</script>",
+            &json!({ "u": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var s=`a ${\"`\"}`; var x=\"alert(1)\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<script>var x=1; <!-- \"\n var y={{.u}};</script>",
+            &json!({ "u": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var x=1; <!-- \"\n var y=\"alert(1)\";</script>"
+    );
+    assert_eq!(
+        render(
+            "</1 title=\"><script>var x={{.u}};</script>\">",
+            &json!({ "u": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "</1 title=\"><script>var x=\"alert(1)\";</script>\">"
+    );
+}

@@ -126,7 +126,7 @@ for (const [name, value, expected] of cases) {
 
 // Unicode 16.0 category boundary in the shared Rust table. U+1C89/U+1C8A are
 // Cyrillic Tje letters in that table. Both engines must reach the same native
-// classifier and the same compiler-backed one-code-point case mapping.
+// classifier and the same pinned Unicode 16.0 one-code-point case mapping.
 equal(chars.isLetter(0x1C89), true, "isLetter(0x1C89)");
 equal(chars.isUpper(0x1C89), true, "isUpper(0x1C89)");
 equal(chars.isLower(0x1C8A), true, "isLower(0x1C8A)");

@@ -38,6 +38,7 @@
     const arrayFrom = Array.from;
     const isInteger = Number.isInteger;
     const promiseAllSettled = Promise.allSettled.bind(Promise);
+    const promiseFinally = Function.prototype.call.bind(Promise.prototype.finally);
     const jsonStringify = JSON.stringify;
     const jsonParse = JSON.parse;
     const stringToLowerCase = Function.prototype.call.bind(String.prototype.toLowerCase);
@@ -1694,7 +1695,7 @@
                     }
                     const task = dispatchOne(reqRid);
                     setAdd(inFlight, task);
-                    task.finally(() => {
+                    promiseFinally(task, () => {
                         setDelete(inFlight, task);
                     });
                 }

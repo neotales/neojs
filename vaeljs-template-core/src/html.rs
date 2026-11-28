@@ -1,4 +1,4 @@
-//! Context-aware HTML escaping primitives and `safeHtml` marker handling.
+//! Context-aware HTML escaping primitives and `safeHtml` / `escapeHtml` marker handling.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -6,11 +6,20 @@ use std::collections::BTreeMap;
 use neotales_gotmpl::{Error as GotmplError, FuncMap, Value};
 
 /// Internal marker key stored inside `Value::Object::members` to identify
-/// trusted raw HTML produced by `safeHtml` or `escapeHtml`.
+/// trusted raw HTML produced by `safeHtml`.
 ///
 /// Because [`crate::json_to_template_value`] never produces [`Value::Object`],
 /// untrusted JSON input cannot forge this marker.
 const SAFE_HTML_MARKER_KEY: &str = "__vael_safe_html";
+
+/// Internal marker key stored inside `Value::Object::members` to identify
+/// HTML-entity-escaped text produced by `escapeHtml` / `htmlEscape`.
+///
+/// Unlike [`SAFE_HTML_MARKER_KEY`], this marker ONLY prevents double-escaping
+/// in HTML text and quoted normal attribute contexts (`AUTO_ESCAPE_FN`), and
+/// never bypasses URL scheme validation, unquoted attribute escaping, JS/`on*`
+/// escaping, CSS filtering, or comment sanitization.
+const ESCAPED_HTML_MARKER_KEY: &str = "__vael_escaped_html";
 
 /// Internal auto-escape helper for HTML text and quoted normal attributes.
 pub(crate) const AUTO_ESCAPE_FN: &str = "__vael_auto_escape";
@@ -20,6 +29,11 @@ pub(crate) const AUTO_ESCAPE_UNQUOTED_FN: &str = "__vael_auto_escape_unquoted";
 pub(crate) const AUTO_ESCAPE_URL_START_FN: &str = "__vael_auto_escape_url_start";
 /// Internal auto-escape helper for the start of unquoted URL attributes.
 pub(crate) const AUTO_ESCAPE_URL_START_UNQUOTED_FN: &str = "__vael_auto_escape_url_start_unquoted";
+/// Internal auto-escape helper for subsequent actions in quoted URL attributes without a safe static prefix.
+pub(crate) const AUTO_ESCAPE_URL_CONT_NO_COLON_FN: &str = "__vael_auto_escape_url_no_colon";
+/// Internal auto-escape helper for subsequent actions in unquoted URL attributes without a safe static prefix.
+pub(crate) const AUTO_ESCAPE_URL_CONT_NO_COLON_UNQUOTED_FN: &str =
+    "__vael_auto_escape_url_no_colon_unquoted";
 /// Internal auto-escape helper for JS string literals inside `<script>`.
 pub(crate) const AUTO_ESCAPE_JS_STR_FN: &str = "__vael_auto_escape_js_str";
 /// Internal auto-escape helper for JS template literals inside `<script>`.
@@ -151,6 +165,17 @@ pub(crate) fn sanitize_url(input: &str) -> Cow<'_, str> {
     }
 }
 
+/// Validates a subsequent URL action when no safe static URL prefix was
+/// established before a prior action (`href="{{.a}}{{.b}}"`): rejects any
+/// value containing `:` (as well as unsafe schemes) to `#ZgotmplZ`.
+pub(crate) fn sanitize_url_no_colon(input: &str) -> Cow<'_, str> {
+    if input.contains(':') {
+        Cow::Borrowed("#ZgotmplZ")
+    } else {
+        sanitize_url(input)
+    }
+}
+
 /// Escapes JavaScript string characters (`\`, `'`, `"`, `` ` ``, `<`, `>`, `&`,
 /// `=`, `/`, `\n`, `\r`, `\u2028`, `\u2029`, and ASCII control chars) to
 /// `\uXXXX` sequences.
@@ -253,7 +278,8 @@ pub(crate) fn escape_css_value(input: &str) -> Cow<'_, str> {
     Cow::Borrowed(input)
 }
 
-/// Sanitizes HTML comment contents so `--` and `>` cannot break out of `<!-- ... -->`.
+/// Sanitizes HTML comment contents so `--`, `!`, `<`, `>`, and leading/trailing
+/// `-` cannot break out of `<!-- ... -->` or `<!-- -...>` via `-->` / `--!>`.
 pub(crate) fn escape_comment(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
@@ -262,11 +288,13 @@ pub(crate) fn escape_comment(input: &str) -> String {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '&' => out.push_str("&amp;"),
+            '!' => out.push_str("&#33;"),
             '-' => {
+                let at_start = idx == 0;
                 let prev_hyphen = idx > 0 && bytes[idx - 1] == b'-';
                 let next_hyphen = idx + 1 < bytes.len() && bytes[idx + 1] == b'-';
                 let at_end = idx + 1 == bytes.len();
-                if prev_hyphen || next_hyphen || at_end {
+                if at_start || prev_hyphen || next_hyphen || at_end {
                     out.push_str("&#45;");
                 } else {
                     out.push('-');
@@ -287,11 +315,29 @@ pub(crate) fn is_safe_html(value: &Value) -> bool {
     )
 }
 
-/// Wraps `html` as a marked safe-HTML value that bypasses auto-escaping.
+/// Reports whether `value` carries the internal `escapeHtml` marker.
+fn is_escaped_html(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Object { members, .. }
+            if members.get(ESCAPED_HTML_MARKER_KEY) == Some(&Value::Bool(true))
+    )
+}
+
+/// Wraps `html` as a marked safe-HTML value that bypasses all auto-escaping.
 fn mark_safe_html(html: String) -> Value {
     Value::Object {
         display: html,
         members: BTreeMap::from([(SAFE_HTML_MARKER_KEY.to_owned(), Value::Bool(true))]),
+    }
+}
+
+/// Wraps `html` as an HTML-entity-escaped value that only suppresses
+/// double-escaping in HTML text and quoted normal attributes.
+fn mark_escaped_html(html: String) -> Value {
+    Value::Object {
+        display: html,
+        members: BTreeMap::from([(ESCAPED_HTML_MARKER_KEY.to_owned(), Value::Bool(true))]),
     }
 }
 
@@ -305,15 +351,19 @@ fn single_rendered_arg(name: &str, arguments: &[Value]) -> Result<String, Gotmpl
     Ok(arguments[0].render())
 }
 
-fn register_context_escape<F>(functions: &mut FuncMap, name: &str, escape_fn: F)
-where
+fn register_context_escape<F>(
+    functions: &mut FuncMap,
+    name: &str,
+    allow_escaped_html_bypass: bool,
+    escape_fn: F,
+) where
     F: Fn(&Value) -> String + Send + Sync + 'static,
 {
     functions.register(name, move |arguments: &[Value]| {
         let Some(value) = arguments.first() else {
             return Ok(Value::String(String::new()));
         };
-        if is_safe_html(value) {
+        if is_safe_html(value) || (allow_escaped_html_bypass && is_escaped_html(value)) {
             Ok(value.clone())
         } else {
             Ok(Value::String(escape_fn(value)))
@@ -324,9 +374,11 @@ where
 /// Registers `escapeHtml`, `htmlEscape`, `safeHtml`, and (when `html_escape`
 /// is `true`) the context-aware auto-escape helpers into `functions`.
 ///
-/// When `html_escape` is `true`, `escapeHtml` and `htmlEscape` return a
-/// `safeHtml`-marked value so auto-escaping does not double-escape their output;
-/// when `html_escape` is `false`, they return a plain `Value::String`.
+/// When `html_escape` is `true`, `escapeHtml` and `htmlEscape` return an
+/// `__vael_escaped_html`-marked value so HTML text and quoted normal attribute
+/// auto-escaping do not double-escape their output, while specialized contexts
+/// (URL, unquoted attributes, JS/`on*`, CSS, comments) still apply their own
+/// sanitization.
 pub(crate) fn register_html_helpers(functions: &mut FuncMap, html_escape: bool) {
     for alias in ["escapeHtml", "htmlEscape"] {
         let name = alias.to_owned();
@@ -334,7 +386,7 @@ pub(crate) fn register_html_helpers(functions: &mut FuncMap, html_escape: bool) 
             let text = single_rendered_arg(&name, arguments)?;
             let escaped = escape_html(&text);
             if html_escape {
-                Ok(mark_safe_html(escaped))
+                Ok(mark_escaped_html(escaped))
             } else {
                 Ok(Value::String(escaped))
             }
@@ -359,48 +411,59 @@ pub(crate) fn register_html_helpers(functions: &mut FuncMap, html_escape: bool) 
     });
 
     if html_escape {
-        register_context_escape(functions, AUTO_ESCAPE_FN, |v| escape_html(&v.render()));
-        register_context_escape(functions, AUTO_ESCAPE_UNQUOTED_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_FN, true, |v| {
+            escape_html(&v.render())
+        });
+        register_context_escape(functions, AUTO_ESCAPE_UNQUOTED_FN, false, |v| {
             escape_unquoted_attr(&v.render())
         });
-        register_context_escape(functions, AUTO_ESCAPE_URL_START_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_URL_START_FN, false, |v| {
             escape_html(&sanitize_url(&v.render()))
         });
-        register_context_escape(functions, AUTO_ESCAPE_URL_START_UNQUOTED_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_URL_START_UNQUOTED_FN, false, |v| {
             escape_unquoted_attr(&sanitize_url(&v.render()))
         });
-        register_context_escape(functions, AUTO_ESCAPE_JS_STR_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_URL_CONT_NO_COLON_FN, false, |v| {
+            escape_html(&sanitize_url_no_colon(&v.render()))
+        });
+        register_context_escape(
+            functions,
+            AUTO_ESCAPE_URL_CONT_NO_COLON_UNQUOTED_FN,
+            false,
+            |v| escape_unquoted_attr(&sanitize_url_no_colon(&v.render())),
+        );
+        register_context_escape(functions, AUTO_ESCAPE_JS_STR_FN, false, |v| {
             escape_js_string(&v.render(), false)
         });
-        register_context_escape(functions, AUTO_ESCAPE_JS_TPL_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_JS_TPL_FN, false, |v| {
             escape_js_string(&v.render(), true)
         });
-        register_context_escape(functions, AUTO_ESCAPE_JS_RAW_FN, escape_js_raw_value);
-        register_context_escape(functions, AUTO_ESCAPE_JS_ATTR_STR_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_JS_RAW_FN, false, escape_js_raw_value);
+        register_context_escape(functions, AUTO_ESCAPE_JS_ATTR_STR_FN, false, |v| {
             escape_html(&escape_js_string(&v.render(), false))
         });
-        register_context_escape(functions, AUTO_ESCAPE_JS_ATTR_TPL_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_JS_ATTR_TPL_FN, false, |v| {
             escape_html(&escape_js_string(&v.render(), true))
         });
-        register_context_escape(functions, AUTO_ESCAPE_JS_ATTR_RAW_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_JS_ATTR_RAW_FN, false, |v| {
             escape_html(&escape_js_raw_value(v))
         });
-        register_context_escape(functions, AUTO_ESCAPE_JS_ATTR_STR_UNQUOTED_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_JS_ATTR_STR_UNQUOTED_FN, false, |v| {
             escape_unquoted_attr(&escape_js_string(&v.render(), false))
         });
-        register_context_escape(functions, AUTO_ESCAPE_JS_ATTR_TPL_UNQUOTED_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_JS_ATTR_TPL_UNQUOTED_FN, false, |v| {
             escape_unquoted_attr(&escape_js_string(&v.render(), true))
         });
-        register_context_escape(functions, AUTO_ESCAPE_JS_ATTR_RAW_UNQUOTED_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_JS_ATTR_RAW_UNQUOTED_FN, false, |v| {
             escape_unquoted_attr(&escape_js_raw_value(v))
         });
-        register_context_escape(functions, AUTO_ESCAPE_CSS_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_CSS_FN, false, |v| {
             escape_html(&escape_css_value(&v.render()))
         });
-        register_context_escape(functions, AUTO_ESCAPE_CSS_UNQUOTED_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_CSS_UNQUOTED_FN, false, |v| {
             escape_unquoted_attr(&escape_css_value(&v.render()))
         });
-        register_context_escape(functions, AUTO_ESCAPE_COMMENT_FN, |v| {
+        register_context_escape(functions, AUTO_ESCAPE_COMMENT_FN, false, |v| {
             escape_comment(&v.render())
         });
     }

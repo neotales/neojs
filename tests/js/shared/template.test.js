@@ -485,3 +485,107 @@ test("htmlEscape: true provides context-aware OWASP XSS protection and exempts c
         }
     }
 });
+
+test("htmlEscape: true security hardening blocks branch divergence, marker bypass, URL splits, comments, srcdoc, and JS lexer PoCs", () => {
+    const opts = { htmlEscape: true };
+
+    // Compile-time rejections: branch divergence, non-text template/block calls, srcdoc, dynamic tag/attr names
+    for (const bad of [
+        '{{if .c}}<!--{{end}}<script>var a="{{.x}}";</script>',
+        '<script>{{if .q}}var s="{{end}}{{.x}}</script>',
+        '{{define "u"}}{{.u}}{{end}}<a href="{{template "u" .}}">x</a>',
+        '<a href="{{block "u" .}}{{.u}}{{end}}">x</a>',
+        '<iframe srcdoc="{{.x}}"></iframe>',
+        "<{{.tag}}>",
+        '<div {{.attr}}="{{.val}}">',
+    ]) {
+        expectTemplateError(() => render(bad, {}, opts), "PARSE");
+    }
+
+    const badSet = createTemplateSet(opts).add("u", "{{.u}}");
+    expectTemplateError(() => badSet.add("href_call", '<a href="{{template "u" .}}">x</a>'), "PARSE");
+
+    // Conservative URL-start join across `if` without `else`
+    assert.strictEquals(
+        render('<a href="{{if .p}}/v2/{{end}}{{.u}}">x</a>', { p: false, u: "javascript:alert(1)" }, opts),
+        '<a href="#ZgotmplZ">x</a>',
+    );
+
+    // escapeHtml marker isolation
+    assert.strictEquals(
+        render('<a href="{{ .u | escapeHtml }}">x</a>', { u: "javascript:alert(1)" }, opts),
+        '<a href="#ZgotmplZ">x</a>',
+    );
+    assert.strictEquals(
+        render("<div class={{ .c | escapeHtml }}></div>", { c: "x onmouseover=alert(1)" }, opts),
+        "<div class=x&#32;onmouseover&#61;alert(1)></div>",
+    );
+    assert.strictEquals(
+        render("<button onclick=\"f('{{ .x | escapeHtml }}')\">go</button>", { x: "'); alert(1)//" }, opts),
+        "<button onclick=\"f('\\u0026#39;); alert(1)\\u002f\\u002f')\">go</button>",
+    );
+
+    // URL multi-action & leading HTML entity
+    assert.strictEquals(
+        render('<a href="{{.a}}{{.b}}">x</a>', { a: "", b: "javascript:alert(1)" }, opts),
+        '<a href="#ZgotmplZ">x</a>',
+    );
+    assert.strictEquals(
+        render('<a href="{{.a}}{{.b}}">x</a>', { a: "javascript", b: ":alert(1)" }, opts),
+        '<a href="javascript#ZgotmplZ">x</a>',
+    );
+    assert.strictEquals(
+        render('<a href="&Tab;{{.u}}">x</a>', { u: "javascript:alert(1)" }, opts),
+        '<a href="&Tab;#ZgotmplZ">x</a>',
+    );
+
+    // HTML5 comments, <script> double-escape, bogus comment </1, and JS lexer edge cases
+    assert.strictEquals(
+        render('<!--><script>var x="{{.u}}";</script>', { u: '";alert(1)//' }, opts),
+        '<!--><script>var x="\\u0022;alert(1)\\u002f\\u002f";</script>',
+    );
+    assert.strictEquals(
+        render('<!-- a --!><script>var x="{{.u}}";</script>', { u: '";alert(1)//' }, opts),
+        '<!-- a --!><script>var x="\\u0022;alert(1)\\u002f\\u002f";</script>',
+    );
+    assert.strictEquals(
+        render('<!-- -{{.c}}><script>var x="{{.u}}";</script>', { c: "-", u: "-->alert(1)" }, opts),
+        '<!-- -&#45;><script>var x="&#45;&#45;&gt;alert(1)";</script>',
+    );
+    assert.strictEquals(
+        render('<!-- -{{.c}}><script>var x="{{.u}}";</script>', { c: "-!", u: "--!>alert(1)" }, opts),
+        '<!-- -&#45;&#33;><script>var x="&#45;&#45;&#33;&gt;alert(1)";</script>',
+    );
+    assert.strictEquals(
+        render("<script><!-- <script> </script> var x={{.u}}; --></script>", { u: "alert(1)" }, opts),
+        '<script><!-- <script> </script> var x="alert(1)"; --></script>',
+    );
+    assert.strictEquals(
+        render("<button onclick=\"/* ' */ {{.x}}\">go</button>", { x: "alert(1)" }, opts),
+        '<button onclick="/* \' */ &quot;alert(1)&quot;">go</button>',
+    );
+    assert.strictEquals(
+        render('<button onclick="f(&#96;{{.x}}&#96;)">go</button>', { x: "${alert(1)}" }, opts),
+        '<button onclick="f(&#96;\\u0024{alert(1)}&#96;)">go</button>',
+    );
+    assert.strictEquals(
+        render('<script>var r=/\\"/; var x={{.u}};</script>', { u: "alert(1)" }, opts),
+        '<script>var r=/\\"/; var x="alert(1)";</script>',
+    );
+    assert.strictEquals(
+        render("<script>var s=`a ${ {{.u}} }`;</script>", { u: "alert(1)" }, opts),
+        '<script>var s=`a ${ "alert(1)" }`;</script>',
+    );
+    assert.strictEquals(
+        render('<script>var s=`a ${"`"}`; var x={{.u}};</script>', { u: "alert(1)" }, opts),
+        '<script>var s=`a ${"`"}`; var x="alert(1)";</script>',
+    );
+    assert.strictEquals(
+        render('<script>var x=1; <!-- "\n var y={{.u}};</script>', { u: "alert(1)" }, opts),
+        '<script>var x=1; <!-- "\n var y="alert(1)";</script>',
+    );
+    assert.strictEquals(
+        render('</1 title="><script>var x={{.u}};</script>">', { u: "alert(1)" }, opts),
+        '</1 title="><script>var x="alert(1)";</script>">',
+    );
+});

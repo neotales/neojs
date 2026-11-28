@@ -1794,6 +1794,7 @@ fn op_vael_http_respond<'s>(
     ok_unit(scope)
 }
 
+#[cfg(feature = "test-support")]
 #[op2]
 fn op_vael_http_set_test_timeouts<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -1911,13 +1912,25 @@ deno_core::extension!(
         op_vael_http_take_request,
         op_vael_http_respond,
         op_vael_http_close,
-        op_vael_http_set_test_timeouts,
     ],
     state = |state| {
         state.put(HttpState::capture());
     },
     docs = "HTTP/1.1 server, Go-style ServeMux router, static files, and cookies behind `Vael.getBuiltInModule(\"vael:http\")`."
 );
+
+#[cfg(feature = "test-support")]
+deno_core::extension!(
+    vaeljs_http_test,
+    ops = [op_vael_http_set_test_timeouts],
+    docs = "Test-only timeout override for `vael:http`, compiled only with `test-support`."
+);
+
+/// The test-only `vael:http` extension.
+#[cfg(feature = "test-support")]
+pub(crate) fn test_support_extension() -> deno_core::Extension {
+    vaeljs_http_test::init()
+}
 
 #[cfg(test)]
 mod tests {

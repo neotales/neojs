@@ -98,6 +98,15 @@ impl TemplateSet {
         neotales_gotmpl::Template::parse_with_options(&standalone, parse_opts)?;
 
         let decomposed = decompose_template(source, true, self.options.max_nesting_depth)?;
+        if self.options.html_escape {
+            rewrite_html_escape(&decomposed.main_body)?;
+            for part in decomposed.defines.values() {
+                rewrite_html_escape(&part.body)?;
+            }
+            for part in decomposed.block_defaults.values() {
+                rewrite_html_escape(&part.body)?;
+            }
+        }
         self.entries.insert(name.to_owned(), decomposed);
         Ok(self)
     }

@@ -20,11 +20,11 @@ declare module "node:buffer" {
    * Supported character encodings for `Buffer` string conversions.
    *
    * Supports `"utf8"` / `"utf-8"`, `"hex"`, `"base64"`, `"base64url"`
-   * (unpadded), `"latin1"`, and `"ascii"`.
+   * (unpadded), `"latin1"` / `"binary"`, and `"ascii"`.
    *
    * @since 0.0.0-alpha.0
    */
-  export type BufferEncoding = "utf8" | "utf-8" | "hex" | "base64" | "base64url" | "latin1" | "ascii";
+  export type BufferEncoding = "utf8" | "utf-8" | "hex" | "base64" | "base64url" | "latin1" | "binary" | "ascii";
 
   /**
    * Fixed-length sequence of bytes extending `Uint8Array`.

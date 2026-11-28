@@ -38,12 +38,11 @@
 //! # Precise limits
 //!
 //! * Character classification uses the Unicode General_Category tables in the
-//!   [`unicode_general_category`] crate, fixed at Unicode 16.0. Case mapping
-//!   uses the Rust compiler's `char::to_lowercase` and `char::to_uppercase`
-//!   tables. Those tables are not tied to the category table's release: a
-//!   compiler upgrade can change a case mapping without changing
-//!   classification, and either can differ from the engine tables used by the
-//!   previous JavaScript implementation.
+//!   [`unicode_general_category`] crate, fixed at Unicode 16.0. Case mapping in
+//!   `vael:chars` uses generated lookup tables from the pinned Unicode 16.0
+//!   `UnicodeData.txt` and `SpecialCasing.txt` artifacts (independent of the
+//!   Rust compiler's standard library), keeping both classification and case
+//!   mapping pinned to Unicode 16.0.
 //! * The module has no host op, no capability, and no I/O. It is not a sandbox.
 //! * The Rust functions are not a stable ABI. The public contract is the
 //!   JavaScript module behavior; this crate's exact Rust signatures are

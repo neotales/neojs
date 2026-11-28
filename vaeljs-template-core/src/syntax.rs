@@ -9,7 +9,8 @@ use crate::html::{
     AUTO_ESCAPE_JS_ATTR_RAW_FN, AUTO_ESCAPE_JS_ATTR_RAW_UNQUOTED_FN, AUTO_ESCAPE_JS_ATTR_STR_FN,
     AUTO_ESCAPE_JS_ATTR_STR_UNQUOTED_FN, AUTO_ESCAPE_JS_ATTR_TPL_FN,
     AUTO_ESCAPE_JS_ATTR_TPL_UNQUOTED_FN, AUTO_ESCAPE_JS_RAW_FN, AUTO_ESCAPE_JS_STR_FN,
-    AUTO_ESCAPE_JS_TPL_FN, AUTO_ESCAPE_UNQUOTED_FN, AUTO_ESCAPE_URL_START_FN,
+    AUTO_ESCAPE_JS_TPL_FN, AUTO_ESCAPE_UNQUOTED_FN, AUTO_ESCAPE_URL_CONT_NO_COLON_FN,
+    AUTO_ESCAPE_URL_CONT_NO_COLON_UNQUOTED_FN, AUTO_ESCAPE_URL_START_FN,
     AUTO_ESCAPE_URL_START_UNQUOTED_FN,
 };
 
@@ -726,9 +727,22 @@ pub(crate) fn rewrite_html_escape(source: &str) -> Result<String, TemplateError>
             }
             Token::Comment(comment) => out.push_str(comment),
             Token::Action(action) => {
-                update_block_stack(&mut block_stack, &mut scanner, action.body);
+                if scanner.in_srcdoc() {
+                    return Err(TemplateError::Parse(
+                        "dynamic template actions are not allowed inside `srcdoc` attributes"
+                            .to_owned(),
+                    ));
+                }
+                if is_template_or_block_call(action.body)
+                    && !matches!(scanner.state, HtmlState::Text)
+                {
+                    return Err(TemplateError::Parse(
+                        "template/block invocation is only allowed in HTML text context".to_owned(),
+                    ));
+                }
+                update_block_stack(&mut block_stack, &mut scanner, action.body)?;
                 if should_wrap_auto_escape(action.body) {
-                    let helper = scanner.escape_fn_for_action();
+                    let helper = scanner.escape_fn_for_action()?;
                     let left = if action.trim_left { "{{- " } else { "{{ " };
                     let right = if action.trim_right { " -}}" } else { " }}" };
                     out.push_str(left);
@@ -746,30 +760,182 @@ pub(crate) fn rewrite_html_escape(source: &str) -> Result<String, TemplateError>
     Ok(out)
 }
 
+fn is_template_or_block_call(body: &str) -> bool {
+    control_expression(body, "template").is_some()
+        || control_expression(body, "block").is_some()
+        || matches!(body, "template" | "block")
+}
+
 #[derive(Debug, Clone)]
 enum BlockOrigin {
-    Conditional(HtmlState),
+    Conditional {
+        entry: HtmlState,
+        branches: Vec<HtmlState>,
+        has_bare_else: bool,
+    },
     Define(HtmlState),
 }
 
-fn update_block_stack(block_stack: &mut Vec<BlockOrigin>, scanner: &mut HtmlScanner, body: &str) {
+fn update_block_stack(
+    block_stack: &mut Vec<BlockOrigin>,
+    scanner: &mut HtmlScanner,
+    body: &str,
+) -> Result<(), TemplateError> {
     if control_expression(body, "if").is_some()
         || control_expression(body, "range").is_some()
         || control_expression(body, "with").is_some()
     {
-        block_stack.push(BlockOrigin::Conditional(scanner.state.clone()));
-    } else if body == "else" || control_expression(body, "else").is_some() {
-        if let Some(BlockOrigin::Conditional(saved)) = block_stack.last() {
-            scanner.state = saved.clone();
+        block_stack.push(BlockOrigin::Conditional {
+            entry: scanner.state.clone(),
+            branches: Vec::new(),
+            has_bare_else: false,
+        });
+    } else if body == "else" {
+        if let Some(BlockOrigin::Conditional {
+            entry,
+            branches,
+            has_bare_else,
+        }) = block_stack.last_mut()
+        {
+            branches.push(scanner.state.clone());
+            *has_bare_else = true;
+            scanner.state = entry.clone();
+        }
+    } else if control_expression(body, "else").is_some() {
+        if let Some(BlockOrigin::Conditional {
+            entry, branches, ..
+        }) = block_stack.last_mut()
+        {
+            branches.push(scanner.state.clone());
+            scanner.state = entry.clone();
         }
     } else if control_expression(body, "define").is_some() {
         block_stack.push(BlockOrigin::Define(scanner.state.clone()));
         scanner.state = HtmlState::Text;
     } else if body == "end"
         && let Some(origin) = block_stack.pop()
-        && let BlockOrigin::Define(saved) = origin
     {
-        scanner.state = saved;
+        match origin {
+            BlockOrigin::Conditional {
+                entry,
+                mut branches,
+                has_bare_else,
+            } => {
+                branches.push(scanner.state.clone());
+                if !has_bare_else {
+                    branches.push(entry);
+                }
+                let mut converged = branches[0].clone();
+                for branch_state in &branches[1..] {
+                    converged = converge_html_states(&converged, branch_state)?;
+                }
+                scanner.state = converged;
+            }
+            BlockOrigin::Define(saved) => {
+                if !matches!(scanner.state, HtmlState::Text) {
+                    return Err(TemplateError::Parse(
+                        "`define` block must end in HTML text context".to_owned(),
+                    ));
+                }
+                scanner.state = saved;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn converge_html_states(a: &HtmlState, b: &HtmlState) -> Result<HtmlState, TemplateError> {
+    match (a, b) {
+        (HtmlState::Text, HtmlState::Text) => Ok(HtmlState::Text),
+        (HtmlState::Comment { at_start: a_s }, HtmlState::Comment { at_start: b_s }) => {
+            Ok(HtmlState::Comment {
+                at_start: *a_s && *b_s,
+            })
+        }
+        (HtmlState::BogusComment, HtmlState::BogusComment) => Ok(HtmlState::BogusComment),
+        (HtmlState::Style, HtmlState::Style) => Ok(HtmlState::Style),
+        (
+            HtmlState::Script {
+                script_escape: a_se,
+                js: a_js,
+            },
+            HtmlState::Script {
+                script_escape: b_se,
+                js: b_js,
+            },
+        ) if a_se == b_se && a_js.structurally_eq(b_js) => Ok(HtmlState::Script {
+            script_escape: *a_se,
+            js: a_js.join(b_js),
+        }),
+        (
+            HtmlState::Tag {
+                sub: a_sub,
+                tag_name: a_t,
+                is_end_tag: a_e,
+                attr_name: a_a,
+            },
+            HtmlState::Tag {
+                sub: b_sub,
+                tag_name: b_t,
+                is_end_tag: b_e,
+                attr_name: b_a,
+            },
+        ) if a_t == b_t && a_e == b_e && a_a == b_a => {
+            let sub = converge_tag_sub_states(a_sub, b_sub)?;
+            Ok(HtmlState::Tag {
+                sub,
+                tag_name: a_t.clone(),
+                is_end_tag: *a_e,
+                attr_name: a_a.clone(),
+            })
+        }
+        _ => Err(TemplateError::Parse(
+            "divergent HTML context across template control branches".to_owned(),
+        )),
+    }
+}
+
+fn converge_tag_sub_states(a: &TagSubState, b: &TagSubState) -> Result<TagSubState, TemplateError> {
+    match (a, b) {
+        (
+            TagSubState::AttrValue {
+                quote: a_q,
+                kind: a_k,
+                url_prefix: a_up,
+                url_prefix_safe: a_safe,
+                url_saw_entity: a_ent,
+                has_prior_action: a_act,
+                js: a_js,
+            },
+            TagSubState::AttrValue {
+                quote: b_q,
+                kind: b_k,
+                url_prefix_safe: b_safe,
+                url_saw_entity: b_ent,
+                has_prior_action: b_act,
+                js: b_js,
+                ..
+            },
+        ) if a_q == b_q && a_k == b_k && a_js.structurally_eq(b_js) => {
+            let url_prefix_safe = *a_safe && *b_safe;
+            Ok(TagSubState::AttrValue {
+                quote: *a_q,
+                kind: *a_k,
+                url_prefix: if url_prefix_safe {
+                    a_up.clone()
+                } else {
+                    String::new()
+                },
+                url_prefix_safe,
+                url_saw_entity: *a_ent || *b_ent,
+                has_prior_action: *a_act || *b_act,
+                js: a_js.join(b_js),
+            })
+        }
+        _ if a == b => Ok(a.clone()),
+        _ => Err(TemplateError::Parse(
+            "divergent HTML tag/attribute context across template control branches".to_owned(),
+        )),
     }
 }
 
@@ -779,12 +945,381 @@ enum AttrKind {
     Url,
     EventHandler,
     Style,
+    Srcdoc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ScriptEscapeState {
+    #[default]
+    Data,
+    Escaped,
+    DoubleEscaped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum JsLexMode {
+    #[default]
+    Code,
+    String {
+        quote: char,
+        escaped: bool,
+    },
+    Template {
+        escaped: bool,
+    },
+    LineComment,
+    BlockComment,
+    Regex {
+        escaped: bool,
+        in_class: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JsState {
+    mode: JsLexMode,
+    regex_allowed: bool,
+    at_line_start: bool,
+    template_braces: Vec<usize>,
+    ident_buf: String,
+}
+
+impl Default for JsState {
+    fn default() -> Self {
+        Self {
+            mode: JsLexMode::Code,
+            regex_allowed: true,
+            at_line_start: true,
+            template_braces: Vec::new(),
+            ident_buf: String::new(),
+        }
+    }
+}
+
+impl JsState {
+    fn quote(&self) -> Option<char> {
+        match self.mode {
+            JsLexMode::String { quote, .. } => Some(quote),
+            JsLexMode::Template { .. } => Some('`'),
+            _ => None,
+        }
+    }
+
+    fn structurally_eq(&self, other: &Self) -> bool {
+        self.mode == other.mode && self.template_braces == other.template_braces
+    }
+
+    fn join(&self, other: &Self) -> Self {
+        Self {
+            mode: self.mode,
+            regex_allowed: self.regex_allowed || other.regex_allowed,
+            at_line_start: self.at_line_start && other.at_line_start,
+            template_braces: self.template_braces.clone(),
+            ident_buf: if self.ident_buf == other.ident_buf {
+                self.ident_buf.clone()
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    fn finish_ident(&mut self) {
+        if self.ident_buf.is_empty() {
+            return;
+        }
+        self.regex_allowed = matches!(
+            self.ident_buf.as_str(),
+            "return"
+                | "typeof"
+                | "void"
+                | "delete"
+                | "throw"
+                | "case"
+                | "in"
+                | "instanceof"
+                | "new"
+                | "else"
+                | "do"
+                | "await"
+                | "yield"
+                | "of"
+        );
+        self.ident_buf.clear();
+    }
+
+    fn advance_str(&mut self, text: &str, decode_entities: bool) {
+        let mut i = 0;
+        while i < text.len() {
+            i += self.step_slice(&text[i..], decode_entities);
+        }
+    }
+
+    fn step_slice(&mut self, rest: &str, decode_entities: bool) -> usize {
+        let (ch, len) = next_js_char(rest, decode_entities);
+        self.step(rest, ch, len, decode_entities)
+    }
+
+    fn step(&mut self, rest: &str, ch: char, len: usize, decode_entities: bool) -> usize {
+        let after = &rest[len..];
+        let next_ch = (!after.is_empty()).then(|| next_js_char(after, decode_entities).0);
+        match self.mode {
+            JsLexMode::LineComment | JsLexMode::BlockComment | JsLexMode::Regex { .. } => {
+                self.step_comment_or_regex(ch, len, after, next_ch, decode_entities)
+            }
+            JsLexMode::String { .. } | JsLexMode::Template { .. } => {
+                self.step_quoted(ch, len, after, next_ch, decode_entities)
+            }
+            JsLexMode::Code => self.step_code(rest, ch, len, after, next_ch, decode_entities),
+        }
+    }
+
+    fn step_comment_or_regex(
+        &mut self,
+        ch: char,
+        len: usize,
+        after: &str,
+        next_ch: Option<char>,
+        decode_entities: bool,
+    ) -> usize {
+        let is_newline = matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}');
+        match self.mode {
+            JsLexMode::LineComment => {
+                if is_newline {
+                    self.mode = JsLexMode::Code;
+                    self.at_line_start = true;
+                }
+                len
+            }
+            JsLexMode::BlockComment => {
+                if ch == '*' && next_ch == Some('/') {
+                    let (_, slash_len) = next_js_char(after, decode_entities);
+                    self.mode = JsLexMode::Code;
+                    return len + slash_len;
+                }
+                if is_newline {
+                    self.at_line_start = true;
+                }
+                len
+            }
+            JsLexMode::Regex {
+                mut escaped,
+                mut in_class,
+            } => {
+                if is_newline {
+                    self.mode = JsLexMode::Code;
+                    self.at_line_start = true;
+                    return len;
+                }
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '[' {
+                    in_class = true;
+                } else if ch == ']' && in_class {
+                    in_class = false;
+                } else if ch == '/' && !in_class {
+                    self.mode = JsLexMode::Code;
+                    self.regex_allowed = false;
+                    return len;
+                }
+                self.mode = JsLexMode::Regex { escaped, in_class };
+                len
+            }
+            _ => len,
+        }
+    }
+
+    fn step_quoted(
+        &mut self,
+        ch: char,
+        len: usize,
+        after: &str,
+        next_ch: Option<char>,
+        decode_entities: bool,
+    ) -> usize {
+        let is_newline = matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}');
+        match self.mode {
+            JsLexMode::Template { mut escaped } => {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '$' && next_ch == Some('{') {
+                    let (_, brace_len) = next_js_char(after, decode_entities);
+                    self.template_braces.push(1);
+                    self.mode = JsLexMode::Code;
+                    self.regex_allowed = true;
+                    self.ident_buf.clear();
+                    return len + brace_len;
+                } else if ch == '`' {
+                    self.mode = JsLexMode::Code;
+                    self.regex_allowed = false;
+                    self.ident_buf.clear();
+                    return len;
+                }
+                self.mode = JsLexMode::Template { escaped };
+                len
+            }
+            JsLexMode::String { quote, mut escaped } => {
+                if is_newline {
+                    self.mode = JsLexMode::Code;
+                    self.at_line_start = true;
+                    self.regex_allowed = true;
+                    return len;
+                }
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == quote {
+                    self.mode = JsLexMode::Code;
+                    self.regex_allowed = false;
+                    return len;
+                }
+                self.mode = JsLexMode::String { quote, escaped };
+                len
+            }
+            _ => len,
+        }
+    }
+
+    fn step_code(
+        &mut self,
+        rest: &str,
+        ch: char,
+        len: usize,
+        after: &str,
+        next_ch: Option<char>,
+        decode_entities: bool,
+    ) -> usize {
+        if ch == '/' && next_ch == Some('/') {
+            let (_, slash_len) = next_js_char(after, decode_entities);
+            self.finish_ident();
+            self.mode = JsLexMode::LineComment;
+            return len + slash_len;
+        }
+        if ch == '/' && next_ch == Some('*') {
+            let (_, star_len) = next_js_char(after, decode_entities);
+            self.finish_ident();
+            self.mode = JsLexMode::BlockComment;
+            return len + star_len;
+        }
+        if let Some(comment_len) = starts_with_decoded_chars(rest, "<!--", decode_entities) {
+            self.finish_ident();
+            self.mode = JsLexMode::LineComment;
+            return comment_len;
+        }
+        if self.at_line_start
+            && let Some(comment_len) = starts_with_decoded_chars(rest, "-->", decode_entities)
+        {
+            self.finish_ident();
+            self.mode = JsLexMode::LineComment;
+            return comment_len;
+        }
+
+        match ch {
+            '/' => {
+                self.finish_ident();
+                if self.regex_allowed {
+                    self.mode = JsLexMode::Regex {
+                        escaped: false,
+                        in_class: false,
+                    };
+                } else {
+                    self.regex_allowed = true;
+                }
+                self.at_line_start = false;
+            }
+            '"' | '\'' => {
+                self.finish_ident();
+                self.mode = JsLexMode::String {
+                    quote: ch,
+                    escaped: false,
+                };
+                self.at_line_start = false;
+            }
+            '`' => {
+                self.finish_ident();
+                self.mode = JsLexMode::Template { escaped: false };
+                self.at_line_start = false;
+            }
+            '{' => {
+                self.finish_ident();
+                if let Some(depth) = self.template_braces.last_mut() {
+                    *depth += 1;
+                }
+                self.regex_allowed = true;
+                self.at_line_start = false;
+            }
+            '}' => {
+                self.finish_ident();
+                if let Some(depth) = self.template_braces.last_mut() {
+                    *depth -= 1;
+                    if *depth == 0 {
+                        self.template_braces.pop();
+                        self.mode = JsLexMode::Template { escaped: false };
+                        self.at_line_start = false;
+                        return len;
+                    }
+                }
+                self.regex_allowed = true;
+                self.at_line_start = false;
+            }
+            c if c.is_ascii_alphanumeric() || c == '_' || c == '$' => {
+                self.ident_buf.push(c);
+                self.at_line_start = false;
+            }
+            '\n' | '\r' | '\u{2028}' | '\u{2029}' => {
+                self.finish_ident();
+                self.at_line_start = true;
+            }
+            c if c.is_ascii_whitespace() => {
+                self.finish_ident();
+            }
+            '(' | '[' | ',' | ';' | ':' | '?' | '=' | '!' | '&' | '|' | '^' | '~' | '*' | '%'
+            | '<' | '>' | '+' | '-' => {
+                self.finish_ident();
+                self.regex_allowed = true;
+                self.at_line_start = false;
+            }
+            _ => {
+                self.finish_ident();
+                self.regex_allowed = false;
+                self.at_line_start = false;
+            }
+        }
+        len
+    }
+}
+
+fn next_js_char(rest: &str, decode_entities: bool) -> (char, usize) {
+    if decode_entities && let Some(decoded) = decode_next_html_entity(rest) {
+        return decoded;
+    }
+    let ch = rest.chars().next().expect("non-empty slice");
+    (ch, ch.len_utf8())
+}
+
+fn starts_with_decoded_chars(rest: &str, target: &str, decode_entities: bool) -> Option<usize> {
+    let mut offset = 0;
+    for expected in target.chars() {
+        if offset >= rest.len() {
+            return None;
+        }
+        let (ch, len) = next_js_char(&rest[offset..], decode_entities);
+        if ch != expected {
+            return None;
+        }
+        offset += len;
+    }
+    Some(offset)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TagSubState {
     Start,
-    DeclOrBang,
+    EndTagOpen,
     TagName,
     BeforeAttrName,
     AttrName,
@@ -793,9 +1328,11 @@ enum TagSubState {
     AttrValue {
         quote: Option<char>,
         kind: AttrKind,
-        at_start: bool,
-        js_quote: Option<char>,
-        js_escaped: bool,
+        url_prefix: String,
+        url_prefix_safe: bool,
+        url_saw_entity: bool,
+        has_prior_action: bool,
+        js: JsState,
     },
 }
 
@@ -803,7 +1340,10 @@ enum TagSubState {
 enum HtmlState {
     #[default]
     Text,
-    Comment,
+    Comment {
+        at_start: bool,
+    },
+    BogusComment,
     Tag {
         sub: TagSubState,
         tag_name: String,
@@ -811,10 +1351,8 @@ enum HtmlState {
         attr_name: String,
     },
     Script {
-        js_quote: Option<char>,
-        js_escaped: bool,
-        in_line_comment: bool,
-        in_block_comment: bool,
+        script_escape: ScriptEscapeState,
+        js: JsState,
     },
     Style,
 }
@@ -825,6 +1363,25 @@ struct HtmlScanner {
 }
 
 impl HtmlScanner {
+    fn in_srcdoc(&self) -> bool {
+        match &self.state {
+            HtmlState::Tag {
+                sub: TagSubState::BeforeAttrValue,
+                attr_name,
+                ..
+            } => classify_attr(attr_name) == AttrKind::Srcdoc,
+            HtmlState::Tag {
+                sub:
+                    TagSubState::AttrValue {
+                        kind: AttrKind::Srcdoc,
+                        ..
+                    },
+                ..
+            } => true,
+            _ => false,
+        }
+    }
+
     fn advance_text(&mut self, text: &str) {
         let mut i = 0;
         while i < text.len() {
@@ -832,7 +1389,7 @@ impl HtmlScanner {
             match &mut self.state {
                 HtmlState::Text => {
                     if rest.starts_with("<!--") {
-                        self.state = HtmlState::Comment;
+                        self.state = HtmlState::Comment { at_start: true };
                         i += 4;
                     } else if rest.starts_with('<') {
                         self.state = HtmlState::Tag {
@@ -848,56 +1405,19 @@ impl HtmlScanner {
                         break;
                     }
                 }
-                HtmlState::Comment => {
-                    if let Some(rel) = rest.find("-->") {
+                HtmlState::Comment { .. } => {
+                    i += self.advance_comment(rest);
+                }
+                HtmlState::BogusComment => {
+                    if let Some(rel) = rest.find('>') {
                         self.state = HtmlState::Text;
-                        i += rel + 3;
+                        i += rel + 1;
                     } else {
                         break;
                     }
                 }
-                HtmlState::Script {
-                    js_quote,
-                    js_escaped,
-                    in_line_comment,
-                    in_block_comment,
-                } => {
-                    if let Some(tag_len) = starts_with_end_tag_ci(rest, "script") {
-                        self.state = HtmlState::Tag {
-                            sub: TagSubState::TagName,
-                            tag_name: "script".to_owned(),
-                            is_end_tag: true,
-                            attr_name: String::new(),
-                        };
-                        i += tag_len;
-                        continue;
-                    }
-                    let ch = rest.chars().next().expect("non-empty rest");
-                    if *in_line_comment {
-                        if ch == '\n' || ch == '\r' {
-                            *in_line_comment = false;
-                        }
-                        i += ch.len_utf8();
-                    } else if *in_block_comment {
-                        if rest.starts_with("*/") {
-                            *in_block_comment = false;
-                            i += 2;
-                        } else {
-                            i += ch.len_utf8();
-                        }
-                    } else if js_quote.is_some() {
-                        step_js_quote(ch, js_quote, js_escaped);
-                        i += ch.len_utf8();
-                    } else if rest.starts_with("//") {
-                        *in_line_comment = true;
-                        i += 2;
-                    } else if rest.starts_with("/*") {
-                        *in_block_comment = true;
-                        i += 2;
-                    } else {
-                        step_js_quote(ch, js_quote, js_escaped);
-                        i += ch.len_utf8();
-                    }
+                HtmlState::Script { .. } => {
+                    i += self.advance_script(rest);
                 }
                 HtmlState::Style => {
                     if let Some(tag_len) = starts_with_end_tag_ci(rest, "style") {
@@ -913,221 +1433,497 @@ impl HtmlScanner {
                         i += ch.len_utf8();
                     }
                 }
-                HtmlState::Tag {
-                    sub,
-                    tag_name,
-                    is_end_tag,
-                    attr_name,
-                } => {
-                    let ch = rest.chars().next().expect("non-empty rest");
-                    let mut next_state: Option<HtmlState> = None;
-                    match sub {
-                        TagSubState::Start => {
-                            if ch == '/' {
-                                *is_end_tag = true;
-                                *sub = TagSubState::TagName;
-                            } else if ch == '!' || ch == '?' {
-                                *sub = TagSubState::DeclOrBang;
-                            } else if ch == '>' {
-                                next_state = Some(HtmlState::Text);
-                            } else if ch.is_ascii_alphanumeric() {
-                                tag_name.push(ch.to_ascii_lowercase());
-                                *sub = TagSubState::TagName;
-                            } else {
-                                next_state = Some(HtmlState::Text);
-                            }
-                            i += ch.len_utf8();
-                        }
-                        TagSubState::DeclOrBang => {
-                            if ch == '>' {
-                                next_state = Some(HtmlState::Text);
-                            }
-                            i += ch.len_utf8();
-                        }
-                        TagSubState::TagName => {
-                            if ch == '>' {
-                                next_state = Some(finish_tag_state(tag_name, *is_end_tag));
-                            } else if ch.is_ascii_whitespace() || ch == '/' {
-                                *sub = TagSubState::BeforeAttrName;
-                            } else {
-                                tag_name.push(ch.to_ascii_lowercase());
-                            }
-                            i += ch.len_utf8();
-                        }
-                        TagSubState::BeforeAttrName => {
-                            if ch == '>' {
-                                next_state = Some(finish_tag_state(tag_name, *is_end_tag));
-                            } else if !ch.is_ascii_whitespace() && ch != '/' {
-                                attr_name.clear();
-                                attr_name.push(ch.to_ascii_lowercase());
-                                *sub = TagSubState::AttrName;
-                            }
-                            i += ch.len_utf8();
-                        }
-                        TagSubState::AttrName => {
-                            if ch == '>' {
-                                next_state = Some(finish_tag_state(tag_name, *is_end_tag));
-                            } else if ch == '=' {
-                                *sub = TagSubState::BeforeAttrValue;
-                            } else if ch.is_ascii_whitespace() {
-                                *sub = TagSubState::AfterAttrName;
-                            } else if ch == '/' {
-                                attr_name.clear();
-                                *sub = TagSubState::BeforeAttrName;
-                            } else {
-                                attr_name.push(ch.to_ascii_lowercase());
-                            }
-                            i += ch.len_utf8();
-                        }
-                        TagSubState::AfterAttrName => {
-                            if ch == '>' {
-                                next_state = Some(finish_tag_state(tag_name, *is_end_tag));
-                            } else if ch == '=' {
-                                *sub = TagSubState::BeforeAttrValue;
-                            } else if ch == '/' {
-                                attr_name.clear();
-                                *sub = TagSubState::BeforeAttrName;
-                            } else if !ch.is_ascii_whitespace() {
-                                attr_name.clear();
-                                attr_name.push(ch.to_ascii_lowercase());
-                                *sub = TagSubState::AttrName;
-                            }
-                            i += ch.len_utf8();
-                        }
-                        TagSubState::BeforeAttrValue => {
-                            if ch == '>' {
-                                next_state = Some(finish_tag_state(tag_name, *is_end_tag));
-                            } else if ch == '"' || ch == '\'' {
-                                let kind = classify_attr(attr_name);
-                                *sub = TagSubState::AttrValue {
-                                    quote: Some(ch),
-                                    kind,
-                                    at_start: true,
-                                    js_quote: None,
-                                    js_escaped: false,
-                                };
-                            } else if !ch.is_ascii_whitespace() {
-                                let kind = classify_attr(attr_name);
-                                let mut js_quote = None;
-                                let mut js_escaped = false;
-                                if kind == AttrKind::EventHandler {
-                                    step_js_quote(ch, &mut js_quote, &mut js_escaped);
-                                }
-                                *sub = TagSubState::AttrValue {
-                                    quote: None,
-                                    kind,
-                                    at_start: false,
-                                    js_quote,
-                                    js_escaped,
-                                };
-                            }
-                            i += ch.len_utf8();
-                        }
-                        TagSubState::AttrValue {
-                            quote,
-                            kind,
-                            at_start,
-                            js_quote,
-                            js_escaped,
-                        } => {
-                            if *quote == Some(ch) || (quote.is_none() && ch.is_ascii_whitespace()) {
-                                attr_name.clear();
-                                *sub = TagSubState::BeforeAttrName;
-                                i += ch.len_utf8();
-                            } else if quote.is_none() && ch == '>' {
-                                next_state = Some(finish_tag_state(tag_name, *is_end_tag));
-                                i += ch.len_utf8();
-                            } else {
-                                if *at_start && !(ch.is_ascii_whitespace() || ch.is_ascii_control())
-                                {
-                                    *at_start = false;
-                                }
-                                if *kind == AttrKind::EventHandler {
-                                    if let Some((decoded, entity_len)) =
-                                        match_html_quote_entity(rest)
-                                    {
-                                        step_js_quote(decoded, js_quote, js_escaped);
-                                        i += entity_len;
-                                        continue;
-                                    }
-                                    step_js_quote(ch, js_quote, js_escaped);
-                                }
-                                i += ch.len_utf8();
-                            }
-                        }
-                    }
-                    if let Some(state) = next_state {
-                        self.state = state;
-                    }
+                HtmlState::Tag { .. } => {
+                    i += self.advance_tag(rest);
                 }
             }
         }
     }
 
-    fn escape_fn_for_action(&mut self) -> &'static str {
+    fn advance_comment(&mut self, rest: &str) -> usize {
+        let HtmlState::Comment { at_start } = &mut self.state else {
+            unreachable!();
+        };
+        if *at_start {
+            if rest.starts_with('>') {
+                self.state = HtmlState::Text;
+                return 1;
+            }
+            if rest.starts_with("->") {
+                self.state = HtmlState::Text;
+                return 2;
+            }
+            *at_start = false;
+        }
+        if rest.starts_with("-->") {
+            self.state = HtmlState::Text;
+            3
+        } else if rest.starts_with("--!>") {
+            self.state = HtmlState::Text;
+            4
+        } else {
+            rest.chars().next().expect("non-empty rest").len_utf8()
+        }
+    }
+
+    fn advance_script(&mut self, rest: &str) -> usize {
+        let HtmlState::Script { script_escape, js } = &mut self.state else {
+            unreachable!();
+        };
+        match *script_escape {
+            ScriptEscapeState::Data => {
+                if let Some(tag_len) = starts_with_end_tag_ci(rest, "script") {
+                    self.state = HtmlState::Tag {
+                        sub: TagSubState::TagName,
+                        tag_name: "script".to_owned(),
+                        is_end_tag: true,
+                        attr_name: String::new(),
+                    };
+                    return tag_len;
+                }
+                if rest.starts_with("<!--") {
+                    *script_escape = ScriptEscapeState::Escaped;
+                    js.advance_str("<!--", false);
+                    return 4;
+                }
+            }
+            ScriptEscapeState::Escaped => {
+                if rest.starts_with("-->") {
+                    *script_escape = ScriptEscapeState::Data;
+                    js.advance_str("-->", false);
+                    return 3;
+                }
+                if let Some(tag_len) = starts_with_end_tag_ci(rest, "script") {
+                    self.state = HtmlState::Tag {
+                        sub: TagSubState::TagName,
+                        tag_name: "script".to_owned(),
+                        is_end_tag: true,
+                        attr_name: String::new(),
+                    };
+                    return tag_len;
+                }
+                if let Some(tag_len) = starts_with_open_tag_ci(rest, "script") {
+                    *script_escape = ScriptEscapeState::DoubleEscaped;
+                    js.advance_str(&rest[..tag_len], false);
+                    return tag_len;
+                }
+            }
+            ScriptEscapeState::DoubleEscaped => {
+                if rest.starts_with("-->") {
+                    *script_escape = ScriptEscapeState::Data;
+                    js.advance_str("-->", false);
+                    return 3;
+                }
+                if let Some(tag_len) = starts_with_end_tag_ci(rest, "script") {
+                    *script_escape = ScriptEscapeState::Escaped;
+                    js.advance_str(&rest[..tag_len], false);
+                    return tag_len;
+                }
+            }
+        }
+        js.step_slice(rest, false)
+    }
+
+    fn advance_tag(&mut self, rest: &str) -> usize {
+        let HtmlState::Tag {
+            sub,
+            tag_name,
+            is_end_tag,
+            attr_name,
+        } = &mut self.state
+        else {
+            unreachable!();
+        };
+        let ch = rest.chars().next().expect("non-empty rest");
+        let mut next_state: Option<HtmlState> = None;
+        let consumed = match sub {
+            TagSubState::Start => {
+                if ch == '/' {
+                    *is_end_tag = true;
+                    *sub = TagSubState::EndTagOpen;
+                } else if ch == '!' || ch == '?' {
+                    next_state = Some(HtmlState::BogusComment);
+                } else if ch == '>' {
+                    next_state = Some(HtmlState::Text);
+                } else if ch.is_ascii_alphabetic() {
+                    tag_name.push(ch.to_ascii_lowercase());
+                    *sub = TagSubState::TagName;
+                } else {
+                    next_state = Some(HtmlState::Text);
+                }
+                ch.len_utf8()
+            }
+            TagSubState::EndTagOpen => {
+                if ch == '>' {
+                    next_state = Some(HtmlState::Text);
+                } else if ch.is_ascii_alphabetic() {
+                    tag_name.push(ch.to_ascii_lowercase());
+                    *sub = TagSubState::TagName;
+                } else {
+                    next_state = Some(HtmlState::BogusComment);
+                }
+                ch.len_utf8()
+            }
+            TagSubState::TagName => {
+                if ch == '>' {
+                    next_state = Some(finish_tag_state(tag_name, *is_end_tag));
+                } else if ch.is_ascii_whitespace() || ch == '/' {
+                    *sub = TagSubState::BeforeAttrName;
+                } else {
+                    tag_name.push(ch.to_ascii_lowercase());
+                }
+                ch.len_utf8()
+            }
+            TagSubState::BeforeAttrName | TagSubState::AttrName | TagSubState::AfterAttrName => {
+                advance_tag_attr_name(ch, sub, tag_name, *is_end_tag, attr_name, &mut next_state)
+            }
+            TagSubState::BeforeAttrValue => advance_before_attr_value(
+                rest,
+                ch,
+                sub,
+                tag_name,
+                *is_end_tag,
+                attr_name,
+                &mut next_state,
+            ),
+            TagSubState::AttrValue { .. } => advance_attr_value(
+                rest,
+                ch,
+                sub,
+                tag_name,
+                *is_end_tag,
+                attr_name,
+                &mut next_state,
+            ),
+        };
+        if let Some(state) = next_state {
+            self.state = state;
+        }
+        consumed
+    }
+
+    fn escape_fn_for_action(&mut self) -> Result<&'static str, TemplateError> {
         match &mut self.state {
-            HtmlState::Text => AUTO_ESCAPE_FN,
-            HtmlState::Comment => AUTO_ESCAPE_COMMENT_FN,
-            HtmlState::Style => AUTO_ESCAPE_CSS_FN,
-            HtmlState::Script { js_quote, .. } => match js_quote {
+            HtmlState::Text => Ok(AUTO_ESCAPE_FN),
+            HtmlState::Comment { at_start } => {
+                *at_start = false;
+                Ok(AUTO_ESCAPE_COMMENT_FN)
+            }
+            HtmlState::BogusComment => Ok(AUTO_ESCAPE_COMMENT_FN),
+            HtmlState::Style => Ok(AUTO_ESCAPE_CSS_FN),
+            HtmlState::Script { js, .. } => Ok(match js.quote() {
                 Some('`') => AUTO_ESCAPE_JS_TPL_FN,
                 Some(_) => AUTO_ESCAPE_JS_STR_FN,
-                None => AUTO_ESCAPE_JS_RAW_FN,
-            },
-            HtmlState::Tag { sub, attr_name, .. } => match sub {
-                TagSubState::BeforeAttrValue => {
-                    let kind = classify_attr(attr_name);
-                    *sub = TagSubState::AttrValue {
-                        quote: None,
-                        kind,
-                        at_start: false,
-                        js_quote: None,
-                        js_escaped: false,
-                    };
-                    match kind {
-                        AttrKind::Normal => AUTO_ESCAPE_UNQUOTED_FN,
-                        AttrKind::Url => AUTO_ESCAPE_URL_START_UNQUOTED_FN,
-                        AttrKind::Style => AUTO_ESCAPE_CSS_UNQUOTED_FN,
-                        AttrKind::EventHandler => AUTO_ESCAPE_JS_ATTR_RAW_UNQUOTED_FN,
-                    }
+                None => {
+                    js.finish_ident();
+                    js.regex_allowed = false;
+                    js.at_line_start = false;
+                    AUTO_ESCAPE_JS_RAW_FN
                 }
-                TagSubState::AttrValue {
-                    quote,
-                    kind,
-                    at_start,
-                    js_quote,
-                    ..
-                } => {
-                    let unquoted = quote.is_none();
-                    let was_at_start = *at_start;
-                    *at_start = false;
-                    match (*kind, unquoted, was_at_start, *js_quote) {
-                        (AttrKind::Normal, false, _, _) | (AttrKind::Url, false, false, _) => {
-                            AUTO_ESCAPE_FN
-                        }
-                        (AttrKind::Normal, true, _, _) | (AttrKind::Url, true, false, _) => {
-                            AUTO_ESCAPE_UNQUOTED_FN
-                        }
-                        (AttrKind::Url, false, true, _) => AUTO_ESCAPE_URL_START_FN,
-                        (AttrKind::Url, true, true, _) => AUTO_ESCAPE_URL_START_UNQUOTED_FN,
-                        (AttrKind::Style, false, _, _) => AUTO_ESCAPE_CSS_FN,
-                        (AttrKind::Style, true, _, _) => AUTO_ESCAPE_CSS_UNQUOTED_FN,
-                        (AttrKind::EventHandler, false, _, Some('`')) => AUTO_ESCAPE_JS_ATTR_TPL_FN,
-                        (AttrKind::EventHandler, false, _, Some(_)) => AUTO_ESCAPE_JS_ATTR_STR_FN,
-                        (AttrKind::EventHandler, false, _, None) => AUTO_ESCAPE_JS_ATTR_RAW_FN,
-                        (AttrKind::EventHandler, true, _, Some('`')) => {
-                            AUTO_ESCAPE_JS_ATTR_TPL_UNQUOTED_FN
-                        }
-                        (AttrKind::EventHandler, true, _, Some(_)) => {
-                            AUTO_ESCAPE_JS_ATTR_STR_UNQUOTED_FN
-                        }
-                        (AttrKind::EventHandler, true, _, None) => {
-                            AUTO_ESCAPE_JS_ATTR_RAW_UNQUOTED_FN
-                        }
-                    }
+            }),
+            HtmlState::Tag { sub, attr_name, .. } => escape_fn_for_tag(sub, attr_name),
+        }
+    }
+}
+
+fn advance_tag_attr_name(
+    ch: char,
+    sub: &mut TagSubState,
+    tag_name: &str,
+    is_end_tag: bool,
+    attr_name: &mut String,
+    next_state: &mut Option<HtmlState>,
+) -> usize {
+    if ch == '>' {
+        *next_state = Some(finish_tag_state(tag_name, is_end_tag));
+        return ch.len_utf8();
+    }
+    match sub {
+        TagSubState::BeforeAttrName => {
+            if !ch.is_ascii_whitespace() && ch != '/' {
+                attr_name.clear();
+                attr_name.push(ch.to_ascii_lowercase());
+                *sub = TagSubState::AttrName;
+            }
+        }
+        TagSubState::AttrName => {
+            if ch == '=' {
+                *sub = TagSubState::BeforeAttrValue;
+            } else if ch.is_ascii_whitespace() {
+                *sub = TagSubState::AfterAttrName;
+            } else if ch == '/' {
+                attr_name.clear();
+                *sub = TagSubState::BeforeAttrName;
+            } else {
+                attr_name.push(ch.to_ascii_lowercase());
+            }
+        }
+        TagSubState::AfterAttrName => {
+            if ch == '=' {
+                *sub = TagSubState::BeforeAttrValue;
+            } else if ch == '/' {
+                attr_name.clear();
+                *sub = TagSubState::BeforeAttrName;
+            } else if !ch.is_ascii_whitespace() {
+                attr_name.clear();
+                attr_name.push(ch.to_ascii_lowercase());
+                *sub = TagSubState::AttrName;
+            }
+        }
+        _ => unreachable!(),
+    }
+    ch.len_utf8()
+}
+
+fn advance_before_attr_value(
+    rest: &str,
+    ch: char,
+    sub: &mut TagSubState,
+    tag_name: &str,
+    is_end_tag: bool,
+    attr_name: &str,
+    next_state: &mut Option<HtmlState>,
+) -> usize {
+    if ch == '>' {
+        *next_state = Some(finish_tag_state(tag_name, is_end_tag));
+        return ch.len_utf8();
+    }
+    if ch == '"' || ch == '\'' {
+        let kind = classify_attr(attr_name);
+        *sub = TagSubState::AttrValue {
+            quote: Some(ch),
+            kind,
+            url_prefix: String::new(),
+            url_prefix_safe: false,
+            url_saw_entity: false,
+            has_prior_action: false,
+            js: JsState::default(),
+        };
+        return ch.len_utf8();
+    }
+    if ch.is_ascii_whitespace() {
+        return ch.len_utf8();
+    }
+    let kind = classify_attr(attr_name);
+    let mut url_prefix = String::new();
+    let mut url_prefix_safe = false;
+    let mut url_saw_entity = false;
+    let mut js = JsState::default();
+    let consumed = if kind == AttrKind::Url {
+        update_url_prefix(
+            ch,
+            &mut url_prefix,
+            &mut url_prefix_safe,
+            &mut url_saw_entity,
+        );
+        ch.len_utf8()
+    } else if kind == AttrKind::EventHandler {
+        let end = rest
+            .find(|c: char| c.is_ascii_whitespace() || c == '>')
+            .unwrap_or(rest.len());
+        js.step_slice(&rest[..end], true)
+    } else {
+        ch.len_utf8()
+    };
+    *sub = TagSubState::AttrValue {
+        quote: None,
+        kind,
+        url_prefix,
+        url_prefix_safe,
+        url_saw_entity,
+        has_prior_action: false,
+        js,
+    };
+    consumed
+}
+
+fn advance_attr_value(
+    rest: &str,
+    ch: char,
+    sub: &mut TagSubState,
+    tag_name: &str,
+    is_end_tag: bool,
+    attr_name: &mut String,
+    next_state: &mut Option<HtmlState>,
+) -> usize {
+    let TagSubState::AttrValue {
+        quote,
+        kind,
+        url_prefix,
+        url_prefix_safe,
+        url_saw_entity,
+        has_prior_action,
+        js,
+    } = sub
+    else {
+        unreachable!();
+    };
+    if *quote == Some(ch) || (quote.is_none() && ch.is_ascii_whitespace()) {
+        attr_name.clear();
+        *sub = TagSubState::BeforeAttrName;
+        return ch.len_utf8();
+    }
+    if quote.is_none() && ch == '>' {
+        *next_state = Some(finish_tag_state(tag_name, is_end_tag));
+        return ch.len_utf8();
+    }
+    if *kind == AttrKind::Url {
+        if !*url_prefix_safe && !*has_prior_action && !*url_saw_entity {
+            update_url_prefix(ch, url_prefix, url_prefix_safe, url_saw_entity);
+        }
+        return ch.len_utf8();
+    }
+    if *kind == AttrKind::EventHandler {
+        let end = if let Some(q) = *quote {
+            rest.find(q).unwrap_or(rest.len())
+        } else {
+            rest.find(|c: char| c.is_ascii_whitespace() || c == '>')
+                .unwrap_or(rest.len())
+        };
+        return js.step_slice(&rest[..end], true);
+    }
+    ch.len_utf8()
+}
+
+fn escape_fn_for_tag(
+    sub: &mut TagSubState,
+    attr_name: &str,
+) -> Result<&'static str, TemplateError> {
+    match sub {
+        TagSubState::BeforeAttrValue => {
+            let kind = classify_attr(attr_name);
+            if kind == AttrKind::Srcdoc {
+                return Err(TemplateError::Parse(
+                    "dynamic template actions are not allowed inside `srcdoc` attributes"
+                        .to_owned(),
+                ));
+            }
+            let mut js = JsState::default();
+            if kind == AttrKind::EventHandler {
+                js.regex_allowed = false;
+                js.at_line_start = false;
+            }
+            *sub = TagSubState::AttrValue {
+                quote: None,
+                kind,
+                url_prefix: String::new(),
+                url_prefix_safe: false,
+                url_saw_entity: false,
+                has_prior_action: true,
+                js,
+            };
+            Ok(match kind {
+                AttrKind::Normal => AUTO_ESCAPE_UNQUOTED_FN,
+                AttrKind::Url => AUTO_ESCAPE_URL_START_UNQUOTED_FN,
+                AttrKind::Style => AUTO_ESCAPE_CSS_UNQUOTED_FN,
+                AttrKind::EventHandler => AUTO_ESCAPE_JS_ATTR_RAW_UNQUOTED_FN,
+                AttrKind::Srcdoc => unreachable!(),
+            })
+        }
+        TagSubState::AttrValue {
+            quote,
+            kind,
+            url_prefix_safe,
+            has_prior_action,
+            js,
+            ..
+        } => {
+            if *kind == AttrKind::Srcdoc {
+                return Err(TemplateError::Parse(
+                    "dynamic template actions are not allowed inside `srcdoc` attributes"
+                        .to_owned(),
+                ));
+            }
+            let unquoted = quote.is_none();
+            let was_prior = *has_prior_action;
+            *has_prior_action = true;
+            match (*kind, unquoted, *url_prefix_safe, was_prior, js.quote()) {
+                (AttrKind::Normal, false, _, _, _) | (AttrKind::Url, false, true, _, _) => {
+                    Ok(AUTO_ESCAPE_FN)
                 }
-                _ => AUTO_ESCAPE_UNQUOTED_FN,
-            },
+                (AttrKind::Normal, true, _, _, _) | (AttrKind::Url, true, true, _, _) => {
+                    Ok(AUTO_ESCAPE_UNQUOTED_FN)
+                }
+                (AttrKind::Url, false, false, false, _) => Ok(AUTO_ESCAPE_URL_START_FN),
+                (AttrKind::Url, false, false, true, _) => Ok(AUTO_ESCAPE_URL_CONT_NO_COLON_FN),
+                (AttrKind::Url, true, false, false, _) => Ok(AUTO_ESCAPE_URL_START_UNQUOTED_FN),
+                (AttrKind::Url, true, false, true, _) => {
+                    Ok(AUTO_ESCAPE_URL_CONT_NO_COLON_UNQUOTED_FN)
+                }
+                (AttrKind::Style, false, _, _, _) => Ok(AUTO_ESCAPE_CSS_FN),
+                (AttrKind::Style, true, _, _, _) => Ok(AUTO_ESCAPE_CSS_UNQUOTED_FN),
+                (AttrKind::EventHandler, false, _, _, Some('`')) => Ok(AUTO_ESCAPE_JS_ATTR_TPL_FN),
+                (AttrKind::EventHandler, false, _, _, Some(_)) => Ok(AUTO_ESCAPE_JS_ATTR_STR_FN),
+                (AttrKind::EventHandler, false, _, _, None) => {
+                    js.finish_ident();
+                    js.regex_allowed = false;
+                    js.at_line_start = false;
+                    Ok(AUTO_ESCAPE_JS_ATTR_RAW_FN)
+                }
+                (AttrKind::EventHandler, true, _, _, Some('`')) => {
+                    Ok(AUTO_ESCAPE_JS_ATTR_TPL_UNQUOTED_FN)
+                }
+                (AttrKind::EventHandler, true, _, _, Some(_)) => {
+                    Ok(AUTO_ESCAPE_JS_ATTR_STR_UNQUOTED_FN)
+                }
+                (AttrKind::EventHandler, true, _, _, None) => {
+                    js.finish_ident();
+                    js.regex_allowed = false;
+                    js.at_line_start = false;
+                    Ok(AUTO_ESCAPE_JS_ATTR_RAW_UNQUOTED_FN)
+                }
+                (AttrKind::Srcdoc, _, _, _, _) => unreachable!(),
+            }
+        }
+        TagSubState::Start
+        | TagSubState::EndTagOpen
+        | TagSubState::TagName
+        | TagSubState::BeforeAttrName
+        | TagSubState::AttrName
+        | TagSubState::AfterAttrName => Err(TemplateError::Parse(
+            "dynamic template expressions are not allowed in HTML tag names or attribute names"
+                .to_owned(),
+        )),
+    }
+}
+
+fn update_url_prefix(
+    ch: char,
+    url_prefix: &mut String,
+    url_prefix_safe: &mut bool,
+    url_saw_entity: &mut bool,
+) {
+    if ch == '&' {
+        *url_saw_entity = true;
+        return;
+    }
+    url_prefix.push(ch);
+    let trimmed =
+        url_prefix.trim_start_matches(|c: char| c.is_ascii_whitespace() || c.is_ascii_control());
+    if trimmed.is_empty() {
+        return;
+    }
+    for (idx, c) in trimmed.char_indices() {
+        match c {
+            '/' | '?' | '#' => {
+                *url_prefix_safe = true;
+                return;
+            }
+            ':' => {
+                let scheme = &trimmed[..idx];
+                if !scheme.bytes().any(|b| b <= 0x20 || b == 0x7F)
+                    && (scheme.eq_ignore_ascii_case("http")
+                        || scheme.eq_ignore_ascii_case("https")
+                        || scheme.eq_ignore_ascii_case("mailto")
+                        || scheme.eq_ignore_ascii_case("tel"))
+                {
+                    *url_prefix_safe = true;
+                } else {
+                    *url_saw_entity = true;
+                }
+                return;
+            }
+            _ => {}
         }
     }
 }
@@ -1135,10 +1931,8 @@ impl HtmlScanner {
 fn finish_tag_state(tag_name: &str, is_end_tag: bool) -> HtmlState {
     if !is_end_tag && tag_name == "script" {
         HtmlState::Script {
-            js_quote: None,
-            js_escaped: false,
-            in_line_comment: false,
-            in_block_comment: false,
+            script_escape: ScriptEscapeState::Data,
+            js: JsState::default(),
         }
     } else if !is_end_tag && tag_name == "style" {
         HtmlState::Style
@@ -1148,7 +1942,9 @@ fn finish_tag_state(tag_name: &str, is_end_tag: bool) -> HtmlState {
 }
 
 fn classify_attr(attr_name: &str) -> AttrKind {
-    if matches!(
+    if attr_name == "srcdoc" {
+        AttrKind::Srcdoc
+    } else if matches!(
         attr_name,
         "href"
             | "src"
@@ -1170,6 +1966,19 @@ fn classify_attr(attr_name: &str) -> AttrKind {
     }
 }
 
+fn starts_with_open_tag_ci(rest: &str, tag: &str) -> Option<usize> {
+    let prefix_len = 1 + tag.len();
+    if rest.len() <= prefix_len || !rest.starts_with('<') {
+        return None;
+    }
+    let candidate = rest.get(1..prefix_len)?;
+    if !candidate.eq_ignore_ascii_case(tag) {
+        return None;
+    }
+    let next = rest[prefix_len..].chars().next()?;
+    (next == '>' || next == '/' || next.is_ascii_whitespace()).then_some(prefix_len)
+}
+
 fn starts_with_end_tag_ci(rest: &str, tag: &str) -> Option<usize> {
     let prefix_len = 2 + tag.len();
     if rest.len() <= prefix_len {
@@ -1186,36 +1995,56 @@ fn starts_with_end_tag_ci(rest: &str, tag: &str) -> Option<usize> {
     (next == '>' || next == '/' || next.is_ascii_whitespace()).then_some(prefix_len)
 }
 
-fn step_js_quote(ch: char, js_quote: &mut Option<char>, js_escaped: &mut bool) {
-    if js_quote.is_some() {
-        if *js_escaped {
-            *js_escaped = false;
-        } else if ch == '\\' {
-            *js_escaped = true;
-        } else if Some(ch) == *js_quote {
-            *js_quote = None;
-        }
-    } else if matches!(ch, '"' | '\'' | '`') {
-        *js_quote = Some(ch);
+fn decode_next_html_entity(rest: &str) -> Option<(char, usize)> {
+    if !rest.starts_with('&') {
+        return None;
     }
-}
-
-fn match_html_quote_entity(rest: &str) -> Option<(char, usize)> {
-    for (entity, ch) in [
-        ("&quot;", '"'),
-        ("&#34;", '"'),
-        ("&#x22;", '"'),
-        ("&#39;", '\''),
-        ("&#x27;", '\''),
-        ("&apos;", '\''),
-    ] {
-        if let Some(prefix) = rest.get(..entity.len())
-            && prefix.eq_ignore_ascii_case(entity)
-        {
-            return Some((ch, entity.len()));
+    let search_limit = rest.len().min(16);
+    let semi = rest[..search_limit].find(';')?;
+    let body = &rest[1..semi];
+    let total_len = semi + 1;
+    if let Some(hex_raw) = body.strip_prefix("#x").or_else(|| body.strip_prefix("#X")) {
+        if hex_raw.is_empty() || !hex_raw.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
         }
+        let cp = u32::from_str_radix(hex_raw, 16).ok()?;
+        let ch = if cp == 0 {
+            '\u{FFFD}'
+        } else {
+            char::from_u32(cp).unwrap_or('\u{FFFD}')
+        };
+        return Some((ch, total_len));
     }
-    None
+    if let Some(dec_raw) = body.strip_prefix('#') {
+        if dec_raw.is_empty() || !dec_raw.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let cp = dec_raw.parse::<u32>().ok()?;
+        let ch = if cp == 0 {
+            '\u{FFFD}'
+        } else {
+            char::from_u32(cp).unwrap_or('\u{FFFD}')
+        };
+        return Some((ch, total_len));
+    }
+    let ch = match body {
+        "quot" | "QUOT" => '"',
+        "apos" => '\'',
+        "grave" | "DiacriticalGrave" => '`',
+        "amp" | "AMP" => '&',
+        "lt" | "LT" => '<',
+        "gt" | "GT" => '>',
+        "bsol" => '\\',
+        "sol" => '/',
+        "lbrace" | "lcub" => '{',
+        "rbrace" | "rcub" => '}',
+        "dollar" => '$',
+        "ast" | "midast" => '*',
+        "Tab" => '\t',
+        "NewLine" => '\n',
+        _ => return None,
+    };
+    Some((ch, total_len))
 }
 
 fn parse_var_ident(input: &str) -> Option<&str> {
