@@ -648,14 +648,29 @@
     }
 
     function clonePathFinderOptions(entry) {
-        const copy = { name: entry.name };
-        if (entry.executable !== undefined) copy.executable = entry.executable;
-        if (entry.envVariable !== undefined) copy.envVariable = entry.envVariable;
-        if (entry.cached !== undefined) copy.cached = entry.cached;
-        if (entry.noCache !== undefined) copy.noCache = entry.noCache;
-        if (entry.windows !== undefined) copy.windows = arraySlice(entry.windows);
-        if (entry.linux !== undefined) copy.linux = arraySlice(entry.linux);
-        if (entry.darwin !== undefined) copy.darwin = arraySlice(entry.darwin);
+        const copy = {};
+        defineOwn(copy, "name", entry.name, true, true);
+        if (entry.executable !== undefined) {
+            defineOwn(copy, "executable", entry.executable, true, true);
+        }
+        if (entry.envVariable !== undefined) {
+            defineOwn(copy, "envVariable", entry.envVariable, true, true);
+        }
+        if (entry.cached !== undefined) {
+            defineOwn(copy, "cached", entry.cached, true, true);
+        }
+        if (entry.noCache !== undefined) {
+            defineOwn(copy, "noCache", entry.noCache, true, true);
+        }
+        if (entry.windows !== undefined) {
+            defineOwn(copy, "windows", arraySlice(entry.windows), true, true);
+        }
+        if (entry.linux !== undefined) {
+            defineOwn(copy, "linux", arraySlice(entry.linux), true, true);
+        }
+        if (entry.darwin !== undefined) {
+            defineOwn(copy, "darwin", arraySlice(entry.darwin), true, true);
+        }
         return copy;
     }
 

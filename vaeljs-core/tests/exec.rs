@@ -812,6 +812,39 @@ try {{
 }}
 if (!vetoed) throw new Error("audit handler throw must propagate");
 pathFinder.clear();
+
+// 5. Prototype pollution immunity on PathFinder.set / get / find / findExeSync
+Object.defineProperty(Object.prototype, "cached", {{
+    value: "/tmp/attacker",
+    writable: true,
+    enumerable: false,
+    configurable: true,
+}});
+Object.defineProperty(Object.prototype, "executable", {{
+    set() {{
+        throw new Error("Object.prototype.executable setter invoked");
+    }},
+    configurable: true,
+}});
+try {{
+    const cleanPf = new PathFinder();
+    cleanPf.set("pollute-test", {{ name: "pollute-test" }});
+    const entry = cleanPf.get("pollute-test");
+    if (Object.prototype.hasOwnProperty.call(entry, "cached")) {{
+        throw new Error("PathFinder.set leaked polluted Object.prototype.cached");
+    }}
+    if (cleanPf.findExeSync("pollute-test") === "/tmp/attacker") {{
+        throw new Error("PathFinder.findExeSync resolved polluted Object.prototype.cached");
+    }}
+    cleanPf.set("pollute-exec", {{ name: "pollute-exec", executable: "echo" }});
+    const entry2 = cleanPf.find("pollute-exec");
+    if (entry2.executable !== "echo") {{
+        throw new Error("PathFinder.find failed under Object.prototype.executable setter");
+    }}
+}} finally {{
+    delete Object.prototype.cached;
+    delete Object.prototype.executable;
+}}
 "#,
     ));
 

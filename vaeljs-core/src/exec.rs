@@ -1787,7 +1787,7 @@ fn op_vael_exec_parse_path_finder_options<'s>(
     options: v8::Local<'s, v8::Value>,
 ) -> v8::Local<'s, v8::Value> {
     let obj = response_obj(scope);
-    let out = v8::Object::new(scope);
+    let out = response_obj(scope);
     let mut name_seen: Option<String> = None;
 
     let res = visit_plain_object_own(
