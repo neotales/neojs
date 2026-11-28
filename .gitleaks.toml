@@ -107,12 +107,12 @@ regexes = [
 ]
 
 [[allowlists]]
-description = "Historical V8 source build header SHA-256 checksum in build-bounded.sh"
+description = "Historical V8 source build SHA-256 checksums (KEYS_H_SHA, KEYS_CC_SHA, API_CC_SHA) in build-bounded.sh"
 condition = "AND"
 paths = [
   '''^eng/v8-source/build-bounded\.sh$''',
 ]
 regexTarget = "match"
 regexes = [
-  '''KEYS_H_SHA=[0-9a-f]{64}''',
+  '''(?:KEYS_H|KEYS_CC|API_CC)_SHA=[0-9a-f]{64}''',
 ]
