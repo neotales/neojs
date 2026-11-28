@@ -615,6 +615,21 @@
             return this;
         }
 
+        killGrace(ms) {
+            const spec = this.#spec;
+            if (typeof ms !== "number") {
+                throw new makeTypeError("killGrace must be a number");
+            }
+            if (!numberIsFinite(ms) || ms < 0) {
+                throw new CommandError(
+                    "killGrace must be a non-negative finite number",
+                    "VAEL_EXEC_INVALID_ARGUMENT",
+                );
+            }
+            spec.killGraceMs = ms;
+            return this;
+        }
+
         toArgs() {
             const spec = this.#spec;
             const out = [spec.program];
@@ -633,6 +648,10 @@
             return new Output(res);
         }
 
+        execSync() {
+            return this.outputSync();
+        }
+
         statusSync() {
             const spec = this.#spec;
             const res = hostRunSync(spec);
@@ -645,6 +664,10 @@
             defineOwn(status, "success", res.success, true, false);
             defineOwn(status, "timedOut", res.timedOut, true, false);
             return freeze(status);
+        }
+
+        runSync() {
+            return this.statusSync();
         }
     }
 
@@ -691,10 +714,16 @@
     }
 
     function execSync(programOrArgv, argsOrOptions, maybeOptions) {
+        if (arguments.length === 1 && programOrArgv instanceof Command) {
+            return programOrArgv.outputSync();
+        }
         return new Command(programOrArgv, argsOrOptions, maybeOptions).outputSync();
     }
 
     function runSync(programOrArgv, argsOrOptions, maybeOptions) {
+        if (arguments.length === 1 && programOrArgv instanceof Command) {
+            return programOrArgv.statusSync();
+        }
         return new Command(programOrArgv, argsOrOptions, maybeOptions).statusSync();
     }
 

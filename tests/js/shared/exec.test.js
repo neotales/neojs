@@ -279,7 +279,9 @@ test("envClear, env, cwd, stdin piping, and timeout work deterministically", () 
         const prevInherited = process.env.VAEL_TEST_INHERITED;
         process.env.VAEL_TEST_INHERITED = "from-parent";
         try {
-            const out = cmd(VJS_BIN)
+            const absBin = realpath(whichSync(VJS_BIN));
+            assert.ok(typeof absBin === "string" && absBin.length > 0);
+            const out = cmd(absBin)
                 .arg(envScript)
                 .cwd(workDir)
                 .envClear()

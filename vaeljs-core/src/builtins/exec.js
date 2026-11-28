@@ -16,6 +16,7 @@
     const opValidateTimeout = ops.op_vael_exec_validate_timeout;
     const opValidateMaxOutput = ops.op_vael_exec_validate_max_output;
     const opValidateSignal = ops.op_vael_exec_validate_signal;
+    const opValidateKillGrace = ops.op_vael_exec_validate_kill_grace;
     const opParseCommandOptions = ops.op_vael_exec_parse_command_options;
     const opOutputSync = ops.op_vael_exec_output_sync;
     const opOutputAsync = ops.op_vael_exec_output_async;
@@ -28,6 +29,7 @@
     const opChildReadStdout = ops.op_vael_exec_child_read_stdout;
     const opChildReadStderr = ops.op_vael_exec_child_read_stderr;
     const opChildKill = ops.op_vael_exec_child_kill;
+    const opChildTryWait = ops.op_vael_exec_child_try_wait;
     const opChildWait = ops.op_vael_exec_child_wait;
     const opChildOutput = ops.op_vael_exec_child_output;
     const opChildDispose = ops.op_vael_exec_child_dispose;
@@ -419,6 +421,20 @@
             if (!res.ok) throwExec(res);
         }
 
+        tryWait() {
+            if (arguments.length !== 0) {
+                throw new makeTypeError("tryWait takes no arguments");
+            }
+            if (this.#disposed) {
+                throw new CommandError("child process handle is disposed", {
+                    code: "VAEL_EXEC_INVALID_ARGUMENT",
+                    fileName: this.#fileName,
+                });
+            }
+            const status = unwrapExec(opChildTryWait(this.#id));
+            return status === null ? null : freezeStatus(status);
+        }
+
         async wait() {
             if (arguments.length !== 0) {
                 throw new makeTypeError("wait takes no arguments");
@@ -432,9 +448,9 @@
             return freezeStatus(unwrapExec(await opChildWait(this.#id)));
         }
 
-        async output() {
-            if (arguments.length !== 0) {
-                throw new makeTypeError("output takes no arguments");
+        async waitWithOutput(options) {
+            if (arguments.length > 1) {
+                throw new makeTypeError("waitWithOutput takes zero or one argument");
             }
             if (this.#disposed) {
                 throw new CommandError("child process handle is disposed", {
@@ -442,8 +458,15 @@
                     fileName: this.#fileName,
                 });
             }
-            const raw = unwrapExec(await opChildOutput(this.#id));
+            const raw = unwrapExec(await opChildOutput(this.#id, options));
             return new Output(outputToken, raw, this.#fileName);
+        }
+
+        async output() {
+            if (arguments.length !== 0) {
+                throw new makeTypeError("output takes no arguments");
+            }
+            return await this.waitWithOutput();
         }
     }
 
@@ -762,6 +785,14 @@
             return this;
         }
 
+        killGrace(ms) {
+            if (arguments.length !== 1) {
+                throw new makeTypeError("killGrace takes exactly one argument");
+            }
+            this.#killGraceMs = unwrapExec(opValidateKillGrace(ms));
+            return this;
+        }
+
         toArgs() {
             if (arguments.length !== 0) {
                 throw new makeTypeError("toArgs takes no arguments");
@@ -777,11 +808,25 @@
             return new Output(outputToken, raw, this.#program);
         }
 
+        execSync() {
+            if (arguments.length !== 0) {
+                throw new makeTypeError("execSync takes no arguments");
+            }
+            return this.outputSync();
+        }
+
         statusSync() {
             if (arguments.length !== 0) {
                 throw new makeTypeError("statusSync takes no arguments");
             }
             return freezeStatus(unwrapExec(opStatusSync(this.#specObject())));
+        }
+
+        runSync() {
+            if (arguments.length !== 0) {
+                throw new makeTypeError("runSync takes no arguments");
+            }
+            return this.statusSync();
         }
 
         async output() {
@@ -792,11 +837,25 @@
             return new Output(outputToken, raw, this.#program);
         }
 
+        async exec() {
+            if (arguments.length !== 0) {
+                throw new makeTypeError("exec takes no arguments");
+            }
+            return await this.output();
+        }
+
         async status() {
             if (arguments.length !== 0) {
                 throw new makeTypeError("status takes no arguments");
             }
             return freezeStatus(unwrapExec(await opStatusAsync(this.#specObject())));
+        }
+
+        async run() {
+            if (arguments.length !== 0) {
+                throw new makeTypeError("run takes no arguments");
+            }
+            return await this.status();
         }
 
         spawn() {
@@ -839,6 +898,9 @@
     }
 
     async function exec(programOrArgv, argsOrOptions, maybeOptions) {
+        if (arguments.length === 1 && programOrArgv instanceof Command) {
+            return await programOrArgv.output();
+        }
         if (arguments.length === 1) return await new Command(programOrArgv).output();
         if (arguments.length === 2) {
             return await new Command(programOrArgv, argsOrOptions).output();
@@ -847,6 +909,9 @@
     }
 
     function execSync(programOrArgv, argsOrOptions, maybeOptions) {
+        if (arguments.length === 1 && programOrArgv instanceof Command) {
+            return programOrArgv.outputSync();
+        }
         if (arguments.length === 1) return new Command(programOrArgv).outputSync();
         if (arguments.length === 2) {
             return new Command(programOrArgv, argsOrOptions).outputSync();
@@ -855,6 +920,9 @@
     }
 
     async function run(programOrArgv, argsOrOptions, maybeOptions) {
+        if (arguments.length === 1 && programOrArgv instanceof Command) {
+            return await programOrArgv.status();
+        }
         if (arguments.length === 1) return await new Command(programOrArgv).status();
         if (arguments.length === 2) {
             return await new Command(programOrArgv, argsOrOptions).status();
@@ -863,6 +931,9 @@
     }
 
     function runSync(programOrArgv, argsOrOptions, maybeOptions) {
+        if (arguments.length === 1 && programOrArgv instanceof Command) {
+            return programOrArgv.statusSync();
+        }
         if (arguments.length === 1) return new Command(programOrArgv).statusSync();
         if (arguments.length === 2) {
             return new Command(programOrArgv, argsOrOptions).statusSync();
@@ -871,6 +942,9 @@
     }
 
     function spawnFn(programOrArgv, argsOrOptions, maybeOptions) {
+        if (arguments.length === 1 && programOrArgv instanceof Command) {
+            return programOrArgv.spawn();
+        }
         if (arguments.length === 1) return new Command(programOrArgv).spawn();
         if (arguments.length === 2) {
             return new Command(programOrArgv, argsOrOptions).spawn();

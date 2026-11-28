@@ -258,7 +258,7 @@ Object.defineProperty(Object.prototype, "code", {
     configurable: true,
 });
 
-const err = new ns.FetchError("boom", "VAEL_FETCH_HTTP_STATUS", 503);
+const err = new ns.FetchError("VAEL_FETCH_HTTP_STATUS", "boom", 503);
 if (!(err instanceof ns.FetchError) || err.name !== "FetchError" || err.code !== "VAEL_FETCH_HTTP_STATUS" || err.status !== 503) {
     throw new Error("FetchError construction failed under mutated primordials");
 }

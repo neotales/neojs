@@ -1480,6 +1480,35 @@ fn op_vael_exec_validate_signal<'s>(
 }
 
 #[op2]
+fn op_vael_exec_validate_kill_grace<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Value> {
+    let obj = response_obj(scope);
+    let res = parse_non_negative_duration_ms(
+        scope,
+        value,
+        "killGrace must be a number",
+        "killGrace must be a non-negative finite number",
+    )
+    .and_then(|d| {
+        CommandSpec::new("p")?
+            .kill_grace(d)
+            .map(|_| d)
+            .map_err(ExecBindingError::from)
+    });
+    match res {
+        Ok(d) => {
+            set_bool(scope, obj, "ok", true);
+            #[allow(clippy::cast_precision_loss)]
+            set_number(scope, obj, "value", d.as_millis() as f64);
+        }
+        Err(err) => set_failure(scope, obj, &err),
+    }
+    obj.into()
+}
+
+#[op2]
 fn op_vael_exec_parse_command_options<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     value: v8::Local<'s, v8::Value>,
@@ -2254,6 +2283,61 @@ fn wait_child_inner_blocking(inner: &ChildInner) -> Result<CommandStatus, ExecEr
 }
 
 #[op2]
+fn op_vael_exec_child_try_wait<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    state: &mut OpState,
+    #[smi] rid: ResourceId,
+) -> v8::Local<'s, v8::Value> {
+    let obj = response_obj(scope);
+    let inner = {
+        let Some(res) = state.resource_table.get::<ChildProcessResource>(rid).ok() else {
+            set_failure(
+                scope,
+                obj,
+                &ExecBindingError::invalid_arg("child process handle is disposed"),
+            );
+            return obj.into();
+        };
+        if res.inner.disposed.load(Ordering::Acquire) {
+            set_failure(
+                scope,
+                obj,
+                &ExecBindingError::invalid_arg("child process handle is disposed"),
+            );
+            return obj.into();
+        }
+        Arc::clone(&res.inner)
+    };
+
+    let mut guard = inner
+        .child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(ref mut child) = *guard else {
+        set_failure(
+            scope,
+            obj,
+            &ExecBindingError::invalid_arg("child process handle is disposed"),
+        );
+        return obj.into();
+    };
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            set_bool(scope, obj, "ok", true);
+            let val = command_status_to_v8(scope, &status);
+            set(scope, obj, "value", val.into());
+        }
+        Ok(None) => {
+            set_bool(scope, obj, "ok", true);
+            let null_val: v8::Local<'s, v8::Value> = v8::null(scope).into();
+            set(scope, obj, "value", null_val);
+        }
+        Err(err) => set_failure(scope, obj, &ExecBindingError::from(err)),
+    }
+    obj.into()
+}
+
+#[op2]
 async fn op_vael_exec_child_wait(
     state: Rc<RefCell<OpState>>,
     #[smi] rid: ResourceId,
@@ -2299,8 +2383,13 @@ fn drain_pipe_bounded(
     })
 }
 
-fn wait_with_optional_timeout(inner: &ChildInner) -> Result<(CommandStatus, bool), ExecError> {
-    let deadline = inner.timeout.and_then(|d| Instant::now().checked_add(d));
+fn wait_with_optional_timeout(
+    inner: &ChildInner,
+    timeout_override: Option<Duration>,
+) -> Result<(CommandStatus, bool), ExecError> {
+    let deadline = timeout_override
+        .or(inner.timeout)
+        .and_then(|d| Instant::now().checked_add(d));
     let mut sleep_dur = Duration::from_millis(1);
     let mut timed_out = false;
     let mut escalated = false;
@@ -2360,11 +2449,70 @@ fn wait_with_optional_timeout(inner: &ChildInner) -> Result<(CommandStatus, bool
     }
 }
 
+#[derive(Default)]
+struct ChildOutputOptions {
+    max_output_bytes: Option<usize>,
+    timeout: Option<Duration>,
+}
+
+struct ChildOutputOptionsArg(Result<ChildOutputOptions, ExecBindingError>);
+
+impl<'a> FromV8<'a> for ChildOutputOptionsArg {
+    type Error = JsErrorBox;
+
+    fn from_v8<'i>(
+        scope: &mut v8::PinScope<'a, 'i>,
+        value: v8::Local<'a, v8::Value>,
+    ) -> Result<Self, Self::Error> {
+        if value.is_undefined() {
+            return Ok(Self(Ok(ChildOutputOptions::default())));
+        }
+        let mut parsed = ChildOutputOptions::default();
+        let res = visit_plain_object_own(
+            scope,
+            value,
+            "waitWithOutput options must be a plain object",
+            |scope, key, val| match key {
+                "maxOutputBytes" => {
+                    if !val.is_undefined() {
+                        let n = parse_max_output_bytes(scope, val)?;
+                        CommandSpec::new("p")?.max_output_bytes(n)?;
+                        parsed.max_output_bytes = Some(n);
+                    }
+                    Ok(())
+                }
+                "timeout" | "timeoutMs" => {
+                    if !val.is_undefined() {
+                        let d = parse_positive_duration_ms(
+                            scope,
+                            val,
+                            "timeout must be a number",
+                            "timeout must be greater than zero",
+                        )?;
+                        CommandSpec::new("p")?.timeout(d)?;
+                        parsed.timeout = Some(d);
+                    }
+                    Ok(())
+                }
+                _ => Err(ExecBindingError::invalid_arg(
+                    "unknown waitWithOutput option",
+                )),
+            },
+        );
+        Ok(Self(res.map(|()| parsed)))
+    }
+}
+
 #[op2]
 async fn op_vael_exec_child_output(
     state: Rc<RefCell<OpState>>,
     #[smi] rid: ResourceId,
+    #[scoped] opts: ChildOutputOptionsArg,
 ) -> ExecOpOutcome {
+    let opts = match opts.0 {
+        Ok(o) => o,
+        Err(err) => return ExecOpOutcome::Err(err),
+    };
     let inner = match get_child_inner(&state, rid) {
         Ok(i) => i,
         Err(err) => return ExecOpOutcome::Err(err),
@@ -2379,11 +2527,11 @@ async fn op_vael_exec_child_output(
     let stderr_pipe = inner.stderr.lock().await.take();
 
     let join = match spawn_blocking_work(&state, move || {
-        let max_bytes = inner.max_output_bytes;
+        let max_bytes = opts.max_output_bytes.unwrap_or(inner.max_output_bytes);
         let out_handle = stdout_pipe.map(|p| drain_pipe_bounded(p, max_bytes));
         let err_handle = stderr_pipe.map(|p| drain_pipe_bounded(p, max_bytes));
 
-        let (status, timed_out) = wait_with_optional_timeout(&inner)?;
+        let (status, timed_out) = wait_with_optional_timeout(&inner, opts.timeout)?;
 
         let (stdout, out_exceeded, out_err) = match out_handle.map(|h| h.join()) {
             Some(Ok(Ok((buf, exceeded)))) => (buf, exceeded, None),
@@ -2776,6 +2924,7 @@ deno_core::extension!(
         op_vael_exec_validate_timeout,
         op_vael_exec_validate_max_output,
         op_vael_exec_validate_signal,
+        op_vael_exec_validate_kill_grace,
         op_vael_exec_parse_command_options,
         op_vael_exec_output_sync,
         op_vael_exec_output_async,
@@ -2788,6 +2937,7 @@ deno_core::extension!(
         op_vael_exec_child_read_stdout,
         op_vael_exec_child_read_stderr,
         op_vael_exec_child_kill,
+        op_vael_exec_child_try_wait,
         op_vael_exec_child_wait,
         op_vael_exec_child_output,
         op_vael_exec_child_dispose,

@@ -81,7 +81,7 @@
     }
 
     class FetchError extends makeError {
-        constructor(message, code = "VAEL_FETCH_NETWORK", status = undefined) {
+        constructor(code = "VAEL_FETCH_NETWORK", message = "", status = undefined) {
             super(message === undefined ? "" : makeString(message));
             defineOwn(this, "name", "FetchError", false, true);
             defineOwn(
@@ -98,7 +98,7 @@
     }
 
     function makeFetchError(err) {
-        return new FetchError(err.message, err.code, err.status);
+        return new FetchError(err.code, err.message, err.status);
     }
 
     class FetchResponse {
@@ -172,7 +172,7 @@
                 const msg = err && typeof err.message === "string"
                     ? `response body is not valid JSON: ${err.message}`
                     : "response body is not valid JSON";
-                throw new FetchError(msg, "VAEL_FETCH_INVALID_JSON");
+                throw new FetchError("VAEL_FETCH_INVALID_JSON", msg);
             }
         }
     }

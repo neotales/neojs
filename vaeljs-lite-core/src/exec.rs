@@ -559,6 +559,7 @@ struct RawCommandOptions<'js> {
     max_output_bytes: Option<Value<'js>>,
     kill_signal: Option<Value<'js>>,
     kill_grace_ms: Option<Value<'js>>,
+    kill_grace: Option<Value<'js>>,
 }
 
 fn host_parse_command_options<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<Object<'js>> {
@@ -587,6 +588,7 @@ fn host_parse_command_options<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Res
                 "maxOutputBytes" => fields.max_output_bytes = Some(val.clone()),
                 "killSignal" => fields.kill_signal = Some(val.clone()),
                 "killGraceMs" => fields.kill_grace_ms = Some(val.clone()),
+                "killGrace" => fields.kill_grace = Some(val.clone()),
                 _ => unknown = true,
             }
             Ok(())
@@ -879,18 +881,26 @@ fn host_parse_command_options<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Res
         )?;
     }
 
-    if let Some(ref val) = fields.kill_grace_ms
-        && !val.is_undefined()
-    {
-        if let Err(e) = parse_duration_ms(&ctx, val, true, "killGraceMs")? {
+    let kill_grace_val = match (fields.kill_grace_ms, fields.kill_grace) {
+        (Some(a), Some(b)) if !a.is_undefined() && !b.is_undefined() => {
+            return error_object(
+                &ctx,
+                &ExecError::InvalidArgument {
+                    reason: "cannot specify both killGrace and killGraceMs",
+                },
+            );
+        }
+        (Some(a), _) if !a.is_undefined() => Some(a),
+        (_, Some(b)) if !b.is_undefined() => Some(b),
+        _ => None,
+    };
+    if let Some(val) = kill_grace_val {
+        if let Err(e) = parse_duration_ms(&ctx, &val, true, "killGrace")? {
             return error_object(&ctx, &e);
         }
         out.prop(
             "killGraceMs",
-            Property::from(val.clone())
-                .writable()
-                .enumerable()
-                .configurable(),
+            Property::from(val).writable().enumerable().configurable(),
         )?;
     }
 
