@@ -1097,22 +1097,17 @@ fn html_escape_hardening_blocks_comments_script_double_escape_and_url_split() {
         "<!-- a --!><script>var x=\"\\u0022;alert(1)\\u002f\\u002f\";</script>"
     );
     assert_eq!(
-        render(
-            "<!-- -{{.c}}><script>var x=\"{{.u}}\";</script>",
-            &json!({ "c": "-", "u": "-->alert(1)" }),
-            &opts,
-        )
-        .unwrap(),
-        "<!-- -&#45;><script>var x=\"&#45;&#45;&gt;alert(1)\";</script>"
+        render("<!-- {{.c}} -->", &json!({ "c": "-!-" }), &opts,).unwrap(),
+        "<!-- &#45;&#33;&#45; -->"
     );
     assert_eq!(
         render(
-            "<!-- -{{.c}}><script>var x=\"{{.u}}\";</script>",
-            &json!({ "c": "-!", "u": "--!>alert(1)" }),
+            "<!-- hello {{.name}} -->",
+            &json!({ "name": "world --> <script>" }),
             &opts,
         )
         .unwrap(),
-        "<!-- -&#45;&#33;><script>var x=\"&#45;&#45;&#33;&gt;alert(1)\";</script>"
+        "<!-- hello world &#45;&#45;&gt; &lt;script&gt; -->"
     );
     assert_eq!(
         render(
@@ -1224,5 +1219,333 @@ fn html_escape_hardening_blocks_js_lexer_and_bogus_comment_pocs() {
         )
         .unwrap(),
         "</1 title=\"><script>var x=\"alert(1)\";</script>\">"
+    );
+}
+
+#[test]
+fn html_escape_hardening_rejects_non_text_eof_and_comment_substate_pocs() {
+    let opts = TemplateOptions {
+        html_escape: true,
+        ..TemplateOptions::default()
+    };
+
+    // 1. Non-Text EOF state rejected in CompiledTemplate and TemplateSet (main, define, block).
+    for unclosed in [
+        "<script>var x = {{.x}};",
+        "<script>",
+        "<!-- {{.x}}",
+        "<div title=\"{{.x}}",
+        "<style>p { color: {{.x}};",
+        "<textarea>{{.x}}",
+        "<title>{{.x}}",
+    ] {
+        assert!(
+            matches!(
+                render(unclosed, &json!({ "x": "1" }), &opts),
+                Err(TemplateError::Parse(_))
+            ),
+            "expected EOF Parse error for {unclosed:?}"
+        );
+    }
+
+    let mut open_set = TemplateSet::new(opts.clone());
+    assert!(matches!(
+        open_set.add("open", "<script>"),
+        Err(TemplateError::Parse(_))
+    ));
+    assert!(matches!(
+        open_set.add("defs", "{{define \"open\"}}<script>{{end}}"),
+        Err(TemplateError::Parse(_))
+    ));
+    assert!(matches!(
+        open_set.add("blk", "{{block \"open\" .}}<script>{{end}}"),
+        Err(TemplateError::Parse(_))
+    ));
+    assert!(matches!(
+        open_set.add("open_comment", "<!-- {{.x}}"),
+        Err(TemplateError::Parse(_))
+    ));
+    assert!(matches!(
+        open_set.add("open_attr", "<div title=\"{{.x}}"),
+        Err(TemplateError::Parse(_))
+    ));
+
+    // 2. HTML5 comment substates, branch equality, and close-token lookahead.
+    for bad_comment in [
+        "<!--{{if .x}}foo{{end}}><script>var a=\"{{.u}}\";</script>",
+        "<!--{{.c}}><script>var x=\"{{.u}}\";</script>",
+        "<!---{{.c}}><script>var x=\"{{.u}}\";</script>",
+        "<!-- a --{{.c}}><script>var x=\"{{.u}}\";</script>",
+        "<!-- a --!{{.c}}><script>var x=\"{{.u}}\";</script>",
+        "<!-- a -{{.c}}->",
+        "<!-- -{{.c}}><script>var x=\"{{.u}}\";</script>",
+        "<!-- {{if .x}}--{{end}}> -->",
+        "<!-- {{if .x}}foo{{end}}>",
+        "<!-- {{.a}}{{if .x}}foo{{end}}>",
+        "<!-- {{.c}}->",
+        "<!-- {{.c}}!>",
+        "<!-- {{- .c}} -->",
+        "<!-- {{.c -}} > -->",
+        "<!{{if .c}}--{{end}}foo><script>var a=\"{{.u}}\";</script>",
+    ] {
+        assert!(
+            matches!(
+                render(bad_comment, &json!({}), &opts),
+                Err(TemplateError::Parse(_))
+            ),
+            "expected compile Parse error for comment PoC {bad_comment:?}"
+        );
+    }
+    assert_eq!(
+        render(
+            "<!-- {{if .x}}hello{{else}}world{{end}} -->",
+            &json!({ "x": true }),
+            &opts
+        )
+        .unwrap(),
+        "<!-- hello -->"
+    );
+}
+
+#[test]
+fn html_escape_hardening_handles_utf8_entities_and_js_line_continuations() {
+    let opts = TemplateOptions {
+        html_escape: true,
+        ..TemplateOptions::default()
+    };
+
+    // 3. UTF-8 panic DoS & WHATWG numeric/named HTML entity decoding in `on*`.
+    assert_eq!(
+        render(
+            "<button onclick=\"&aaaaaaaaaaaaaa\u{00e9}; f({{.x}})\">go</button>",
+            &json!({ "x": "1);alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<button onclick=\"&aaaaaaaaaaaaaa\u{00e9}; f(&quot;1);alert(1)\\u002f\\u002f&quot;)\">go</button>"
+    );
+    assert_eq!(
+        render(
+            "<button onclick=\"f(&#96+{{.x}}+&#96)\">go</button>",
+            &json!({ "x": "${alert(1)}" }),
+            &opts,
+        )
+        .unwrap(),
+        "<button onclick=\"f(&#96+\\u0024{alert(1)}+&#96)\">go</button>"
+    );
+    assert_eq!(
+        render(
+            "<button onclick=\"f(&#00000000000000000096;{{.x}}&#00000000000000000096;)\">go</button>",
+            &json!({ "x": "${alert(1)}" }),
+            &opts,
+        )
+        .unwrap(),
+        "<button onclick=\"f(&#00000000000000000096;\\u0024{alert(1)}&#00000000000000000096;)\">go</button>"
+    );
+    assert_eq!(
+        render(
+            "<button onclick=\"&#47* ' */ {{.x}}\">go</button>",
+            &json!({ "x": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<button onclick=\"&#47* ' */ &quot;alert(1)&quot;\">go</button>"
+    );
+    assert_eq!(
+        render(
+            "<button onclick=\"&#0000000000000000047;* &#39; */ {{.x}}\">go</button>",
+            &json!({ "x": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<button onclick=\"&#0000000000000000047;* &#39; */ &quot;alert(1)&quot;\">go</button>"
+    );
+    assert_eq!(
+        render(
+            "<button onclick=\"&#x99999999999999999999; f(&quot+{{.x}}+&quot)\">go</button>",
+            &json!({ "x": "\";alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<button onclick=\"&#x99999999999999999999; f(&quot+\\u0022;alert(1)\\u002f\\u002f+&quot)\">go</button>"
+    );
+
+    // 4. JS LineContinuation (`\<newline>`, `\<CR><LF>`, `\u2028`, `\u2029`) inside quoted strings.
+    assert_eq!(
+        render(
+            "<script>var s = \"\\\n{{.x}}\";</script>",
+            &json!({ "x": "\";alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var s = \"\\\n\\u0022;alert(1)\\u002f\\u002f\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<script>var s = \"\\\r\n{{.x}}\";</script>",
+            &json!({ "x": "\";alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var s = \"\\\r\n\\u0022;alert(1)\\u002f\\u002f\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<script>var s = \"\\\r{{.x}}\";</script>",
+            &json!({ "x": "\";alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var s = \"\\\r\\u0022;alert(1)\\u002f\\u002f\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<script>var s = \"\\\u{2028}{{.x}}\";</script>",
+            &json!({ "x": "\";alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var s = \"\\\u{2028}\\u0022;alert(1)\\u002f\\u002f\";</script>"
+    );
+}
+
+#[test]
+fn html_escape_hardening_fail_closes_js_regex_division_ambiguity() {
+    let opts = TemplateOptions {
+        html_escape: true,
+        ..TemplateOptions::default()
+    };
+
+    // 5. Fail-closed JS regex-vs-division disambiguation & `++`/`--` & `.return` & trailing `\`/`$`.
+    for bad_js in [
+        "<script>{{if .c}}var x=1{{else}}var x=1+{{end}} /a\"/; var y={{.u}}+\"\";</script>",
+        "<script>{{if .c}}var x=1 {{else}}var x=1+{{end}} /a\"/; var y={{.u}}+\"\";</script>",
+        "<script>var x={} /a\"/; var y={{.u}}+\"\";</script>",
+        "<script>if (1) /\"/; var y={{.u}};</script>",
+        "<script>if (1) /* c */ /\"/; var y={{.u}};</script>",
+        "<button onclick=\"if (1) /'/; {{.u}}\">go</button>",
+        "<script>var s = \"\\{{.x}}\";</script>",
+        "<script>var s = `${{.x}}`;</script>",
+        "<script>var r = /{{.x}}/; var y = {{.u}};</script>",
+        "<script>{{if .c}}\n{{else}}var x=1;{{end}}--> \"\nvar y={{.u}};</script>",
+        "<script>var s=\"</scr{{.x}}ipt>\";</script>",
+        "<style>p{}</style{{.x}}>",
+    ] {
+        assert!(
+            matches!(
+                render(bad_js, &json!({}), &opts),
+                Err(TemplateError::Parse(_))
+            ),
+            "expected compile Parse error for JS/tag PoC {bad_js:?}"
+        );
+    }
+    assert_eq!(
+        render(
+            "<script>var y = x++ / b + \"{{.x}}\";</script>",
+            &json!({ "x": "\";alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var y = x++ / b + \"\\u0022;alert(1)\\u002f\\u002f\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<script>var y = x-- / b + \"{{.x}}\";</script>",
+            &json!({ "x": "\";alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var y = x-- / b + \"\\u0022;alert(1)\\u002f\\u002f\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<script>var x = obj.return /a\"/; var y={{.u}}+\"\";</script>",
+            &json!({ "u": "\";alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var x = obj.return /a\"/; var y=\\u0022;alert(1)\\u002f\\u002f+\"\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<script>var x = obj.return / a; var y={{.u}};</script>",
+            &json!({ "u": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var x = obj.return / a; var y=\"alert(1)\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<script>var x = 1 + /* {{.x}} */ /\"/; var y={{.u}};</script>",
+            &json!({ "x": "ok", "u": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var x = 1 + /* \"ok\" */ /\"/; var y=\"alert(1)\";</script>"
+    );
+}
+
+#[test]
+fn html_escape_hardening_rejects_unsafe_url_schemes_and_isolates_rcdata() {
+    let opts = TemplateOptions {
+        html_escape: true,
+        ..TemplateOptions::default()
+    };
+
+    // 6. URL attribute static unsafe schemes & static `:` after dynamic prefix.
+    for bad_url_tpl in [
+        "<a href=\"javascript:{{.u}}\">x</a>",
+        "<a href=\"vbscript:{{.u}}\">x</a>",
+        "<a href=\"data:{{.u}}\">x</a>",
+        "<a href=\"java&#115;cript:{{.u}}\">x</a>",
+        "<a href=\"java&#x09;script:{{.u}}\">x</a>",
+        "<a href=\"javascript&#58;{{.u}}\">x</a>",
+        "<a href=\"javascript&colon;{{.u}}\">x</a>",
+        "<a href=javascript:{{.u}}>x</a>",
+        "<a href=\"{{.a}}:{{.b}}\">x</a>",
+        "<a href=\"{{.a}}:alert(1)\">x</a>",
+        "<a href=\"{{.a}}&#58;alert(1)\">x</a>",
+        "<a href=\"{{.a}}&colon;alert(1)\">x</a>",
+        "<a href=\"{{.a}}&#58{{.b}}\">x</a>",
+        "<a href=\"{{if .c}}java{{end}}:alert(1)\">x</a>",
+        "<a href=\"{{if .c}}java{{end}}http:{{.u}}\">x</a>",
+    ] {
+        assert!(
+            matches!(
+                render(bad_url_tpl, &json!({}), &opts),
+                Err(TemplateError::Parse(_))
+            ),
+            "expected compile Parse error for URL PoC {bad_url_tpl:?}"
+        );
+    }
+    assert_eq!(
+        render(
+            "<img src=\"data:image/png;base64,iVBOR\"><a href=\"https&#58;//example.com/{{.p}}:8080\">ok</a>",
+            &json!({ "p": "v1" }),
+            &opts,
+        )
+        .unwrap(),
+        "<img src=\"data:image/png;base64,iVBOR\"><a href=\"https&#58;//example.com/v1:8080\">ok</a>"
+    );
+
+    // 7. RCDATA isolation (`<textarea>`, `<title>`).
+    assert_eq!(
+        render(
+            "<textarea><script></textarea><a href={{.u}}>",
+            &json!({ "u": "javascript:alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<textarea><script></textarea><a href=#ZgotmplZ>"
+    );
+    assert_eq!(
+        render(
+            "<title><!--</title><a href=\"{{.u}}\">x</a>",
+            &json!({ "u": "javascript:alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<title><!--</title><a href=\"#ZgotmplZ\">x</a>"
     );
 }

@@ -549,12 +549,12 @@ test("htmlEscape: true security hardening blocks branch divergence, marker bypas
         '<!-- a --!><script>var x="\\u0022;alert(1)\\u002f\\u002f";</script>',
     );
     assert.strictEquals(
-        render('<!-- -{{.c}}><script>var x="{{.u}}";</script>', { c: "-", u: "-->alert(1)" }, opts),
-        '<!-- -&#45;><script>var x="&#45;&#45;&gt;alert(1)";</script>',
+        render('<!-- {{.c}} -->', { c: "-!-" }, opts),
+        '<!-- &#45;&#33;&#45; -->',
     );
     assert.strictEquals(
-        render('<!-- -{{.c}}><script>var x="{{.u}}";</script>', { c: "-!", u: "--!>alert(1)" }, opts),
-        '<!-- -&#45;&#33;><script>var x="&#45;&#45;&#33;&gt;alert(1)";</script>',
+        render('<!-- hello {{.name}} -->', { name: "world --> <script>" }, opts),
+        '<!-- hello world &#45;&#45;&gt; &lt;script&gt; -->',
     );
     assert.strictEquals(
         render("<script><!-- <script> </script> var x={{.u}}; --></script>", { u: "alert(1)" }, opts),
@@ -587,5 +587,126 @@ test("htmlEscape: true security hardening blocks branch divergence, marker bypas
     assert.strictEquals(
         render('</1 title="><script>var x={{.u}};</script>">', { u: "alert(1)" }, opts),
         '</1 title="><script>var x="alert(1)";</script>">',
+    );
+});
+
+test("htmlEscape: true fail-closes EOF non-Text states, comment substates, UTF-8/numeric entities, line continuations, JS slash ambiguity, and static URL schemes", () => {
+    const opts = { htmlEscape: true };
+
+    // 1. Non-Text EOF state check (CompiledTemplate & TemplateSet)
+    for (const unclosed of [
+        "<script>var x = {{.x}};",
+        "<script>",
+        "<!-- {{.x}}",
+        '<div title="{{.x}}',
+        "<style>p { color: {{.x}};",
+        "<textarea>{{.x}}",
+        "<title>{{.x}}",
+    ]) {
+        expectTemplateError(() => render(unclosed, { x: "1" }, opts), "PARSE");
+    }
+
+    const openSet = createTemplateSet(opts);
+    expectTemplateError(() => openSet.add("open", "<script>"), "PARSE");
+    expectTemplateError(() => openSet.add("defs", '{{define "open"}}<script>{{end}}'), "PARSE");
+    expectTemplateError(() => openSet.add("blk", '{{block "open" .}}<script>{{end}}'), "PARSE");
+
+    // 2. HTML5 comment substates, branch equality, and close-token lookahead
+    for (const badComment of [
+        '<!--{{if .x}}foo{{end}}><script>var a="{{.u}}";</script>',
+        '<!--{{.c}}><script>var x="{{.u}}";</script>',
+        '<!---{{.c}}><script>var x="{{.u}}";</script>',
+        '<!-- a --{{.c}}><script>var x="{{.u}}";</script>',
+        '<!-- a --!{{.c}}><script>var x="{{.u}}";</script>',
+        "<!-- a -{{.c}}->",
+        '<!-- -{{.c}}><script>var x="{{.u}}";</script>',
+        "<!-- {{if .x}}--{{end}}> -->",
+        "<!-- {{if .x}}foo{{end}}>",
+        "<!-- {{.a}}{{if .x}}foo{{end}}>",
+        "<!-- {{.c}}->",
+        "<!-- {{.c}}!>",
+        "<!-- {{- .c}} -->",
+    ]) {
+        expectTemplateError(() => render(badComment, {}, opts), "PARSE");
+    }
+    assert.strictEquals(
+        render("<!-- {{if .x}}hello{{else}}world{{end}} -->", { x: true }, opts),
+        "<!-- hello -->",
+    );
+
+    // 3. UTF-8 entity scan safety & WHATWG numeric/named HTML entities in `on*`
+    assert.strictEquals(
+        render('<button onclick="&aaaaaaaaaaaaaa\u00e9; f({{.x}})">go</button>', { x: "1);alert(1)//" }, opts),
+        '<button onclick="&aaaaaaaaaaaaaa\u00e9; f(&quot;1);alert(1)\\u002f\\u002f&quot;)">go</button>',
+    );
+    assert.strictEquals(
+        render('<button onclick="f(&#96+{{.x}}+&#96)">go</button>', { x: "${alert(1)}" }, opts),
+        '<button onclick="f(&#96+\\u0024{alert(1)}+&#96)">go</button>',
+    );
+    assert.strictEquals(
+        render('<button onclick="f(&#00000000000000000096;{{.x}}&#00000000000000000096;)">go</button>', { x: "${alert(1)}" }, opts),
+        '<button onclick="f(&#00000000000000000096;\\u0024{alert(1)}&#00000000000000000096;)">go</button>',
+    );
+    assert.strictEquals(
+        render("<button onclick=\"&#47* ' */ {{.x}}\">go</button>", { x: "alert(1)" }, opts),
+        '<button onclick="&#47* \' */ &quot;alert(1)&quot;">go</button>',
+    );
+    assert.strictEquals(
+        render('<button onclick="&#0000000000000000047;* &#39; */ {{.x}}">go</button>', { x: "alert(1)" }, opts),
+        '<button onclick="&#0000000000000000047;* &#39; */ &quot;alert(1)&quot;">go</button>',
+    );
+
+    // 4. JS LineContinuation (`\<newline>` and `\<CR><LF>`) inside quoted strings
+    assert.strictEquals(
+        render('<script>var s = "\\\n{{.x}}";</script>', { x: '";alert(1)//' }, opts),
+        '<script>var s = "\\\n\\u0022;alert(1)\\u002f\\u002f";</script>',
+    );
+    assert.strictEquals(
+        render('<script>var s = "\\\r\n{{.x}}";</script>', { x: '";alert(1)//' }, opts),
+        '<script>var s = "\\\r\n\\u0022;alert(1)\\u002f\\u002f";</script>',
+    );
+
+    // 5. Fail-closed JS regex-vs-division disambiguation & `++`/`--`
+    for (const badJs of [
+        '<script>{{if .c}}var x=1{{else}}var x=1+{{end}} /a"/; var y={{.u}}+"";</script>',
+        '<script>var x={} /a"/; var y={{.u}}+"";</script>',
+        '<script>if (1) /"/; var y={{.u}};</script>',
+        '<script>var s = "\\{{.x}}";</script>',
+        "<script>var s = `${{.x}}`;</script>",
+        '<script>var r = /{{.x}}/; var y = {{.u}};</script>',
+    ]) {
+        expectTemplateError(() => render(badJs, {}, opts), "PARSE");
+    }
+    assert.strictEquals(
+        render('<script>var y = x++ / b + "{{.x}}";</script>', { x: '";alert(1)//' }, opts),
+        '<script>var y = x++ / b + "\\u0022;alert(1)\\u002f\\u002f";</script>',
+    );
+    assert.strictEquals(
+        render('<script>var x = obj.return /a"/; var y={{.u}}+"";</script>', { u: '";alert(1)//' }, opts),
+        '<script>var x = obj.return /a"/; var y=\\u0022;alert(1)\\u002f\\u002f+"";</script>',
+    );
+    assert.strictEquals(
+        render("<script>var x = obj.return / a; var y={{.u}};</script>", { u: "alert(1)" }, opts),
+        '<script>var x = obj.return / a; var y="alert(1)";</script>',
+    );
+
+    // 6. URL static unsafe schemes & static `:` after dynamic prefix
+    for (const badUrlTpl of [
+        '<a href="javascript:{{.u}}">x</a>',
+        '<a href="vbscript:{{.u}}">x</a>',
+        '<a href="data:{{.u}}">x</a>',
+        '<a href="java&#115;cript:{{.u}}">x</a>',
+        '<a href="{{.a}}:{{.b}}">x</a>',
+        '<a href="{{.a}}:alert(1)">x</a>',
+        '<a href="{{.a}}&#58;alert(1)">x</a>',
+        '<a href="{{.a}}&colon;alert(1)">x</a>',
+    ]) {
+        expectTemplateError(() => render(badUrlTpl, {}, opts), "PARSE");
+    }
+
+    // 7. RCDATA isolation
+    assert.strictEquals(
+        render("<textarea><script></textarea><a href={{.u}}>", { u: "javascript:alert(1)" }, opts),
+        "<textarea><script></textarea><a href=#ZgotmplZ>",
     );
 });
