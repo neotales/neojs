@@ -4588,6 +4588,8 @@ dependencies = [
  "vaeljs-builtins",
  "vaeljs-crypto-core",
  "vaeljs-dts",
+ "vaeljs-exec-core",
+ "vaeljs-fetch-core",
  "vaeljs-fs-core",
  "vaeljs-manifest",
  "vaeljs-module-policy",
