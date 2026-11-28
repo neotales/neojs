@@ -1549,3 +1549,93 @@ fn html_escape_hardening_rejects_unsafe_url_schemes_and_isolates_rcdata() {
         "<title><!--</title><a href=\"#ZgotmplZ\">x</a>"
     );
 }
+
+#[test]
+fn html_escape_hardening_handles_consecutive_comments_decimal_dot_noscript_asi_and_unicode_ident() {
+    let opts = TemplateOptions {
+        html_escape: true,
+        ..TemplateOptions::default()
+    };
+
+    // 1. Consecutive `Token::Comment` trim scanning and coalescing.
+    assert_eq!(
+        render(
+            "<!-- {{/* a */}}{{- /* b */}}><script>var a=\"{{.u}}\";</script>-->",
+            &json!({ "u": "\";alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<!--><script>var a=\"\\u0022;alert(1)\\u002f\\u002f\";</script>-->"
+    );
+    assert_eq!(
+        render(
+            "<script>/ {{/* a */}}{{- /* b */}}* / ' */ var y = {{.u}}; /* ' */</script>",
+            &json!({ "u": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>/* / ' */ var y = \"alert(1)\"; /* ' */</script>"
+    );
+
+    // 2. Trailing decimal point (`1.\n`) does not suppress keyword recognition, while `1..toString()` still marks member access.
+    assert_eq!(
+        render(
+            "<script>var x = 1.\ntypeof /\"/; var y = {{.u}}; // \"\n</script>",
+            &json!({ "u": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var x = 1.\ntypeof /\"/; var y = \"alert(1)\"; // \"\n</script>"
+    );
+    assert_eq!(
+        render(
+            "<script>var x = 1..typeof /\"/; var y = {{.u}}+\"\";</script>",
+            &json!({ "u": "\";alert(1)//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var x = 1..typeof /\"/; var y = \\u0022;alert(1)\\u002f\\u002f+\"\";</script>"
+    );
+
+    // 3. `<noscript>` as `HtmlState::RawText`.
+    assert_eq!(
+        render(
+            "<noscript><div title=\"</noscript><script>var x={{.u}};</script>\"></noscript>",
+            &json!({ "u": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<noscript><div title=\"</noscript><script>var x=\"alert(1)\";</script>\"></noscript>"
+    );
+
+    // 4. Labeled `break` / `continue` ASI before `/`.
+    assert_eq!(
+        render(
+            "<script>l: { break l\n/a'b/; } var y = {{.x}};</script>",
+            &json!({ "x": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>l: { break l\n/a'b/; } var y = \"alert(1)\";</script>"
+    );
+    assert_eq!(
+        render(
+            "<script>l: for (;;) { continue l\n/a'b/; } var y = {{.x}};</script>",
+            &json!({ "x": "alert(1)" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>l: for (;;) { continue l\n/a'b/; } var y = \"alert(1)\";</script>"
+    );
+
+    // 5. Non-ASCII JS identifier chars (`éreturn` is not keyword `return`).
+    assert_eq!(
+        render(
+            "<script>var x = \u{00e9}return / 2 + \"{{.u}}\";</script>",
+            &json!({ "u": "\";alert(1);//" }),
+            &opts,
+        )
+        .unwrap(),
+        "<script>var x = \u{00e9}return / 2 + \"\\u0022;alert(1);\\u002f\\u002f\";</script>"
+    );
+}

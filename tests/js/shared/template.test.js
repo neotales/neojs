@@ -709,4 +709,30 @@ test("htmlEscape: true fail-closes EOF non-Text states, comment substates, UTF-8
         render("<textarea><script></textarea><a href={{.u}}>", { u: "javascript:alert(1)" }, opts),
         "<textarea><script></textarea><a href=#ZgotmplZ>",
     );
+
+    // 8. Consecutive comments trim/coalescing, decimal dot vs member access, <noscript> RawText, labeled break ASI, non-ASCII JS ident
+    assert.strictEquals(
+        render('<!-- {{/* a */}}{{- /* b */}}><script>var a="{{.u}}";</script>-->', { u: '";alert(1)//' }, opts),
+        '<!--><script>var a="\\u0022;alert(1)\\u002f\\u002f";</script>-->',
+    );
+    assert.strictEquals(
+        render("<script>/ {{/* a */}}{{- /* b */}}* / ' */ var y = {{.u}}; /* ' */</script>", { u: "alert(1)" }, opts),
+        '<script>/* / \' */ var y = "alert(1)"; /* \' */</script>',
+    );
+    assert.strictEquals(
+        render('<script>var x = 1.\ntypeof /"/; var y = {{.u}}; // "\n</script>', { u: "alert(1)" }, opts),
+        '<script>var x = 1.\ntypeof /"/; var y = "alert(1)"; // "\n</script>',
+    );
+    assert.strictEquals(
+        render('<noscript><div title="</noscript><script>var x={{.u}};</script>"></noscript>', { u: "alert(1)" }, opts),
+        '<noscript><div title="</noscript><script>var x="alert(1)";</script>"></noscript>',
+    );
+    assert.strictEquals(
+        render("<script>l: { break l\n/a'b/; } var y = {{.x}};</script>", { x: "alert(1)" }, opts),
+        "<script>l: { break l\n/a'b/; } var y = \"alert(1)\";</script>",
+    );
+    assert.strictEquals(
+        render('<script>var x = \u00e9return / 2 + "{{.u}}";</script>', { u: '";alert(1);//' }, opts),
+        '<script>var x = \u00e9return / 2 + "\\u0022;alert(1);\\u002f\\u002f";</script>',
+    );
 });

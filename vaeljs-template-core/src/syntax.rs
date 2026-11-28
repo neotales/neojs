@@ -721,13 +721,27 @@ pub(crate) fn rewrite_html_escape(source: &str) -> Result<String, TemplateError>
     let mut scanner = HtmlScanner::default();
     let mut block_stack: Vec<BlockOrigin> = Vec::new();
 
-    for (idx, token) in tokens.iter().copied().enumerate() {
-        match token {
-            Token::Text(text) => {
-                scanner.advance_text(trimmed_texts[idx])?;
-                out.push_str(text);
+    let mut idx = 0;
+    while idx < tokens.len() {
+        match tokens[idx] {
+            Token::Text(_) | Token::Comment(_) => {
+                let run_start = idx;
+                while idx < tokens.len()
+                    && matches!(tokens[idx], Token::Text(_) | Token::Comment(_))
+                {
+                    match tokens[idx] {
+                        Token::Text(text) => out.push_str(text),
+                        Token::Comment(comment) => out.push_str(comment),
+                        Token::Action(_) => unreachable!(),
+                    }
+                    idx += 1;
+                }
+                advance_static_run(
+                    &mut scanner,
+                    &tokens[run_start..idx],
+                    &trimmed_texts[run_start..idx],
+                )?;
             }
-            Token::Comment(comment) => out.push_str(comment),
             Token::Action(action) => {
                 if scanner.in_srcdoc() {
                     return Err(TemplateError::Parse(
@@ -769,6 +783,7 @@ pub(crate) fn rewrite_html_escape(source: &str) -> Result<String, TemplateError>
                 } else {
                     out.push_str(&source[action.start..action.end]);
                 }
+                idx += 1;
             }
         }
     }
@@ -787,6 +802,40 @@ pub(crate) fn rewrite_html_escape(source: &str) -> Result<String, TemplateError>
     Ok(out)
 }
 
+fn advance_static_run(
+    scanner: &mut HtmlScanner,
+    run_tokens: &[Token<'_>],
+    run_trimmed: &[&str],
+) -> Result<(), TemplateError> {
+    if run_tokens.len() == 1 {
+        if !run_trimmed[0].is_empty() {
+            scanner.advance_text(run_trimmed[0])?;
+        }
+        return Ok(());
+    }
+    let total_len: usize = run_trimmed.iter().map(|s| s.len()).sum();
+    if total_len == 0 {
+        return Ok(());
+    }
+    let mut coalesced = String::with_capacity(total_len);
+    for slice in run_trimmed {
+        coalesced.push_str(slice);
+    }
+    scanner.advance_text(&coalesced)
+}
+
+fn comment_has_left_trim(raw: &str) -> bool {
+    has_left_trim_marker(&raw[2..])
+}
+
+fn comment_has_right_trim(raw: &str) -> bool {
+    let trimmed = raw.trim_end_matches(is_template_space);
+    let Some(before_close) = trimmed.strip_suffix("}}") else {
+        return false;
+    };
+    has_right_trim_suffix(before_close)
+}
+
 fn compute_trimmed_texts<'a>(tokens: &[Token<'a>]) -> Vec<&'a str> {
     tokens
         .iter()
@@ -795,22 +844,51 @@ fn compute_trimmed_texts<'a>(tokens: &[Token<'a>]) -> Vec<&'a str> {
             let Token::Text(mut text) = *token else {
                 return "";
             };
-            if idx > 0
-                && let Token::Action(prev) = tokens[idx - 1]
-                && prev.trim_right
-            {
-                text = text.trim_start_matches(is_template_space);
-            }
-            if idx + 1 < tokens.len() {
-                let next_trims_left = match tokens[idx + 1] {
-                    Token::Action(next) => next.trim_left,
-                    Token::Comment(raw) => has_left_trim_marker(&raw[2..]),
-                    Token::Text(_) => false,
-                };
-                if next_trims_left {
-                    text = text.trim_end_matches(is_template_space);
+
+            let mut left_trimmed = false;
+            let mut j = idx;
+            while j > 0 {
+                j -= 1;
+                match tokens[j] {
+                    Token::Comment(raw) => {
+                        if comment_has_right_trim(raw) {
+                            left_trimmed = true;
+                            break;
+                        }
+                    }
+                    Token::Action(prev) => {
+                        left_trimmed = prev.trim_right;
+                        break;
+                    }
+                    Token::Text(_) => break,
                 }
             }
+            if left_trimmed {
+                text = text.trim_start_matches(is_template_space);
+            }
+
+            let mut right_trimmed = false;
+            let mut k = idx + 1;
+            while k < tokens.len() {
+                match tokens[k] {
+                    Token::Comment(raw) => {
+                        if comment_has_left_trim(raw) {
+                            right_trimmed = true;
+                            break;
+                        }
+                        k += 1;
+                    }
+                    Token::Action(next) => {
+                        right_trimmed = next.trim_left;
+                        break;
+                    }
+                    Token::Text(_) => break,
+                }
+            }
+            if right_trimmed {
+                text = text.trim_end_matches(is_template_space);
+            }
+
             text
         })
         .collect()
@@ -1347,6 +1425,26 @@ fn ident_buffers_equivalent(a: &str, b: &str) -> bool {
     !is_regex_keyword_prefix(a) && !is_regex_keyword_prefix(b)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DotState {
+    #[default]
+    None,
+    MemberAccess,
+    DecimalFraction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum StmtAsiState {
+    #[default]
+    None,
+    AfterBreakContinue,
+    AfterLabel,
+}
+
+fn is_js_ident_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_' || ch == '$' || matches!(ch, '\u{200C}' | '\u{200D}')
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct JsState {
     mode: JsLexMode,
@@ -1354,7 +1452,9 @@ struct JsState {
     at_line_start: LineStartState,
     template_braces: Vec<usize>,
     ident_buf: String,
-    after_dot: bool,
+    dot_state: DotState,
+    consecutive_dots: u8,
+    stmt_asi: StmtAsiState,
     prev_sign: Option<char>,
 }
 
@@ -1394,7 +1494,9 @@ impl JsState {
     fn structurally_eq(&self, other: &Self) -> bool {
         self.mode == other.mode
             && self.slash_ctx == other.slash_ctx
-            && self.after_dot == other.after_dot
+            && self.dot_state == other.dot_state
+            && self.consecutive_dots == other.consecutive_dots
+            && self.stmt_asi == other.stmt_asi
             && self.prev_sign == other.prev_sign
             && self.template_braces == other.template_braces
             && ident_buffers_equivalent(&self.ident_buf, &other.ident_buf)
@@ -1415,7 +1517,9 @@ impl JsState {
             } else {
                 "_".to_owned()
             },
-            after_dot: self.after_dot,
+            dot_state: self.dot_state,
+            consecutive_dots: self.consecutive_dots,
+            stmt_asi: self.stmt_asi,
             prev_sign: self.prev_sign,
         }
     }
@@ -1424,14 +1528,24 @@ impl JsState {
         if self.ident_buf.is_empty() {
             return;
         }
-        let is_kw = !self.after_dot && JS_REGEX_KEYWORDS.contains(&self.ident_buf.as_str());
+        let is_member = self.dot_state == DotState::MemberAccess;
+        let ident = self.ident_buf.as_str();
+        let is_kw = !is_member && JS_REGEX_KEYWORDS.contains(&ident);
+        let is_break_continue = !is_member && matches!(ident, "break" | "continue");
         self.set_slash_ctx(if is_kw {
             JsSlashContext::RegexAllowed
         } else {
             JsSlashContext::DivisionOnly
         });
+        self.stmt_asi = if is_break_continue {
+            StmtAsiState::AfterBreakContinue
+        } else if !is_member && self.stmt_asi == StmtAsiState::AfterBreakContinue {
+            StmtAsiState::AfterLabel
+        } else {
+            StmtAsiState::None
+        };
         self.ident_buf.clear();
-        self.after_dot = false;
+        self.dot_state = DotState::None;
     }
 
     fn advance_str(&mut self, text: &str, decode_entities: bool) {
@@ -1474,6 +1588,10 @@ impl JsState {
                 if is_newline {
                     self.mode = JsLexMode::Code;
                     self.at_line_start = LineStartState::True;
+                    if self.stmt_asi != StmtAsiState::None {
+                        self.set_slash_ctx(JsSlashContext::RegexAllowed);
+                        self.stmt_asi = StmtAsiState::None;
+                    }
                 }
                 len
             }
@@ -1485,6 +1603,10 @@ impl JsState {
                 }
                 if is_newline {
                     self.at_line_start = LineStartState::True;
+                    if self.stmt_asi != StmtAsiState::None {
+                        self.set_slash_ctx(JsSlashContext::RegexAllowed);
+                        self.stmt_asi = StmtAsiState::None;
+                    }
                 }
                 self.mode = JsLexMode::BlockComment {
                     after_star: ch == '*',
@@ -1548,10 +1670,7 @@ impl JsState {
                 } else if after_dollar && ch == '{' {
                     self.template_braces.push(1);
                     self.mode = JsLexMode::Code;
-                    self.set_slash_ctx(JsSlashContext::RegexAllowed);
-                    self.ident_buf.clear();
-                    self.after_dot = false;
-                    self.prev_sign = None;
+                    self.transition_code_token(JsSlashContext::RegexAllowed);
                     return len;
                 } else if ch == '\\' {
                     escaped = true;
@@ -1560,19 +1679,13 @@ impl JsState {
                     let (_, brace_len) = next_js_char(after, decode_entities);
                     self.template_braces.push(1);
                     self.mode = JsLexMode::Code;
-                    self.set_slash_ctx(JsSlashContext::RegexAllowed);
-                    self.ident_buf.clear();
-                    self.after_dot = false;
-                    self.prev_sign = None;
+                    self.transition_code_token(JsSlashContext::RegexAllowed);
                     return len + brace_len;
                 } else if ch == '$' {
                     after_dollar = true;
                 } else if ch == '`' {
                     self.mode = JsLexMode::Code;
-                    self.set_slash_ctx(JsSlashContext::DivisionOnly);
-                    self.ident_buf.clear();
-                    self.after_dot = false;
-                    self.prev_sign = None;
+                    self.transition_code_token(JsSlashContext::DivisionOnly);
                     return len;
                 } else {
                     after_dollar = false;
@@ -1615,11 +1728,7 @@ impl JsState {
 
     fn consume_raw_action_value(&mut self) {
         if matches!(self.mode, JsLexMode::Code) {
-            self.finish_ident();
-            self.set_slash_ctx(JsSlashContext::DivisionOnly);
-            self.at_line_start = LineStartState::False;
-            self.after_dot = false;
-            self.prev_sign = None;
+            self.transition_code_token(JsSlashContext::DivisionOnly);
         }
     }
 
@@ -1636,6 +1745,7 @@ impl JsState {
             let (_, slash_len) = next_js_char(after, decode_entities);
             self.finish_ident();
             self.mode = JsLexMode::LineComment;
+            self.consecutive_dots = 0;
             self.prev_sign = None;
             return Some(len + slash_len);
         }
@@ -1643,12 +1753,14 @@ impl JsState {
             let (_, star_len) = next_js_char(after, decode_entities);
             self.finish_ident();
             self.mode = JsLexMode::BlockComment { after_star: false };
+            self.consecutive_dots = 0;
             self.prev_sign = None;
             return Some(len + star_len);
         }
         if let Some(comment_len) = starts_with_decoded_chars(rest, "<!--", decode_entities) {
             self.finish_ident();
             self.mode = JsLexMode::LineComment;
+            self.consecutive_dots = 0;
             self.prev_sign = None;
             return Some(comment_len);
         }
@@ -1660,6 +1772,7 @@ impl JsState {
                 self.slash_ctx = JsSlashContext::AmbiguousSlash;
             }
             self.mode = JsLexMode::LineComment;
+            self.consecutive_dots = 0;
             self.prev_sign = None;
             return Some(comment_len);
         }
@@ -1684,7 +1797,9 @@ impl JsState {
             }
         }
         self.at_line_start = LineStartState::False;
-        self.after_dot = false;
+        self.dot_state = DotState::None;
+        self.consecutive_dots = 0;
+        self.stmt_asi = StmtAsiState::None;
         self.prev_sign = None;
     }
 
@@ -1692,8 +1807,33 @@ impl JsState {
         self.finish_ident();
         self.set_slash_ctx(next_slash);
         self.at_line_start = LineStartState::False;
-        self.after_dot = false;
+        self.dot_state = DotState::None;
+        self.consecutive_dots = 0;
+        self.stmt_asi = StmtAsiState::None;
         self.prev_sign = None;
+    }
+
+    fn step_code_dot(&mut self) {
+        if self.consecutive_dots == 2 {
+            // Spread operator `...`: reset dot tracking cleanly.
+            self.transition_code_token(JsSlashContext::RegexAllowed);
+            return;
+        }
+        let starts_with_digit = self
+            .ident_buf
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_digit);
+        if self.dot_state == DotState::None && starts_with_digit {
+            self.transition_code_token(JsSlashContext::DivisionOnly);
+            self.dot_state = DotState::DecimalFraction;
+            self.consecutive_dots = 1;
+        } else {
+            let next_dots = self.consecutive_dots.saturating_add(1);
+            self.transition_code_token(JsSlashContext::DivisionOnly);
+            self.dot_state = DotState::MemberAccess;
+            self.consecutive_dots = next_dots;
+        }
     }
 
     fn step_code(
@@ -1749,10 +1889,7 @@ impl JsState {
                 self.transition_code_token(JsSlashContext::AfterAmbiguousCloser);
             }
             ')' => self.transition_code_token(JsSlashContext::AfterAmbiguousCloser),
-            '.' => {
-                self.transition_code_token(JsSlashContext::DivisionOnly);
-                self.after_dot = true;
-            }
+            '.' => self.step_code_dot(),
             '+' | '-' => {
                 self.finish_ident();
                 if self.prev_sign == Some(ch) {
@@ -1763,23 +1900,38 @@ impl JsState {
                     self.prev_sign = Some(ch);
                 }
                 self.at_line_start = LineStartState::False;
-                self.after_dot = false;
+                self.dot_state = DotState::None;
+                self.consecutive_dots = 0;
+                self.stmt_asi = StmtAsiState::None;
             }
-            c if c.is_ascii_alphanumeric() || c == '_' || c == '$' => {
+            c if is_js_ident_char(c) => {
                 if self.slash_ctx == JsSlashContext::AfterAmbiguousCloser {
                     self.slash_ctx = JsSlashContext::DivisionOnly;
                 }
                 self.ident_buf.push(c);
                 self.at_line_start = LineStartState::False;
+                self.consecutive_dots = 0;
                 self.prev_sign = None;
             }
             '\n' | '\r' | '\u{2028}' | '\u{2029}' => {
                 self.finish_ident();
                 self.at_line_start = LineStartState::True;
+                if self.dot_state == DotState::DecimalFraction {
+                    self.dot_state = DotState::None;
+                }
+                self.consecutive_dots = 0;
+                if self.stmt_asi != StmtAsiState::None {
+                    self.set_slash_ctx(JsSlashContext::RegexAllowed);
+                    self.stmt_asi = StmtAsiState::None;
+                }
                 self.prev_sign = None;
             }
-            c if c.is_ascii_whitespace() => {
+            c if c.is_whitespace() || c == '\u{FEFF}' => {
                 self.finish_ident();
+                if self.dot_state == DotState::DecimalFraction {
+                    self.dot_state = DotState::None;
+                }
+                self.consecutive_dots = 0;
                 self.prev_sign = None;
             }
             '(' | '[' | ',' | ';' | ':' | '?' | '=' | '!' | '&' | '|' | '^' | '~' | '*' | '%'
@@ -2744,6 +2896,10 @@ fn finish_tag_state(tag_name: &str, is_end_tag: bool) -> HtmlState {
         },
         "xmp" => HtmlState::RawText {
             tag_name: "xmp",
+            end_tag_match: 0,
+        },
+        "noscript" => HtmlState::RawText {
+            tag_name: "noscript",
             end_tag_match: 0,
         },
         _ => HtmlState::Text,
