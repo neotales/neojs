@@ -95,8 +95,8 @@ The canonical specifier and registry key is `vael:chars`.
 | `isPunc` | Unicode category `P`. |
 | `isSpace` | ASCII `\t\n\v\f\r`, space, U+0085, categories `Zs`, `Zl`, and `Zp`. U+FEFF and U+200B are false. |
 | `isSymbol` | Unicode category `S`, including emoji. |
-| `toLower` | One-code-point lowercase mapping; an expanding mapping returns the input. |
-| `toUpper` | One-code-point uppercase mapping; an expanding mapping returns the input. |
+| `toLower` | One-code-point lowercase mapping (Unicode 16.0); expanding mappings return the input. |
+| `toUpper` | One-code-point uppercase mapping (Unicode 16.0); expanding mappings return the input. |
 
 All predicates are total: a non-number, a non-integer, a surrogate, an
 out-of-range value, or `NaN` returns `false`. `toLower` and `toUpper` throw
@@ -165,21 +165,19 @@ module calls no host op and adds no capability.
 
 ## Precise limits
 
-* **Category data is Unicode 16.0; case data follows the Rust compiler.**
+* **Category and case-mapping data are pinned to Unicode 16.0.**
   Classification uses the Unicode 16.0 General_Category tables from
-  `unicode-general-category`. Case mapping uses Rust's `char::to_lowercase` and
-  `char::to_uppercase`, whose Unicode release is the compiler's and is not
-  guaranteed to match the category table. A compiler upgrade can therefore
-  change a case mapping without changing classification. Both can differ from
-  the previous JavaScript implementation's engine tables. The contract tests
-  pin the intended one-code-point behavior and a Unicode 16 classification
-  boundary. `isSpace` is intentionally Go's `unicode.IsSpace` contract, not
-  JavaScript `\s`: U+FEFF is not whitespace.
-* **Folding is pinned to Unicode 16.0 while `chars` case mapping follows the
-  compiler.** The `strings` table is fixed at Unicode 16.0, so both engines fold
-  the same input the same way. `chars` case mapping still uses the compiler's
-  `char` tables. A compiler upgrade can change a `chars` mapping without
-  changing `strings` folding.
+  `unicode-general-category`. `toLower` and `toUpper` use generated lookup
+  tables from the pinned Unicode 16.0 `UnicodeData.txt` and `SpecialCasing.txt`
+  artifacts (omitting expanding mappings such as `U+0130` lowercase -> `0069 0307`
+  so they return the input unchanged), so both engines and every compiler
+  release classify and map the same input identically.
+  `isSpace` is intentionally Go's `unicode.IsSpace` contract, not JavaScript
+  `\s`: U+FEFF is not whitespace.
+* **Folding and case mapping are both pinned to Unicode 16.0.** Both
+  `vael:strings` (`CaseFolding.txt`) and `vael:chars` (`UnicodeData.txt` +
+  `SpecialCasing.txt`) use generated tables pinned to Unicode 16.0, independent
+  of the Rust compiler's stdlib Unicode release.
 * **Captured native functions.** The engine creates the function objects once,
   before user code runs. Replacing a JavaScript intrinsic afterwards does not
   change the module. Code that replaces a realm intrinsic before the runtime is

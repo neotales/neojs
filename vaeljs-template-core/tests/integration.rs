@@ -687,3 +687,249 @@ fn template_set_preserves_whitespace_boundary_across_removed_define() {
         "A  Vael"
     );
 }
+
+#[test]
+fn html_escape_control_keywords_and_variable_reassignments_work() {
+    let opts = TemplateOptions {
+        html_escape: true,
+        ..TemplateOptions::default()
+    };
+    let plain_opts = TemplateOptions::default();
+
+    // Variable declarations ($x := ..., $k, $v := ...) work and preserve raw types before escaping output.
+    let vars = "{{$x := \"<b>init</b>\"}}{{$x}}|{{range $k, $v := .list}}{{$k}}={{$v}};{{end}}";
+    assert_eq!(
+        render(vars, &json!({ "list": ["<x>", "y"] }), &opts).unwrap(),
+        "&lt;b&gt;init&lt;/b&gt;|0=&lt;x&gt;;1=y;"
+    );
+
+    // Non-assignment expression containing '=' inside pipeline string literal still escapes.
+    assert_eq!(
+        render("{{$x := \"\"}}{{$x | default \"a=<b\"}}", &json!({}), &opts).unwrap(),
+        "a=&lt;b"
+    );
+
+    // Control keywords / reassignments not yet supported by neotales_gotmpl are left
+    // untouched by rewrite_html_escape (neither wrapped nor leaking __vael_auto_escape).
+    for tmpl in [
+        "{{if .a}}A{{else if .b}}B{{end}}",
+        "{{with .a}}A{{else with .b}}B{{end}}",
+        "{{range .items}}{{break}}{{end}}",
+        "{{range .items}}{{continue}}{{end}}",
+        "{{$x := 1}}{{$x = 2}}{{$x}}",
+    ] {
+        let plain_res = render(
+            tmpl,
+            &json!({ "a": false, "b": true, "items": [1] }),
+            &plain_opts,
+        );
+        let html_res = render(tmpl, &json!({ "a": false, "b": true, "items": [1] }), &opts);
+        match (plain_res, html_res) {
+            (Ok(plain_out), Ok(html_out)) => assert_eq!(plain_out, html_out, "mismatch for {tmpl}"),
+            (Err(plain_err), Err(html_err)) => {
+                assert_eq!(
+                    std::mem::discriminant(&plain_err),
+                    std::mem::discriminant(&html_err),
+                    "html_escape changed error kind for {tmpl}: plain={plain_err:?} html={html_err:?}"
+                );
+                assert!(
+                    !html_err.to_string().contains("__vael_auto_escape"),
+                    "error leaked internal helper for {tmpl}: {html_err}"
+                );
+            }
+            (plain, html) => {
+                panic!("html_escape changed outcome for {tmpl}: plain={plain:?} html={html:?}")
+            }
+        }
+    }
+}
+
+#[test]
+fn html_escape_context_aware_attributes_and_urls() {
+    let opts = TemplateOptions {
+        html_escape: true,
+        ..TemplateOptions::default()
+    };
+
+    // 1. HTML text & quoted normal attributes
+    assert_eq!(
+        render(
+            "<p>{{.x}}</p><div title=\"{{.x}}\"></div>",
+            &json!({ "x": "<img src=x onerror=\"alert('1')\"> & more" }),
+            &opts
+        )
+        .unwrap(),
+        "<p>&lt;img src=x onerror=&quot;alert(&#39;1&#39;)&quot;&gt; &amp; more</p><div title=\"&lt;img src=x onerror=&quot;alert(&#39;1&#39;)&quot;&gt; &amp; more\"></div>"
+    );
+
+    // 2. Unquoted attributes: whitespace, =, /, ` are escaped so attribute breakout is impossible
+    let unquoted = render(
+        "<div class={{.x}}></div>",
+        &json!({ "x": "x onmouseover=alert(1) data-a=`b`/c" }),
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(
+        unquoted,
+        "<div class=x&#32;onmouseover&#61;alert(1)&#32;data-a&#61;&#96;b&#96;&#47;c></div>"
+    );
+    assert!(!unquoted.contains(" onmouseover="));
+
+    // 3. URL attributes: dangerous schemes rejected, safe schemes & relative URLs allowed
+    for dangerous in [
+        "javascript:alert(1)",
+        "  \t\nJaVaScRiPt:alert(1)",
+        "\x01javascript:alert(1)",
+        "java\tscript:alert(1)",
+        "vbscript:msgbox(1)",
+        "data:text/html,<script>alert(1)</script>",
+    ] {
+        let out = render(
+            "<a href=\"{{.u}}\">link</a><form action={{.u}}></form>",
+            &json!({ "u": dangerous }),
+            &opts,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "<a href=\"#ZgotmplZ\">link</a><form action=#ZgotmplZ></form>"
+        );
+    }
+
+    for (safe_in, expected_href) in [
+        (
+            "https://example.com/a?x=1&y=2",
+            "https://example.com/a?x=1&amp;y=2",
+        ),
+        ("HTTP://example.com", "HTTP://example.com"),
+        ("mailto:ada@example.com", "mailto:ada@example.com"),
+        ("tel:+15551234", "tel:+15551234"),
+        ("/tasks/123?tab=open#top", "/tasks/123?tab=open#top"),
+        ("./sub:path", "./sub:path"),
+        ("?q=1&b=2", "?q=1&amp;b=2"),
+        ("#section", "#section"),
+    ] {
+        let out = render("<a href=\"{{.u}}\">ok</a>", &json!({ "u": safe_in }), &opts).unwrap();
+        assert_eq!(out, format!("<a href=\"{expected_href}\">ok</a>"));
+    }
+
+    // URL attribute continuation (after static prefix) still escapes attribute chars without breaking relative paths
+    assert_eq!(
+        render(
+            "<form action=\"/tasks/{{.id}}/toggle\"></form>",
+            &json!({ "id": "abc\" onclick=\"evil()" }),
+            &opts
+        )
+        .unwrap(),
+        "<form action=\"/tasks/abc&quot; onclick=&quot;evil()/toggle\"></form>"
+    );
+
+    // Conditional branches inside URL attribute both validate start-of-URL
+    assert_eq!(
+        render(
+            "<a href=\"{{if .ok}}{{.a}}{{else}}{{.b}}{{end}}\">x</a>",
+            &json!({ "ok": false, "a": "/ok", "b": "javascript:alert(1)" }),
+            &opts
+        )
+        .unwrap(),
+        "<a href=\"#ZgotmplZ\">x</a>"
+    );
+}
+
+#[test]
+fn html_escape_context_aware_scripts_styles_and_comments() {
+    let opts = TemplateOptions {
+        html_escape: true,
+        ..TemplateOptions::default()
+    };
+
+    // 4. Event-handler attributes (on*): JS-escape first, HTML-attribute-escape second
+    let on_quoted = render(
+        "<button onclick=\"f('{{.x}}')\">go</button>",
+        &json!({ "x": "'); alert(1); //\"&#39;" }),
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(
+        on_quoted,
+        "<button onclick=\"f('\\u0027); alert(1); \\u002f\\u002f\\u0022\\u0026#39;')\">go</button>"
+    );
+
+    let on_raw = render(
+        "<button onclick=\"f({{.x}})\">go</button>",
+        &json!({ "x": "1); alert(1)//" }),
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(
+        on_raw,
+        "<button onclick=\"f(&quot;1); alert(1)\\u002f\\u002f&quot;)\">go</button>"
+    );
+
+    // 5. <script> context: quoted strings, template literals, and raw JS expressions
+    let script_str = render(
+        "<script>var a = \"{{.s}}\"; var b = `{{.s}}`; var c = {{.n}}; var d = {{.rawStr}};</script>",
+        &json!({
+            "s": "\";alert(1);//</script>${evil}\u{2028}\u{2029}",
+            "n": 42,
+            "rawStr": "</script><script>alert(1)</script>"
+        }),
+        &opts,
+    )
+    .unwrap();
+    assert!(!script_str.contains("</script><script>"));
+    assert_eq!(
+        script_str,
+        "<script>var a = \"\\u0022;alert(1);\\u002f\\u002f\\u003c\\u002fscript\\u003e${evil}\\u2028\\u2029\"; var b = `\\u0022;alert(1);\\u002f\\u002f\\u003c\\u002fscript\\u003e\\u0024{evil}\\u2028\\u2029`; var c = 42; var d = \"\\u003c\\u002fscript\\u003e\\u003cscript\\u003ealert(1)\\u003c\\u002fscript\\u003e\";</script>"
+    );
+
+    // 6. <style> and style="..." context
+    assert_eq!(
+        render(
+            "<div style=\"color: {{.safe}}; width: {{.bad}}\"></div><style>p { color: {{.styleTag}}; }</style>",
+            &json!({
+                "safe": "#1a2b3c",
+                "bad": "red; background: url(javascript:alert(1))",
+                "styleTag": "</style><script>alert(1)</script>"
+            }),
+            &opts
+        )
+        .unwrap(),
+        "<div style=\"color: #1a2b3c; width: ZgotmplZ\"></div><style>p { color: ZgotmplZ; }</style>"
+    );
+
+    for css_attack in [
+        "expression(alert(1))",
+        "url(https://evil.com)",
+        "@import 'x'",
+        "behavior",
+        "-moz-binding",
+        "10px /* comment */",
+        "10px; } body { color: red",
+    ] {
+        assert_eq!(
+            render(
+                "<div style=\"color: {{.c}}\"></div>",
+                &json!({ "c": css_attack }),
+                &opts
+            )
+            .unwrap(),
+            "<div style=\"color: ZgotmplZ\"></div>",
+            "expected CSS attack {css_attack:?} to be replaced with ZgotmplZ"
+        );
+    }
+
+    // 7. HTML comments: -- and > are sanitized so comment breakout is impossible
+    let comment_out = render(
+        "<!-- {{.c}} -->",
+        &json!({ "c": "x --> <script>alert(1)</script> a--b" }),
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(
+        comment_out,
+        "<!-- x &#45;&#45;&gt; &lt;script&gt;alert(1)&lt;/script&gt; a&#45;&#45;b -->"
+    );
+    assert!(!comment_out[4..comment_out.len() - 4].contains("--"));
+    assert!(!comment_out[4..comment_out.len() - 4].contains('>'));
+}
