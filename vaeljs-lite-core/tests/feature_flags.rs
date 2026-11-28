@@ -26,6 +26,12 @@ fn expected_list() -> String {
     if cfg!(feature = "vael-crypto") {
         entries.push(r#""vael:crypto""#);
     }
+    if cfg!(feature = "vael-exec") {
+        entries.push(r#""vael:exec""#);
+    }
+    if cfg!(feature = "vael-fetch") {
+        entries.push(r#""vael:fetch""#);
+    }
     if cfg!(feature = "vael-fs") {
         entries.push(r#""vael:fs""#);
     }
@@ -669,6 +675,152 @@ try {
 if (imported) throw new Error("vael:crypto was importable while disabled");
 "#)
     .expect("crypto absent");
+}
+
+#[test]
+#[cfg(feature = "vael-exec")]
+fn exec_is_present_when_its_feature_is_enabled() {
+    run(r#"
+const list = Vael.getBuiltInModulesList();
+if (!list.includes("vael:exec")) {
+    throw new Error(`exec is missing from the list: ${JSON.stringify(list)}`);
+}
+if (list.includes("exec")) {
+    throw new Error(`a bare exec name is listed: ${JSON.stringify(list)}`);
+}
+const registry = Vael.getBuiltInModule("vael:exec");
+if (registry === undefined || typeof registry !== "object" || !Object.isFrozen(registry)) {
+    throw new Error("the exec registry object is missing or unfrozen");
+}
+if (Vael.getBuiltInModule("exec") !== undefined) {
+    throw new Error("the registry accepted a bare exec name");
+}
+const namespace = await import("vael:exec");
+if (namespace === registry) {
+    throw new Error("the ES module namespace must be distinct from the registry object");
+}
+const expected = [
+    "Command",
+    "CommandError",
+    "FileLock",
+    "NotFoundOnPathError",
+    "Output",
+    "cmd",
+    "execSync",
+    "lockFileSync",
+    "runSync",
+    "whichAllSync",
+    "whichSync",
+];
+if (JSON.stringify(Object.keys(registry).sort()) !== JSON.stringify(expected)) {
+    throw new Error(`unexpected exec registry keys: ${JSON.stringify(Object.keys(registry).sort())}`);
+}
+if (JSON.stringify(Object.keys(namespace).sort()) !== JSON.stringify(expected)) {
+    throw new Error(`unexpected exec namespace keys: ${JSON.stringify(Object.keys(namespace).sort())}`);
+}
+if ("default" in namespace) {
+    throw new Error("vael:exec must not have a default export");
+}
+for (const name of expected) {
+    if (namespace[name] !== registry[name]) {
+        throw new Error(`vael:exec.${name} namespace/registry identity mismatch`);
+    }
+}
+"#)
+    .expect("exec feature");
+}
+
+#[test]
+#[cfg(not(feature = "vael-exec"))]
+fn exec_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+const list = Vael.getBuiltInModulesList();
+if (list.includes("vael:exec") || list.includes("exec")) {
+    throw new Error(`exec is still listed: ${JSON.stringify(list)}`);
+}
+if (Vael.getBuiltInModule("vael:exec") !== undefined || Vael.getBuiltInModule("exec") !== undefined) {
+    throw new Error("exec registry entry is still present");
+}
+let imported = false;
+try {
+    await import("vael:exec");
+    imported = true;
+} catch {
+    // Expected: the loader has no exec entry.
+}
+if (imported) throw new Error("vael:exec was importable while disabled");
+"#)
+    .expect("exec absent");
+}
+
+#[test]
+#[cfg(feature = "vael-fetch")]
+fn fetch_is_present_when_its_feature_is_enabled() {
+    run(r#"
+if ("fetch" in globalThis) {
+    throw new Error("vael:fetch must never install globalThis.fetch");
+}
+const list = Vael.getBuiltInModulesList();
+if (!list.includes("vael:fetch")) {
+    throw new Error(`fetch is missing from the list: ${JSON.stringify(list)}`);
+}
+if (list.includes("fetch")) {
+    throw new Error(`a bare fetch name is listed: ${JSON.stringify(list)}`);
+}
+const registry = Vael.getBuiltInModule("vael:fetch");
+if (registry === undefined || typeof registry !== "object" || !Object.isFrozen(registry)) {
+    throw new Error("the fetch registry object is missing or unfrozen");
+}
+if (Vael.getBuiltInModule("fetch") !== undefined) {
+    throw new Error("the registry accepted a bare fetch name");
+}
+const namespace = await import("vael:fetch");
+if (namespace === registry) {
+    throw new Error("the ES module namespace must be distinct from the registry object");
+}
+const expected = ["FetchError", "downloadSync", "fetchSync"];
+if (JSON.stringify(Object.keys(registry).sort()) !== JSON.stringify(expected)) {
+    throw new Error(`unexpected fetch registry keys: ${JSON.stringify(Object.keys(registry).sort())}`);
+}
+if (JSON.stringify(Object.keys(namespace).sort()) !== JSON.stringify(expected)) {
+    throw new Error(`unexpected fetch namespace keys: ${JSON.stringify(Object.keys(namespace).sort())}`);
+}
+if ("default" in namespace) {
+    throw new Error("vael:fetch must not have a default export");
+}
+for (const name of expected) {
+    if (namespace[name] !== registry[name]) {
+        throw new Error(`vael:fetch.${name} namespace/registry identity mismatch`);
+    }
+}
+"#)
+    .expect("fetch feature");
+}
+
+#[test]
+#[cfg(not(feature = "vael-fetch"))]
+fn fetch_is_absent_when_its_feature_is_disabled() {
+    run(r#"
+if ("fetch" in globalThis) {
+    throw new Error("globalThis.fetch must not exist");
+}
+const list = Vael.getBuiltInModulesList();
+if (list.includes("vael:fetch") || list.includes("fetch")) {
+    throw new Error(`fetch is still listed: ${JSON.stringify(list)}`);
+}
+if (Vael.getBuiltInModule("vael:fetch") !== undefined || Vael.getBuiltInModule("fetch") !== undefined) {
+    throw new Error("fetch registry entry is still present");
+}
+let imported = false;
+try {
+    await import("vael:fetch");
+    imported = true;
+} catch {
+    // Expected: the loader has no fetch entry.
+}
+if (imported) throw new Error("vael:fetch was importable while disabled");
+"#)
+    .expect("fetch absent");
 }
 
 #[test]

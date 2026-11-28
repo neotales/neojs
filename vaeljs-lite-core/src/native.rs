@@ -7,16 +7,28 @@
 
 use std::mem::MaybeUninit;
 
-#[cfg(feature = "vael-crypto")]
+#[cfg(any(feature = "vael-crypto", feature = "vael-fetch", feature = "vael-exec"))]
 use rquickjs::Array;
-#[cfg(any(feature = "vael-crypto", feature = "vael-fs", feature = "vael-ssh"))]
+#[cfg(any(
+    feature = "vael-crypto",
+    feature = "vael-exec",
+    feature = "vael-fetch",
+    feature = "vael-fs",
+    feature = "vael-ssh"
+))]
 use rquickjs::TypedArray;
 use rquickjs::{
     Ctx, Exception, Function, Object, Result, String as JsString, Value, object::Property, qjs,
 };
 
 #[cfg_attr(
-    not(any(feature = "vael-crypto", feature = "vael-fs", feature = "vael-ssh")),
+    not(any(
+        feature = "vael-crypto",
+        feature = "vael-exec",
+        feature = "vael-fetch",
+        feature = "vael-fs",
+        feature = "vael-ssh"
+    )),
     allow(dead_code)
 )]
 struct PropertyEnumGuard {
@@ -38,7 +50,13 @@ impl Drop for PropertyEnumGuard {
 /// Freezes `object` using QuickJS's native `JS_FreezeObject` without
 /// consulting `globalThis.Object.freeze`.
 #[cfg_attr(
-    not(any(feature = "vael-crypto", feature = "vael-fs", feature = "vael-ssh")),
+    not(any(
+        feature = "vael-crypto",
+        feature = "vael-exec",
+        feature = "vael-fetch",
+        feature = "vael-fs",
+        feature = "vael-ssh"
+    )),
     allow(dead_code)
 )]
 pub(super) fn freeze_native<'js>(ctx: &Ctx<'js>, object: &Object<'js>) -> Result<()> {
@@ -71,8 +89,16 @@ pub(super) fn get_prototype<'js>(ctx: &Ctx<'js>, val: qjs::JSValue) -> Result<Va
 ///
 /// Returns `Ok(None)` when the property is absent, or `Err(TypeError)` when
 /// the own property is an accessor.
-#[cfg(any(feature = "vael-crypto", feature = "node-compat"))]
-#[cfg_attr(not(feature = "vael-crypto"), allow(dead_code))]
+#[cfg(any(
+    feature = "vael-crypto",
+    feature = "vael-exec",
+    feature = "vael-fetch",
+    feature = "node-compat"
+))]
+#[cfg_attr(
+    not(any(feature = "vael-crypto", feature = "vael-exec", feature = "vael-fetch")),
+    allow(dead_code)
+)]
 pub(super) fn own_data_property<'js>(
     ctx: &Ctx<'js>,
     object: qjs::JSValue,
@@ -89,7 +115,12 @@ pub(super) fn own_data_property<'js>(
 
 /// Reads an own array element data property at `index` without walking
 /// `Array.prototype` or invoking getters/proxy traps.
-#[cfg(any(feature = "vael-crypto", feature = "node-compat"))]
+#[cfg(any(
+    feature = "vael-crypto",
+    feature = "vael-exec",
+    feature = "vael-fetch",
+    feature = "node-compat"
+))]
 pub(super) fn own_array_element<'js>(
     ctx: &Ctx<'js>,
     array: &Array<'js>,
@@ -104,7 +135,12 @@ pub(super) fn own_array_element<'js>(
     own_data_property_by_atom(ctx, array.as_raw(), atom, accessor_msg)
 }
 
-#[cfg(any(feature = "vael-crypto", feature = "node-compat"))]
+#[cfg(any(
+    feature = "vael-crypto",
+    feature = "vael-exec",
+    feature = "vael-fetch",
+    feature = "node-compat"
+))]
 fn own_data_property_by_atom<'js>(
     ctx: &Ctx<'js>,
     object: qjs::JSValue,
@@ -135,7 +171,13 @@ fn own_data_property_by_atom<'js>(
 }
 
 /// Reads an own getter function from `object` without invoking user traps.
-#[cfg(any(feature = "vael-crypto", feature = "vael-fs", feature = "vael-ssh"))]
+#[cfg(any(
+    feature = "vael-crypto",
+    feature = "vael-exec",
+    feature = "vael-fetch",
+    feature = "vael-fs",
+    feature = "vael-ssh"
+))]
 pub(super) fn own_getter<'js>(
     ctx: &Ctx<'js>,
     object: qjs::JSValue,
@@ -207,7 +249,13 @@ pub(super) fn throw_coded_error(
 /// passes its live byte slice to `f` without executing JavaScript while the
 /// slice is alive.
 #[cfg_attr(
-    not(any(feature = "vael-fs", feature = "vael-ssh", feature = "node-compat")),
+    not(any(
+        feature = "vael-exec",
+        feature = "vael-fetch",
+        feature = "vael-fs",
+        feature = "vael-ssh",
+        feature = "node-compat"
+    )),
     allow(dead_code)
 )]
 pub(super) fn with_uint8_array_bytes<'js, T>(
@@ -229,7 +277,13 @@ pub(super) fn with_uint8_array_bytes<'js, T>(
 /// reports detached/OOB views via `on_detached_or_oob`, and passes its live
 /// byte slice and `is_shared` flag (`SharedArrayBuffer`-backed) to `f` without
 /// executing JavaScript while the slice is alive.
-#[cfg(any(feature = "vael-crypto", feature = "vael-fs", feature = "vael-ssh"))]
+#[cfg(any(
+    feature = "vael-crypto",
+    feature = "vael-exec",
+    feature = "vael-fetch",
+    feature = "vael-fs",
+    feature = "vael-ssh"
+))]
 pub(super) fn with_uint8_array_bytes_ex<'js, T>(
     ctx: &Ctx<'js>,
     value: &Value<'js>,
@@ -315,7 +369,13 @@ pub(super) fn with_uint8_array_bytes_ex<'js, T>(
 /// with no proxies, symbols, non-enumerable properties, or accessors, and
 /// passes each own enumerable string property to `on_field`.
 #[cfg_attr(
-    not(any(feature = "vael-crypto", feature = "vael-fs", feature = "vael-ssh")),
+    not(any(
+        feature = "vael-crypto",
+        feature = "vael-exec",
+        feature = "vael-fetch",
+        feature = "vael-fs",
+        feature = "vael-ssh"
+    )),
     allow(dead_code)
 )]
 pub(super) fn parse_options<'js>(
