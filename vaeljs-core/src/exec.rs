@@ -18,7 +18,7 @@ use std::io::{self, Read as _, Write as _};
 use std::os::fd::OwnedFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStderr, ChildStdin, ChildStdout};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -36,8 +36,8 @@ use deno_error::JsErrorBox;
 use tokio::sync::Mutex as AsyncMutex;
 use vaeljs_exec_core::{
     CommandOutput, CommandSpec, CommandStatus, ExecError, FileLock, LockMode, LockOptions,
-    MAX_OUTPUT_BYTES, Signal, SpawnedChild, StdioMode, exec_sync, run_sync, spawn, which,
-    which_all,
+    MAX_OUTPUT_BYTES, Signal, SpawnedChild, StdioMode, env_var, exec_sync, expand_env_path,
+    is_executable_file, run_sync, spawn, which, which_all,
 };
 
 const MAX_SAFE_INTEGER_F64: f64 = 9_007_199_254_740_991.0;
@@ -1736,6 +1736,15 @@ fn op_vael_exec_parse_command_options<'s>(
                 }
                 Ok(())
             }
+            "log" => {
+                if !val.is_undefined() {
+                    if !val.is_function() {
+                        return Err(ExecBindingError::Type("options.log must be a function"));
+                    }
+                    set_bool(scope, out, "hasLog", true);
+                }
+                Ok(())
+            }
             _ => Err(ExecBindingError::Type("unknown command option")),
         },
     );
@@ -1770,6 +1779,152 @@ fn op_vael_exec_parse_command_options<'s>(
     set_bool(scope, obj, "ok", true);
     set(scope, obj, "value", out.into());
     obj.into()
+}
+
+#[op2]
+fn op_vael_exec_parse_path_finder_options<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    options: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Value> {
+    let obj = response_obj(scope);
+    let out = v8::Object::new(scope);
+    let mut name_seen: Option<String> = None;
+
+    let res = visit_plain_object_own(
+        scope,
+        options,
+        "PathFinder options must be a plain object",
+        |scope, key, val| match key {
+            "name" => {
+                let s = copy_strict_string(scope, val, "options.name must be a string")?;
+                if s.is_empty() || s.contains('\0') {
+                    return Err(ExecBindingError::Type(
+                        "options.name must be a non-empty string without NUL bytes",
+                    ));
+                }
+                set_string(scope, out, "name", &s);
+                name_seen = Some(s);
+                Ok(())
+            }
+            "executable" => {
+                if !val.is_undefined() {
+                    let s = copy_strict_string(scope, val, "options.executable must be a string")?;
+                    if s.contains('\0') {
+                        return Err(ExecBindingError::Type(
+                            "options.executable must not contain NUL bytes",
+                        ));
+                    }
+                    set_string(scope, out, "executable", &s);
+                }
+                Ok(())
+            }
+            "envVariable" => {
+                if !val.is_undefined() {
+                    let s = copy_strict_string(scope, val, "options.envVariable must be a string")?;
+                    if s.contains('\0') || s.contains('=') {
+                        return Err(ExecBindingError::Type(
+                            "options.envVariable must not contain '=' or NUL bytes",
+                        ));
+                    }
+                    set_string(scope, out, "envVariable", &s);
+                }
+                Ok(())
+            }
+            "cached" => {
+                if !val.is_undefined() {
+                    let s = copy_strict_string(scope, val, "options.cached must be a string")?;
+                    if s.contains('\0') {
+                        return Err(ExecBindingError::Type(
+                            "options.cached must not contain NUL bytes",
+                        ));
+                    }
+                    set_string(scope, out, "cached", &s);
+                }
+                Ok(())
+            }
+            "noCache" => {
+                if !val.is_undefined() {
+                    if !val.is_boolean() {
+                        return Err(ExecBindingError::Type("options.noCache must be a boolean"));
+                    }
+                    set_bool(scope, out, "noCache", val.boolean_value(scope));
+                }
+                Ok(())
+            }
+            "windows" | "linux" | "darwin" => {
+                if !val.is_undefined() {
+                    let items = read_string_array(
+                        scope,
+                        val,
+                        "platform path list must be an array of strings",
+                    )?;
+                    for item in &items {
+                        if item.contains('\0') {
+                            return Err(ExecBindingError::Type(
+                                "platform path candidate must not contain NUL bytes",
+                            ));
+                        }
+                    }
+                    let elems: Vec<v8::Local<'s, v8::Value>> = items
+                        .iter()
+                        .map(|s| {
+                            v8::String::new(scope, s)
+                                .map(Into::into)
+                                .unwrap_or_else(|| v8::String::empty(scope).into())
+                        })
+                        .collect();
+                    let arr = v8::Array::new_with_elements(scope, &elems);
+                    set(scope, out, key, arr.into());
+                }
+                Ok(())
+            }
+            _ => Err(ExecBindingError::Type("unknown PathFinder option")),
+        },
+    );
+
+    if let Err(err) = res {
+        set_failure(scope, obj, &err);
+        return obj.into();
+    }
+    if name_seen.is_none() {
+        set_failure(
+            scope,
+            obj,
+            &ExecBindingError::Type("options.name must be a non-empty string"),
+        );
+        return obj.into();
+    }
+
+    set_bool(scope, obj, "ok", true);
+    set(scope, obj, "value", out.into());
+    obj.into()
+}
+
+#[op2(fast)]
+fn op_vael_exec_is_executable_file(#[string] path: String) -> bool {
+    is_executable_file(Path::new(&path))
+}
+
+#[op2]
+#[string]
+fn op_vael_exec_env_var(#[string] name: String) -> Option<String> {
+    env_var(&name)
+}
+
+#[op2]
+#[string]
+fn op_vael_exec_expand_env_path(#[string] template: String) -> Option<String> {
+    expand_env_path(&template)
+}
+
+#[op2]
+#[string]
+fn op_vael_exec_platform() -> &'static str {
+    match std::env::consts::OS {
+        "windows" => "windows",
+        "macos" => "darwin",
+        _ => "linux",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2645,9 +2800,7 @@ impl<'a> FromV8<'a> for ChildOutputOptionsArg {
                     }
                     Ok(())
                 }
-                _ => Err(ExecBindingError::invalid_arg(
-                    "unknown waitWithOutput option",
-                )),
+                _ => Err(ExecBindingError::Type("unknown waitWithOutput option")),
             },
         );
         Ok(Self(res.map(|()| parsed)))
@@ -3114,6 +3267,11 @@ deno_core::extension!(
         op_vael_exec_validate_signal,
         op_vael_exec_validate_kill_grace,
         op_vael_exec_parse_command_options,
+        op_vael_exec_parse_path_finder_options,
+        op_vael_exec_is_executable_file,
+        op_vael_exec_env_var,
+        op_vael_exec_expand_env_path,
+        op_vael_exec_platform,
         op_vael_exec_output_sync,
         op_vael_exec_output_async,
         op_vael_exec_status_sync,

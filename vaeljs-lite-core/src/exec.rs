@@ -28,7 +28,8 @@ use rquickjs::{
 };
 use vaeljs_exec_core::{
     CommandSpec, ExecError, ExecErrorCode, FileLock, LockMode, LockOptions, MAX_OUTPUT_BYTES,
-    Signal, StdioMode, exec_sync, run_sync, which, which_all,
+    Signal, StdioMode, env_var, exec_sync, expand_env_path, is_executable_file, run_sync, which,
+    which_all,
 };
 
 use crate::native::{
@@ -45,9 +46,13 @@ pub(super) const EXPORTS: &[&str] = &[
     "FileLock",
     "NotFoundOnPathError",
     "Output",
+    "PathFinder",
+    "addLogger",
+    "clearLoggers",
     "cmd",
     "execSync",
     "lockFileSync",
+    "pathFinder",
     "runSync",
     "whichAllSync",
     "whichSync",
@@ -226,6 +231,36 @@ pub(super) fn object<'js>(
         Function::new(ctx.clone(), host_lines_lossy)?
             .with_name("linesLossy")?
             .with_length(1)?,
+    )?;
+    host.set(
+        "parsePathFinderOptions",
+        Function::new(ctx.clone(), host_parse_path_finder_options)?
+            .with_name("parsePathFinderOptions")?
+            .with_length(1)?,
+    )?;
+    host.set(
+        "isExecutableFile",
+        Function::new(ctx.clone(), host_is_executable_file)?
+            .with_name("isExecutableFile")?
+            .with_length(1)?,
+    )?;
+    host.set(
+        "envVar",
+        Function::new(ctx.clone(), host_env_var)?
+            .with_name("envVar")?
+            .with_length(1)?,
+    )?;
+    host.set(
+        "expandEnvPath",
+        Function::new(ctx.clone(), host_expand_env_path)?
+            .with_name("expandEnvPath")?
+            .with_length(1)?,
+    )?;
+    host.set(
+        "platform",
+        Function::new(ctx.clone(), host_platform)?
+            .with_name("platform")?
+            .with_length(0)?,
     )?;
     let module: Object<'js> = factory.call((host,))?;
     freeze_native(ctx, &module)?;
@@ -581,6 +616,7 @@ struct RawCommandOptions<'js> {
     kill_signal: Option<Value<'js>>,
     kill_grace_ms: Option<Value<'js>>,
     kill_grace: Option<Value<'js>>,
+    log: Option<Value<'js>>,
 }
 
 fn host_parse_command_options<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<Object<'js>> {
@@ -609,6 +645,7 @@ fn host_parse_command_options<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Res
                 "killSignal" => fields.kill_signal = Some(val.clone()),
                 "killGraceMs" => fields.kill_grace_ms = Some(val.clone()),
                 "killGrace" => fields.kill_grace = Some(val.clone()),
+                "log" => fields.log = Some(val.clone()),
                 _ => unknown = true,
             }
             Ok(())
@@ -914,7 +951,237 @@ fn host_parse_command_options<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Res
         )?;
     }
 
+    if let Some(val) = fields.log
+        && !val.is_undefined()
+    {
+        if !unsafe { qjs::JS_IsFunction(ctx.as_raw().as_ptr(), val.as_raw()) } {
+            return Err(Exception::throw_type(
+                &ctx,
+                "options.log must be a function",
+            ));
+        }
+        out.prop(
+            "log",
+            Property::from(val).writable().enumerable().configurable(),
+        )?;
+    }
+
     Ok(out)
+}
+
+#[derive(Default)]
+struct RawPathFinderOptions<'js> {
+    name: Option<Value<'js>>,
+    executable: Option<Value<'js>>,
+    env_variable: Option<Value<'js>>,
+    cached: Option<Value<'js>>,
+    no_cache: Option<Value<'js>>,
+    windows: Option<Value<'js>>,
+    linux: Option<Value<'js>>,
+    darwin: Option<Value<'js>>,
+}
+
+fn host_parse_path_finder_options<'js>(
+    ctx: Ctx<'js>,
+    args: Rest<Value<'js>>,
+) -> Result<Object<'js>> {
+    let Some(opts_val) = args.0.first() else {
+        return Err(Exception::throw_type(
+            &ctx,
+            "PathFinder options must be a plain object",
+        ));
+    };
+    if opts_val.is_undefined() {
+        return Err(Exception::throw_type(
+            &ctx,
+            "PathFinder options must be a plain object",
+        ));
+    }
+
+    let mut fields = RawPathFinderOptions::default();
+    let mut unknown = false;
+    parse_options(
+        &ctx,
+        Some(opts_val),
+        "PathFinder options must be a plain object",
+        |_ctx, key, val| {
+            if unknown {
+                return Ok(());
+            }
+            match key {
+                "name" => fields.name = Some(val.clone()),
+                "executable" => fields.executable = Some(val.clone()),
+                "envVariable" => fields.env_variable = Some(val.clone()),
+                "cached" => fields.cached = Some(val.clone()),
+                "noCache" => fields.no_cache = Some(val.clone()),
+                "windows" => fields.windows = Some(val.clone()),
+                "linux" => fields.linux = Some(val.clone()),
+                "darwin" => fields.darwin = Some(val.clone()),
+                _ => unknown = true,
+            }
+            Ok(())
+        },
+    )?;
+    if unknown {
+        return Err(Exception::throw_type(&ctx, "unknown PathFinder option"));
+    }
+
+    let out = ok_object(&ctx)?;
+    let Some(ref name_val) = fields.name else {
+        return Err(Exception::throw_type(
+            &ctx,
+            "options.name must be a non-empty string",
+        ));
+    };
+    let name_str = match read_strict_string(
+        &ctx,
+        name_val,
+        "options.name must be a string",
+        "options.name contains an unpaired UTF-16 surrogate",
+    )? {
+        Ok(s) if !s.is_empty() && !s.contains('\0') => s,
+        _ => {
+            return Err(Exception::throw_type(
+                &ctx,
+                "options.name must be a non-empty string without NUL bytes",
+            ));
+        }
+    };
+    out.prop(
+        "name",
+        Property::from(name_str)
+            .writable()
+            .enumerable()
+            .configurable(),
+    )?;
+
+    for (key, field) in [
+        ("executable", fields.executable),
+        ("envVariable", fields.env_variable),
+        ("cached", fields.cached),
+    ] {
+        if let Some(ref val) = field
+            && !val.is_undefined()
+        {
+            let s = match read_strict_string(
+                &ctx,
+                val,
+                &format!("options.{key} must be a string"),
+                "option string contains an unpaired UTF-16 surrogate",
+            )? {
+                Ok(s) => s,
+                Err(_) => {
+                    return Err(Exception::throw_type(
+                        &ctx,
+                        &format!("options.{key} contains an unpaired UTF-16 surrogate"),
+                    ));
+                }
+            };
+            if s.contains('\0') || (key == "envVariable" && s.contains('=')) {
+                return Err(Exception::throw_type(
+                    &ctx,
+                    &format!("options.{key} contains invalid characters"),
+                ));
+            }
+            out.prop(
+                key,
+                Property::from(s).writable().enumerable().configurable(),
+            )?;
+        }
+    }
+
+    if let Some(ref val) = fields.no_cache
+        && !val.is_undefined()
+    {
+        let Some(b) = val.as_bool() else {
+            return Err(Exception::throw_type(
+                &ctx,
+                "options.noCache must be a boolean",
+            ));
+        };
+        out.prop(
+            "noCache",
+            Property::from(b).writable().enumerable().configurable(),
+        )?;
+    }
+
+    for (key, field) in [
+        ("windows", fields.windows),
+        ("linux", fields.linux),
+        ("darwin", fields.darwin),
+    ] {
+        if let Some(ref val) = field
+            && !val.is_undefined()
+        {
+            let items = match parse_string_array_inner(&ctx, val, key, false)? {
+                Ok(items) => items,
+                Err(_) => {
+                    return Err(Exception::throw_type(
+                        &ctx,
+                        "platform path list must be an array of strings without NUL bytes",
+                    ));
+                }
+            };
+            let arr = Array::new(ctx.clone())?;
+            for (idx, item) in items.into_iter().enumerate() {
+                arr.as_object().prop(
+                    idx as u32,
+                    Property::from(item).writable().enumerable().configurable(),
+                )?;
+            }
+            out.prop(
+                key,
+                Property::from(arr).writable().enumerable().configurable(),
+            )?;
+        }
+    }
+
+    Ok(out)
+}
+
+fn host_is_executable_file<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<bool> {
+    let Some(val) = args.0.first() else {
+        return Ok(false);
+    };
+    let Ok(Ok(s)) = read_strict_string(&ctx, val, "path must be a string", "invalid path") else {
+        return Ok(false);
+    };
+    Ok(is_executable_file(Path::new(&s)))
+}
+
+fn host_env_var<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<Value<'js>> {
+    let Some(val) = args.0.first() else {
+        return Ok(Value::new_null(ctx));
+    };
+    let Ok(Ok(s)) = read_strict_string(&ctx, val, "name must be a string", "invalid name") else {
+        return Ok(Value::new_null(ctx));
+    };
+    match env_var(&s) {
+        Some(v) => Ok(JsString::from_str(ctx, &v)?.into_value()),
+        None => Ok(Value::new_null(ctx)),
+    }
+}
+
+fn host_expand_env_path<'js>(ctx: Ctx<'js>, args: Rest<Value<'js>>) -> Result<Value<'js>> {
+    let Some(val) = args.0.first() else {
+        return Ok(Value::new_null(ctx));
+    };
+    let Ok(Ok(s)) = read_strict_string(&ctx, val, "template must be a string", "invalid template")
+    else {
+        return Ok(Value::new_null(ctx));
+    };
+    match expand_env_path(&s) {
+        Some(v) => Ok(JsString::from_str(ctx, &v)?.into_value()),
+        None => Ok(Value::new_null(ctx)),
+    }
+}
+
+fn host_platform() -> &'static str {
+    match std::env::consts::OS {
+        "windows" => "windows",
+        "macos" => "darwin",
+        _ => "linux",
+    }
 }
 
 fn build_spec_from_js<'js>(

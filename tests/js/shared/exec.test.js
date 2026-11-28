@@ -13,9 +13,13 @@ import {
     FileLock,
     NotFoundOnPathError,
     Output,
+    PathFinder,
+    addLogger,
+    clearLoggers,
     cmd,
     execSync,
     lockFileSync,
+    pathFinder,
     runSync,
     whichAllSync,
     whichSync,
@@ -27,9 +31,13 @@ const EXPECTED_LITE_EXPORTS = [
     "FileLock",
     "NotFoundOnPathError",
     "Output",
+    "PathFinder",
+    "addLogger",
+    "clearLoggers",
     "cmd",
     "execSync",
     "lockFileSync",
+    "pathFinder",
     "runSync",
     "whichAllSync",
     "whichSync",
@@ -42,11 +50,15 @@ const EXPECTED_V8_EXPORTS = [
     "FileLock",
     "NotFoundOnPathError",
     "Output",
+    "PathFinder",
+    "addLogger",
+    "clearLoggers",
     "cmd",
     "exec",
     "execSync",
     "lockFile",
     "lockFileSync",
+    "pathFinder",
     "run",
     "runSync",
     "spawn",
@@ -130,9 +142,13 @@ test("vael:exec registry, module namespace, and profile exports", async () => {
     assert.strictEquals(FileLock, reg.FileLock);
     assert.strictEquals(NotFoundOnPathError, reg.NotFoundOnPathError);
     assert.strictEquals(Output, reg.Output);
+    assert.strictEquals(PathFinder, reg.PathFinder);
+    assert.strictEquals(addLogger, reg.addLogger);
+    assert.strictEquals(clearLoggers, reg.clearLoggers);
     assert.strictEquals(cmd, reg.cmd);
     assert.strictEquals(execSync, reg.execSync);
     assert.strictEquals(lockFileSync, reg.lockFileSync);
+    assert.strictEquals(pathFinder, reg.pathFinder);
     assert.strictEquals(runSync, reg.runSync);
     assert.strictEquals(whichAllSync, reg.whichAllSync);
     assert.strictEquals(whichSync, reg.whichSync);
@@ -363,6 +379,97 @@ test("lockFileSync enforces exclusive/shared locks, nonBlocking, unlock, and Sym
         const reacquired = lockFileSync(lockPath, { mode: "exclusive", nonBlocking: true });
         reacquired.unlock();
     });
+});
+
+test("PathFinder registry and global/per-instance command loggers work across engines", () => {
+    const absSelf = realpath(whichSync(VJS_BIN));
+    try {
+        const pf = new PathFinder();
+        pf.set("SelfTool", {
+            name: "SelfTool",
+            executable: "nonexistent-shared-tool-xyz",
+            windows: ["%VAEL_DEFINITELY_UNSET_SHARED_999%\\tool.exe", absSelf],
+            linux: ["${VAEL_DEFINITELY_UNSET_SHARED_999}/tool", absSelf],
+            darwin: ["${VAEL_DEFINITELY_UNSET_SHARED_999}/tool", absSelf],
+        });
+        assert.strictEquals(pf.find("selftool")?.name, "SelfTool");
+        assert.strictEquals(pf.findExeSync("selftool"), absSelf);
+        assert.strictEquals(pf.find(absSelf)?.name, "SelfTool");
+
+        const snap = pf.get("SelfTool");
+        snap.linux.push("/tamper");
+        assert.ok(!pf.get("SelfTool").linux.includes("/tamper"));
+        assert.strictEquals(pf.delete("SelfTool"), true);
+        assert.strictEquals(pf.has("SelfTool"), false);
+
+        pathFinder.set("vael-self-alias", {
+            name: "vael-self-alias",
+            executable: "nonexistent-shared-alias-xyz",
+            windows: [absSelf],
+            linux: [absSelf],
+            darwin: [absSelf],
+        });
+
+        const calls = [];
+        const subA = addLogger((file, args, ev) => {
+            assert.strictEquals(Object.isFrozen(args), true);
+            assert.strictEquals(Object.isFrozen(ev), true);
+            assert.strictEquals(Object.getPrototypeOf(ev), null);
+            calls.push(`A:${ev.mode}:${file}:${args.join(",")}`);
+        });
+        const subB = addLogger((_file, _args, ev) => calls.push(`B:${ev.mode}`));
+
+        const command = cmd("vael-self-alias", ["--version"], {
+            log: (file) => calls.push(`opt:${file}`),
+        });
+        const instSub = command.addLogger((file) => calls.push(`inst:${file}`));
+        const out = command.outputSync();
+        assert.strictEquals(out.success, true);
+
+        subA.dispose();
+        subA.dispose();
+        assert.strictEquals(subA.active, false);
+        assert.strictEquals(subB.active, true);
+        instSub[Symbol.dispose]();
+        assert.strictEquals(instSub.active, false);
+
+        command.clearLoggers();
+        const status = command.statusSync();
+        assert.strictEquals(status.success, true);
+
+        clearLoggers();
+        assert.strictEquals(subB.active, false);
+        assert.equals(calls, [
+            `A:execSync:${absSelf}:--version`,
+            "B:execSync",
+            `opt:${absSelf}`,
+            `inst:${absSelf}`,
+            "B:runSync",
+        ]);
+
+        // Audit hook throw vetoes spawn
+        withTempDir((dir) => {
+            const marker = join(dir, "vetoed.txt");
+            const script = join(dir, "write_marker.js");
+            writeTextFile(
+                script,
+                `import { writeTextFile } from "vael:fs"; writeTextFile(${JSON.stringify(marker)}, "ran");`,
+            );
+            assert.throws(
+                () =>
+                    cmd(VJS_BIN, [script])
+                        .log(() => {
+                            throw new Error("audit-veto-shared");
+                        })
+                        .outputSync(),
+                Error,
+            );
+            assert.strictEquals(exists(marker), false);
+        });
+    } finally {
+        clearLoggers();
+        pathFinder.clear();
+    }
 });
 
 if (Vael.engine === "vael") {

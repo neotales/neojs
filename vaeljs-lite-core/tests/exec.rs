@@ -61,9 +61,13 @@ const expected = [
     "FileLock",
     "NotFoundOnPathError",
     "Output",
+    "PathFinder",
+    "addLogger",
+    "clearLoggers",
     "cmd",
     "execSync",
     "lockFileSync",
+    "pathFinder",
     "runSync",
     "whichAllSync",
     "whichSync",
@@ -468,5 +472,137 @@ if (!globalThis.__held.locked) throw new Error("expected lock held");
         let clean = FileLock::acquire(&drop_lock_path, &LockOptions::default().non_blocking(true))
             .expect("OS lock must be released on Runtime drop");
         clean.unlock().expect("unlock");
+    }
+
+    #[test]
+    fn path_finder_and_command_log_hooks_lite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tool_path = dir.path().join("custom-lite-tool");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::write(&tool_path, "#!/bin/sh\necho \"lite-pf:$1\"\n").unwrap();
+            fs::set_permissions(&tool_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            fs::write(&tool_path, "@echo off\r\necho lite-pf:%1\r\n").unwrap();
+        }
+        let veto_marker = dir.path().join("should-not-exist-lite.txt");
+
+        let tool_js = js_str(&tool_path.to_string_lossy());
+        let veto_js = js_str(&veto_marker.to_string_lossy());
+
+        run_js(&format!(
+            r#"
+import {{
+    CommandError,
+    NotFoundOnPathError,
+    PathFinder,
+    addLogger,
+    clearLoggers,
+    cmd,
+    execSync,
+    pathFinder,
+    runSync,
+}} from "vael:exec";
+
+const pf = new PathFinder();
+pf.set("MyLiteTool", {{
+    name: "MyLiteTool",
+    executable: "nonexistent-lite-bin",
+    linux: ["${{VAEL_DEFINITELY_UNSET_999}}/tool", {tool_js}],
+    darwin: ["${{VAEL_DEFINITELY_UNSET_999}}/tool", {tool_js}],
+    windows: ["%VAEL_DEFINITELY_UNSET_999%\\tool.exe", {tool_js}],
+}});
+if (pf.find("mylitetool")?.name !== "MyLiteTool") {{
+    throw new Error("PathFinder.find case-insensitive failed");
+}}
+if (pf.findExeSync("mylitetool") !== {tool_js}) {{
+    throw new Error("PathFinder.findExeSync failed");
+}}
+
+pathFinder.set("lite-alias", {{
+    name: "lite-alias",
+    executable: "nonexistent-lite-alias",
+    linux: [{tool_js}],
+    darwin: [{tool_js}],
+    windows: [{tool_js}],
+}});
+
+const seen = [];
+const sub1 = addLogger((file, args, ev) => {{
+    if (!Object.isFrozen(args) || !Object.isFrozen(ev) || Object.getPrototypeOf(ev) !== null) {{
+        throw new Error("event payload must be frozen null-prototype");
+    }}
+    seen.push(`g1:${{ev.mode}}:${{file}}`);
+}});
+const sub2 = addLogger((_f, _a, ev) => seen.push(`g2:${{ev.mode}}`));
+
+const c = cmd("lite-alias", ["ok"], {{ log: (f) => seen.push(`opt:${{f}}`) }});
+const instSub = c.addLogger((f) => seen.push(`inst:${{f}}`));
+const out = c.outputSync();
+if (!out.text().includes("lite-pf:ok")) {{
+    throw new Error(`unexpected output: ${{out.text()}}`);
+}}
+sub1.dispose();
+instSub[Symbol.dispose]();
+if (sub1.active || instSub.active || !sub2.active) {{
+    throw new Error("subscription active flags wrong after partial dispose");
+}}
+c.log(null);
+runSync(c);
+clearLoggers();
+if (sub2.active) throw new Error("clearLoggers must deactivate sub2");
+
+if (
+    JSON.stringify(seen) !==
+    JSON.stringify([
+        `g1:execSync:${{{tool_js}}}`,
+        "g2:execSync",
+        `opt:${{{tool_js}}}`,
+        `inst:${{{tool_js}}}`,
+        "g2:runSync",
+    ])
+) {{
+    throw new Error(`unexpected hook log sequence: ${{JSON.stringify(seen)}}`);
+}}
+
+// Check reviewer fix #2: CommandError.signal is null on normal non-zero exit
+const failOut = execSync(["sh", "-c", "exit 5"]);
+let err5 = null;
+try {{ failOut.validate(); }} catch (e) {{ err5 = e; }}
+if (!(err5 instanceof CommandError) || err5.signal !== null || err5.exitCode !== 5) {{
+    throw new Error(`expected signal===null on normal exit, got ${{err5 && err5.signal}}`);
+}}
+
+// Registered entry failing to resolve throws NotFoundOnPathError
+pathFinder.set("lite-missing", {{
+    name: "lite-missing",
+    executable: "definitely-missing-vael-lite-xyz",
+    linux: ["${{VAEL_DEFINITELY_UNSET_999}}/missing"],
+}});
+let nfCaught = false;
+try {{ execSync("lite-missing"); }} catch (e) {{ nfCaught = e instanceof NotFoundOnPathError; }}
+if (!nfCaught) throw new Error("expected NotFoundOnPathError");
+
+// Audit throw veto prevents spawn
+let vetoed = false;
+try {{
+    cmd("sh", ["-c", `touch ${{{veto_js}}}`])
+        .log(() => {{ throw new Error("veto-lite"); }})
+        .outputSync();
+}} catch (e) {{
+    vetoed = e.message === "veto-lite";
+}}
+if (!vetoed) throw new Error("audit throw must propagate");
+pathFinder.clear();
+"#
+        ));
+
+        assert!(
+            !veto_marker.exists(),
+            "audit veto throw must prevent process spawn in lite"
+        );
     }
 }

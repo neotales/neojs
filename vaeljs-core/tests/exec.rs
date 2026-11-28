@@ -26,11 +26,15 @@ import {
     FileLock,
     NotFoundOnPathError,
     Output,
+    PathFinder,
+    addLogger,
+    clearLoggers,
     cmd,
     exec,
     execSync,
     lockFile,
     lockFileSync,
+    pathFinder,
     run,
     runSync,
     spawn,
@@ -55,7 +59,7 @@ if (Object.prototype.hasOwnProperty.call(ns, "default")) {
     throw new Error("vael:exec must not have a default export");
 }
 
-const expected = "ChildProcess,Command,CommandError,FileLock,NotFoundOnPathError,Output,cmd,exec,execSync,lockFile,lockFileSync,run,runSync,spawn,which,whichAll,whichAllSync,whichSync";
+const expected = "ChildProcess,Command,CommandError,FileLock,NotFoundOnPathError,Output,PathFinder,addLogger,clearLoggers,cmd,exec,execSync,lockFile,lockFileSync,pathFinder,run,runSync,spawn,which,whichAll,whichAllSync,whichSync";
 const keys = Object.keys(ns).sort().join(",");
 if (keys !== expected) {
     throw new Error(`unexpected exports: ${keys}`);
@@ -614,5 +618,205 @@ if (st.success !== false) {
     throw new Error("timed out wait() status must have success=false");
 }
 "#,
+    );
+}
+
+#[test]
+fn path_finder_and_command_log_hooks_v8() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tool_path = dir.path().join("custom-v8-tool");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::write(&tool_path, "#!/bin/sh\necho \"v8-pf:$1\"\n").unwrap();
+        fs::set_permissions(&tool_path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        fs::write(&tool_path, "@echo off\r\necho v8-pf:%1\r\n").unwrap();
+    }
+    let veto_marker = dir.path().join("should-not-exist.txt");
+
+    let tool_js = serde_json::to_string(&tool_path.to_string_lossy().into_owned()).unwrap();
+    let veto_js = serde_json::to_string(&veto_marker.to_string_lossy().into_owned()).unwrap();
+
+    run_js(&format!(
+        r#"
+import {{
+    Command,
+    NotFoundOnPathError,
+    PathFinder,
+    addLogger,
+    clearLoggers,
+    cmd,
+    exec,
+    execSync,
+    pathFinder,
+}} from "vael:exec";
+
+// 1. PathFinder CRUD, clone isolation, find() case-insensitive + cached match, noCache, unset env skip
+const pf = new PathFinder();
+pf.set("MyTool", {{
+    name: "MyTool",
+    executable: "nonexistent-binary-vael-v8",
+    linux: ["${{VAEL_DEFINITELY_UNSET_999}}/bin/tool", {tool_js}],
+    darwin: ["${{VAEL_DEFINITELY_UNSET_999}}/bin/tool", {tool_js}],
+    windows: ["%VAEL_DEFINITELY_UNSET_999%\\tool.exe", {tool_js}],
+}});
+const got = pf.get("MyTool");
+got.linux.push("/tampered");
+if (pf.get("MyTool").linux.includes("/tampered")) {{
+    throw new Error("PathFinder.get must return cloned arrays");
+}}
+if (!pf.has("MyTool") || pf.find("mytool")?.name !== "MyTool") {{
+    throw new Error("PathFinder.find case-insensitive match failed");
+}}
+const resolvedAsync = await pf.findExe("mytool");
+if (resolvedAsync !== {tool_js}) {{
+    throw new Error(`expected resolved path ${{{tool_js}}}, got ${{resolvedAsync}}`);
+}}
+if (pf.find({tool_js})?.name !== "MyTool") {{
+    throw new Error("PathFinder.find by cached path failed");
+}}
+
+// Auto-registration only on findExe/findExeSync, and envVariable override + noCache
+const foundEcho = pf.findExeSync("echo");
+if (foundEcho !== undefined && !pf.has("echo")) {{
+    throw new Error("findExeSync should register default entry");
+}}
+pf.set("nocache-tool", {{
+    name: "nocache-tool",
+    noCache: true,
+    linux: [{tool_js}],
+    darwin: [{tool_js}],
+    windows: [{tool_js}],
+}});
+if (pf.findExeSync("nocache-tool") !== {tool_js} || pf.get("nocache-tool").cached !== undefined) {{
+    throw new Error("noCache must prevent caching resolved path");
+}}
+
+// 2. Command automatic integration with default pathFinder singleton
+pathFinder.set("v8-alias-tool", {{
+    name: "v8-alias-tool",
+    executable: "nonexistent-vael-alias-bin",
+    linux: [{tool_js}],
+    darwin: [{tool_js}],
+    windows: [{tool_js}],
+}});
+
+const events = [];
+const sub1 = addLogger((file, args, event) => {{
+    if (!Object.isFrozen(args) || !Object.isFrozen(event) || Object.getPrototypeOf(event) !== null) {{
+        throw new Error("hook payload must be frozen null-prototype");
+    }}
+    events.push(["g1", file, args.join(","), event.mode, event.cwd ?? ""]);
+}});
+{{
+    using sub2 = addLogger((file, args, event) => {{
+        events.push(["g2", file, event.mode]);
+    }});
+    if (!sub1.active || !sub2.active) throw new Error("expected active subscriptions");
+    const c1 = new Command("v8-alias-tool", ["arg1"], {{
+        log: (file) => events.push(["opt-log", file]),
+    }});
+    const instSub1 = c1.addLogger((file) => {{
+        events.push(["inst1", file]);
+    }});
+    const out = await c1.exec();
+    instSub1.dispose();
+    if (!out.text().includes("v8-pf:arg1")) throw new Error("unexpected output");
+}}
+sub1.dispose();
+sub1.dispose();
+if (sub1.active) throw new Error("disposed subscription must become inactive");
+
+// Test ordering (g1 -> optLog -> inst1) and `using` block cleanup + clearLoggers + veto
+events.length = 0;
+const gA = addLogger((file, args, ev) => events.push(`gA:${{ev.mode}}:${{file}}`));
+const gB = addLogger((file, args, ev) => events.push(`gB:${{ev.mode}}`));
+try {{
+    using _scoped = addLogger((_f, _a, ev) => events.push(`gScoped:${{ev.mode}}`));
+    const c = cmd("v8-alias-tool", ["hi"], {{
+        log: (f) => events.push(`logOpt:${{f}}`),
+    }});
+    const instSub = c.addLogger((f) => events.push(`inst:${{f}}`));
+    const res = await c.exec();
+    if (!res.text().includes("v8-pf:hi")) {{
+        throw new Error(`unexpected output from registered tool: ${{res.text()}}`);
+    }}
+    instSub.dispose();
+    if (instSub.active) throw new Error("instance subscription should be inactive");
+    throw new Error("force-exit-using");
+}} catch (e) {{
+    if (e.message !== "force-exit-using") throw e;
+}}
+// Only gA and gB remain; instSub disposed, _scoped exited via throw!
+const syncOut = execSync("v8-alias-tool", ["sync-hi"]);
+if (!syncOut.text().includes("v8-pf:sync-hi")) {{
+    throw new Error("sync exec of registered tool failed");
+}}
+clearLoggers();
+if (gA.active || gB.active) throw new Error("clearLoggers must deactivate all global subscriptions");
+
+if (
+    JSON.stringify(events) !==
+    JSON.stringify([
+        `gA:exec:${{{tool_js}}}`,
+        "gB:exec",
+        "gScoped:exec",
+        `logOpt:${{{tool_js}}}`,
+        `inst:${{{tool_js}}}`,
+        `gA:execSync:${{{tool_js}}}`,
+        "gB:execSync",
+    ])
+) {{
+    throw new Error(`unexpected event sequence: ${{JSON.stringify(events)}}`);
+}}
+
+// 3. Unresolved registered pathFinder entry fails with NotFoundOnPathError
+pathFinder.set("missing-registered-tool", {{
+    name: "missing-registered-tool",
+    executable: "nonexistent-registered-vael-bin-xyz",
+    linux: ["${{VAEL_DEFINITELY_UNSET_999}}/missing"],
+    darwin: ["${{VAEL_DEFINITELY_UNSET_999}}/missing"],
+    windows: ["%VAEL_DEFINITELY_UNSET_999%\\missing.exe"],
+}});
+let nfErr = null;
+try {{
+    await exec("missing-registered-tool");
+}} catch (e) {{
+    nfErr = e;
+}}
+if (!(nfErr instanceof NotFoundOnPathError)) {{
+    throw new Error(`expected NotFoundOnPathError, got ${{nfErr}}`);
+}}
+// Unregistered dynamic command must NOT auto-insert into pathFinder
+if (pathFinder.find("echo") !== undefined) {{
+    // only check something we haven't looked up
+}}
+execSync("true");
+if (pathFinder.find("true") !== undefined) {{
+    throw new Error("execSync must not auto-register unregistered programs into pathFinder");
+}}
+
+// 4. Audit handler veto prevents process spawn
+let vetoed = false;
+try {{
+    await cmd("sh", ["-c", `touch ${{{veto_js}}}`])
+        .log(() => {{
+            throw new Error("audit-veto");
+        }})
+        .exec();
+}} catch (e) {{
+    vetoed = e.message === "audit-veto";
+}}
+if (!vetoed) throw new Error("audit handler throw must propagate");
+pathFinder.clear();
+"#,
+    ));
+
+    assert!(
+        !veto_marker.exists(),
+        "audit veto throw must prevent process spawn"
     );
 }

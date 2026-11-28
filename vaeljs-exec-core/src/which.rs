@@ -29,6 +29,102 @@ pub fn which_all(name: &str, prepend_path: Option<&OsStr>) -> Result<Vec<PathBuf
     which_impl(name, prepend_path, false)
 }
 
+/// Returns `true` iff `path` resolves to an existing regular executable file.
+///
+/// Rejects empty paths and paths containing NUL bytes. Follows symlinks via
+/// [`std::fs::metadata`]. On Unix, requires at least one execute permission bit
+/// (`mode & 0o111 != 0`); on Windows, checks regular-file existence.
+#[must_use]
+pub fn is_executable_file(path: &Path) -> bool {
+    let raw = path.as_os_str();
+    if raw.is_empty() || raw.as_encoded_bytes().contains(&0) {
+        return false;
+    }
+    #[cfg(not(windows))]
+    {
+        is_unix_executable_file(path)
+    }
+    #[cfg(windows)]
+    {
+        std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+    }
+}
+
+/// Safely reads an environment variable by `name`, returning `None` if `name` is
+/// empty, contains `=` or NUL bytes, or the variable is unset / non-UTF-8.
+#[must_use]
+pub fn env_var(name: &str) -> Option<String> {
+    if name.is_empty() || name.contains('\0') || name.contains('=') {
+        return None;
+    }
+    std::env::var(name).ok().filter(|val| !val.contains('\0'))
+}
+
+/// Expands `${VAR}` and `%VAR%` environment-variable placeholders in `template`.
+///
+/// Returns `None` if `template` contains NUL bytes or if any referenced
+/// placeholder environment variable is unset, empty, or invalid (preventing
+/// accidental fallback to root paths like `"/.tool/bin"`). Unclosed
+/// placeholders (such as trailing `"${UNCLOSED"` or `"%UNCLOSED"`) are left
+/// untouched.
+#[must_use]
+pub fn expand_env_path(template: &str) -> Option<String> {
+    if template.contains('\0') {
+        return None;
+    }
+    let bytes = template.as_bytes();
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'{') {
+            let rest = &template[i + 2..];
+            if let Some(rel_end) = rest.find('}') {
+                let name = &rest[..rel_end];
+                if !name.is_empty() && !name.contains('$') && !name.contains('{') {
+                    let val = env_var(name)?;
+                    if val.is_empty() {
+                        return None;
+                    }
+                    out.push_str(&val);
+                    i += 2 + rel_end + 1;
+                    continue;
+                }
+            }
+            out.push_str("${");
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'%' {
+            let rest = &template[i + 1..];
+            if let Some(rel_end) = rest.find('%') {
+                let name = &rest[..rel_end];
+                if !name.is_empty() {
+                    let val = env_var(name)?;
+                    if val.is_empty() {
+                        return None;
+                    }
+                    out.push_str(&val);
+                    i += 1 + rel_end + 1;
+                    continue;
+                }
+                out.push_str("%%");
+                i += 2;
+                continue;
+            }
+            out.push('%');
+            i += 1;
+            continue;
+        }
+        let ch = template[i..].chars().next()?;
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    if out.contains('\0') {
+        return None;
+    }
+    Some(out)
+}
+
 fn validate_which_inputs(name: &str, prepend_path: Option<&OsStr>) -> Result<(), ExecError> {
     if name.is_empty() {
         return Err(ExecError::InvalidArgument {
@@ -370,5 +466,61 @@ mod tests {
         assert!(is_bare_program_name_win("mytool.exe"));
         assert!(!is_bare_program_name_win("./mytool.exe"));
         assert!(!is_bare_program_name_win(r"C:\bin\mytool.exe"));
+    }
+
+    #[test]
+    fn env_var_and_expand_env_path_prevent_unset_fallback_and_leave_unclosed_literal() {
+        assert_eq!(env_var(""), None);
+        assert_eq!(env_var("BAD=KEY"), None);
+        assert_eq!(env_var("BAD\0KEY"), None);
+        assert_eq!(
+            expand_env_path("${VAEL_DEFINITELY_UNSET_ENV_VAR_999}/.deno/bin/deno"),
+            None
+        );
+        assert_eq!(
+            expand_env_path("%VAEL_DEFINITELY_UNSET_ENV_VAR_999%\\bin\\tool.exe"),
+            None
+        );
+        assert_eq!(
+            expand_env_path("/usr/local/${UNCLOSED"),
+            Some("/usr/local/${UNCLOSED".to_owned())
+        );
+        assert_eq!(
+            expand_env_path("/usr/local/%UNCLOSED"),
+            Some("/usr/local/%UNCLOSED".to_owned())
+        );
+        assert_eq!(expand_env_path("bad\0path"), None);
+        // `PATH` is always set and non-empty in the test environment.
+        let path_val = env_var("PATH").expect("PATH must be set");
+        assert_eq!(
+            expand_env_path("${PATH}/extra"),
+            Some(format!("{path_val}/extra"))
+        );
+        assert_eq!(
+            expand_env_path("%PATH%\\extra"),
+            Some(format!("{path_val}\\extra"))
+        );
+    }
+
+    #[test]
+    fn is_executable_file_checks_regular_executable_and_rejects_nul_or_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_executable_file(tmp.path()));
+        assert!(!is_executable_file(Path::new("")));
+        assert!(!is_executable_file(Path::new("/tmp/\0bad")));
+
+        let file = tmp.path().join("tool");
+        std::fs::write(&file, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert!(!is_executable_file(&file));
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(is_executable_file(&file));
+        }
+        #[cfg(windows)]
+        {
+            assert!(is_executable_file(&file));
+        }
     }
 }

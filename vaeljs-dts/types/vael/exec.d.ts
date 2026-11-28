@@ -197,6 +197,159 @@ declare module "vael:exec" {
      * @since 0.0.0-alpha.2
      */
     maxOutputBytes?: number;
+
+    /**
+     * Optional per-instance execution logging / audit hook invoked right before
+     * spawning the command. Throwing from this hook aborts spawn.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    log?: CommandLogHandler;
+  }
+
+  /**
+   * Event metadata passed to a `CommandLogHandler` before a subprocess spawns.
+   *
+   * @since 0.0.0-alpha.2
+   */
+  export interface CommandLogEvent {
+    /**
+     * Resolved executable name or path about to be executed.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    readonly file: string;
+
+    /**
+     * Frozen snapshot of argument strings passed to the executable (excluding `argv[0]`).
+     *
+     * @since 0.0.0-alpha.2
+     */
+    readonly args: readonly string[];
+
+    /**
+     * Configured working directory for the command, if explicitly set.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    readonly cwd?: string;
+
+    /**
+     * Execution entry point mode that triggered the spawn.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    readonly mode: "exec" | "execSync" | "run" | "runSync" | "spawn";
+  }
+
+  /**
+   * Pre-spawn command logging or audit callback.
+   *
+   * Throwing an error aborts execution before spawning the subprocess.
+   *
+   * @param file Resolved executable name or path.
+   * @param args Frozen argument array (`argv.slice(1)`).
+   * @param event Frozen null-prototype event metadata.
+   * @since 0.0.0-alpha.2
+   */
+  export type CommandLogHandler = (
+    file: string,
+    args: readonly string[],
+    event: CommandLogEvent,
+  ) => void;
+
+  /**
+   * Disposable handle returned by `addLogger` and `Command.addLogger`.
+   *
+   * Calling `dispose()` or exiting a `using` block removes only this
+   * subscription idempotently and flips `active` to `false`.
+   *
+   * @since 0.0.0-alpha.2
+   */
+  export interface CommandLogSubscription {
+    /**
+     * `true` while the handler subscription remains registered and active.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    readonly active: boolean;
+
+    /**
+     * Unregister this specific log handler subscription idempotently.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    dispose(): void;
+
+    /**
+     * Dispose this subscription automatically when exiting a `using` block.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    [Symbol.dispose](): void;
+  }
+
+  /**
+   * Executable lookup entry stored in a `PathFinder` registry.
+   *
+   * @since 0.0.0-alpha.2
+   */
+  export interface PathFinderOptions {
+    /**
+     * Canonical executable name for this entry.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    name: string;
+
+    /**
+     * Executable binary name or explicit path to look up instead of `name`.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    executable?: string;
+
+    /**
+     * Environment variable name checked for an explicit executable path override.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    envVariable?: string;
+
+    /**
+     * Cached resolved path returned when `noCache` is not `true`.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    cached?: string;
+
+    /**
+     * Disable caching resolved paths on this entry when `true`.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    noCache?: boolean;
+
+    /**
+     * Ordered candidate fallback paths on Windows (supports `${VAR}` and `%VAR%` expansion).
+     *
+     * @since 0.0.0-alpha.2
+     */
+    windows?: readonly string[];
+
+    /**
+     * Ordered candidate fallback paths on Linux (supports `${VAR}` and `%VAR%` expansion).
+     *
+     * @since 0.0.0-alpha.2
+     */
+    linux?: readonly string[];
+
+    /**
+     * Ordered candidate fallback paths on macOS (`darwin`; supports `${VAR}` and `%VAR%` expansion).
+     *
+     * @since 0.0.0-alpha.2
+     */
+    darwin?: readonly string[];
   }
 
   /**
@@ -798,6 +951,35 @@ declare module "vael:exec" {
     json<T = unknown>(): Promise<T>;
 
     /**
+     * Set or clear (`null`) the single per-instance `log` hook on this command.
+     *
+     * @param handler Pre-spawn hook or `null` to clear.
+     * @returns `this` for fluent chaining.
+     * @throws {TypeError} if `handler` is neither a function nor `null`.
+     * @since 0.0.0-alpha.2
+     */
+    log(handler: CommandLogHandler | null): this;
+
+    /**
+     * Attach a disposable per-instance log/audit handler to this command.
+     *
+     * @param handler Pre-spawn log/audit callback.
+     * @returns Frozen `CommandLogSubscription` handle.
+     * @throws {TypeError} if `handler` is not a function.
+     * @since 0.0.0-alpha.2
+     */
+    addLogger(handler: CommandLogHandler): CommandLogSubscription;
+
+    /**
+     * Clear the per-instance `log` hook and all `addLogger` subscriptions on
+     * this command, marking existing subscriptions inactive.
+     *
+     * @returns `this` for fluent chaining.
+     * @since 0.0.0-alpha.2
+     */
+    clearLoggers(): this;
+
+    /**
      * Spawn this command as a managed `ChildProcess` handle with piped streams.
      *
      * Available in `vjs` (`vaeljs`) only.
@@ -1356,4 +1538,120 @@ declare module "vael:exec" {
    * @since 0.0.0-alpha.2
    */
   export function lockFileSync(path: string, options?: LockOptions): FileLock;
+
+  /**
+   * Executable registry for resolving and caching platform binary paths.
+   *
+   * @since 0.0.0-alpha.2
+   */
+  export class PathFinder {
+    /**
+     * Register or update executable lookup configuration under `name`.
+     *
+     * @param name Registry key name.
+     * @param options Validated `PathFinderOptions` configuration.
+     * @returns `this` for chaining.
+     * @throws {TypeError} if `name` or `options` is invalid.
+     * @since 0.0.0-alpha.2
+     */
+    set(name: string, options: PathFinderOptions): this;
+
+    /**
+     * Retrieve a shallow clone of the entry registered under exact key `name`.
+     *
+     * @param name Registry key name.
+     * @returns Cloned `PathFinderOptions` or `undefined`.
+     * @since 0.0.0-alpha.2
+     */
+    get(name: string): PathFinderOptions | undefined;
+
+    /**
+     * Return `true` if exact key `name` is registered.
+     *
+     * @param name Registry key name.
+     * @since 0.0.0-alpha.2
+     */
+    has(name: string): boolean;
+
+    /**
+     * Delete exact key `name` from the registry.
+     *
+     * @param name Registry key name.
+     * @returns `true` if an entry was removed.
+     * @since 0.0.0-alpha.2
+     */
+    delete(name: string): boolean;
+
+    /**
+     * Remove all entries from the registry.
+     *
+     * @since 0.0.0-alpha.2
+     */
+    clear(): void;
+
+    /**
+     * Find a registered entry by exact key, `options.name`, `options.cached`,
+     * or ASCII case-insensitive match.
+     *
+     * @param name Executable key, name, or cached path.
+     * @returns Cloned `PathFinderOptions` or `undefined`.
+     * @since 0.0.0-alpha.2
+     */
+    find(name: string): PathFinderOptions | undefined;
+
+    /**
+     * Synchronously resolve `name` to an executable file path via env
+     * overrides, cache, `PATH`, and platform fallback candidates.
+     *
+     * @param name Executable key or name.
+     * @returns Resolved executable path, or `undefined` if not found.
+     * @since 0.0.0-alpha.2
+     */
+    findExeSync(name: string): string | undefined;
+
+    /**
+     * Asynchronously resolve `name` to an executable file path via env
+     * overrides, cache, `PATH`, and platform fallback candidates.
+     *
+     * Available in `vjs` (`vaeljs`) only; use `findExeSync` in `vjs-lite`.
+     *
+     * @param name Executable key or name.
+     * @returns Promise resolving to the executable path, or `undefined`.
+     * @since 0.0.0-alpha.2
+     */
+    findExe(name: string): Promise<string | undefined>;
+  }
+
+  /**
+   * Default singleton `PathFinder` registry consulted automatically when
+   * executing a `Command` whose program matches a registered entry.
+   *
+   * @since 0.0.0-alpha.2
+   */
+  export const pathFinder: PathFinder;
+
+  /**
+   * Register a global command execution logging / audit handler.
+   *
+   * @param handler Callback invoked right before any command spawns.
+   * @returns Disposable `CommandLogSubscription` guard.
+   * @throws {TypeError} if `handler` is not a function.
+   * @example
+   * ```ts
+   * import { addLogger, execSync } from "vael:exec";
+   *
+   * using _sub = addLogger((file, args) => console.log(file, args));
+   * execSync("echo", ["hello"]);
+   * ```
+   * @since 0.0.0-alpha.2
+   */
+  export function addLogger(handler: CommandLogHandler): CommandLogSubscription;
+
+  /**
+   * Unregister all global command execution log handlers and mark existing
+   * subscriptions inactive.
+   *
+   * @since 0.0.0-alpha.2
+   */
+  export function clearLoggers(): void;
 }

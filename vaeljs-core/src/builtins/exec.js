@@ -18,6 +18,11 @@
     const opValidateSignal = ops.op_vael_exec_validate_signal;
     const opValidateKillGrace = ops.op_vael_exec_validate_kill_grace;
     const opParseCommandOptions = ops.op_vael_exec_parse_command_options;
+    const opParsePathFinderOptions = ops.op_vael_exec_parse_path_finder_options;
+    const opIsExecutableFile = ops.op_vael_exec_is_executable_file;
+    const opEnvVar = ops.op_vael_exec_env_var;
+    const opExpandEnvPath = ops.op_vael_exec_expand_env_path;
+    const opPlatform = ops.op_vael_exec_platform;
     const opOutputSync = ops.op_vael_exec_output_sync;
     const opOutputAsync = ops.op_vael_exec_output_async;
     const opStatusSync = ops.op_vael_exec_status_sync;
@@ -49,13 +54,28 @@
     const defineProperty = Object.defineProperty;
     const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
     const getPrototypeOf = Object.getPrototypeOf;
+    const makeMap = Map;
+    const mapGet = Function.prototype.call.bind(Map.prototype.get);
+    const mapSet = Function.prototype.call.bind(Map.prototype.set);
+    const mapHas = Function.prototype.call.bind(Map.prototype.has);
+    const mapDelete = Function.prototype.call.bind(Map.prototype.delete);
+    const mapClear = Function.prototype.call.bind(Map.prototype.clear);
+    const mapForEach = Function.prototype.call.bind(Map.prototype.forEach);
     const hasOwn = Object.hasOwn;
     const arrayIsArray = Array.isArray;
     const arraySlice = Function.prototype.call.bind(Array.prototype.slice);
     const arrayPush = Function.prototype.call.bind(Array.prototype.push);
     const arrayPop = Function.prototype.call.bind(Array.prototype.pop);
     const stringSplit = Function.prototype.call.bind(String.prototype.split);
+    const stringIncludes = Function.prototype.call.bind(String.prototype.includes);
+    const stringReplace = Function.prototype.call.bind(String.prototype.replace);
+    const stringToLowerCase = Function.prototype.call.bind(String.prototype.toLowerCase);
+    const stringToUpperCase = Function.prototype.call.bind(String.prototype.toUpperCase);
     const jsonParse = JSON.parse;
+
+    const CAMEL_BOUNDARY_RE = makeRegExp("([a-z0-9])([A-Z])", "g");
+    const NON_ALNUM_RE = makeRegExp("[^a-zA-Z0-9]+", "g");
+    const EDGE_UNDERSCORE_RE = makeRegExp("^_+|_+$", "g");
 
     const typedArrayProto = getPrototypeOf(Uint8Array.prototype);
     const typedArraySet = Function.prototype.call.bind(Uint8Array.prototype.set);
@@ -293,7 +313,7 @@
         /**
          * Validate the command outcome, throwing `CommandError` on failure.
          *
-         * @param {(out: Output) => boolean} [predicate]
+         * @param {(code: number) => boolean} [predicate]
          * @param {boolean} [failOnStderr=false]
          * @returns {Output} `this`
          */
@@ -552,6 +572,312 @@
     freeze(FileLock.prototype);
     freeze(FileLock);
 
+    const globalLoggers = new makeMap();
+
+    function createLogSubscription(registry, handler) {
+        if (typeof handler !== "function") {
+            throw new makeTypeError("log handler must be a function");
+        }
+        const token = { __proto__: null };
+        const entry = { __proto__: null, handler, active: true };
+        mapSet(registry, token, entry);
+        const dispose = () => {
+            if (entry.active) {
+                entry.active = false;
+                mapDelete(registry, token);
+            }
+        };
+        const sub = { __proto__: null };
+        defineProperty(sub, "active", {
+            __proto__: null,
+            get: () => entry.active,
+            enumerable: true,
+            configurable: true,
+        });
+        defineOwn(sub, "dispose", dispose, true, false);
+        if (disposeSymbol !== null) {
+            defineOwn(sub, disposeSymbol, dispose, false, false);
+        }
+        return freeze(sub);
+    }
+
+    function clearLogRegistry(registry) {
+        mapForEach(registry, (entry) => {
+            entry.active = false;
+        });
+        mapClear(registry);
+    }
+
+    function appendActiveHandlers(registry, out) {
+        mapForEach(registry, (entry) => {
+            if (entry.active) {
+                arrayPush(out, entry.handler);
+            }
+        });
+    }
+
+    /**
+     * Register a global command execution log/audit handler.
+     *
+     * @param {(file: string, args: readonly string[], event: CommandLogEvent) => void} handler
+     * @returns {CommandLogSubscription}
+     */
+    function addLogger(handler) {
+        if (arguments.length !== 1) {
+            throw new makeTypeError("addLogger takes exactly one argument");
+        }
+        return createLogSubscription(globalLoggers, handler);
+    }
+
+    /**
+     * Remove all global command execution log handlers and mark their
+     * subscriptions inactive.
+     */
+    function clearLoggers() {
+        if (arguments.length !== 0) {
+            throw new makeTypeError("clearLoggers takes no arguments");
+        }
+        clearLogRegistry(globalLoggers);
+    }
+
+    function toUnderscoreUpper(name) {
+        const camelSplit = stringReplace(name, CAMEL_BOUNDARY_RE, "$1_$2");
+        const underscored = stringReplace(camelSplit, NON_ALNUM_RE, "_");
+        const trimmed = stringReplace(underscored, EDGE_UNDERSCORE_RE, "");
+        return stringToUpperCase(trimmed);
+    }
+
+    function clonePathFinderOptions(entry) {
+        const copy = { name: entry.name };
+        if (entry.executable !== undefined) copy.executable = entry.executable;
+        if (entry.envVariable !== undefined) copy.envVariable = entry.envVariable;
+        if (entry.cached !== undefined) copy.cached = entry.cached;
+        if (entry.noCache !== undefined) copy.noCache = entry.noCache;
+        if (entry.windows !== undefined) copy.windows = arraySlice(entry.windows);
+        if (entry.linux !== undefined) copy.linux = arraySlice(entry.linux);
+        if (entry.darwin !== undefined) copy.darwin = arraySlice(entry.darwin);
+        return copy;
+    }
+
+    function hasPathSeparator(p) {
+        return stringIncludes(p, "/") || stringIncludes(p, "\\");
+    }
+
+    function validatePathFinderKey(name) {
+        if (typeof name !== "string" || name.length === 0 || stringIncludes(name, "\0")) {
+            throw new makeTypeError("executable name must be a non-empty string");
+        }
+    }
+
+    /**
+     * Registry for resolving and caching platform executable paths.
+     */
+    class PathFinder {
+        #map = new makeMap();
+
+        set(name, options) {
+            if (arguments.length !== 2) {
+                throw new makeTypeError("PathFinder.set takes exactly two arguments");
+            }
+            validatePathFinderKey(name);
+            const parsed = unwrapExec(opParsePathFinderOptions(options));
+            const stored = { __proto__: null, name: parsed.name };
+            if (parsed.executable !== undefined) stored.executable = parsed.executable;
+            if (parsed.envVariable !== undefined) stored.envVariable = parsed.envVariable;
+            if (parsed.cached !== undefined) stored.cached = parsed.cached;
+            if (parsed.noCache !== undefined) stored.noCache = parsed.noCache;
+            if (parsed.windows !== undefined) stored.windows = arraySlice(parsed.windows);
+            if (parsed.linux !== undefined) stored.linux = arraySlice(parsed.linux);
+            if (parsed.darwin !== undefined) stored.darwin = arraySlice(parsed.darwin);
+            mapSet(this.#map, name, stored);
+            return this;
+        }
+
+        get(name) {
+            if (arguments.length !== 1) {
+                throw new makeTypeError("PathFinder.get takes exactly one argument");
+            }
+            if (typeof name !== "string") {
+                throw new makeTypeError("executable name must be a string");
+            }
+            const entry = mapGet(this.#map, name);
+            return entry === undefined ? undefined : clonePathFinderOptions(entry);
+        }
+
+        has(name) {
+            if (arguments.length !== 1) {
+                throw new makeTypeError("PathFinder.has takes exactly one argument");
+            }
+            if (typeof name !== "string") {
+                throw new makeTypeError("executable name must be a string");
+            }
+            return mapHas(this.#map, name);
+        }
+
+        delete(name) {
+            if (arguments.length !== 1) {
+                throw new makeTypeError("PathFinder.delete takes exactly one argument");
+            }
+            if (typeof name !== "string") {
+                throw new makeTypeError("executable name must be a string");
+            }
+            return mapDelete(this.#map, name);
+        }
+
+        clear() {
+            if (arguments.length !== 0) {
+                throw new makeTypeError("PathFinder.clear takes no arguments");
+            }
+            mapClear(this.#map);
+        }
+
+        #findRecord(name) {
+            const exact = mapGet(this.#map, name);
+            if (exact !== undefined) return exact;
+            const lowerName = stringToLowerCase(name);
+            let exactPropMatch = undefined;
+            let foldMatch = undefined;
+            mapForEach(this.#map, (entry, key) => {
+                if (exactPropMatch !== undefined) return;
+                if (entry.name === name || entry.cached === name) {
+                    exactPropMatch = entry;
+                    return;
+                }
+                if (
+                    foldMatch === undefined &&
+                    (stringToLowerCase(key) === lowerName ||
+                        stringToLowerCase(entry.name) === lowerName)
+                ) {
+                    foldMatch = entry;
+                }
+            });
+            return exactPropMatch !== undefined ? exactPropMatch : foldMatch;
+        }
+
+        find(name) {
+            if (arguments.length !== 1) {
+                throw new makeTypeError("PathFinder.find takes exactly one argument");
+            }
+            if (typeof name !== "string") {
+                throw new makeTypeError("executable name must be a string");
+            }
+            const record = this.#findRecord(name);
+            return record === undefined ? undefined : clonePathFinderOptions(record);
+        }
+
+        #ensureRecord(name) {
+            validatePathFinderKey(name);
+            let record = this.#findRecord(name);
+            if (record === undefined) {
+                const envBase = toUnderscoreUpper(name);
+                record = { __proto__: null, name };
+                if (envBase.length > 0) {
+                    record.envVariable = envBase + "_EXE";
+                }
+                mapSet(this.#map, name, record);
+            }
+            return record;
+        }
+
+        #resolveEnvOrCached(record) {
+            if (record.envVariable !== undefined && record.envVariable.length > 0) {
+                const rawEnv = opEnvVar(record.envVariable);
+                if (rawEnv !== null && rawEnv !== undefined && rawEnv.length > 0) {
+                    const expanded = opExpandEnvPath(rawEnv);
+                    if (expanded !== null && expanded !== undefined && expanded.length > 0) {
+                        if (record.noCache !== true && record.cached === expanded) {
+                            return expanded;
+                        }
+                        if (opIsExecutableFile(expanded)) {
+                            if (record.noCache !== true) record.cached = expanded;
+                            return expanded;
+                        }
+                    }
+                }
+            }
+            if (
+                record.executable !== undefined &&
+                record.executable.length > 0 &&
+                hasPathSeparator(record.executable) &&
+                opIsExecutableFile(record.executable)
+            ) {
+                if (record.noCache !== true) record.cached = record.executable;
+                return record.executable;
+            }
+            if (record.noCache !== true && record.cached !== undefined && record.cached.length > 0) {
+                return record.cached;
+            }
+            return undefined;
+        }
+
+        #resolveFallback(record) {
+            const os = opPlatform();
+            const lists = [];
+            if (os === "windows") {
+                if (record.windows !== undefined) arrayPush(lists, record.windows);
+            } else if (os === "darwin") {
+                if (record.darwin !== undefined) arrayPush(lists, record.darwin);
+                if (record.linux !== undefined) arrayPush(lists, record.linux);
+            } else {
+                if (record.linux !== undefined) arrayPush(lists, record.linux);
+            }
+            for (let li = 0; li < lists.length; li += 1) {
+                const candidates = lists[li];
+                for (let ci = 0; ci < candidates.length; ci += 1) {
+                    const expanded = opExpandEnvPath(candidates[ci]);
+                    if (
+                        expanded !== null &&
+                        expanded !== undefined &&
+                        expanded.length > 0 &&
+                        opIsExecutableFile(expanded)
+                    ) {
+                        if (record.noCache !== true) record.cached = expanded;
+                        return expanded;
+                    }
+                }
+            }
+            return undefined;
+        }
+
+        findExeSync(name) {
+            if (arguments.length !== 1) {
+                throw new makeTypeError("PathFinder.findExeSync takes exactly one argument");
+            }
+            const record = this.#ensureRecord(name);
+            const early = this.#resolveEnvOrCached(record);
+            if (early !== undefined) return early;
+
+            const target = record.executable !== undefined ? record.executable : name;
+            const onPath = whichSync(target);
+            if (onPath !== null && onPath !== undefined) {
+                if (record.noCache !== true) record.cached = onPath;
+                return onPath;
+            }
+            return this.#resolveFallback(record);
+        }
+
+        async findExe(name) {
+            if (arguments.length !== 1) {
+                throw new makeTypeError("PathFinder.findExe takes exactly one argument");
+            }
+            const record = this.#ensureRecord(name);
+            const early = this.#resolveEnvOrCached(record);
+            if (early !== undefined) return early;
+
+            const target = record.executable !== undefined ? record.executable : name;
+            const onPath = await whichFn(target);
+            if (onPath !== null && onPath !== undefined) {
+                if (record.noCache !== true) record.cached = onPath;
+                return onPath;
+            }
+            return this.#resolveFallback(record);
+        }
+    }
+    freeze(PathFinder.prototype);
+    freeze(PathFinder);
+
+    const pathFinder = freeze(new PathFinder());
+
     /**
      * Argv-only command builder that never invokes a shell.
      */
@@ -568,6 +894,8 @@
         #killSignal;
         #killGraceMs;
         #maxOutputBytes;
+        #logHandler = null;
+        #loggers = new makeMap();
 
         constructor(programOrArgv, argsOrOptions, maybeOptions) {
             if (arguments.length < 1 || arguments.length > 3) {
@@ -641,12 +969,15 @@
             if (parsedOpts.maxOutputBytes !== undefined) {
                 this.#maxOutputBytes = parsedOpts.maxOutputBytes;
             }
+            if (parsedOpts.hasLog === true) {
+                this.#logHandler = options.log;
+            }
         }
 
-        #specObject() {
+        #specObject(programOverride) {
             const spec = {
                 __proto__: null,
-                program: this.#program,
+                program: programOverride !== undefined ? programOverride : this.#program,
                 args: arraySlice(this.#args),
                 clearEnv: this.#clearEnv,
                 envOps: arraySlice(this.#envOps),
@@ -660,6 +991,84 @@
             if (this.#killGraceMs !== undefined) spec.killGraceMs = this.#killGraceMs;
             if (this.#maxOutputBytes !== undefined) spec.maxOutputBytes = this.#maxOutputBytes;
             return spec;
+        }
+
+        #runLogHooks(resolvedFile, mode) {
+            const handlers = [];
+            appendActiveHandlers(globalLoggers, handlers);
+            if (this.#logHandler !== null) {
+                arrayPush(handlers, this.#logHandler);
+            }
+            appendActiveHandlers(this.#loggers, handlers);
+            if (handlers.length === 0) return;
+
+            const loggedArgs = freeze(arraySlice(this.#args));
+            const event = {
+                __proto__: null,
+                file: resolvedFile,
+                args: loggedArgs,
+                mode,
+            };
+            if (this.#cwd !== undefined) {
+                event.cwd = this.#cwd;
+            }
+            freeze(event);
+            for (let i = 0; i < handlers.length; i += 1) {
+                handlers[i](resolvedFile, loggedArgs, event);
+            }
+        }
+
+        #prepareSync(mode) {
+            let resolvedFile = this.#program;
+            if (pathFinder.find(this.#program) !== undefined) {
+                const found = pathFinder.findExeSync(this.#program);
+                if (found === undefined) {
+                    throw new NotFoundOnPathError(this.#program);
+                }
+                resolvedFile = found;
+            }
+            this.#runLogHooks(resolvedFile, mode);
+            return this.#specObject(resolvedFile);
+        }
+
+        async #prepareAsync(mode) {
+            let resolvedFile = this.#program;
+            if (pathFinder.find(this.#program) !== undefined) {
+                const found = await pathFinder.findExe(this.#program);
+                if (found === undefined) {
+                    throw new NotFoundOnPathError(this.#program);
+                }
+                resolvedFile = found;
+            }
+            this.#runLogHooks(resolvedFile, mode);
+            return this.#specObject(resolvedFile);
+        }
+
+        log(handler) {
+            if (arguments.length !== 1) {
+                throw new makeTypeError("log takes exactly one argument");
+            }
+            if (handler !== null && typeof handler !== "function") {
+                throw new makeTypeError("log handler must be a function or null");
+            }
+            this.#logHandler = handler;
+            return this;
+        }
+
+        addLogger(handler) {
+            if (arguments.length !== 1) {
+                throw new makeTypeError("addLogger takes exactly one argument");
+            }
+            return createLogSubscription(this.#loggers, handler);
+        }
+
+        clearLoggers() {
+            if (arguments.length !== 0) {
+                throw new makeTypeError("clearLoggers takes no arguments");
+            }
+            this.#logHandler = null;
+            clearLogRegistry(this.#loggers);
+            return this;
         }
 
         arg(v) {
@@ -805,8 +1214,9 @@
             if (arguments.length !== 0) {
                 throw new makeTypeError("outputSync takes no arguments");
             }
-            const raw = unwrapExec(opOutputSync(this.#specObject()));
-            return new Output(outputToken, raw, this.#program);
+            const spec = this.#prepareSync("execSync");
+            const raw = unwrapExec(opOutputSync(spec));
+            return new Output(outputToken, raw, spec.program);
         }
 
         execSync() {
@@ -820,7 +1230,8 @@
             if (arguments.length !== 0) {
                 throw new makeTypeError("statusSync takes no arguments");
             }
-            return freezeStatus(unwrapExec(opStatusSync(this.#specObject())));
+            const spec = this.#prepareSync("runSync");
+            return freezeStatus(unwrapExec(opStatusSync(spec)));
         }
 
         runSync() {
@@ -834,8 +1245,9 @@
             if (arguments.length !== 0) {
                 throw new makeTypeError("output takes no arguments");
             }
-            const raw = unwrapExec(await opOutputAsync(this.#specObject()));
-            return new Output(outputToken, raw, this.#program);
+            const spec = await this.#prepareAsync("exec");
+            const raw = unwrapExec(await opOutputAsync(spec));
+            return new Output(outputToken, raw, spec.program);
         }
 
         async exec() {
@@ -849,7 +1261,8 @@
             if (arguments.length !== 0) {
                 throw new makeTypeError("status takes no arguments");
             }
-            return freezeStatus(unwrapExec(await opStatusAsync(this.#specObject())));
+            const spec = await this.#prepareAsync("run");
+            return freezeStatus(unwrapExec(await opStatusAsync(spec)));
         }
 
         async run() {
@@ -863,9 +1276,10 @@
             if (arguments.length !== 0) {
                 throw new makeTypeError("spawn takes no arguments");
             }
-            const res = opSpawn(this.#specObject());
+            const spec = this.#prepareSync("spawn");
+            const res = opSpawn(spec);
             if (!res.ok) throwExec(res);
-            return new ChildProcess(childToken, res.id, res.pid, this.#program);
+            return new ChildProcess(childToken, res.id, res.pid, spec.program);
         }
 
         async text() {
@@ -1006,11 +1420,15 @@
         FileLock,
         NotFoundOnPathError,
         Output,
+        PathFinder,
+        addLogger,
+        clearLoggers,
         cmd,
         exec,
         execSync,
         lockFile,
         lockFileSync,
+        pathFinder,
         run,
         runSync,
         spawn: spawnFn,

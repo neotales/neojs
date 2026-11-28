@@ -51,7 +51,7 @@ pub use types::{
     CommandOutput, CommandSpec, CommandStatus, DEFAULT_KILL_GRACE, DEFAULT_MAX_OUTPUT_BYTES,
     MAX_OUTPUT_BYTES, Signal, StdioMode,
 };
-pub use which::{which, which_all};
+pub use which::{env_var, expand_env_path, is_executable_file, which, which_all};
 
 /// The canonical `vael:exec` import specifier and module registry key.
 pub const SPECIFIER: &str = "vael:exec";
