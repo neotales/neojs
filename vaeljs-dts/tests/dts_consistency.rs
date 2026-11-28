@@ -37,6 +37,8 @@ const V8_SPECIFIERS: &[&str] = &[
     "vael:cron",
     "vael:crypto",
     "vael:db",
+    "vael:exec",
+    "vael:fetch",
     "vael:fs",
     "vael:http",
     "vael:os",
@@ -68,6 +70,8 @@ const LITE_SPECIFIERS: &[&str] = &[
     "vael:chars",
     "vael:console",
     "vael:crypto",
+    "vael:exec",
+    "vael:fetch",
     "vael:fs",
     "vael:os",
     "vael:path",
@@ -196,16 +200,54 @@ fn contains_identifier_word(haystack: &str, needle: &str) -> bool {
     false
 }
 
+fn strip_vael_fetch_module_exports(source: &str) -> String {
+    // Strip only the explicit ESM `fetch` export and its documented examples
+    // inside `vael:fetch`, never ambient/global `fetch` declarations.
+    source
+        .replace(
+            "export function fetch(url: string, options?: FetchOptions): Promise<FetchResponse>;",
+            "",
+        )
+        .replace("await fetch(", "await (")
+        .replace(
+            "import { download, fetch, fetchSync }",
+            "import { download, fetchSync }",
+        )
+        .replace("import { fetch }", "import {}")
+        .replace("`fetch`, `fetchSync`", "`fetchSync`")
+        .replace("`fetch` and `fetchSync`", "`fetchSync`")
+}
+
 fn assert_no_forbidden_globals(label: &str, source: &str, is_node_module: bool) {
     // `ServeMux.fetch` is an instance method on `ServeMux` inside `vael:http`,
     // not a global `fetch` function. Strip those exact member occurrences
+    // plus quoted `"vael:fetch"` specifiers / `"./vael/fetch.d.ts"` index paths
     // before running the global-identifier word scan.
-    let sanitized = source
+    let mut sanitized = source
         .replace(
             "fetch(input: string | FetchInput, init?: FetchInit): Promise<HttpResponse>;",
             "",
         )
-        .replace(".fetch(", ".(");
+        .replace(".fetch(", ".(")
+        .replace("vael:fetch", "vael:")
+        .replace("./vael/fetch.d.ts", "./vael/.d.ts");
+
+    // Exempt `vael:fetch` ONLY for its explicit ESM `fetch` export (in the
+    // standalone `vael/fetch.d.ts` file or inside the `vael:fetch` block of a
+    // rendered bundle), keeping `fetch` strictly forbidden in `globals.d.ts`
+    // and every other module.
+    if label.ends_with("::vael/fetch.d.ts") {
+        sanitized = strip_vael_fetch_module_exports(&sanitized);
+    } else if (label == "vjs" || label == "vjs-lite")
+        && let Some(start) = sanitized.find("declare module \"vael:\"")
+        && let Some(rel_end) = sanitized[start..].find("\n}\n")
+    {
+        let block_start = sanitized[..start].rfind("/**").unwrap_or(start);
+        let block_end = start + rel_end + 3;
+        let scrubbed = strip_vael_fetch_module_exports(&sanitized[block_start..block_end]);
+        sanitized.replace_range(block_start..block_end, &scrubbed);
+    }
+
     let list = if is_node_module {
         ALWAYS_FORBIDDEN_GLOBALS
     } else {
@@ -375,6 +417,11 @@ fn declared_exports_match_expected_exports_one_to_one_for_both_profiles() {
 fn globals_and_index_match_profile_surfaces() {
     let v8_globals = globals_dts(Profile::V8);
     assert!(v8_globals.contains("readonly engine: \"vael\";"));
+    assert!(
+        !v8_globals.contains("declare function fetch")
+            && !v8_globals.contains("declare const fetch"),
+        "V8 globals.d.ts must never declare ambient global fetch"
+    );
     for method in ["log(", "debug(", "info(", "warn(", "error("] {
         assert!(
             v8_globals.contains(method),
@@ -398,6 +445,11 @@ fn globals_and_index_match_profile_surfaces() {
 
     let lite_globals = globals_dts(Profile::Lite);
     assert!(lite_globals.contains("readonly engine: \"vael-lite\";"));
+    assert!(
+        !lite_globals.contains("declare function fetch")
+            && !lite_globals.contains("declare const fetch"),
+        "Lite globals.d.ts must never declare ambient global fetch"
+    );
     for method in ["log(", "debug(", "info(", "warn(", "error("] {
         assert!(
             lite_globals.contains(method),
@@ -444,6 +496,40 @@ fn globals_and_index_match_profile_surfaces() {
         assert!(
             v8_crypto.contains(async_name),
             "Profile::V8 vael:crypto must declare `{async_name}`"
+        );
+    }
+
+    let lite_fetch = module_dts(Profile::Lite, "vael:fetch").expect("Lite vael:fetch dts");
+    let v8_fetch = module_dts(Profile::V8, "vael:fetch").expect("V8 vael:fetch dts");
+    for async_name in ["export function fetch(", "export function download("] {
+        assert!(
+            !lite_fetch.contains(async_name),
+            "Profile::Lite vael:fetch must not declare `{async_name}`"
+        );
+        assert!(
+            v8_fetch.contains(async_name),
+            "Profile::V8 vael:fetch must declare `{async_name}`"
+        );
+    }
+
+    let lite_exec = module_dts(Profile::Lite, "vael:exec").expect("Lite vael:exec dts");
+    let v8_exec = module_dts(Profile::V8, "vael:exec").expect("V8 vael:exec dts");
+    for v8_only_decl in [
+        "export class ChildProcess",
+        "export function exec(",
+        "export function run(",
+        "export function spawn(",
+        "export function which(",
+        "export function whichAll(",
+        "export function lockFile(",
+    ] {
+        assert!(
+            !lite_exec.contains(v8_only_decl),
+            "Profile::Lite vael:exec must not declare `{v8_only_decl}`"
+        );
+        assert!(
+            v8_exec.contains(v8_only_decl),
+            "Profile::V8 vael:exec must declare `{v8_only_decl}`"
         );
     }
 
