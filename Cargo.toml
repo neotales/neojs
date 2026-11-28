@@ -7,6 +7,7 @@ members = [
     "vaeljs",
     "vaeljs-dbapi",
     "vaeljs-dts",
+    "vaeljs-exec-core",
     "vaeljs-fetch-core",
     "vaeljs-fs-core",
     "vaeljs-http-core",
@@ -35,6 +36,7 @@ default-members = [
     "vaeljs",
     "vaeljs-dbapi",
     "vaeljs-dts",
+    "vaeljs-exec-core",
     "vaeljs-fetch-core",
     "vaeljs-fs-core",
     "vaeljs-http-core",
@@ -101,6 +103,8 @@ vaeljs-dts = { version = "0.0.0-alpha.1", path = "vaeljs-dts" }
 vaeljs-fetch-core = { version = "0.0.0-alpha.1", path = "vaeljs-fetch-core" }
 # Driver-neutral SQL API with strict JSON configuration and SQLite provider.
 vaeljs-dbapi = { version = "0.0.0-alpha.1", path = "vaeljs-dbapi" }
+# Engine-neutral process execution, PATH lookup, and advisory file locking core for `vael:exec`.
+vaeljs-exec-core = { version = "0.0.0-alpha.1", path = "vaeljs-exec-core" }
 # Engine-neutral core filesystem operations for `vael:fs`.
 vaeljs-fs-core = { version = "0.0.0-alpha.1", path = "vaeljs-fs-core" }
 # Engine-neutral core HTTP primitives for `vael:http`.
