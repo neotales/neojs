@@ -1258,6 +1258,12 @@ fn reports_an_unknown_vael_module_and_lists_the_implemented_ones() {
     if cfg!(feature = "vael-db") {
         expected_specifiers.push("vael:db");
     }
+    if cfg!(feature = "vael-exec") {
+        expected_specifiers.push("vael:exec");
+    }
+    if cfg!(feature = "vael-fetch") {
+        expected_specifiers.push("vael:fetch");
+    }
     expected_specifiers.push("vael:fs");
     if cfg!(feature = "vael-http") {
         expected_specifiers.push("vael:http");
