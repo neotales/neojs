@@ -3002,6 +3002,8 @@
     });
     // __VAEL_SLICES_IMPL__
     // __VAEL_DB_IMPL__
+    // __VAEL_EXEC_IMPL__
+    // __VAEL_FETCH_IMPL__
     // __VAEL_TEMPLATE_IMPL__
 
     const testCore = Deno.core;
@@ -3031,6 +3033,8 @@
         ["vael:cron", cron],
         ["vael:crypto", crypto],
         // __VAEL_DB_REGISTRY_ENTRY__
+        // __VAEL_EXEC_REGISTRY_ENTRY__
+        // __VAEL_FETCH_REGISTRY_ENTRY__
         ["vael:fs", fs],
         // __VAEL_HTTP_REGISTRY_ENTRY__
         ["vael:os", os],

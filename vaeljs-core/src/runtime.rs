@@ -747,6 +747,10 @@ impl Runtime {
         ];
         #[cfg(feature = "vael-db")]
         extensions.push(vaeljs_db::init());
+        #[cfg(feature = "vael-exec")]
+        extensions.push(crate::exec::vaeljs_exec::init());
+        #[cfg(feature = "vael-fetch")]
+        extensions.push(crate::fetch::vaeljs_fetch::init());
         #[cfg(feature = "vael-http")]
         extensions.push(crate::http::vaeljs_http::init());
         #[cfg(feature = "vael-template")]

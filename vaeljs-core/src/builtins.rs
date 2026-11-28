@@ -194,6 +194,26 @@ const DB_REGISTRY_TOKEN: &str = "// __VAEL_DB_REGISTRY_ENTRY__";
 #[cfg(feature = "vael-db")]
 const DB_IMPL_SOURCE: &str = include_str!("builtins/db.impl.js");
 
+/// The marker replaced with the `exec` implementation source.
+const EXEC_IMPL_TOKEN: &str = "// __VAEL_EXEC_IMPL__";
+
+/// The marker replaced with the `exec` registry entry.
+const EXEC_REGISTRY_TOKEN: &str = "// __VAEL_EXEC_REGISTRY_ENTRY__";
+
+/// The `vael:exec` factory source, compiled in only when `vael-exec` is enabled.
+#[cfg(feature = "vael-exec")]
+const EXEC_IMPL_SOURCE: &str = include_str!("builtins/exec.js");
+
+/// The marker replaced with the `fetch` implementation source.
+const FETCH_IMPL_TOKEN: &str = "// __VAEL_FETCH_IMPL__";
+
+/// The marker replaced with the `fetch` registry entry.
+const FETCH_REGISTRY_TOKEN: &str = "// __VAEL_FETCH_REGISTRY_ENTRY__";
+
+/// The `vael:fetch` factory source, compiled in only when `vael-fetch` is enabled.
+#[cfg(feature = "vael-fetch")]
+const FETCH_IMPL_SOURCE: &str = include_str!("builtins/fetch.js");
+
 /// The marker replaced with the `http` implementation source.
 const HTTP_IMPL_TOKEN: &str = "// __VAEL_HTTP_IMPL__";
 
@@ -281,6 +301,30 @@ pub(crate) fn vael_shim() -> String {
         .replace(DB_IMPL_TOKEN, "")
         .replace(DB_REGISTRY_TOKEN, "");
 
+    #[cfg(feature = "vael-exec")]
+    let shim = shim
+        .replace(
+            EXEC_IMPL_TOKEN,
+            &format!("const execMod = (\n{EXEC_IMPL_SOURCE}\n)({{ ops: Deno.core.ops }});"),
+        )
+        .replace(EXEC_REGISTRY_TOKEN, "[\"vael:exec\", execMod],");
+    #[cfg(not(feature = "vael-exec"))]
+    let shim = shim
+        .replace(EXEC_IMPL_TOKEN, "")
+        .replace(EXEC_REGISTRY_TOKEN, "");
+
+    #[cfg(feature = "vael-fetch")]
+    let shim = shim
+        .replace(
+            FETCH_IMPL_TOKEN,
+            &format!("const fetchMod = (\n{FETCH_IMPL_SOURCE}\n)({{ ops: Deno.core.ops }});"),
+        )
+        .replace(FETCH_REGISTRY_TOKEN, "[\"vael:fetch\", fetchMod],");
+    #[cfg(not(feature = "vael-fetch"))]
+    let shim = shim
+        .replace(FETCH_IMPL_TOKEN, "")
+        .replace(FETCH_REGISTRY_TOKEN, "");
+
     #[cfg(feature = "vael-http")]
     let shim = shim
         .replace(
@@ -311,6 +355,10 @@ pub(crate) fn vael_shim() -> String {
     debug_assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
     debug_assert!(!shim.contains(DB_IMPL_TOKEN));
     debug_assert!(!shim.contains(DB_REGISTRY_TOKEN));
+    debug_assert!(!shim.contains(EXEC_IMPL_TOKEN));
+    debug_assert!(!shim.contains(EXEC_REGISTRY_TOKEN));
+    debug_assert!(!shim.contains(FETCH_IMPL_TOKEN));
+    debug_assert!(!shim.contains(FETCH_REGISTRY_TOKEN));
     debug_assert!(!shim.contains(HTTP_IMPL_TOKEN));
     debug_assert!(!shim.contains(HTTP_REGISTRY_TOKEN));
     debug_assert!(!shim.contains(TEMPLATE_IMPL_TOKEN));
@@ -441,6 +489,28 @@ pub(crate) const DB_SPECIFIER: &str = "vael:db";
 /// The ECMAScript module source served for [`DB_SPECIFIER`].
 #[cfg(feature = "vael-db")]
 const DB_MODULE: &str = include_str!("builtins/db.esm.js");
+
+/// The canonical module specifier for the `exec` built-in.
+///
+/// Only `vael:exec` resolves to this URL. With `vael-exec` off, the specifier is
+/// absent from the name and source tables and the loader rejects it.
+#[cfg(feature = "vael-exec")]
+pub(crate) const EXEC_SPECIFIER: &str = vaeljs_exec_core::SPECIFIER;
+
+/// The ECMAScript module source served for [`EXEC_SPECIFIER`].
+#[cfg(feature = "vael-exec")]
+const EXEC_MODULE: &str = include_str!("builtins/exec.esm.js");
+
+/// The canonical module specifier for the `fetch` built-in.
+///
+/// Only `vael:fetch` resolves to this URL. With `vael-fetch` off, the specifier is
+/// absent from the name and source tables and the loader rejects it.
+#[cfg(feature = "vael-fetch")]
+pub(crate) const FETCH_SPECIFIER: &str = vaeljs_fetch_core::MODULE_SPECIFIER;
+
+/// The ECMAScript module source served for [`FETCH_SPECIFIER`].
+#[cfg(feature = "vael-fetch")]
+const FETCH_MODULE: &str = include_str!("builtins/fetch.esm.js");
 
 /// The canonical module specifier for the `fs` built-in.
 ///
@@ -652,6 +722,10 @@ const BUILTINS: &[(&str, &str)] = &[
     ("crypto", CRYPTO_SPECIFIER),
     #[cfg(feature = "vael-db")]
     ("db", DB_SPECIFIER),
+    #[cfg(feature = "vael-exec")]
+    ("exec", EXEC_SPECIFIER),
+    #[cfg(feature = "vael-fetch")]
+    ("fetch", FETCH_SPECIFIER),
     ("fs", FS_SPECIFIER),
     #[cfg(feature = "vael-http")]
     ("http", HTTP_SPECIFIER),
@@ -720,6 +794,10 @@ pub(crate) fn source(specifier: &Url) -> Option<&'static str> {
         CRYPTO_SPECIFIER => Some(CRYPTO_MODULE),
         #[cfg(feature = "vael-db")]
         DB_SPECIFIER => Some(DB_MODULE),
+        #[cfg(feature = "vael-exec")]
+        EXEC_SPECIFIER => Some(EXEC_MODULE),
+        #[cfg(feature = "vael-fetch")]
+        FETCH_SPECIFIER => Some(FETCH_MODULE),
         FS_SPECIFIER => Some(FS_MODULE),
         #[cfg(feature = "vael-http")]
         HTTP_SPECIFIER => Some(HTTP_MODULE),
@@ -764,9 +842,10 @@ mod tests {
     use super::resolve_name;
     use super::vael_shim;
     use super::{
-        ASSERT_IMPL_TOKEN, DB_IMPL_TOKEN, DB_REGISTRY_TOKEN, NATIVE_ENTRIES_TOKEN,
-        NATIVE_STRINGS_TOKEN, PATH_IMPL_TOKEN, SLICES_IMPL_TOKEN, SLICES_REGISTRY_TOKEN,
-        TEMPLATE_IMPL_TOKEN, TEMPLATE_REGISTRY_TOKEN, TEST_IMPL_TOKEN,
+        ASSERT_IMPL_TOKEN, DB_IMPL_TOKEN, DB_REGISTRY_TOKEN, EXEC_IMPL_TOKEN, EXEC_REGISTRY_TOKEN,
+        FETCH_IMPL_TOKEN, FETCH_REGISTRY_TOKEN, NATIVE_ENTRIES_TOKEN, NATIVE_STRINGS_TOKEN,
+        PATH_IMPL_TOKEN, SLICES_IMPL_TOKEN, SLICES_REGISTRY_TOKEN, TEMPLATE_IMPL_TOKEN,
+        TEMPLATE_REGISTRY_TOKEN, TEST_IMPL_TOKEN,
     };
     use deno_core::url::Url;
 
@@ -824,6 +903,10 @@ mod tests {
         assert!(!shim.contains(SLICES_REGISTRY_TOKEN));
         assert!(!shim.contains(DB_IMPL_TOKEN));
         assert!(!shim.contains(DB_REGISTRY_TOKEN));
+        assert!(!shim.contains(EXEC_IMPL_TOKEN));
+        assert!(!shim.contains(EXEC_REGISTRY_TOKEN));
+        assert!(!shim.contains(FETCH_IMPL_TOKEN));
+        assert!(!shim.contains(FETCH_REGISTRY_TOKEN));
         assert!(!shim.contains(TEMPLATE_IMPL_TOKEN));
         assert!(!shim.contains(TEMPLATE_REGISTRY_TOKEN));
         assert!(
@@ -947,6 +1030,52 @@ mod tests {
             assert!(
                 !shim.contains("[\"vael:db\", db],"),
                 "the disabled db registry entry is present"
+            );
+        }
+
+        #[cfg(feature = "vael-exec")]
+        {
+            assert!(
+                shim.contains("op_vael_exec_output_sync"),
+                "the exec implementation is missing"
+            );
+            assert!(
+                shim.contains("[\"vael:exec\", execMod],"),
+                "the exec registry entry is missing"
+            );
+        }
+        #[cfg(not(feature = "vael-exec"))]
+        {
+            assert!(
+                !shim.contains("op_vael_exec_output_sync"),
+                "the disabled exec implementation is present"
+            );
+            assert!(
+                !shim.contains("[\"vael:exec\", execMod],"),
+                "the disabled exec registry entry is present"
+            );
+        }
+
+        #[cfg(feature = "vael-fetch")]
+        {
+            assert!(
+                shim.contains("op_vael_fetch_sync"),
+                "the fetch implementation is missing"
+            );
+            assert!(
+                shim.contains("[\"vael:fetch\", fetchMod],"),
+                "the fetch registry entry is missing"
+            );
+        }
+        #[cfg(not(feature = "vael-fetch"))]
+        {
+            assert!(
+                !shim.contains("op_vael_fetch_sync"),
+                "the disabled fetch implementation is present"
+            );
+            assert!(
+                !shim.contains("[\"vael:fetch\", fetchMod],"),
+                "the disabled fetch registry entry is present"
             );
         }
     }

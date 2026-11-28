@@ -19,12 +19,18 @@ authors.workspace = true
 # under `vael-slices`, so it is not embedded in a disabled binary. Features are
 # additive and unify across the dependency graph; this is surface selection,
 # not a sandbox.
-default = ["vael-chars", "vael-db", "vael-http", "vael-slices", "vael-strings", "vael-template", "node-compat", "npm"]
+default = ["vael-chars", "vael-db", "vael-exec", "vael-fetch", "vael-http", "vael-slices", "vael-strings", "vael-template", "node-compat", "npm"]
 # The native `chars` binding and its canonical V8 registration. This enables
 # the shared `chars` module in `vaeljs-builtins`.
 vael-chars = ["vaeljs-builtins/chars"]
 # The `vael:db` built-in module backed by `vaeljs-dbapi` (SQLite by default).
 vael-db = ["dep:vaeljs-dbapi", "dep:serde_json"]
+# The `vael:exec` argv-only process execution, PATH lookup, and advisory file
+# locking module backed by `vaeljs-exec-core`.
+vael-exec = ["dep:vaeljs-exec-core"]
+# The `vael:fetch` SSRF-guarded HTTP fetch and atomic streaming download module
+# backed by `vaeljs-fetch-core`.
+vael-fetch = ["dep:vaeljs-fetch-core", "dep:serde_json"]
 # The `vael:http` HTTP/1.1 server, router, static file, and cookie surface
 # backed by `vaeljs-http-core`, `hyper`, and `tokio`.
 vael-http = ["dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:vaeljs-http-core"]
@@ -59,6 +65,8 @@ hyper-util = { workspace = true, optional = true }
 vaeljs-builtins = { workspace = true, features = ["assert", "console", "os", "path", "test", "uuid"] }
 vaeljs-crypto-core.workspace = true
 vaeljs-dbapi = { workspace = true, optional = true }
+vaeljs-exec-core = { workspace = true, optional = true }
+vaeljs-fetch-core = { workspace = true, optional = true }
 vaeljs-fs-core.workspace = true
 vaeljs-http-core = { workspace = true, optional = true }
 vaeljs-manifest.workspace = true
